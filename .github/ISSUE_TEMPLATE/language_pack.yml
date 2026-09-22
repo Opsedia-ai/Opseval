@@ -1,0 +1,22 @@
+name: 🌍 Language pack proposal
+description: Propose a new language or dialect for the customer simulator
+labels: ["area/langpacks", "help wanted"]
+body:
+  - type: input
+    id: language
+    attributes:
+      label: Language and dialect
+      placeholder: "e.g. Arabic (Levantine), Turkish, Urdu, French (Maghreb)"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Dialect notes
+      description: Typical phrasings, code-switching habits, keyboard layout, script, and tokens that typing noise must never change.
+  - type: checkboxes
+    id: reviewer
+    attributes:
+      label: Native-speaker review
+      options:
+        - label: I'm a native or fluent speaker and can review sample persona turns

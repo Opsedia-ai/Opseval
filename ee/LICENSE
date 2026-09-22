@@ -1,0 +1,22 @@
+Opseval Enterprise License — PLACEHOLDER
+
+Copyright (c) 2026 Opsedia. All rights reserved.
+
+This directory will contain the source code of Opseval Enterprise Edition
+modules. The final licence text is being drafted by legal counsel and will
+replace this placeholder before any code is added here.
+
+Intended terms (summary, not legally binding):
+  * The source code is visible (source-available), but it is NOT open source
+    and NOT covered by the Apache License 2.0 that applies to the rest of
+    this repository.
+  * Using these modules in production requires a valid Opseval Enterprise
+    subscription and licence key issued by Opsedia.
+  * You may modify the code for your own internal use under a valid
+    subscription; you may not redistribute, sublicense or offer it as a
+    service.
+  * The open-source core never depends on this directory and runs fully
+    without it.
+
+Until the final text is published, no rights are granted to any code placed
+in this directory.

@@ -1,0 +1,42 @@
+name: ✨ Feature request
+description: Suggest an improvement or a new capability
+labels: ["type/feature", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Changes to public contracts (scenario schema, run record, score or verdict states, exit codes, plugin or REST APIs) should start as an **RFC in GitHub Discussions**.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the job to be done ("When …, I want to …, so that …").
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Scenarios / catalogue
+        - Simulator / language packs
+        - Transports / SUT profiles
+        - Checkpoints
+        - Scoring / judges
+        - Verdicts / release gate / CI
+        - Reports / console
+        - Integrations (Langfuse, OTel, CI, issue trackers)
+        - Docs / examples
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to help implement this

@@ -1,0 +1,51 @@
+name: 🐞 Bug report
+description: Something in Opseval doesn't work as documented
+labels: ["type/bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Security issues must not be filed here.** See SECURITY.md.
+        Please remove secrets (tokens, API keys, hostnames) from logs and records before pasting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the command you ran and the exit code.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: dropdown
+    id: false-red
+    attributes:
+      label: Did Opseval blame the agent for a harness problem (a "false red")?
+      options:
+        - "No"
+        - "Yes: a harness or tooling fault was reported as an agent failure"
+        - "Yes: a real agent failure was reported as infra_error / not measured"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Scenario YAML, SUT profile excerpt and transport type. Use the reference refund agent if you can.
+      render: yaml
+  - type: input
+    id: version
+    attributes:
+      label: Opseval version
+      placeholder: "opseval --version"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "OS, Python version, local or server mode, LLM provider/model"

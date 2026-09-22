@@ -1,0 +1,10 @@
+# Replace @ayanasser with an @Opsedia-ai/maintainers team once it exists
+# Default owners for everything in the repo
+*            @ayanasser
+
+# Enterprise modules — Opsedia only
+/ee/         @ayanasser
+
+# Governance and licensing changes need the project lead
+/LICENSE     @ayanasser
+/GOVERNANCE.md @ayanasser

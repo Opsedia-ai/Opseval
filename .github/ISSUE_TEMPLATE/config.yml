@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions and ideas
+    url: https://github.com/Opsedia-ai/Opseval/discussions
+    about: Ask questions, propose RFCs and vote on ideas in GitHub Discussions.
+  - name: 🔒 Security vulnerability
+    url: https://github.com/Opsedia-ai/Opseval/security/advisories/new
+    about: Report vulnerabilities privately.

@@ -1,0 +1,50 @@
+[project]
+name = "opseval-workspace"
+version = "0.0.0"
+description = "Opseval monorepo workspace (not published)"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/opseval"]
+
+[tool.uv.sources]
+opseval = { workspace = true }
+
+[dependency-groups]
+dev = [
+  "opseval",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=5.0",
+  "ruff>=0.6",
+  "mypy>=1.10",
+  "types-PyYAML>=6.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["packages/opseval/src", "packages/opseval/tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "DTZ", "S", "RUF100"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"packages/opseval/tests/**" = ["S", "BLE"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+mypy_path = "packages/opseval/src"
+packages = ["opseval"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/opseval/tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
