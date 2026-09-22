@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opseval report · {{ result.suite }} · {{ result.run_id }}</title>
+<style>
+:root{--bg:#fbfbfa;--fg:#1d1d1b;--muted:#6b6b66;--line:#e4e3de;--card:#fff;
+--pass:#1f7a4d;--fail:#b3261e;--warn:#8a5a00;--info:#3d5a99;--chip:#f1f0ec}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe6;--muted:#a3a29c;--line:#2e2e2b;
+--card:#1e1e1c;--pass:#5cc493;--fail:#f28b82;--warn:#e7b34d;--info:#9fb7ec;--chip:#2a2a27}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+font:15px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans","Noto Sans Arabic",sans-serif}
+main{max-width:1080px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:18px;margin:32px 0 8px}h3{font-size:15px;margin:16px 0 6px}
+.muted{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0}
+.gate{border-width:2px}.gate.pass{border-color:var(--pass)}.gate.block{border-color:var(--fail)}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;background:var(--chip)}
+.passed{color:var(--pass)}.failed{color:var(--fail)}.inconclusive,.infra_error,.skipped_precondition,.blocked{color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:start;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600}code,pre{font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--chip);padding:8px;border-radius:6px;margin:4px 0}
+details{margin:6px 0}summary{cursor:pointer}
+.bubble{padding:8px 12px;border-radius:10px;margin:6px 0;max-width:85%}
+.customer{background:var(--chip);margin-inline-start:auto}.agent{border:1px solid var(--line)}
+.who{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.decision{font-size:12px;color:var(--info);margin:4px 0}
+</style>
+</head>
+<body><main>
+<h1>Opseval report</h1>
+<div class="muted">Suite <b>{{ result.suite }}</b> · run <code>{{ result.run_id }}</code> · target <code>{{ result.target }}</code> · profile <code>{{ result.profile }}</code> · Opseval {{ result.opseval_version }}</div>
+
+<div class="card gate {{ result.gate.status }}">
+  <div><span class="badge {{ 'passed' if result.gate.status == 'pass' else 'failed' }}">{{ 'RELEASE: PASS' if result.gate.status == 'pass' else 'RELEASE: BLOCKED' }}</span>
+  <span class="muted">exit code {{ result.exit_code }}</span></div>
+  <p style="margin:8px 0 0">{{ result.gate.summary }}</p>
+  {% if result.gate.warnings %}<p class="muted" style="margin:4px 0 0">Warnings: {{ result.gate.warnings | join('; ') }}</p>{% endif %}
+</div>
+
+{% if result.load_errors %}
+<div class="card"><h3 class="inconclusive">Scenarios that could not be loaded (never run)</h3>
+<ul>{% for e in result.load_errors %}<li><code>{{ e }}</code></li>{% endfor %}</ul></div>
+{% endif %}
+
+<h2>Scenarios</h2>
+<table>
+<tr><th>Scenario</th><th>Criticality</th><th>Verdict</th><th>Pass rate</th><th>pass^k</th><th>Notes</th></tr>
+{% for t in result.tests %}
+<tr><td><a href="#{{ t.test_id }}"><code>{{ t.test_id }}</code></a><br><span dir="auto">{{ t.name }}</span></td>
+<td>{{ t.criticality.value }}</td>
+<td class="{{ t.status.value }}"><b>{{ t.status.value }}</b></td>
+<td>{{ t.pass_rate | score }}</td><td>{{ t.pass_hat_k | score }}</td>
+<td>{% if t.flaky %}<span class="badge inconclusive">flaky</span> {% endif %}{% if t.unstable_scorers %}<span class="muted">unstable: {{ t.unstable_scorers | join(', ') }}</span>{% endif %}<span class="muted" dir="auto">{{ t.reason or '' }}</span></td></tr>
+{% endfor %}
+</table>
+
+{% for t in result.tests %}
+<h2 id="{{ t.test_id }}"><code>{{ t.test_id }}</code> · <span dir="auto">{{ t.name }}</span> <span class="badge {{ t.status.value }}">{{ t.status.value }}</span></h2>
+{% if t.reason %}<p class="muted" dir="auto">{{ t.reason }}</p>{% endif %}
+{% for a in t.attempts %}
+{% set rec = records.get((t.test_id, a.attempt_index)) %}
+<div class="card">
+<h3>Attempt {{ a.attempt_index }} ·
+{% if a.passed is none %}<span class="inconclusive">not judged</span>{% elif a.passed %}<span class="passed">passed</span>{% else %}<span class="failed">failed</span>{% endif %}
+<span class="muted">&nbsp;· ended: {{ a.terminal_state.value }}{% if rec %} ({{ rec.stop_reason }}){% endif %}</span></h3>
+{% if a.invalid_reason %}<p class="inconclusive">Invalidated (harness side, not counted against the agent): {{ a.invalid_reason }}</p>{% endif %}
+<table>
+<tr><th>Check</th><th>Axis</th><th>Result</th><th>Score</th><th>Threshold</th><th>Evidence</th></tr>
+{% for s in a.scores %}
+<tr><td><code>{{ s.scorer_id }}</code>{% if s.degraded %} <span class="badge">degraded</span>{% endif %}</td><td>{{ s.axis.value }}</td>
+<td class="{{ s.status.value }}"><b>{{ s.status.value }}</b></td><td>{{ s.score | score }}</td><td>{{ '%.2f' % s.threshold }}</td>
+<td>{% if s.reason %}<div class="inconclusive">{{ s.reason }}</div>{% endif %}{% if s.details %}<details><summary>details</summary><pre dir="auto">{{ s.details | tojson(indent=2) }}</pre></details>{% endif %}</td></tr>
+{% endfor %}
+</table>
+{% if rec %}
+<details {% if a.passed is sameas false %}open{% endif %}><summary>Conversation ({{ rec.user_turns }} customer turns, persona {{ rec.persona.language }}{{ '/' ~ rec.persona.dialect if rec.persona.dialect else '' }})</summary>
+{% for f in rec.frames %}
+  {% if f.text %}<div class="bubble {{ 'customer' if f.direction == 'sent' else 'agent' }}"><div class="who">{{ 'customer' if f.direction == 'sent' else 'agent' }}{% if f.phase %} · {{ f.phase }}{% endif %}{% if f.latency_ms %} · {{ '%.0f' % f.latency_ms }} ms{% endif %}</div><div dir="auto">{{ f.text }}</div></div>{% endif %}
+  {% if f.kind.value == 'needs_human' %}<div class="decision">⏸ checkpoint raised: <code>{{ f.payload.get('checkpoint', '') }}</code></div>{% endif %}
+  {% if f.kind.value == 'resume' %}<div class="decision">▶ customer decision: <code>{{ f.payload.get('action', '') }}</code></div>{% endif %}
+{% endfor %}
+{% if rec.infra_errors %}<pre>{{ rec.infra_errors | join('\n') }}</pre>{% endif %}
+</details>
+{% endif %}
+</div>
+{% endfor %}
+{% endfor %}
+
+{% if result.usage %}
+<h2>LLM usage</h2>
+<table><tr><th>Role</th><th>Model</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th><th>Cost (USD)</th></tr>
+{% for u in result.usage %}<tr><td>{{ u.role }}</td><td>{{ u.model }}</td><td>{{ u.calls }}</td><td>{{ u.input_tokens }}</td><td>{{ u.output_tokens }}</td><td>{{ 'no rate' if u.cost_usd is none else '%.4f' % u.cost_usd }}</td></tr>{% endfor %}
+</table>
+{% endif %}
+
+<h2>Configuration (secrets redacted)</h2>
+<pre>{{ result.config_digest | tojson(indent=2) }}</pre>
+<p class="muted">Generated {{ result.ended_at.isoformat() }} · self-contained, no network requests.</p>
+</main></body></html>
