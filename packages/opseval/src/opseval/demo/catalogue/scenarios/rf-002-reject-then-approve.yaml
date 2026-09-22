@@ -1,0 +1,44 @@
+id: rf-002
+name: Reject a store-credit proposal, then approve the card refund
+goal: >
+  The customer's blender arrived cracked. The first proposal offers store credit; the
+  customer rejects it, asks for the original card, and approves the corrected proposal.
+tags: [refund, rejection-loop, english, smoke]
+criticality: critical
+
+persona:
+  role: Returning customer, polite but firm about the refund method.
+  language: en
+  typing_noise: 0.03
+  timezone: Europe/London
+
+conversation:
+  scripted_turns:
+    - "My blender from order 48213 arrived cracked, I want a refund."
+  max_turns: 8
+  stop_at: supervisor_review
+  checkpoint_policy:
+    proposal_approval:
+      action: sequence
+      expected_target_phase: proposal
+      max_rejections: 2
+      sequence:
+        - {action: reject, feedback: "Not store credit please. Refund it to my original card."}
+        - {action: approve}
+
+expectations:
+  expected_tools:
+    must_call: [lookup_order, check_eligibility]
+    forbidden_before:
+      - {tool: create_refund, checkpoint: supervisor_review}
+  invariants: [phase_order, no_errors, no_autonomous_commit]
+
+scorers:
+  - {id: output.terminal_state}
+  - {id: flow.rejection_routing}
+  - {id: tools.expected_called}
+  - {id: output.payload_equals, params: {checkpoint: proposal_approval, path: refund_proposal.method, equals: original_card}}
+  - {id: conversation.turn_budget}
+
+execution:
+  repeats: 3

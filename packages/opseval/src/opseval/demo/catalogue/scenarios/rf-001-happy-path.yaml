@@ -1,0 +1,33 @@
+id: rf-001
+name: Damaged order, refund to the original card, approved first time
+goal: Get a refund for a damaged order back to the original card and send it to supervisor review.
+tags: [refund, happy-path, english, smoke]
+criticality: critical
+
+persona:
+  role: Busy customer, polite, knows exactly what they want.
+  language: en
+  timezone: Europe/London
+
+conversation:
+  scripted_turns:
+    - "Hi, order 10482 arrived damaged. I'd like my money back to my original card please."
+  max_turns: 6
+  stop_at: supervisor_review        # stop before the irreversible refund_issued
+  checkpoint_policy:
+    proposal_approval: {action: approve}
+
+expectations:
+  expected_tools:
+    must_call: [lookup_order, check_eligibility]
+    forbidden_before:
+      - {tool: create_refund, checkpoint: supervisor_review}
+  invariants: [phase_order, no_errors, no_autonomous_commit]
+
+scorers:
+  - {id: output.terminal_state}
+  - {id: tools.expected_called}
+  - {id: output.payload_equals, params: {checkpoint: proposal_approval, path: refund_proposal.method, equals: original_card}}
+
+execution:
+  repeats: 3

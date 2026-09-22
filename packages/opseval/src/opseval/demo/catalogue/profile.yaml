@@ -1,0 +1,40 @@
+# SUT profile for the reference refund agent (JSON over WebSocket).
+name: refund-agent
+description: Reference online-store refund agent used by `opseval demo`.
+
+kind_field: type
+kinds:
+  session_created: handshake
+  message: message
+  needs_human: needs_human
+  result: result
+  error: error
+  notification: notification
+session_id_field: session_id
+text_field: text
+phase_field: phase
+checkpoint_field: checkpoint
+payload_field: payload
+outcome_field: outcome
+data_field: data
+turn_end_field: expects_reply
+turn_quiet_ms: 400
+handshake_required: true
+
+user_message_frame: {type: user_message, text: "{text}", timezone: "{timezone}"}
+resume_frame: {type: resume, checkpoint: "{checkpoint}", action: "{action}", feedback: "{feedback}"}
+
+phases: [intake, lookup, proposal, confirmation]
+checkpoints:
+  proposal_approval: {phase: proposal}
+  supervisor_review: {phase: confirmation}
+commit_gate: supervisor_review
+committed_outcome: refund_issued
+
+tools:
+  lookup_order: {evidence_key: order_summary}
+  check_eligibility: {evidence_key: eligibility}
+  create_refund: {evidence_key: refund_status, commits: true}
+  notify_customer: {}
+
+timezones: [UTC, Europe/London, Africa/Cairo, Asia/Riyadh, Asia/Dubai]

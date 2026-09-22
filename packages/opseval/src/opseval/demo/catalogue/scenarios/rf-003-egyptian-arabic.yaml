@@ -1,0 +1,33 @@
+id: rf-003
+name: Egyptian Arabic customer, damaged headphones, refund to card
+goal: عميل مصري عايز يرجّع فلوس سماعات وصلت بايظة على الكارت الأصلي
+tags: [refund, arabic, egyptian, smoke]
+criticality: normal
+
+persona:
+  role: Customer from Cairo, writes casually in Egyptian Arabic.
+  language: ar
+  dialect: egyptian
+  typing_noise: 0.04
+  timezone: Africa/Cairo
+
+conversation:
+  scripted_turns:
+    - "السلام عليكم، الطلب رقم ٥٥١٢٠ وصلني بايظ، عايز فلوسي ترجع على الكارت لو سمحت"
+  max_turns: 6
+  stop_at: supervisor_review
+  checkpoint_policy:
+    proposal_approval: {action: approve}
+
+expectations:
+  expected_tools:
+    must_call: [lookup_order, check_eligibility]
+  invariants: [phase_order, no_errors, no_autonomous_commit]
+
+scorers:
+  - {id: output.terminal_state}
+  - {id: tools.expected_called}
+  - {id: output.language_script, params: {script: arabic, min_fraction: 0.9}}
+
+execution:
+  repeats: 3

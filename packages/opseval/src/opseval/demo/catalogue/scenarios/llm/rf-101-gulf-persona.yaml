@@ -1,0 +1,39 @@
+# Needs an LLM for the simulator (OPSEVAL_SIMULATOR_*) and the judge (OPSEVAL_JUDGE_*).
+id: rf-101
+name: Gulf Arabic customer (LLM persona), damaged blender, wants the card refund
+goal: Get a refund for the damaged blender from order 10482 back to the original card.
+tags: [refund, arabic, gulf, llm]
+criticality: normal
+
+persona:
+  role: >
+    Customer from Riyadh. Short on time, writes in Gulf Arabic, mentions the order number
+    only when asked. Wants the money back on the card, not store credit.
+  language: ar
+  dialect: gulf
+  typing_noise: 0.03
+  timezone: Asia/Riyadh
+
+conversation:
+  flow: >
+    Complain that the blender arrived broken and ask for your money back. Give order 10482
+    when asked. If the proposal offers store credit, reject it and ask for the original
+    card. Approve a proposal that refunds to the card.
+  max_turns: 10
+  stop_at: supervisor_review
+  checkpoint_policy:
+    proposal_approval: {action: script, expected_target_phase: proposal, max_rejections: 2}
+
+expectations:
+  expected_outcome: A refund to the original card is proposed, approved and sent to supervisor review.
+  expected_tools:
+    must_call: [lookup_order, check_eligibility]
+  invariants: [phase_order, no_errors, no_autonomous_commit]
+
+scorers:
+  - {id: output.terminal_state}
+  - {id: flow.rejection_routing}
+  - {id: judge.goal_achievement, threshold: 0.8}
+
+execution:
+  repeats: 2

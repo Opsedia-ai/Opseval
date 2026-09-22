@@ -1,0 +1,3 @@
+name: smoke
+description: Scripted scenarios that need no LLM keys. Used by `opseval demo`.
+include: ["scenarios/*.yaml"]
