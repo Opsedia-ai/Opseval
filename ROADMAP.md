@@ -8,23 +8,24 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 
 - 🟢 Declarative YAML scenarios and suites, with fail-closed validation (`opseval validate`)
 - 🟢 SUT profiles that map any agent's wire protocol to canonical frames
-- 🟢 Transports: `http-json`, `websocket`, `python` callable (⚪ still to do: websocket resume/token refresh, `openai-chat`)
+- 🟢 Transports: `http-json`, `websocket`, `openai-chat` (any OpenAI-compatible endpoint), `python` callable (⚪ still to do: websocket resume/token refresh)
 - 🟢 Customer simulator: scripted and LLM personas, seeded runs, English + Arabic language packs (Gulf, Egyptian, MSA), keyboard-aware typing noise
 - 🟢 Checkpoint policies (approve / reject / script), stop points, and the **committed-outcome guard**
 - 🟢 Immutable run records with secret redaction
 - 🟢 Deterministic scorers + first LLM judges (quoted evidence, harness-computed scores)
 - 🟢 Repeats, consistency, five-state verdicts, criticality-aware release gate, exit codes 0/1/2/3
 - 🟢 Self-contained HTML + JSON report
-- 🟢 `opseval demo` with a reference refund agent · ⚪ `opseval init`
+- 🟢 `opseval demo` with a reference refund agent · 🟢 `opseval init` starter catalogues
+- 🟢 JUnit XML output for CI test reports
 - ⚪ Opt-out, content-free telemetry
 
 ## v0.2 Beta: "It gates releases" ⚪
 
 - ⚪ Official GitHub Action (report artifact, PR comment) and `pytest-opseval`
-- ⚪ Langfuse trace reader and trace-backed tool scorers (ordering, approval gating, call success, argument schemas)
+- 🟢 Langfuse trace reader and trace-backed tool scorers (ordering, approval gating, call success) · ⚪ argument schemas
 - ⚪ `opseval rescore` (offline) and `opseval calibrate` (judge ↔ human agreement)
 - ⚪ Prompt-injection planting and 3-vote security judges
-- ⚪ pass^k, flow map, JUnit output, preflight checks
+- ⚪ Flow map, preflight checks (🟢 pass^k and JUnit shipped early)
 - ⚪ SSE transport and protocol probes
 - ⚪ Stable scorer plugin API with a contract test kit
 

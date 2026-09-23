@@ -47,16 +47,31 @@ uv run opseval demo --bug skip-approval   # the agent issues refunds without app
 uv run opseval demo --bug crash           # the connection drops → "not judged", exit 3 (never a false red)
 ```
 
-Point it at your own agent:
+Point it at your own agent. If it speaks the OpenAI Chat Completions API, start from a template:
 
 ```bash
+uv run opseval init my-evals                      # profile, example scenarios, suites, .env.example
 export OPSEVAL_ALLOWED_HOSTS=agent.example.com
-uv run opseval validate my-scenarios/ --profile my-agent.profile.yaml
-uv run opseval run my-scenarios/suites/release.yaml --profile my-agent.profile.yaml \
-    --target wss://agent.example.com/chat
+uv run opseval validate my-evals/suites/smoke.yaml --profile my-evals/profile.yaml
+uv run opseval run my-evals/suites/smoke.yaml --profile my-evals/profile.yaml \
+    --transport openai-chat --target https://agent.example.com/v1 --junit junit.xml
 ```
 
+For WebSocket or custom HTTP agents, write a SUT profile that maps their frames (`opseval init --template refund-demo` is a worked example with approval checkpoints) and use `--transport websocket` or `--transport http-json`.
+
 LLM personas and judges use any OpenAI-compatible endpoint: set `OPSEVAL_SIMULATOR_BASE_URL`, `OPSEVAL_SIMULATOR_MODEL`, `OPSEVAL_SIMULATOR_API_KEY`, and likewise `OPSEVAL_JUDGE_*`. Scripted scenarios need no LLM at all.
+
+### Trace-backed tool checks (Langfuse)
+
+If your agent already sends traces to Langfuse, Opseval can check its tool calls from what really happened instead of what it said. Add this to the SUT profile:
+
+```yaml
+traces:
+  source: langfuse
+  session_id: "{session_id}"   # the Langfuse session id your agent uses
+```
+
+Then set `OPSEVAL_LANGFUSE_HOST`, `OPSEVAL_LANGFUSE_PUBLIC_KEY` and `OPSEVAL_LANGFUSE_SECRET_KEY`. Scorers such as `tools.forbidden_not_called`, `tools.ordering` and `tools.call_success` then use the trace. If the agent's clock and Opseval's are too close to order two events, the check reports *not measured* instead of guessing ([ADR-0011](docs/adr/0011-trace-backed-tool-scoring.md)).
 
 A scenario looks like this:
 
