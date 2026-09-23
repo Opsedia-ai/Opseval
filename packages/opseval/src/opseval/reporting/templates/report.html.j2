@@ -63,7 +63,8 @@ details{margin:6px 0}summary{cursor:pointer}
 <div class="card">
 <h3>Attempt {{ a.attempt_index }} ·
 {% if a.passed is none %}<span class="inconclusive">not judged</span>{% elif a.passed %}<span class="passed">passed</span>{% else %}<span class="failed">failed</span>{% endif %}
-<span class="muted">&nbsp;· ended: {{ a.terminal_state.value }}{% if rec %} ({{ rec.stop_reason }}){% endif %}</span></h3>
+<span class="muted">&nbsp;· ended: {{ a.terminal_state.value }}{% if rec %} ({{ rec.stop_reason }}){% endif %}</span>
+{% if rec and rec.trace_coverage == 'full' %}<span class="badge">trace-backed</span>{% endif %}</h3>
 {% if a.invalid_reason %}<p class="inconclusive">Invalidated (harness side, not counted against the agent): {{ a.invalid_reason }}</p>{% endif %}
 <table>
 <tr><th>Check</th><th>Axis</th><th>Result</th><th>Score</th><th>Threshold</th><th>Evidence</th></tr>
@@ -82,6 +83,13 @@ details{margin:6px 0}summary{cursor:pointer}
 {% endfor %}
 {% if rec.infra_errors %}<pre>{{ rec.infra_errors | join('\n') }}</pre>{% endif %}
 </details>
+{% if rec.trace_coverage == 'full' %}
+<details><summary>Tool calls from the agent's trace ({{ rec.tool_calls | length }})</summary>
+<table><tr><th>Tool</th><th>Started</th><th>Status</th><th>Arguments</th></tr>
+{% for c in rec.tool_calls %}<tr><td><code>{{ c.name }}</code></td><td>{{ c.started_at.isoformat() }}</td><td class="{{ 'passed' if c.ok else 'failed' }}">{{ 'ok' if c.ok else 'error' }}</td><td>{% if c.arguments is not none %}<pre dir="auto">{{ c.arguments | tojson(indent=2) }}</pre>{% endif %}</td></tr>{% endfor %}
+</table></details>
+{% endif %}
+{% for n in rec.notes if n.startswith('trace_unavailable') %}<p class="inconclusive">Traces not used: {{ n[19:] }} (tool checks fell back to frame evidence)</p>{% endfor %}
 {% endif %}
 </div>
 {% endfor %}

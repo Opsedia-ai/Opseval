@@ -7,6 +7,7 @@ Exit codes: 0 pass · 1 fail · 2 not judged · 3 harness or configuration error
 from __future__ import annotations
 
 import asyncio
+import shutil
 import webbrowser
 from pathlib import Path
 from typing import Annotated, Optional
@@ -14,11 +15,13 @@ from typing import Annotated, Optional
 import typer
 
 from opseval import __version__
-from opseval.catalogue import load_catalogue, load_profile
+from opseval.catalogue import builtin_profiles, load_catalogue, load_profile
 from opseval.config import Settings
 from opseval.errors import ConfigError
+from opseval.models.results import SuiteResult
 from opseval.reporting import console_summary
 from opseval.runner import RunOptions, launch
+from opseval.scaffold import TEMPLATES, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.verdicts import EXIT_HARNESS
 
@@ -45,7 +48,34 @@ def main(
     """Opseval command line."""
 
 
-ProfileOpt = Annotated[Path, typer.Option("--profile", "-p", help="SUT profile YAML.")]
+ProfileOpt = Annotated[
+    str, typer.Option("--profile", "-p", help="SUT profile YAML, or builtin:<name>.")
+]
+JunitOpt = Annotated[
+    Optional[Path],  # noqa: UP045 - typer needs Optional here
+    typer.Option("--junit", help="Also write JUnit XML here (for CI test reports)."),
+]
+
+
+@app.command()
+def init(
+    directory: Annotated[Path, typer.Argument(help="Where to create the catalogue.")] = Path(
+        "opseval"
+    ),
+    template: Annotated[
+        str, typer.Option(help=" | ".join(f"{k}: {v}" for k, v in TEMPLATES.items()))
+    ] = "openai-chat",
+    force: Annotated[bool, typer.Option(help="Overwrite existing files.")] = False,
+) -> None:
+    """Create a starter catalogue (profile, scenarios, suites) that validates as is."""
+    try:
+        written = scaffold(directory, template, force=force)
+    except ConfigError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+    for path in written:
+        typer.echo(f"  created {path}")
+    typer.echo(f"\nNext: read {directory / 'README.md'}")
 
 
 @app.command()
@@ -72,25 +102,36 @@ def validate(
 
 @app.command("list-scorers")
 def list_scorers() -> None:
-    """List every scorer with its axis and the evidence it needs."""
+    """List every scorer with its axis and the evidence it needs, plus built-in profiles."""
     for sid, cls in sorted(REGISTRY.items()):
         typer.echo(f"{sid:<32} {cls.axis.value:<9} needs {cls.requires:<7} {cls.description}")
     typer.echo("\nInvariant bundles: " + ", ".join(f"{k} → {v}" for k, v in INVARIANTS.items()))
+    typer.echo("Built-in profiles: " + ", ".join(f"builtin:{n}" for n in builtin_profiles()))
 
 
-def _execute(path: Path, options: RunOptions, settings: Settings, open_report: bool) -> int:
+def _finish(result: SuiteResult, settings: Settings, open_report: bool, junit: Path | None) -> int:
+    typer.echo("")
+    typer.echo(console_summary(result))
+    run_dir = (Path(settings.reports_dir) / result.run_id).resolve()
+    typer.echo(f"Report: {run_dir / 'report.html'}")
+    if junit is not None:
+        junit.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(run_dir / "junit.xml", junit)
+        typer.echo(f"JUnit:  {junit.resolve()}")
+    if open_report:
+        webbrowser.open((run_dir / "report.html").as_uri())
+    return result.exit_code
+
+
+def _execute(
+    path: Path, options: RunOptions, settings: Settings, open_report: bool, junit: Path | None
+) -> int:
     try:
         result = asyncio.run(launch(path, options, settings, log=typer.echo))
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg="red", err=True)
         return EXIT_HARNESS
-    typer.echo("")
-    typer.echo(console_summary(result))
-    report = Path(settings.reports_dir) / result.run_id / "report.html"
-    typer.echo(f"Report: {report.resolve()}")
-    if open_report:
-        webbrowser.open(report.resolve().as_uri())
-    return result.exit_code
+    return _finish(result, settings, open_report, junit)
 
 
 @app.command()
@@ -100,7 +141,9 @@ def run(
     target: Annotated[
         str, typer.Option("--target", "-t", help="Agent URL (ws://, wss://, http(s)://).")
     ],
-    transport: Annotated[str, typer.Option(help="websocket | http-json")] = "websocket",
+    transport: Annotated[
+        str, typer.Option(help="websocket | http-json | openai-chat")
+    ] = "websocket",
     repeats: Annotated[Optional[int], typer.Option(min=1, max=20, help="Override repeats.")] = None,  # noqa: UP045
     allow_commit: Annotated[
         bool, typer.Option(help="Allow scenarios to perform the irreversible outcome.")
@@ -110,6 +153,10 @@ def run(
         list[str] | None, typer.Option("--filter", help="tag=…, id=… or criticality=…")
     ] = None,
     reports_dir: Annotated[Optional[Path], typer.Option(help="Where to write reports.")] = None,  # noqa: UP045
+    traces: Annotated[
+        bool, typer.Option(help="Read the agent's traces if the profile declares a source.")
+    ] = True,
+    junit: JunitOpt = None,
     open_report: Annotated[
         bool, typer.Option("--open", help="Open report.html when done.")
     ] = False,
@@ -126,8 +173,9 @@ def run(
         allow_commit=allow_commit,
         fail_fast=fail_fast,
         filters=filter_ or [],
+        traces=traces,
     )
-    raise typer.Exit(_execute(path, options, settings, open_report))
+    raise typer.Exit(_execute(path, options, settings, open_report, junit))
 
 
 @app.command()
@@ -139,6 +187,7 @@ def demo(
         ),
     ] = None,
     repeats: Annotated[int, typer.Option(min=1, max=20)] = 3,
+    junit: JunitOpt = None,
     open_report: Annotated[
         bool, typer.Option("--open", help="Open report.html when done.")
     ] = False,
@@ -165,13 +214,7 @@ def demo(
             except ConfigError as exc:
                 typer.secho(f"configuration error: {exc}", fg="red", err=True)
                 return EXIT_HARNESS
-        typer.echo("")
-        typer.echo(console_summary(result))
-        report = (Path(settings.reports_dir) / result.run_id / "report.html").resolve()
-        typer.echo(f"Report: {report}")
-        if open_report:
-            webbrowser.open(report.as_uri())
-        return result.exit_code
+        return _finish(result, settings, open_report, junit)
 
     raise typer.Exit(asyncio.run(_go()))
 
