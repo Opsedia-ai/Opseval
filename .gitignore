@@ -21,6 +21,9 @@ reports/
 .env.*
 !.env.example
 
+# Internal planning docs kept locally for context (never commit)
+docs-internal/
+
 # Editors / OS
 .idea/
 .vscode/
