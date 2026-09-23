@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Public data models (the ``opseval/v1`` contracts)."""
 
-from opseval.models.profile import FrameKind, SutProfile
-from opseval.models.record import FrameRecord, InterruptRecord, RunRecord, TerminalState
+from opseval.models.profile import FrameKind, SutProfile, TraceConfig
+from opseval.models.record import (
+    FrameRecord,
+    InterruptRecord,
+    RunRecord,
+    TerminalState,
+    ToolCall,
+)
 from opseval.models.results import (
     AttemptVerdict,
     Axis,
@@ -33,5 +39,7 @@ __all__ = [
     "SutProfile",
     "TerminalState",
     "TestVerdict",
+    "ToolCall",
+    "TraceConfig",
     "VerdictStatus",
 ]

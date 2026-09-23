@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,24 @@ def _problems_from(path: Path, exc: ValidationError) -> list[LoadProblem]:
     return out
 
 
+BUILTIN_PREFIX = "builtin:"
+
+
+def builtin_profiles() -> dict[str, Path]:
+    """Profiles shipped with Opseval, usable as ``--profile builtin:<name>``."""
+    folder = Path(str(files("opseval") / "profiles"))
+    return {f.stem: f for f in sorted(folder.glob("*.yaml"))}
+
+
 def load_profile(path: str | Path) -> SutProfile:
+    """Load a SUT profile from a file, or a built-in one via ``builtin:<name>``."""
+    raw = str(path)
+    if raw.startswith(BUILTIN_PREFIX):
+        name = raw[len(BUILTIN_PREFIX) :]
+        known = builtin_profiles()
+        if name not in known:
+            raise ConfigError(f"unknown built-in profile {name!r}; available: {sorted(known)}")
+        path = known[name]
     p = Path(path)
     data = _read_yaml(p)
     try:
@@ -78,7 +96,10 @@ def check_references(
             f"{profile.name!r} (known: {sorted(profile.checkpoints)})"
         )
     if conv.stop_at == "commit_gate" and profile.commit_gate is None:
-        errors.append("conversation.stop_at: commit_gate used but the profile declares none")
+        errors.append(
+            "conversation.stop_at: the default 'commit_gate' needs a profile with a commit_gate; "
+            f"profile {profile.name!r} declares none, so set stop_at: goal_reached"
+        )
     for name, policy in conv.checkpoint_policy.items():
         if name not in profile.checkpoints:
             errors.append(f"conversation.checkpoint_policy.{name}: unknown checkpoint")
@@ -105,6 +126,10 @@ def check_references(
     for tool in [*tools.must_call, *tools.must_not_call]:
         if tool not in profile.tools:
             errors.append(f"expectations.expected_tools: unknown tool {tool!r}")
+    for order in tools.ordering:
+        for tool in (order.before, order.after):
+            if tool not in profile.tools:
+                errors.append(f"expectations.expected_tools.ordering: unknown tool {tool!r}")
     for rule in tools.forbidden_before:
         if rule.tool not in profile.tools:
             errors.append(
