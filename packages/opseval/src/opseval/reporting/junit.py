@@ -8,7 +8,8 @@ that could not be loaded appear as one errored case, so they cannot vanish silen
 
 from __future__ import annotations
 
-from xml.etree import ElementTree as ET
+# Only builds XML; never parses untrusted input.
+from xml.etree import ElementTree as ET  # nosec B405
 
 from opseval.models.results import ScoreStatus, SuiteResult, TestVerdict, VerdictStatus
 

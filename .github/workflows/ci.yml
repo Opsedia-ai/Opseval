@@ -17,11 +17,16 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync
+      - name: Install (lockfile must be up to date)
+        run: uv sync --locked
       - name: Lint
         run: |
           uv run ruff check .
           uv run ruff format --check .
+      - name: Import boundaries (core never imports ee/; scorers never touch transports)
+        run: uv run lint-imports
+      - name: Security lint
+        run: uv run bandit -c pyproject.toml -r packages/opseval/src -q
       - run: uv run mypy
       - run: uv run pytest --cov=opseval --cov-report=term-missing --cov-fail-under=85
       - name: Demo passes (exit 0)
@@ -31,3 +36,19 @@ jobs:
           set +e
           uv run opseval demo --repeats 1 --bug skip-approval
           test $? -eq 1
+      - name: Demo reports a harness failure, not an agent failure (exit 3)
+        run: |
+          set +e
+          uv run opseval demo --repeats 1 --bug crash
+          test $? -eq 3
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - name: Known vulnerabilities and licences of runtime dependencies
+        run: make audit
