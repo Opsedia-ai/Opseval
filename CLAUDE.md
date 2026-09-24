@@ -27,7 +27,8 @@ When you add a transport, scorer or trace source, add fault-injection tests that
 packages/opseval/src/opseval/
   models/        scenario.py (YAML schema, opseval/v1), profile.py (SUT profile), record.py (RunRecord, ToolCall), results.py
   catalogue.py   load + cross-check scenarios/suites/profiles (fail closed); builtin:<name> profiles
-  transport/     websocket.py, queued.py (http-json, python), openai_chat.py
+  auth.py        static and short-lived HS256 tokens (per attempt, refreshed before expiry)
+  transport/     websocket.py (resume, token refresh), queued.py (http-json, python), openai_chat.py
   driver.py      one attempt as a state machine; records, never judges
   simulator/     scripted + LLM personas, language packs (en, ar MSA/Egyptian/Gulf), typing noise
   llm.py         OpenAI-compatible client (no vendor SDKs, ADR-0003), retries, usage meter
@@ -40,7 +41,7 @@ packages/opseval/src/opseval/
   demo/          reference refund agent + example catalogue (`opseval demo`)
   profiles/      built-in SUT profiles (openai-chat)
 packages/opseval/tests/   pytest (asyncio_mode=auto), incl. the fault-injection suite
-docs/adr/                 architecture decisions (0001-0011); new decisions get a new ADR
+docs/adr/                 architecture decisions (0001-0012); new decisions get a new ADR
 ```
 
 ## Commands
@@ -68,19 +69,18 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 
 ## Current status (update this section when it changes)
 
-- v0.1 core: done. CLI, transports (websocket, http-json, openai-chat, python), simulator, scoring, verdicts, reports, demo, `init`, JUnit.
+- v0.1 core: done. CLI, transports (websocket with resume and HS256 token refresh (ADR-0012), http-json, openai-chat, python), simulator, scoring, verdicts, reports, demo, `init`, JUnit.
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`).
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
 
 ## Next up (suggested order)
 
-1. WebSocket reconnect/resume and token refresh (HS256 short-lived tokens from `OPSEVAL_TOKEN_SIGNING_KEY`).
-2. `opseval rescore <run>`: re-score saved records offline. The judge and scorer versions are already in the details.
-3. More judges: language consistency, persona consistency (harness axis), 3-vote security judges with prompt-injection planting.
-4. GitHub Action + `pytest-opseval` plugin.
-5. Opt-out, content-free telemetry (ADR-0010).
-6. SSE transport; OpenTelemetry trace source.
+1. `opseval rescore <run>`: re-score saved records offline. The judge and scorer versions are already in the details.
+2. More judges: language consistency, persona consistency (harness axis), 3-vote security judges with prompt-injection planting.
+3. GitHub Action + `pytest-opseval` plugin.
+4. Opt-out, content-free telemetry (ADR-0010).
+5. SSE transport; OpenTelemetry trace source.
 
 ## Planning documents
 

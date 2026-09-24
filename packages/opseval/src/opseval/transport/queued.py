@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from opseval.auth import BearerAuth, TokenSource, as_token_source
 from opseval.errors import TransportError, TransportTimeout
 from opseval.models.profile import SutProfile
 from opseval.transport.base import SYNTHETIC_KIND, Session, Transport
@@ -99,13 +100,13 @@ class HttpJsonTransport(Transport):
         url: str,
         profile: SutProfile,
         *,
-        token: str | None = None,
+        token: str | TokenSource | None = None,
         request_timeout: float = 120.0,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self._url = url
         self._profile = profile
-        self._token = token
+        self._tokens = as_token_source(token)
         self._timeout = request_timeout
         self._client_factory = client_factory
 
@@ -114,9 +115,9 @@ class HttpJsonTransport(Transport):
         return self._url
 
     async def connect(self) -> Session:
-        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         client = self._client_factory() if self._client_factory else httpx.AsyncClient()
-        client.headers.update(headers)
+        if self._tokens is not None:
+            client.auth = BearerAuth(self._tokens)
         return HttpJsonSession(client, self._url, self._profile, self._timeout)
 
 

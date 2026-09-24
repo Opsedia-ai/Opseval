@@ -185,6 +185,7 @@ class Driver:
             infra_errors=tuple(self._infra),
             notes=tuple(self._notes),
             planted_injections=tuple(self._injections),
+            transport_events=session.transport_events() if session else (),
         )
 
     async def _converse(self, session: Session) -> None:
@@ -218,8 +219,9 @@ class Driver:
                         f"no reply within {self.s.execution.turn_timeout_seconds:.0f}s",
                     ) from None
                 return "quiet", None
-            first = False
             kind = self.p.classify(payload)
+            # Transport chatter (e.g. a late resume confirmation) is not the agent's reply.
+            first = first and kind is FrameKind.HANDSHAKE
             text = payload.get(self.p.text_field) if isinstance(payload, dict) else None
             self._record("received", payload, kind, text if isinstance(text, str) else None)
             if kind is FrameKind.ERROR:
