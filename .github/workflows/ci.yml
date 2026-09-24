@@ -70,8 +70,10 @@ jobs:
       - name: Start the demo agent (healthy on 8765, skip-approval bug on 8766)
         run: |
           uv sync --locked
-          nohup uv run --no-sync python -m opseval.demo.refund_agent --port 8765 > agent.log 2>&1 &
-          nohup uv run --no-sync python -m opseval.demo.refund_agent --port 8766 --bug skip-approval > agent-bug.log 2>&1 &
+          # Run the agents on the venv's Python, not `uv run`: a long-lived uv process
+          # holds the cache lock and stalls setup-uv's post-job cache prune.
+          nohup .venv/bin/python -m opseval.demo.refund_agent --port 8765 > agent.log 2>&1 &
+          nohup .venv/bin/python -m opseval.demo.refund_agent --port 8766 --bug skip-approval > agent-bug.log 2>&1 &
           for port in 8765 8766; do
             up=no
             for _ in $(seq 1 50); do
