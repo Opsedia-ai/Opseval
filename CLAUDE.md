@@ -35,12 +35,14 @@ packages/opseval/src/opseval/
   scoring/       base.py (registry/engine), deterministic.py, tools.py (trace-backed), judges.py
   verdicts.py    attempt verdicts, folding, release gate, exit codes
   runner.py      the launch pipeline used by the CLI
-  reporting/     self-contained HTML report, console summary, JUnit XML
+  reporting/     self-contained HTML report, console summary, JUnit XML, Markdown gate summary
   scaffold/      `opseval init` templates
   demo/          reference refund agent + example catalogue (`opseval demo`)
   profiles/      built-in SUT profiles (openai-chat)
 packages/opseval/tests/   pytest (asyncio_mode=auto), incl. the fault-injection suite
-docs/adr/                 architecture decisions (0001-0011); new decisions get a new ADR
+packages/pytest-opseval/  pytest plugin: scenarios as pytest items (entry point disabled in our own run)
+action.yml                composite GitHub Action (dogfooded by the `action` CI job)
+docs/adr/                 architecture decisions (0001-0015); new decisions get a new ADR
 ```
 
 ## Commands
@@ -69,6 +71,7 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 ## Current status (update this section when it changes)
 
 - v0.1 core: done. CLI, transports (websocket, http-json, openai-chat, python), simulator, scoring, verdicts, reports, demo, `init`, JUnit.
+- v0.2: CI integrations: `action.yml` (composite GitHub Action), `opseval summary`, and the `pytest-opseval` package (ADR-0015).
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`).
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
@@ -78,9 +81,8 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 1. WebSocket reconnect/resume and token refresh (HS256 short-lived tokens from `OPSEVAL_TOKEN_SIGNING_KEY`).
 2. `opseval rescore <run>`: re-score saved records offline. The judge and scorer versions are already in the details.
 3. More judges: language consistency, persona consistency (harness axis), 3-vote security judges with prompt-injection planting.
-4. GitHub Action + `pytest-opseval` plugin.
-5. Opt-out, content-free telemetry (ADR-0010).
-6. SSE transport; OpenTelemetry trace source.
+4. Opt-out, content-free telemetry (ADR-0010).
+5. SSE transport; OpenTelemetry trace source.
 
 ## Planning documents
 

@@ -179,6 +179,26 @@ def run(
 
 
 @app.command()
+def summary(
+    run_dir: Annotated[Path, typer.Argument(help="A finished run folder, e.g. reports/<run_id>.")],
+    report_url: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(help="Link to the full report (e.g. a CI artifact URL)."),
+    ] = None,
+) -> None:
+    """Print a Markdown gate summary (for PR comments and CI job summaries)."""
+    from opseval.reporting.markdown import markdown_summary
+
+    path = run_dir / "result.json"
+    try:
+        result = SuiteResult.model_validate_json(path.read_text("utf-8"))
+    except (OSError, ValueError) as exc:
+        typer.secho(f"error: {path}: not a finished run ({exc})", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+    typer.echo(markdown_summary(result, report_url=report_url))
+
+
+@app.command()
 def demo(
     bug: Annotated[
         Optional[str],  # noqa: UP045

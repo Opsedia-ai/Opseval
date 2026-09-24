@@ -61,6 +61,28 @@ For WebSocket or custom HTTP agents, write a SUT profile that maps their frames 
 
 LLM personas and judges use any OpenAI-compatible endpoint: set `OPSEVAL_SIMULATOR_BASE_URL`, `OPSEVAL_SIMULATOR_MODEL`, `OPSEVAL_SIMULATOR_API_KEY`, and likewise `OPSEVAL_JUDGE_*`. Scripted scenarios need no LLM at all.
 
+### Gate releases in CI
+
+**GitHub Actions**: the step fails exactly when Opseval says the release is blocked, and the gate summary is posted on the pull request:
+
+```yaml
+permissions: {contents: read, pull-requests: write}
+steps:
+  - uses: actions/checkout@v4
+  - uses: Opsedia-ai/Opseval@main
+    env:
+      OPSEVAL_ALLOWED_HOSTS: agent.staging.example.com
+      OPSEVAL_JUDGE_API_KEY: ${{ secrets.JUDGE_API_KEY }}
+    with:
+      suite: opseval/suites/smoke.yaml
+      profile: opseval/profile.yaml
+      target: wss://agent.staging.example.com/ws
+```
+
+The report, JUnit file and `result.json` are uploaded as an artifact, and the step's exit code is Opseval's. For other CI systems, `opseval summary reports/<run_id>` prints the same Markdown summary.
+
+**pytest**: `pip install pytest-opseval`, then `pytest --opseval-profile opseval/profile.yaml --opseval-target wss://… opseval/suites/smoke.yaml`. Each scenario becomes a test: *failed* is FAILED, *not judged* is ERROR (never a pass), and skipped scenarios are skipped ([ADR-0015](docs/adr/0015-ci-integrations.md)).
+
 ### Trace-backed tool checks (Langfuse)
 
 If your agent already sends traces to Langfuse, Opseval can check its tool calls from what really happened instead of what it said. Add this to the SUT profile:

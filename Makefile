@@ -10,20 +10,20 @@ lint:
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run lint-imports
-	uv run bandit -c pyproject.toml -r packages/opseval/src -q
+	uv run bandit -c pyproject.toml -r packages/opseval/src packages/pytest-opseval/src -q
 
 typecheck:
 	uv run mypy
 
 test:
-	uv run pytest --cov=opseval --cov-report=term-missing --cov-fail-under=85
+	uv run pytest --cov=opseval --cov=pytest_opseval --cov-report=term-missing --cov-fail-under=85
 
 check: lint typecheck test
 
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
 	@mkdir -p build/audit
-	uv export --frozen --package opseval --no-dev --no-emit-workspace --no-hashes \
+	uv export --frozen --package pytest-opseval --no-dev --no-emit-workspace --no-hashes \
 		--format requirements-txt -q -o build/audit/requirements.txt
 	uv run pip-audit --disable-pip --no-deps -r build/audit/requirements.txt
 	uv venv -q --allow-existing build/audit/venv

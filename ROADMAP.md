@@ -21,7 +21,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 
 ## v0.2 Beta: "It gates releases" ⚪
 
-- ⚪ Official GitHub Action (report artifact, PR comment) and `pytest-opseval`
+- 🟢 GitHub Action (report artifact, job summary, PR comment, exit code passthrough) and `pytest-opseval`
 - 🟢 Langfuse trace reader and trace-backed tool scorers (ordering, approval gating, call success) · ⚪ argument schemas
 - ⚪ `opseval rescore` (offline) and `opseval calibrate` (judge ↔ human agreement)
 - ⚪ Prompt-injection planting and 3-vote security judges
