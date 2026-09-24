@@ -61,6 +61,17 @@ For WebSocket or custom HTTP agents, write a SUT profile that maps their frames 
 
 LLM personas and judges use any OpenAI-compatible endpoint: set `OPSEVAL_SIMULATOR_BASE_URL`, `OPSEVAL_SIMULATOR_MODEL`, `OPSEVAL_SIMULATOR_API_KEY`, and likewise `OPSEVAL_JUDGE_*`. Scripted scenarios need no LLM at all.
 
+### Re-score a run offline
+
+Changed a rubric, a judge prompt or a scorer? Re-score the saved conversations without talking to the agent again:
+
+```bash
+opseval rescore reports/<run_id>            # uses the scenarios and profile saved with the run
+opseval rescore reports/<run_id> --catalogue opseval/suites/full.yaml --profile opseval/profile.yaml
+```
+
+The original run is never modified. The new result goes to `reports/<run_id>/rescore-<time>/`, listing which scorer versions and judge prompts changed and which verdicts moved. The exit code follows the new result. Without a judge configured, judge scores are reused only if their prompt is unchanged ([ADR-0013](docs/adr/0013-offline-rescore.md)).
+
 ### Trace-backed tool checks (Langfuse)
 
 If your agent already sends traces to Langfuse, Opseval can check its tool calls from what really happened instead of what it said. Add this to the SUT profile:

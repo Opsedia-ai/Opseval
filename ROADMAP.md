@@ -23,7 +23,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 
 - ⚪ Official GitHub Action (report artifact, PR comment) and `pytest-opseval`
 - 🟢 Langfuse trace reader and trace-backed tool scorers (ordering, approval gating, call success) · ⚪ argument schemas
-- ⚪ `opseval rescore` (offline) and `opseval calibrate` (judge ↔ human agreement)
+- 🟢 `opseval rescore` (offline, self-contained run folders) · ⚪ `opseval calibrate` (judge ↔ human agreement)
 - ⚪ Prompt-injection planting and 3-vote security judges
 - ⚪ Flow map, preflight checks (🟢 pass^k and JUnit shipped early)
 - ⚪ SSE transport and protocol probes

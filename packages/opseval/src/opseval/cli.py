@@ -179,6 +179,55 @@ def run(
 
 
 @app.command()
+def rescore(
+    run_dir: Annotated[Path, typer.Argument(help="A finished run folder, e.g. reports/<run_id>.")],
+    catalogue: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option(help="Score against these scenario files instead of the run's snapshot."),
+    ] = None,
+    profile: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option("--profile", "-p", help="SUT profile to use with --catalogue."),
+    ] = None,
+    junit: JunitOpt = None,
+    open_report: Annotated[
+        bool, typer.Option("--open", help="Open report.html when done.")
+    ] = False,
+) -> None:
+    """Re-score saved records offline with the current scorers (no agent, no simulator)."""
+    from opseval.rescore import rescore_run
+
+    settings = Settings()
+    try:
+        outcome = asyncio.run(
+            rescore_run(run_dir, settings, catalogue=catalogue, profile=profile, log=typer.echo)
+        )
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+    info = outcome.info
+    typer.echo(f"Re-scored {info.of_run_id} (scenarios from the {info.scenario_source}).")
+    for change in info.scorer_changes:
+        typer.echo(f"  changed {change.scorer_id} {change.what}: {change.before} → {change.after}")
+    if not info.scorer_changes:
+        typer.echo("  no scorer version or judge prompt changed")
+    if info.reused_judge_scores:
+        typer.echo(
+            f"  {info.reused_judge_scores} judge score(s) reused (same prompt, no judge configured)"
+        )
+    typer.echo("")
+    typer.echo(console_summary(outcome.result))
+    typer.echo(f"Report: {(outcome.out_dir / 'report.html').resolve()}")
+    if junit is not None:
+        junit.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(outcome.out_dir / "junit.xml", junit)
+        typer.echo(f"JUnit:  {junit.resolve()}")
+    if open_report:
+        webbrowser.open((outcome.out_dir / "report.html").resolve().as_uri())
+    raise typer.Exit(outcome.result.exit_code)
+
+
+@app.command()
 def demo(
     bug: Annotated[
         Optional[str],  # noqa: UP045
