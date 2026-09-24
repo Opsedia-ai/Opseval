@@ -69,11 +69,16 @@ jobs:
           python-version: "3.12"
       - name: Start the demo agent (healthy on 8765, skip-approval bug on 8766)
         run: |
-          uv sync --locked --no-dev
+          uv sync --locked
           nohup uv run --no-sync python -m opseval.demo.refund_agent --port 8765 > agent.log 2>&1 &
           nohup uv run --no-sync python -m opseval.demo.refund_agent --port 8766 --bug skip-approval > agent-bug.log 2>&1 &
           for port in 8765 8766; do
-            for _ in $(seq 1 50); do (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null && break; sleep 0.2; done
+            up=no
+            for _ in $(seq 1 50); do
+              if (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; then up=yes; break; fi
+              sleep 0.2
+            done
+            if [ "$up" != yes ]; then cat agent.log agent-bug.log; echo "demo agent on $port did not start"; exit 1; fi
           done
       - name: Opseval gate (healthy agent)
         id: healthy
