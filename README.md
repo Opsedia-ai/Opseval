@@ -11,7 +11,7 @@ Simulated customers · real protocol · human-approval checkpoints · verdicts y
 
 </div>
 
-> 🚧 **Pre-alpha.** Opseval is being designed in the open. No release is available yet. See the [roadmap](ROADMAP.md) and the [architecture decisions](docs/adr/).
+> 🚧 **Pre-alpha.** The core CLI runs end to end (see Quickstart), but nothing is released on PyPI yet. See the [roadmap](ROADMAP.md) and the [architecture decisions](docs/adr/).
 
 ---
 
@@ -37,14 +37,26 @@ It tests your **deployed** agent the way your customers meet it:
 - An unmeasured value is shown as *not measured*, never as zero.
 - An inconclusive run is never green in CI. Exit codes: `0` pass · `1` fail · `2` not judged · `3` harness error.
 
-## Planned quickstart (target for v0.1)
+## Quickstart (from source, pre-release)
 
 ```bash
-pip install opseval
-opseval demo            # starts a sample refund agent, runs a smoke suite, opens report.html
-opseval init            # scaffold a SUT profile + first scenario for *your* agent
-opseval run suites/release.yaml
+git clone https://github.com/Opsedia-ai/Opseval.git && cd Opseval
+uv sync
+uv run opseval demo            # starts a sample refund agent, runs the smoke suite, writes reports/<run>/report.html
+uv run opseval demo --bug skip-approval   # the agent issues refunds without approval → release BLOCKED, exit 1
+uv run opseval demo --bug crash           # the connection drops → "not judged", exit 3 (never a false red)
 ```
+
+Point it at your own agent:
+
+```bash
+export OPSEVAL_ALLOWED_HOSTS=agent.example.com
+uv run opseval validate my-scenarios/ --profile my-agent.profile.yaml
+uv run opseval run my-scenarios/suites/release.yaml --profile my-agent.profile.yaml \
+    --target wss://agent.example.com/chat
+```
+
+LLM personas and judges use any OpenAI-compatible endpoint: set `OPSEVAL_SIMULATOR_BASE_URL`, `OPSEVAL_SIMULATOR_MODEL`, `OPSEVAL_SIMULATOR_API_KEY`, and likewise `OPSEVAL_JUDGE_*`. Scripted scenarios need no LLM at all.
 
 A scenario looks like this:
 
@@ -78,7 +90,7 @@ expectations:
 scorers:
   - {id: flow.rejection_routing, threshold: 1.0}
   - {id: judge.goal_achievement, threshold: 0.8}
-  - {id: judge.language_consistency, threshold: 0.9}
+  - {id: output.language_script, params: {script: arabic, min_fraction: 0.9}}
 
 execution:
   repeats: 3

@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Scoring: deterministic scorers and LLM judges behind one registry."""
+
+from opseval.scoring import deterministic as _deterministic  # noqa: F401 - registers scorers
+from opseval.scoring import judges as _judges  # noqa: F401 - registers judges
+from opseval.scoring.base import (
+    DEFAULT_PACK,
+    INVARIANTS,
+    REGISTRY,
+    Scorer,
+    ScoringContext,
+    ScoringEngine,
+    effective_specs,
+    register,
+)
+
+__all__ = [
+    "DEFAULT_PACK",
+    "INVARIANTS",
+    "REGISTRY",
+    "Scorer",
+    "ScoringContext",
+    "ScoringEngine",
+    "effective_specs",
+    "register",
+]

@@ -1,0 +1,3 @@
+name: full
+description: Everything, including LLM-persona scenarios (configure OPSEVAL_SIMULATOR_* and OPSEVAL_JUDGE_*).
+include: ["scenarios/**/*.yaml"]

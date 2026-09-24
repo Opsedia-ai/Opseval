@@ -4,18 +4,18 @@ This is the public roadmap. Dates are targets, not promises. Vote on ideas in Gi
 
 Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 
-## v0.1 Alpha: "It runs end to end" ⚪
+## v0.1 Alpha: "It runs end to end" 🟢
 
-- ⚪ Declarative YAML scenarios and suites, with fail-closed validation (`opseval validate`)
-- ⚪ SUT profiles that map any agent's wire protocol to canonical frames
-- ⚪ Transports: `http-json`, `websocket` (auth, resume, token refresh), `openai-chat`, `python` callable
-- ⚪ Customer simulator: personas, seeded runs, English + Arabic language packs (Gulf, Egyptian, MSA), keyboard-aware typing noise
-- ⚪ Checkpoint policies (approve / reject / script), stop points, and the **committed-outcome guard**
-- ⚪ Immutable run records with secret redaction
-- ⚪ Deterministic scorers + first LLM judges (quoted evidence, harness-computed scores)
-- ⚪ Repeats, consistency, five-state verdicts, criticality-aware release gate, exit codes 0/1/2/3
-- ⚪ Self-contained HTML + JSON report
-- ⚪ `opseval demo` with a reference refund agent; `opseval init`
+- 🟢 Declarative YAML scenarios and suites, with fail-closed validation (`opseval validate`)
+- 🟢 SUT profiles that map any agent's wire protocol to canonical frames
+- 🟢 Transports: `http-json`, `websocket`, `python` callable (⚪ still to do: websocket resume/token refresh, `openai-chat`)
+- 🟢 Customer simulator: scripted and LLM personas, seeded runs, English + Arabic language packs (Gulf, Egyptian, MSA), keyboard-aware typing noise
+- 🟢 Checkpoint policies (approve / reject / script), stop points, and the **committed-outcome guard**
+- 🟢 Immutable run records with secret redaction
+- 🟢 Deterministic scorers + first LLM judges (quoted evidence, harness-computed scores)
+- 🟢 Repeats, consistency, five-state verdicts, criticality-aware release gate, exit codes 0/1/2/3
+- 🟢 Self-contained HTML + JSON report
+- 🟢 `opseval demo` with a reference refund agent · ⚪ `opseval init`
 - ⚪ Opt-out, content-free telemetry
 
 ## v0.2 Beta: "It gates releases" ⚪
