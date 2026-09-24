@@ -75,7 +75,7 @@ runs:
       run: |
         set -euo pipefail
         venv="$RUNNER_TEMP/opseval-venv"
-        uv venv --quiet "$venv"
+        uv venv --quiet --allow-existing "$venv"   # the action may run more than once per job
         if [ -n "$OPSEVAL_SPEC" ]; then
           uv pip install --quiet --python "$venv/bin/python" "$OPSEVAL_SPEC"
         else
