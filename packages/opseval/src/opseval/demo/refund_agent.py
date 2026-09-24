@@ -125,7 +125,8 @@ class Conversation:
         return [self.message(self.t("anything_else"), expects_reply=True)]
 
     def _order_info(self) -> dict[str, Any]:
-        assert self.order is not None
+        if self.order is None:
+            raise RuntimeError("no order selected yet")
         return {"order": self.order, **CATALOGUE[self.order]}
 
     def _lookup_and_propose(self) -> list[dict[str, Any]]:

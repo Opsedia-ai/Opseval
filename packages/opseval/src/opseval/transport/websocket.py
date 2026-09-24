@@ -13,7 +13,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed, InvalidURI, WebSocketException
 
 from opseval.errors import TransportClosed, TransportError, TransportTimeout
-from opseval.models.profile import FrameKind, SutProfile, render_template
+from opseval.models.profile import FrameKind, SutProfile, render_frame
 from opseval.transport.base import Session, Transport, decode_frame
 
 
@@ -84,9 +84,7 @@ class WebSocketTransport(Transport):
             if self._token is None:
                 await session.close()
                 raise TransportError("the SUT profile requires auth but no token is configured")
-            await session.send(
-                render_template(self._profile.auth_frame, {"token": self._token})  # type: ignore[arg-type]
-            )
+            await session.send(render_frame(self._profile.auth_frame, {"token": self._token}))
         if self._profile.handshake_required or self._profile.session_id_field:
             await self._await_handshake(session)
         return session

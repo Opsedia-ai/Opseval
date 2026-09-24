@@ -1,4 +1,7 @@
-.PHONY: install lint typecheck test check demo
+.PHONY: install lint typecheck test check audit demo
+
+# Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
+ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
 
 install:
 	uv sync
@@ -6,14 +9,27 @@ install:
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
+	uv run lint-imports
+	uv run bandit -c pyproject.toml -r packages/opseval/src -q
 
 typecheck:
 	uv run mypy
 
 test:
-	uv run pytest --cov=opseval --cov-report=term-missing
+	uv run pytest --cov=opseval --cov-report=term-missing --cov-fail-under=85
 
 check: lint typecheck test
+
+# Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
+audit:
+	@mkdir -p build/audit
+	uv export --frozen --package opseval --no-dev --no-emit-workspace --no-hashes \
+		--format requirements-txt -q -o build/audit/requirements.txt
+	uv run pip-audit --disable-pip --no-deps -r build/audit/requirements.txt
+	uv venv -q --allow-existing build/audit/venv
+	uv pip install -q --python build/audit/venv/bin/python -r build/audit/requirements.txt
+	uv run pip-licenses --python build/audit/venv/bin/python --from=mixed \
+		--partial-match --allow-only="$(ALLOWED_LICENCES)"
 
 demo:
 	uv run opseval demo

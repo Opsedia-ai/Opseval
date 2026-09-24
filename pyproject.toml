@@ -23,6 +23,10 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.10",
   "types-PyYAML>=6.0",
+  "import-linter>=2.15",
+  "bandit>=1.9.4",
+  "pip-audit>=2.10.1",
+  "pip-licenses>=5.5.5",
 ]
 
 [tool.ruff]
@@ -48,3 +52,38 @@ packages = ["opseval"]
 testpaths = ["packages/opseval/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.importlinter]
+root_packages = ["opseval"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "The open-source core never imports Enterprise code (ADR-0002)"
+type = "forbidden"
+source_modules = ["opseval"]
+forbidden_modules = ["ee", "opseval_ee"]
+
+[[tool.importlinter.contracts]]
+name = "Data models depend on nothing else in opseval"
+type = "forbidden"
+source_modules = ["opseval.models"]
+forbidden_modules = [
+  "opseval.cli",
+  "opseval.runner",
+  "opseval.driver",
+  "opseval.transport",
+  "opseval.simulator",
+  "opseval.scoring",
+  "opseval.traces",
+  "opseval.reporting",
+  "opseval.verdicts",
+]
+
+[[tool.importlinter.contracts]]
+name = "Scorers read only the frozen record: no transports, driver or simulator (record first, judge later)"
+type = "forbidden"
+source_modules = ["opseval.scoring"]
+forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
+
+[tool.bandit]
+exclude_dirs = ["packages/opseval/tests"]

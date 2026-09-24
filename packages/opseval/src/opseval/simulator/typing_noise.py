@@ -75,7 +75,8 @@ def add_typing_noise(text: str, rate: float, seed: int) -> str:
     """Return ``text`` with roughly ``rate`` of eligible words mistyped (deterministic)."""
     if rate <= 0 or not text:
         return text
-    rng = random.Random(seed)  # noqa: S311 - reproducible noise, not cryptography
+    # Reproducible noise, not cryptography.
+    rng = random.Random(seed)  # noqa: S311  # nosec B311
     out: list[str] = []
     last = 0
     for match in PROTECTED.finditer(text):

@@ -7,7 +7,7 @@ Adopting Opseval for a new agent means writing a profile, not forking the tool.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -160,3 +160,8 @@ def render_template(template: object, values: dict[str, Any]) -> object:
         if name in values:
             return values[name]
     return template
+
+
+def render_frame(template: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    """Render an outbound frame template (a mapping always renders to a mapping)."""
+    return cast(dict[str, Any], render_template(template, values))
