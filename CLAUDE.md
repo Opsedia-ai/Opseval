@@ -68,7 +68,7 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 ## Current status (update this section when it changes)
 
 - v0.1 core: done. CLI, transports (websocket, http-json, openai-chat, python), simulator, scoring, verdicts, reports, demo, `init`, JUnit.
-- v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`).
+- v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`). The reader is verified against a real self-hosted Langfuse 4.44 (`scripts/langfuse_smoke.py`, ADR-0011); not yet against Langfuse Cloud.
 - CI: `.github/workflows/ci.yml` runs lint, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks on Python 3.11–3.13. `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
 
