@@ -1,0 +1,38 @@
+# SUT profile for an agent behind an OpenAI-compatible /chat/completions endpoint.
+# Run with:  opseval run suites/smoke.yaml --profile profile.yaml --transport openai-chat \
+#                --target https://your-agent.example.com/v1
+name: my-agent
+description: My agent, tested over its OpenAI-compatible chat endpoint.
+
+kind_field: type
+kinds:
+  message: message
+  error: error
+session_id_field: null
+text_field: text
+phase_field: null
+data_field: data
+tool_calls_field: tool_calls
+turn_end_field: expects_reply
+
+user_message_frame: {type: user_message, text: "{text}"}
+
+transport_options:
+  model: default          # sent as "model"; many agent gateways ignore it
+  # system_prompt: "You are the support assistant for ..."
+  # temperature: 0
+
+# Tools your agent may call. Tool scorers (tools.expected_called, tools.forbidden_not_called,
+# tools.ordering, tools.call_success) check them against traces, or against the tool_calls
+# the endpoint returns when no trace source is configured.
+tools: {}
+#  lookup_order: {}
+#  issue_refund: {commits: true}
+
+# Read what the agent really did from Langfuse (set OPSEVAL_LANGFUSE_* in .env).
+# The agent must use the same session id in Langfuse as the one Opseval sees.
+# traces:
+#   source: langfuse
+#   session_id: "{session_id}"
+#   clock_skew_ms: 2000
+#   wait_seconds: 15

@@ -54,6 +54,17 @@ class InterruptRecord(Frozen):
     decision_seq: int | None = None
 
 
+class ToolCall(Frozen):
+    """One tool call observed in the agent's own trace."""
+
+    name: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    ok: bool = True
+    arguments: Any = None
+    observation_id: str | None = None
+
+
 class RunRecord(Frozen):
     run_id: str
     test_id: str
@@ -70,6 +81,8 @@ class RunRecord(Frozen):
     user_turns: int = 0
     persona: dict[str, Any] = Field(default_factory=dict)
     trace_coverage: Literal["full", "frames_only"] = "frames_only"
+    tool_calls: tuple[ToolCall, ...] = ()
+    """Filled from the trace source when ``trace_coverage`` is ``full``."""
     infra_errors: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     planted_injections: tuple[str, ...] = ()

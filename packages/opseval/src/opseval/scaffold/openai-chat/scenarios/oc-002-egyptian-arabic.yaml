@@ -1,0 +1,23 @@
+id: oc-002
+name: Replies in Arabic to an Egyptian Arabic customer
+goal: عميل عايز يعرف مواعيد الشغل النهارده
+tags: [smoke, arabic, egyptian]
+criticality: normal
+
+persona:
+  role: Customer from Cairo who writes casually in Egyptian Arabic.
+  language: ar
+  dialect: egyptian
+
+conversation:
+  scripted_turns:
+    - "السلام عليكم، ممكن أعرف مواعيد الشغل النهارده؟"
+  max_turns: 3
+  stop_at: goal_reached
+
+scorers:
+  - {id: conversation.no_errors}
+  - {id: output.language_script, params: {script: arabic, min_fraction: 1.0}}
+
+execution:
+  repeats: 3

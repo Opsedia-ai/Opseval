@@ -1,0 +1,23 @@
+id: oc-001
+name: Answers a simple question in one turn
+goal: Find out the store's opening hours.
+tags: [smoke, english]
+criticality: critical
+
+persona:
+  role: Customer who wants a quick answer.
+  language: en
+
+conversation:
+  scripted_turns:
+    - "Hi! What are your opening hours?"
+  max_turns: 3
+  stop_at: goal_reached        # this protocol has no approval checkpoints
+
+scorers:
+  - {id: conversation.no_errors}
+  - {id: output.terminal_state}
+  - {id: conversation.turn_budget, params: {budget: 1}}
+
+execution:
+  repeats: 3

@@ -48,5 +48,9 @@ class LLMInfraError(HarnessError):
     """The LLM provider failed (outage, rate limit exhausted, malformed response)."""
 
 
+class TraceUnavailable(HarnessError):
+    """The agent's trace could not be read (source down, not ingested yet, no session id)."""
+
+
 class LLMRequestError(HarnessError):
     """The LLM provider rejected the request (4xx other than 429)."""

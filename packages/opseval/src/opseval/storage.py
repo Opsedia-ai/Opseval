@@ -5,6 +5,7 @@
 <root>/<run_id>/records/<test_id>__attempt<N>.json
 <root>/<run_id>/result.json        (written last: marks completion)
 <root>/<run_id>/report.html
+<root>/<run_id>/junit.xml
 """
 
 from __future__ import annotations
@@ -61,4 +62,9 @@ class FileStore:
     def save_report(self, run_id: str, html: str) -> Path:
         path = self.run_dir(run_id) / "report.html"
         _atomic_write(path, html)
+        return path
+
+    def save_junit(self, run_id: str, xml: str) -> Path:
+        path = self.run_dir(run_id) / "junit.xml"
+        _atomic_write(path, xml)
         return path

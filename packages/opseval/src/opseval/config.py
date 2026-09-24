@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     judge_model: str | None = None
     judge_concurrency: int = 4
 
+    # Trace source (Langfuse public API)
+    langfuse_host: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+
     # Gate
     gate_fail_on_flaky: bool = False
 
@@ -49,7 +54,13 @@ class Settings(BaseSettings):
         return {h.strip().lower() for h in self.allowed_hosts.split(",") if h.strip()}
 
 
-SECRET_FIELDS = ("static_token", "token_signing_key", "simulator_api_key", "judge_api_key")
+SECRET_FIELDS = (
+    "static_token",
+    "token_signing_key",
+    "simulator_api_key",
+    "judge_api_key",
+    "langfuse_secret_key",
+)
 
 
 def config_digest(settings: Settings) -> dict[str, Any]:

@@ -12,5 +12,6 @@
 | [0008](0008-committed-outcome-guard.md) | Committed-outcome guard is on by default | Proposed |
 | [0009](0009-offline-licence-keys.md) | Offline-verifiable licence keys, no phone-home | Proposed |
 | [0010](0010-telemetry.md) | Opt-out, content-free, documented telemetry | Proposed |
+| [0011](0011-trace-backed-tool-scoring.md) | Trace-backed tool scoring with explicit clock-skew ambiguity | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

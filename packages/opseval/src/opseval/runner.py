@@ -19,10 +19,18 @@ from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.scenario import Scenario
 from opseval.reporting import render_html
+from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 from opseval.storage import FileStore
-from opseval.transport import HttpJsonTransport, Transport, WebSocketTransport
+from opseval.traces import TraceSource, enrich
+from opseval.traces.langfuse import LangfuseTraceSource
+from opseval.transport import (
+    HttpJsonTransport,
+    OpenAIChatTransport,
+    Transport,
+    WebSocketTransport,
+)
 from opseval.verdicts import (
     attempt_verdict,
     exit_code,
@@ -43,7 +51,11 @@ class RunOptions:
     allow_commit: bool = False
     fail_fast: bool = False
     filters: list[str] = field(default_factory=list)
+    traces: bool = True
+    """Read the agent's traces when the profile declares a trace source."""
     transport_factory: TransportFactory | None = None
+    trace_source: TraceSource | None = None
+    """Inject a trace source (tests); otherwise one is built from settings."""
 
 
 def _llm_client(settings: Settings, role: str, meter: UsageMeter) -> ChatClient | None:
@@ -76,7 +88,30 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
     if options.transport == "http-json":
         check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
         return lambda profile: HttpJsonTransport(target, profile, token=token)
-    raise ConfigError(f"unknown transport {options.transport!r}; use websocket or http-json")
+    if options.transport == "openai-chat":
+        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
+        return lambda profile: OpenAIChatTransport(target, profile, token=token)
+    raise ConfigError(
+        f"unknown transport {options.transport!r}; use websocket, http-json or openai-chat"
+    )
+
+
+def build_trace_source(
+    options: RunOptions, settings: Settings, profile: SutProfile
+) -> TraceSource | None:
+    if not options.traces or profile.traces is None:
+        return None
+    if options.trace_source is not None:
+        return options.trace_source
+    host = settings.langfuse_host
+    public, secret = settings.langfuse_public_key, settings.langfuse_secret_key
+    if not (host and public and secret):
+        raise ConfigError(
+            f"profile {profile.name!r} reads traces from Langfuse: set OPSEVAL_LANGFUSE_HOST, "
+            "OPSEVAL_LANGFUSE_PUBLIC_KEY and OPSEVAL_LANGFUSE_SECRET_KEY, or pass --no-traces"
+        )
+    check_url_allowed(host, settings.allowlist(), secure_schemes=("https",))
+    return LangfuseTraceSource(host, public, secret.get_secret_value())
 
 
 def _needs_llm_persona(scenario: Scenario) -> bool:
@@ -103,6 +138,7 @@ async def launch(
         filters=options.filters,
     )
     make_transport = build_transport_factory(options, settings)
+    trace_source = build_trace_source(options, settings, profile)
     meter = UsageMeter()
     sim_client = _llm_client(settings, "simulator", meter)
     judge_client = _llm_client(settings, "judge", meter)
@@ -123,6 +159,7 @@ async def launch(
             "load_errors": [str(p) for p in catalogue.problems],
             "started_at": started.isoformat(),
             "opseval_version": __version__,
+            "traces": trace_source.name if trace_source else None,
             "config": config_digest(settings),
         },
     )
@@ -178,6 +215,8 @@ async def launch(
                 allow_commit=options.allow_commit,
             )
             record = await driver.run()
+            if trace_source is not None:
+                record = await enrich(record, trace_source, profile)
             path = store.save_record(record)
             scores = await engine.score(record, scenario, profile)
             verdict = attempt_verdict(record, scores, str(path))
@@ -185,7 +224,8 @@ async def launch(
             state = (
                 "not judged" if verdict.passed is None else ("pass" if verdict.passed else "FAIL")
             )
-            log(f"   attempt {i}: {state} ({record.terminal_state.value})")
+            coverage = " · traces" if record.trace_coverage == "full" else ""
+            log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
         verdicts.append(fold_attempts(scenario, attempts))
         if options.fail_fast and verdicts[-1].status is VerdictStatus.FAILED:
             log("fail-fast: stopping after the first failed scenario")
@@ -208,5 +248,6 @@ async def launch(
         load_errors=[str(p) for p in catalogue.problems],
     )
     store.save_report(run_id, render_html(result, store.load_records(run_id)))
+    store.save_junit(run_id, render_junit(result))
     store.save_result(result)  # written last: marks the run as complete
     return result

@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest --cov=opseval --cov-report=term-missing --cov-fail-under=85
+      - name: Demo passes (exit 0)
+        run: uv run opseval demo --repeats 1 --junit reports/junit.xml
+      - name: Demo catches an injected bug (exit 1)
+        run: |
+          set +e
+          uv run opseval demo --repeats 1 --bug skip-approval
+          test $? -eq 1
