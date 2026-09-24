@@ -133,12 +133,18 @@ class TestCatalogue:
     def test_reference_errors(self, profile: SutProfile) -> None:
         s = make_scenario(
             conversation={"stop_at": "nope", "checkpoint_policy": {"ghost": {"action": "approve"}}},
-            expectations={"expected_tools": {"must_call": ["teleport"]}, "invariants": ["magic"]},
+            expectations={
+                "expected_tools": {
+                    "must_call": ["teleport"],
+                    "ordering": [{"before": "lookup_order", "after": "warp"}],
+                },
+                "invariants": ["magic"],
+            },
             scorers=[{"id": "does.not.exist"}],
         )
         errors = check_references(s, profile, REGISTRY.keys(), set(INVARIANTS))
         joined = "\n".join(errors)
-        for needle in ("stop_at", "ghost", "teleport", "magic", "does.not.exist"):
+        for needle in ("stop_at", "ghost", "teleport", "warp", "magic", "does.not.exist"):
             assert needle in joined
 
     def test_broken_file_is_reported_not_run(self, tmp_path: Path, profile: SutProfile) -> None:

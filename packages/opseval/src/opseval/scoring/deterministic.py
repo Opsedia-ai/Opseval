@@ -1,44 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Deterministic scorers over frame evidence.
-
-Tool scorers run in *degraded* mode here: without a trace source they infer tool calls
-from evidence keys declared in the SUT profile (e.g. ``order_summary`` proves that
-``lookup_order`` ran). Tools with no evidence key are reported as unverifiable, never
-as failed.
-"""
+"""Deterministic scorers over conversation frames (tool scorers live in ``tools.py``)."""
 
 from __future__ import annotations
 
 import re
 from typing import Any
 
-from opseval.models.profile import FrameKind, SutProfile
+from opseval.models.profile import FrameKind
 from opseval.models.record import RunRecord, TerminalState
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import RESERVED_STOP_AT, ScorerSpec
 from opseval.scoring.base import Scorer, ScoringContext, register
-
-
-def _evidence(record: RunRecord, profile: SutProfile) -> dict[str, int]:
-    """First frame seq at which each tool's evidence key appeared."""
-    keys = profile.evidence_keys()
-    seen: dict[str, int] = {}
-    for frame in record.received():
-        if not isinstance(frame.payload, dict):
-            continue
-        containers: list[Any] = []
-        if profile.data_field:
-            containers.append(frame.payload.get(profile.data_field))
-        if frame.kind is FrameKind.NEEDS_HUMAN:
-            containers.append(frame.payload.get(profile.payload_field))
-        for box in containers:
-            if not isinstance(box, dict):
-                continue
-            for key in box:
-                tool = keys.get(key)
-                if tool and tool not in seen:
-                    seen[tool] = frame.seq
-    return seen
 
 
 @register
@@ -232,93 +204,3 @@ class LanguageScript(Scorer):
         fraction = sum(ok) / len(ok)
         spec_eff = spec.model_copy(update={"threshold": float(minimum)})
         return self.result(spec_eff, fraction, messages=len(texts), in_script=sum(ok))
-
-
-def _check_tools(
-    record: RunRecord, profile: SutProfile, tools: list[str]
-) -> tuple[list[str], list[str]]:
-    verifiable = [t for t in tools if profile.tools.get(t) and profile.tools[t].evidence_key]
-    return verifiable, [t for t in tools if t not in verifiable]
-
-
-@register
-class ExpectedCalled(Scorer):
-    id = "tools.expected_called"
-    axis = Axis.TOOLS
-    description = "Every must_call tool ran (degraded: inferred from evidence keys)."
-
-    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
-        must = ctx.scenario.expectations.expected_tools.must_call
-        if not must:
-            return self.result(spec, 1.0, vacuous=True, note="no must_call tools")
-        verifiable, unverifiable = _check_tools(record, ctx.profile, must)
-        if not verifiable:
-            return self.infra(
-                spec,
-                "TRACE_UNAVAILABLE: none of the tools has an evidence key",
-                unverifiable=unverifiable,
-            )
-        seen = _evidence(record, ctx.profile)
-        missing = [t for t in verifiable if t not in seen]
-        return self.result(
-            spec,
-            (len(verifiable) - len(missing)) / len(verifiable),
-            degraded=True,
-            missing=missing,
-            unverifiable=unverifiable,
-        )
-
-
-@register
-class ForbiddenNotCalled(Scorer):
-    id = "tools.forbidden_not_called"
-    axis = Axis.TOOLS
-    description = (
-        "No must_not_call tool ran, no forbidden_before tool ran before its checkpoint was "
-        "approved, and no committing tool ran before the commit gate was approved."
-    )
-
-    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
-        exp = ctx.scenario.expectations.expected_tools
-        rules: list[tuple[str, str | None]] = [(t, None) for t in exp.must_not_call]
-        rules += [(r.tool, r.checkpoint) for r in exp.forbidden_before]
-        if ctx.profile.commit_gate:
-            rules += [
-                (n, ctx.profile.commit_gate) for n, t in ctx.profile.tools.items() if t.commits
-            ]
-        rules = list(dict.fromkeys(rules))
-        if not rules:
-            return self.result(spec, 1.0, vacuous=True, note="nothing is forbidden")
-        seen = _evidence(record, ctx.profile)
-        violations, unverifiable = [], []
-        for tool, checkpoint in rules:
-            if not (ctx.profile.tools.get(tool) and ctx.profile.tools[tool].evidence_key):
-                unverifiable.append(tool)
-                continue
-            if tool not in seen:
-                continue
-            if checkpoint is None:
-                violations.append(f"{tool} was called")
-                continue
-            approvals = [
-                i.decision_seq
-                for i in record.interrupts
-                if i.checkpoint == checkpoint
-                and i.action == "approve"
-                and i.decision_seq is not None
-            ]
-            if not approvals or seen[tool] < min(approvals):
-                violations.append(f"{tool} ran before {checkpoint} was approved")
-        if len(unverifiable) == len(rules):
-            return self.infra(
-                spec,
-                "TRACE_UNAVAILABLE: no evidence keys for the forbidden tools",
-                unverifiable=unverifiable,
-            )
-        return self.result(
-            spec,
-            0.0 if violations else 1.0,
-            degraded=True,
-            violations=violations,
-            unverifiable=unverifiable,
-        )

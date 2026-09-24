@@ -7,7 +7,7 @@ Adopting Opseval for a new agent means writing a profile, not forking the tool.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -27,12 +27,29 @@ class FrameKind(StrEnum):
 class ToolSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     evidence_key: str | None = None
+    """A key in a frame's data that proves the tool ran (degraded, frames-only mode)."""
+    trace_name: str | None = None
+    """Observation name in traces, if it differs from the tool name."""
     commits: bool = False
 
 
 class CheckpointSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     phase: str | None = None
+
+
+class TraceConfig(BaseModel):
+    """Where to read the agent's own traces (ADR-0011)."""
+
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["langfuse"] = "langfuse"
+    session_id: str = "{session_id}"
+    """Template for the trace session id. Values: session_id, run_id, test_id, attempt_index."""
+    clock_skew_ms: int = Field(default=2000, ge=0, le=600_000)
+    """Trace timestamps within this window of a decision are treated as ambiguous."""
+    wait_seconds: float = Field(default=15.0, ge=0, le=600)
+    """How long to wait for traces to be ingested after the conversation ends."""
+    poll_interval_seconds: float = Field(default=2.0, gt=0, le=60)
 
 
 class SutProfile(BaseModel):
@@ -57,6 +74,8 @@ class SutProfile(BaseModel):
     """If set, a MESSAGE frame whose field is truthy ends the agent's turn."""
     turn_quiet_ms: int = Field(default=400, ge=0, le=60_000)
     """Otherwise the agent's turn ends after this much silence."""
+    tool_calls_field: str | None = None
+    """Key inside ``data_field`` holding a list of ``{name, arguments}`` tool calls."""
 
     # --- outbound templates ("{name}" string values are substituted) ------------------
     auth_frame: dict[str, Any] | None = None
@@ -73,6 +92,9 @@ class SutProfile(BaseModel):
     )
     handshake_required: bool = False
     reject_via_message_allowed: bool = True
+    transport_options: dict[str, Any] = Field(default_factory=dict)
+    """Transport-specific settings (e.g. ``model`` and ``system_prompt`` for openai-chat)."""
+    traces: TraceConfig | None = None
 
     # --- conversation model -----------------------------------------------------------
     phases: list[str] = Field(default_factory=list)
@@ -107,6 +129,15 @@ class SutProfile(BaseModel):
     def evidence_keys(self) -> dict[str, str]:
         """Map evidence key -> tool name, for tools that declare one."""
         return {spec.evidence_key: name for name, spec in self.tools.items() if spec.evidence_key}
+
+    def trace_names(self) -> dict[str, str]:
+        """Map trace observation name -> tool name."""
+        return {(spec.trace_name or name): name for name, spec in self.tools.items()}
+
+    def frame_verifiable(self, tool: str) -> bool:
+        """Can frames alone show whether ``tool`` ran?"""
+        spec = self.tools.get(tool)
+        return spec is not None and (spec.evidence_key is not None or bool(self.tool_calls_field))
 
 
 def render_template(template: object, values: dict[str, Any]) -> object:

@@ -1,0 +1,30 @@
+# Needs an LLM for the simulated customer (OPSEVAL_SIMULATOR_*) and the judge (OPSEVAL_JUDGE_*).
+id: oc-101
+name: Customer asks how to get a refund for a late order (LLM persona, judged)
+goal: Get clear next steps for a refund on order 10482, which arrived two weeks late.
+tags: [refund, english, llm]
+criticality: normal
+
+persona:
+  role: Polite but busy customer. Gives details only when asked.
+  language: en
+  typing_noise: 0.03
+
+conversation:
+  flow: >
+    Explain that order 10482 arrived two weeks late and ask how to get a refund.
+    Answer the agent's questions briefly. Consider the goal reached once you know
+    the next steps.
+  max_turns: 8
+  stop_at: goal_reached
+
+expectations:
+  expected_outcome: The agent explains or starts the refund process without inventing policies.
+
+scorers:
+  - {id: conversation.no_errors}
+  - {id: output.terminal_state}
+  - {id: judge.goal_achievement, threshold: 0.75}
+
+execution:
+  repeats: 2
