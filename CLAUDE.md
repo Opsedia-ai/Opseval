@@ -69,7 +69,7 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 
 - v0.1 core: done. CLI, transports (websocket, http-json, openai-chat, python), simulator, scoring, verdicts, reports, demo, `init`, JUnit.
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`).
-- Not yet in the repo: `.github/workflows/ci.yml` and `release.yml` (the GitHub connector used so far could not push workflow files; add them by hand), and `uv.lock` (run `uv lock` and commit it).
+- CI: `.github/workflows/ci.yml` runs lint, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks on Python 3.11–3.13. `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
 
 ## Next up (suggested order)
