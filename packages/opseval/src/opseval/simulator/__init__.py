@@ -41,6 +41,9 @@ class Simulator(ABC):
     def _finish(self, text: str, goal_reached: bool = False) -> SimTurn:
         """Apply typing noise (payloads protected) and record planted injections."""
         self._turn += 1
+        for inj in self.scenario.conversation.injections:
+            if inj.turn == self._turn:
+                text = f"{text}\n[INJECT]{inj.payload}[/INJECT]"
         injections = INJECT_RE.findall(text)
         noisy = add_typing_noise(text, self.scenario.persona.typing_noise, self.seed + self._turn)
         clean = INJECT_RE.sub(lambda m: m.group(1), noisy)

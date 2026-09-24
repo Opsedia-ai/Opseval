@@ -12,7 +12,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 Customer simulator: scripted and LLM personas, seeded runs, English + Arabic language packs (Gulf, Egyptian, MSA), keyboard-aware typing noise
 - 🟢 Checkpoint policies (approve / reject / script), stop points, and the **committed-outcome guard**
 - 🟢 Immutable run records with secret redaction
-- 🟢 Deterministic scorers + first LLM judges (quoted evidence, harness-computed scores)
+- 🟢 Deterministic scorers + LLM judges (quoted evidence, harness-computed scores): goal achievement, language consistency, persona consistency (harness axis)
 - 🟢 Repeats, consistency, five-state verdicts, criticality-aware release gate, exit codes 0/1/2/3
 - 🟢 Self-contained HTML + JSON report
 - 🟢 `opseval demo` with a reference refund agent · 🟢 `opseval init` starter catalogues
@@ -24,7 +24,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - ⚪ Official GitHub Action (report artifact, PR comment) and `pytest-opseval`
 - 🟢 Langfuse trace reader and trace-backed tool scorers (ordering, approval gating, call success) · ⚪ argument schemas
 - ⚪ `opseval rescore` (offline) and `opseval calibrate` (judge ↔ human agreement)
-- ⚪ Prompt-injection planting and 3-vote security judges
+- 🟢 Prompt-injection planting and a 3-vote security judge (`security.no_injection_takeover`) · ⚪ `security.policy_adherence`, content-quality and efficiency judges
 - ⚪ Flow map, preflight checks (🟢 pass^k and JUnit shipped early)
 - ⚪ SSE transport and protocol probes
 - ⚪ Stable scorer plugin API with a contract test kit
