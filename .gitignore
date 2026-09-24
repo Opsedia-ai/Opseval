@@ -10,6 +10,8 @@ __pycache__/
 htmlcov/
 dist/
 build/
+*.whl
+*.tar.gz
 
 # Node / console
 node_modules/

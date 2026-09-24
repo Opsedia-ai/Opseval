@@ -17,7 +17,8 @@ Thank you for helping build Opseval! This guide explains how to propose changes 
 git clone https://github.com/Opsedia-ai/Opseval.git
 cd Opseval
 uv sync            # installs the workspace with dev dependencies
-make test          # ruff, mypy --strict, pytest
+make check         # ruff, import-linter, bandit, mypy --strict, pytest (coverage >= 85%)
+make audit         # needs network: pip-audit and licence check of runtime dependencies
 make demo          # runs the example refund agent + smoke suite
 ```
 
@@ -27,7 +28,7 @@ Requirements: Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/). You need Nod
 
 - [ ] The PR is focused on one thing and links an issue (or explains why none is needed).
 - [ ] Tests are added or updated. Coverage does not drop.
-- [ ] `make test` passes locally (ruff, mypy strict, pytest, import-linter).
+- [ ] `make check` passes locally (ruff, import-linter, bandit, mypy strict, pytest).
 - [ ] **Harness faults map to `infra_error`.** Any new failure mode that comes from the tool itself, not the agent, must never produce `failed`.
 - [ ] Docs are updated for user-facing changes.
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:` …).
@@ -53,7 +54,8 @@ Code under `ee/` is covered by the commercial Opseval Enterprise License and is 
 ## Code style
 
 - Python: ruff (lint and format), mypy `--strict`, Pydantic v2 models with `extra="forbid"`.
-- Every source file carries an SPDX header: `# SPDX-License-Identifier: Apache-2.0`.
+- Every source file carries an SPDX header: `# SPDX-License-Identifier: Apache-2.0` (checked by a test).
+- Runtime dependencies of the core must use a permissive licence: MIT, BSD, Apache-2.0, ISC, PSF or MPL-2.0. GPL-family, SSPL, BSL, ELv2 and non-commercial licences are not accepted (`make audit` checks this).
 - Error messages must tell the user what to do next.
 - Never show an unmeasured value as `0`. Use `None` and render "not measured".
 

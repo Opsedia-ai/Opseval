@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from opseval.errors import HarnessError, TransportError, TransportTimeout
-from opseval.models.profile import FrameKind, SutProfile, render_template
+from opseval.models.profile import FrameKind, SutProfile, render_frame
 from opseval.models.record import FrameRecord, InterruptRecord, RunRecord, TerminalState
 from opseval.models.scenario import (
     CheckpointPolicy,
@@ -130,10 +130,9 @@ class Driver:
     async def _send_user(self, session: Session, text: str) -> None:
         if self._user_turns >= self.s.conversation.max_turns:
             raise _Stop(TerminalState.MAX_TURNS_EXHAUSTED, "turn budget spent")
-        frame = render_template(
+        frame = render_frame(
             self.p.user_message_frame, {"text": text, "timezone": self.s.persona.timezone}
         )
-        assert isinstance(frame, dict)
         await self._send(session, frame, FrameKind.USER_MESSAGE, text)
         self._user_turns += 1
 
@@ -316,13 +315,12 @@ class Driver:
         text: str | None
         if decision.action is DecisionAction.REJECT and policy.via is DecisionChannel.USER_MESSAGE:
             text = decision.feedback or "No."
-            frame = render_template(self.p.user_message_frame, {**values, "text": text})
+            frame = render_frame(self.p.user_message_frame, {**values, "text": text})
             kind = FrameKind.USER_MESSAGE
         else:
-            frame = render_template(self.p.resume_frame, values)
+            frame = render_frame(self.p.resume_frame, values)
             kind = FrameKind.RESUME
             text = decision.feedback
-        assert isinstance(frame, dict)
         sent = await self._send(session, frame, kind, text)
         self._user_turns += 1
         interrupt(decision, sent)
