@@ -28,6 +28,7 @@ from opseval.traces.langfuse import LangfuseTraceSource
 from .conftest import make_scenario
 
 T0 = datetime(2026, 9, 23, 10, 0, 0, tzinfo=UTC)
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def at(seconds: float) -> datetime:
@@ -67,26 +68,62 @@ def record(
 
 
 def observation(
-    name: str, start: float, *, type_: str = "SPAN", level: str = "DEFAULT"
+    name: str,
+    start: float,
+    *,
+    type_: str = "SPAN",
+    level: str = "DEFAULT",
+    trace_id: str = "t1",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
+    """One row in the documented v2 shape (``core,basic,io``): I/O are raw strings and the
+    session id is only present where the agent set it (on v4 ingestion, often the root)."""
     return {
         "id": f"obs-{name}-{start}",
-        "traceId": "t1",
-        "type": type_,
-        "name": name,
+        "traceId": trace_id,
         "startTime": at(start).isoformat().replace("+00:00", "Z"),
         "endTime": at(start + 0.2).isoformat().replace("+00:00", "Z"),
+        "projectId": "proj-anon",
+        "parentObservationId": None if session_id else "obs-root",
+        "type": type_,
+        "name": name,
         "level": level,
-        "input": {"order": "10482"},
+        "statusMessage": "boom" if level == "ERROR" else None,
+        "version": None,
+        "environment": "default",
+        "bookmarked": False,
+        "public": False,
+        "userId": None,
+        "sessionId": session_id,
+        "isRootObservation": session_id is not None,
+        "input": '{"order": "10482"}',
+        "output": "ok",
     }
 
 
+def columns(req: httpx.Request) -> dict[str, Any]:
+    return {c["column"]: c["value"] for c in json.loads(req.url.params["filter"])}
+
+
+def langfuse(handler: Any) -> LangfuseTraceSource:
+    return LangfuseTraceSource(
+        "https://cloud.langfuse.com",
+        "pk",
+        "sk",
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+
 class TestLangfuseSource:
-    async def test_reads_pages_and_maps_tools(self, profile: SutProfile) -> None:
+    async def test_finds_traces_by_session_then_reads_every_observation(
+        self, profile: SutProfile
+    ) -> None:
         prof = traced_profile(profile)
-        pages = {
+        root = {k: v for k, v in observation("agent", 0, session_id="s-1").items()}
+        trace_pages = {
             None: {
                 "data": [
+                    root,
                     observation("lookup-order", 1),
                     observation("llm-call", 2, type_="GENERATION"),
                     observation("send_email", 3, type_="TOOL"),
@@ -99,51 +136,140 @@ class TestLangfuseSource:
 
         def handler(req: httpx.Request) -> httpx.Response:
             seen.append(req)
-            return httpx.Response(200, json=pages[req.url.params.get("cursor")])
+            cols = columns(req)
+            if "sessionId" in cols:  # step 1: only the root carries the session id
+                return httpx.Response(200, json={"data": [root], "meta": {"cursor": None}})
+            assert cols["traceId"] == "t1"
+            return httpx.Response(200, json=trace_pages[req.url.params.get("cursor")])
 
-        src = LangfuseTraceSource(
-            "https://cloud.langfuse.com",
-            "pk",
-            "sk",
-            client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        )
-        calls = await src.fetch("s-1", record(), prof)
+        calls = await langfuse(handler).fetch("s-1", record(), prof)
         assert [(c.name, c.ok) for c in calls] == [
             ("lookup-order", True),
             ("send_email", True),
             ("create_refund", False),
         ]
+        assert calls[0].arguments == {"order": "10482"}  # raw string parsed as JSON
+
         first = seen[0]
         assert first.url.path == "/api/public/v2/observations"
         assert first.headers["authorization"] == "Basic " + base64.b64encode(b"pk:sk").decode()
+        assert first.url.params["fields"] == "core"
         flt = json.loads(first.url.params["filter"])
-        assert flt == [{"type": "string", "column": "sessionId", "operator": "=", "value": "s-1"}]
+        # the window lives inside the filter, because `filter` overrides fixed parameters
+        assert flt == [
+            {"type": "string", "column": "sessionId", "operator": "=", "value": "s-1"},
+            {
+                "type": "datetime",
+                "column": "startTime",
+                "operator": ">=",
+                "value": "2026-09-23T09:50:00Z",
+            },
+            {
+                "type": "datetime",
+                "column": "startTime",
+                "operator": "<",
+                "value": "2026-09-23T10:11:00Z",
+            },
+        ]
         assert first.url.params["fromStartTime"] == "2026-09-23T09:50:00Z"
-        assert len(seen) == 2
+        assert seen[1].url.params["fields"] == "core,basic,io"
+        assert len(seen) == 3
+
+    async def test_real_v4_response_with_session_on_root_only(self, profile: SutProfile) -> None:
+        """Regression (real Langfuse 4.44 rows): child spans carry ``sessionId: ""``.
+
+        A single session-filtered query sees only the root span and no tools, which
+        would look like "the agent called no tools" and fail it. Reading the whole
+        trace finds the calls.
+        """
+        fixture = json.loads((FIXTURES / "langfuse_v2_root_only_session.json").read_text("utf-8"))
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "sessionId" in columns(req):
+                return httpx.Response(200, json=fixture["session_query_fields_core"])
+            assert columns(req)["traceId"] == "trace-2"
+            return httpx.Response(200, json=fixture["trace_query_fields_core_basic_io"])
+
+        calls = await langfuse(handler).fetch("session-anon", record(), profile)
+        assert [(c.name, c.ok) for c in calls] == [
+            ("lookup_order", True),
+            ("check_eligibility", True),
+            ("create_refund", False),
+        ]
+        assert calls[2].arguments == {"order": "10482", "step": 2}
+        session_rows = fixture["session_query_fields_core"]["data"]
+        assert LangfuseTraceSource._tool_calls(session_rows, profile) == []
+
+    async def test_reads_each_trace_of_the_session_once(self, profile: SutProfile) -> None:
+        roots = [
+            observation("agent", 0, trace_id="t1", session_id="s-1"),
+            observation("agent", 5, trace_id="t2", session_id="s-1"),
+            observation("agent", 6, trace_id="t2", session_id="s-1"),
+        ]
+        by_trace = {
+            "t1": [observation("lookup-order", 1, trace_id="t1")],
+            "t2": [
+                observation("create_refund", 7, trace_id="t2"),
+                observation("create_refund", 7, trace_id="t2"),  # duplicate row
+            ],
+        }
+        traces_read: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            cols = columns(req)
+            if "sessionId" in cols:
+                return httpx.Response(200, json={"data": roots, "meta": {}})
+            traces_read.append(cols["traceId"])
+            return httpx.Response(200, json={"data": by_trace[cols["traceId"]], "meta": {}})
+
+        calls = await langfuse(handler).fetch("s-1", record(), traced_profile(profile))
+        assert traces_read == ["t1", "t2"]
+        assert [c.name for c in calls] == ["lookup-order", "create_refund"]
+
+    async def test_non_json_input_is_kept_as_text(self, profile: SutProfile) -> None:
+        row = {**observation("lookup-order", 1, session_id="s-1"), "input": "order 10482"}
+        src = langfuse(lambda r: httpx.Response(200, json={"data": [row], "meta": {}}))
+        calls = await src.fetch("s-1", record(), traced_profile(profile))
+        assert calls[0].arguments == "order 10482"
+
+    async def test_too_many_traces_is_unavailable(self, profile: SutProfile) -> None:
+        roots = [observation("agent", i, trace_id=f"t{i}", session_id="s-1") for i in range(21)]
+        src = langfuse(lambda r: httpx.Response(200, json={"data": roots, "meta": {}}))
+        with pytest.raises(TraceUnavailable, match="per-attempt session id"):
+            await src.fetch("s-1", record(), traced_profile(profile))
+
+    async def test_endless_pagination_is_unavailable(self, profile: SutProfile) -> None:
+        row = observation("agent", 0, session_id="s-1")
+        src = langfuse(lambda r: httpx.Response(200, json={"data": [row], "meta": {"cursor": "x"}}))
+        with pytest.raises(TraceUnavailable, match="more than"):
+            await src.fetch("s-1", record(), traced_profile(profile))
 
     @pytest.mark.parametrize(
         ("response", "match"),
         [
             (httpx.Response(401), "rejected the API keys"),
+            (httpx.Response(404), "needs v4 or later"),
+            (httpx.Response(400, text="bad filter"), "rejected the query"),
             (httpx.Response(500), "HTTP 500"),
             (httpx.Response(200, json={"data": [], "meta": {}}), "no observations"),
             (httpx.Response(200, text="<html>"), "invalid JSON"),
+            (httpx.Response(200, json=[1]), "unexpected"),
             (httpx.Response(200, json={"data": "x"}), "unexpected"),
         ],
     )
     async def test_failures_are_trace_unavailable(
         self, profile: SutProfile, response: httpx.Response, match: str
     ) -> None:
-        src = LangfuseTraceSource(
-            "https://lf.example.com",
-            "pk",
-            "sk",
-            client_factory=lambda: httpx.AsyncClient(
-                transport=httpx.MockTransport(lambda r: response)
-            ),
-        )
+        src = langfuse(lambda r: response)
         with pytest.raises(TraceUnavailable, match=match):
             await src.fetch("s-1", record(), traced_profile(profile))
+
+    async def test_unreachable_is_trace_unavailable(self, profile: SutProfile) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused", request=req)
+
+        with pytest.raises(TraceUnavailable, match="cannot reach"):
+            await langfuse(handler).fetch("s-1", record(), traced_profile(profile))
 
 
 class FakeSource(TraceSource):
