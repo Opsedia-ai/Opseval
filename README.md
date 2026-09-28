@@ -82,7 +82,7 @@ traces:
   session_id: "{session_id}"   # the Langfuse session id your agent uses
 ```
 
-Then set `OPSEVAL_LANGFUSE_HOST`, `OPSEVAL_LANGFUSE_PUBLIC_KEY` and `OPSEVAL_LANGFUSE_SECRET_KEY`. Scorers such as `tools.forbidden_not_called`, `tools.ordering` and `tools.call_success` then use the trace. If the agent's clock and Opseval's are too close to order two events, the check reports *not measured* instead of guessing ([ADR-0011](docs/adr/0011-trace-backed-tool-scoring.md)).
+Then set `OPSEVAL_LANGFUSE_HOST`, `OPSEVAL_LANGFUSE_PUBLIC_KEY` and `OPSEVAL_LANGFUSE_SECRET_KEY`. It works with Langfuse Cloud and self-hosted Langfuse v4 or later (v3 has no v2 observations API). The session id only needs to be on the trace's root span. Use a Langfuse SDK recent enough to ingest in real time (Python ≥ 4.7.0, JS ≥ 5.4.0, or an OpenTelemetry exporter sending `x-langfuse-ingestion-version: 4`); with older SDKs, data can arrive minutes late, so raise `traces.wait_seconds`. To check a Langfuse project end to end, run `uv run python scripts/langfuse_smoke.py`. Scorers such as `tools.forbidden_not_called`, `tools.ordering` and `tools.call_success` then use the trace. If the agent's clock and Opseval's are too close to order two events, the check reports *not measured* instead of guessing ([ADR-0011](docs/adr/0011-trace-backed-tool-scoring.md)).
 
 A scenario looks like this:
 
