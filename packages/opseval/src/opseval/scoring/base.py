@@ -33,6 +33,8 @@ class Scorer(ABC):
     axis: ClassVar[Axis]
     requires: ClassVar[str] = "frames"  # frames | trace | llm
     description: ClassVar[str] = ""
+    version: ClassVar[str] = "1"
+    """Bump when the scoring logic changes (``opseval rescore`` reports the difference)."""
 
     @abstractmethod
     async def score(
@@ -53,14 +55,21 @@ class Scorer(ABC):
             weight=spec.weight,
             degraded=degraded,
             details=details,
+            scorer_version=self.version,
         )
 
     def infra(self, spec: ScorerSpec, reason: str, **details: Any) -> ScoreResult:
-        return infra_error(self.id, self.axis, spec, reason, **details)
+        return infra_error(self.id, self.axis, spec, reason, version=self.version, **details)
 
 
 def infra_error(
-    scorer_id: str, axis: Axis, spec: ScorerSpec, reason: str, **details: Any
+    scorer_id: str,
+    axis: Axis,
+    spec: ScorerSpec,
+    reason: str,
+    *,
+    version: str | None = None,
+    **details: Any,
 ) -> ScoreResult:
     return ScoreResult(
         scorer_id=scorer_id,
@@ -71,6 +80,7 @@ def infra_error(
         weight=spec.weight,
         reason=reason,
         details=details,
+        scorer_version=version,
     )
 
 
@@ -140,7 +150,17 @@ class ScoringEngine:
             return await scorer.score(record, spec, ctx)
         except ValidationError as exc:
             return infra_error(
-                cls.id, cls.axis, spec, f"CONTRACT_VIOLATION: {exc.errors()[0]['msg']}"
+                cls.id,
+                cls.axis,
+                spec,
+                f"CONTRACT_VIOLATION: {exc.errors()[0]['msg']}",
+                version=cls.version,
             )
         except Exception as exc:  # noqa: BLE001 - a scorer bug is never the agent's fault
-            return infra_error(cls.id, cls.axis, spec, f"SCORER_ERROR: {type(exc).__name__}: {exc}")
+            return infra_error(
+                cls.id,
+                cls.axis,
+                spec,
+                f"SCORER_ERROR: {type(exc).__name__}: {exc}",
+                version=cls.version,
+            )

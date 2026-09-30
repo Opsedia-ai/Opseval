@@ -65,6 +65,16 @@ class ToolCall(Frozen):
     observation_id: str | None = None
 
 
+class TransportEvent(Frozen):
+    """Connection-level events: drops, resumes and token refreshes (never token values)."""
+
+    at: datetime
+    kind: Literal["dropped", "resumed", "resume_failed", "token_refreshed"]
+    close_code: int | None = None
+    attempt: int | None = None
+    detail: str | None = None
+
+
 class RunRecord(Frozen):
     run_id: str
     test_id: str
@@ -86,6 +96,7 @@ class RunRecord(Frozen):
     infra_errors: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     planted_injections: tuple[str, ...] = ()
+    transport_events: tuple[TransportEvent, ...] = ()
 
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]

@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 
+from opseval.auth import BearerAuth, TokenSource, as_token_source
 from opseval.errors import TransportError, TransportTimeout
 from opseval.models.profile import SutProfile
 from opseval.transport.base import SYNTHETIC_KIND, Session, Transport
@@ -152,7 +153,7 @@ class OpenAIChatTransport(Transport):
         base_url: str,
         profile: SutProfile,
         *,
-        token: str | None = None,
+        token: str | TokenSource | None = None,
         request_timeout: float = 120.0,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -160,7 +161,7 @@ class OpenAIChatTransport(Transport):
         base = base_url.rstrip("/")
         self._url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
         self._profile = profile
-        self._token = token
+        self._tokens = as_token_source(token)
         self._timeout = request_timeout
         self._client_factory = client_factory
         self._sleep = sleep
@@ -171,6 +172,6 @@ class OpenAIChatTransport(Transport):
 
     async def connect(self) -> Session:
         client = self._client_factory() if self._client_factory else httpx.AsyncClient()
-        if self._token:
-            client.headers["Authorization"] = f"Bearer {self._token}"
+        if self._tokens is not None:
+            client.auth = BearerAuth(self._tokens)
         return OpenAIChatSession(client, self._url, self._profile, self._timeout, self._sleep)
