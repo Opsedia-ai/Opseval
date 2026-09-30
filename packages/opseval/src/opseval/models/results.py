@@ -47,6 +47,8 @@ class ScoreResult(BaseModel):
     degraded: bool = False
     reason: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+    scorer_version: str | None = None
+    """Bumped when a scorer's logic changes, so re-scoring can tell scorer drift apart."""
 
     @model_validator(mode="after")
     def _contract(self) -> ScoreResult:
@@ -113,6 +115,37 @@ class Gate(BaseModel):
     summary: str = ""
 
 
+class ScorerChange(BaseModel):
+    """A scorer whose logic (version) or judge prompt (hash) differs from the original run."""
+
+    model_config = ConfigDict(extra="forbid")
+    scorer_id: str
+    what: str  # "version" | "prompt_hash" | "model"
+    before: str | None
+    after: str | None
+
+
+class VerdictChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    test_id: str
+    before: VerdictStatus
+    after: VerdictStatus
+
+
+class RescoreInfo(BaseModel):
+    """Marks a result produced by ``opseval rescore`` from saved records (no agent contact)."""
+
+    model_config = ConfigDict(extra="forbid")
+    of_run_id: str
+    rescored_at: datetime
+    scenario_source: str  # "snapshot" (saved with the run) | "catalogue" (current files)
+    scorer_changes: list[ScorerChange] = Field(default_factory=list)
+    verdict_changes: list[VerdictChange] = Field(default_factory=list)
+    reused_judge_scores: int = 0
+    """Judge scores copied from the original run because no judge is configured and the
+    prompt hash is unchanged."""
+
+
 class SuiteResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -130,3 +163,4 @@ class SuiteResult(BaseModel):
     usage: list[ModelUsage] = Field(default_factory=list)
     config_digest: dict[str, Any] = Field(default_factory=dict)
     load_errors: list[str] = Field(default_factory=list)
+    rescore: RescoreInfo | None = None

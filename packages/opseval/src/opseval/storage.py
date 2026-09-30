@@ -2,10 +2,15 @@
 """FileStore: the on-disk layout contract (ADR-0005).
 
 <root>/<run_id>/manifest.json
+<root>/<run_id>/profile.json                     (SUT profile as run, for offline re-scoring)
+<root>/<run_id>/scenarios/<test_id>.json         (each scenario as run, suite merges applied)
 <root>/<run_id>/records/<test_id>__attempt<N>.json
 <root>/<run_id>/result.json        (written last: marks completion)
 <root>/<run_id>/report.html
 <root>/<run_id>/junit.xml
+<root>/<run_id>/rescore-<UTC time>/{result.json, report.html, junit.xml}   (opseval rescore)
+
+Records are written once and never modified; re-scoring writes a new folder.
 """
 
 from __future__ import annotations
@@ -16,8 +21,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
+from opseval.models.scenario import Scenario
 
 SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
@@ -41,6 +48,34 @@ class FileStore:
         _atomic_write(path, json.dumps(manifest, indent=2, ensure_ascii=False, default=str))
         return path
 
+    def save_profile(self, run_id: str, profile: SutProfile) -> Path:
+        path = self.run_dir(run_id) / "profile.json"
+        _atomic_write(path, profile.model_dump_json(indent=2))
+        return path
+
+    def save_scenario(self, run_id: str, scenario: Scenario) -> Path:
+        path = self.run_dir(run_id) / "scenarios" / f"{SAFE.sub('_', scenario.id)}.json"
+        _atomic_write(path, scenario.model_dump_json(indent=2, by_alias=True))
+        return path
+
+    def load_snapshot(self, run_id: str) -> tuple[SutProfile, dict[str, Scenario]] | None:
+        """The profile and scenarios exactly as run, or ``None`` for runs without one."""
+        folder = self.run_dir(run_id)
+        profile_path = folder / "profile.json"
+        if not profile_path.is_file():
+            return None
+        profile = SutProfile.model_validate_json(profile_path.read_text("utf-8"))
+        scenarios = [
+            Scenario.model_validate_json(p.read_text("utf-8"))
+            for p in (folder / "scenarios").glob("*.json")
+        ]
+        return profile, {s.id: s for s in scenarios}
+
+    def load_result(self, run_id: str) -> SuiteResult:
+        return SuiteResult.model_validate_json(
+            (self.run_dir(run_id) / "result.json").read_text("utf-8")
+        )
+
     def save_record(self, record: RunRecord) -> Path:
         name = f"{SAFE.sub('_', record.test_id)}__attempt{record.attempt_index}.json"
         path = self.run_dir(record.run_id) / "records" / name
@@ -63,6 +98,18 @@ class FileStore:
         path = self.run_dir(run_id) / "report.html"
         _atomic_write(path, html)
         return path
+
+    def save_rescore(
+        self, run_id: str, stamp: str, result: SuiteResult, html: str, xml: str
+    ) -> Path:
+        """Write a re-scored result next to the original run; never over it."""
+        folder = self.run_dir(run_id) / f"rescore-{stamp}"
+        if folder.exists():
+            raise FileExistsError(folder)
+        _atomic_write(folder / "report.html", html)
+        _atomic_write(folder / "junit.xml", xml)
+        _atomic_write(folder / "result.json", result.model_dump_json(indent=2))  # last
+        return folder
 
     def save_junit(self, run_id: str, xml: str) -> Path:
         path = self.run_dir(run_id) / "junit.xml"

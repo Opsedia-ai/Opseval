@@ -25,6 +25,28 @@ class NoErrors(Scorer):
 
 
 @register
+class ConnectionStable(Scorer):
+    id = "conversation.connection_stable"
+    axis = Axis.FLOW
+    description = (
+        "Fails if the agent dropped the connection, even when the session was resumed "
+        "(opt-in; params.ignore_codes lists close codes to tolerate)."
+    )
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        ignore = spec.params.get("ignore_codes", [])
+        if not isinstance(ignore, list) or not all(isinstance(c, int) for c in ignore):
+            return self.infra(spec, "BAD_PARAMS: ignore_codes must be a list of close codes")
+        drops = [
+            {"at": e.at.isoformat(), "close_code": e.close_code, "detail": e.detail}
+            for e in record.transport_events
+            if e.kind == "dropped" and e.close_code not in ignore
+        ]
+        resumed = sum(1 for e in record.transport_events if e.kind == "resumed")
+        return self.result(spec, 0.0 if drops else 1.0, drops=drops, resumed=resumed)
+
+
+@register
 class TurnBudget(Scorer):
     id = "conversation.turn_budget"
     axis = Axis.FLOW

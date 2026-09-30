@@ -52,6 +52,35 @@ class TraceConfig(BaseModel):
     poll_interval_seconds: float = Field(default=2.0, gt=0, le=60)
 
 
+class ReconnectConfig(BaseModel):
+    """What to do when the connection drops mid-conversation (websocket transport)."""
+
+    model_config = ConfigDict(extra="forbid")
+    resume_session_frame: dict[str, Any] | None = None
+    """Sent first on a new connection to resume the session (``{session_id}``, ``{token}``).
+    Without it a drop cannot be resumed and stays a transport failure (not judged)."""
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    backoff_seconds: float = Field(default=0.5, ge=0, le=30)
+    confirm_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    """How long to wait for a handshake frame carrying the resumed session id."""
+    resend_unanswered: bool = False
+    """Resend the last frame once after resuming if the agent had not answered it yet.
+    Only safe if the agent handles duplicate messages."""
+
+
+class TokenConfig(BaseModel):
+    """Short-lived HS256 bearer tokens signed with ``OPSEVAL_TOKEN_SIGNING_KEY``."""
+
+    model_config = ConfigDict(extra="forbid")
+    ttl_seconds: int = Field(default=300, ge=10, le=86_400)
+    refresh_before_seconds: int = Field(default=30, ge=1, le=3_600)
+    claims: dict[str, Any] = Field(default_factory=dict)
+    """Extra JWT claims (e.g. ``aud``, ``tenant``); ``iat``, ``exp`` and ``jti`` are set."""
+    refresh_frame: dict[str, Any] | None = None
+    """Sent on an open connection before the token expires (``{token}``). Without it a
+    new token is only used when the connection is next opened."""
+
+
 class SutProfile(BaseModel):
     """Maps an agent's wire protocol onto Opseval's canonical model."""
 
@@ -95,6 +124,9 @@ class SutProfile(BaseModel):
     transport_options: dict[str, Any] = Field(default_factory=dict)
     """Transport-specific settings (e.g. ``model`` and ``system_prompt`` for openai-chat)."""
     traces: TraceConfig | None = None
+    reconnect: ReconnectConfig | None = None
+    token: TokenConfig | None = None
+    """Mint HS256 tokens per attempt instead of using ``OPSEVAL_STATIC_TOKEN``."""
 
     # --- conversation model -----------------------------------------------------------
     phases: list[str] = Field(default_factory=list)
@@ -109,6 +141,15 @@ class SutProfile(BaseModel):
     def _check(self) -> SutProfile:
         if self.commit_gate is not None and self.commit_gate not in self.checkpoints:
             raise ValueError(f"commit_gate {self.commit_gate!r} is not a declared checkpoint")
+        if (
+            self.reconnect is not None
+            and self.reconnect.resume_session_frame is not None
+            and not self.session_id_field
+        ):
+            raise ValueError(
+                "reconnect.resume_session_frame needs session_id_field: a session can only be "
+                "resumed if the agent tells Opseval its id"
+            )
         for name, spec in self.checkpoints.items():
             if spec.phase is not None and self.phases and spec.phase not in self.phases:
                 raise ValueError(f"checkpoint {name!r} refers to unknown phase {spec.phase!r}")

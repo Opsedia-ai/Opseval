@@ -10,11 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from opseval import __version__
+from opseval.auth import HS256Tokens, TokenSource
 from opseval.catalogue import load_catalogue, load_profile
 from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.driver import Driver
 from opseval.errors import ConfigError
-from opseval.llm import ChatClient, UsageMeter
+from opseval.llm import UsageMeter, client_for_role
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.scenario import Scenario
@@ -58,23 +59,6 @@ class RunOptions:
     """Inject a trace source (tests); otherwise one is built from settings."""
 
 
-def _llm_client(settings: Settings, role: str, meter: UsageMeter) -> ChatClient | None:
-    base = getattr(settings, f"{role}_base_url")
-    model = getattr(settings, f"{role}_model")
-    key = getattr(settings, f"{role}_api_key")
-    if not base or not model:
-        return None
-    if key is not None:
-        check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
-    return ChatClient(
-        base_url=base,
-        model=model,
-        api_key=key.get_secret_value() if key else None,
-        role=role,
-        meter=meter,
-    )
-
-
 def build_transport_factory(options: RunOptions, settings: Settings) -> TransportFactory:
     if options.transport_factory is not None:
         return options.transport_factory
@@ -82,15 +66,32 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
         raise ConfigError("no target: pass --target (e.g. ws://localhost:8765)")
     target = options.target
     token = settings.static_token.get_secret_value() if settings.static_token else None
+    signing_key = settings.token_signing_key
+
+    def credentials(profile: SutProfile) -> str | TokenSource | None:
+        """A fresh token source per attempt: HS256 when the profile asks for it."""
+        if profile.token is None:
+            return token
+        if signing_key is None:
+            raise ConfigError(
+                f"profile {profile.name!r} mints HS256 tokens: set OPSEVAL_TOKEN_SIGNING_KEY"
+            )
+        return HS256Tokens(
+            signing_key.get_secret_value(),
+            ttl_seconds=profile.token.ttl_seconds,
+            refresh_before_seconds=profile.token.refresh_before_seconds,
+            claims=profile.token.claims,
+        )
+
     if options.transport == "websocket":
         check_url_allowed(target, settings.allowlist(), secure_schemes=("wss",))
-        return lambda profile: WebSocketTransport(target, profile, token=token)
+        return lambda profile: WebSocketTransport(target, profile, token=credentials(profile))
     if options.transport == "http-json":
         check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: HttpJsonTransport(target, profile, token=token)
+        return lambda profile: HttpJsonTransport(target, profile, token=credentials(profile))
     if options.transport == "openai-chat":
         check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: OpenAIChatTransport(target, profile, token=token)
+        return lambda profile: OpenAIChatTransport(target, profile, token=credentials(profile))
     raise ConfigError(
         f"unknown transport {options.transport!r}; use websocket, http-json or openai-chat"
     )
@@ -140,8 +141,8 @@ async def launch(
     make_transport = build_transport_factory(options, settings)
     trace_source = build_trace_source(options, settings, profile)
     meter = UsageMeter()
-    sim_client = _llm_client(settings, "simulator", meter)
-    judge_client = _llm_client(settings, "judge", meter)
+    sim_client = client_for_role(settings, "simulator", meter)
+    judge_client = client_for_role(settings, "judge", meter)
     engine = ScoringEngine(judge=judge_client, judge_concurrency=settings.judge_concurrency)
     store = FileStore(settings.reports_dir)
 
@@ -163,6 +164,7 @@ async def launch(
             "config": config_digest(settings),
         },
     )
+    store.save_profile(run_id, profile)
 
     verdicts: list[TestVerdict] = []
     for scenario in catalogue.scenarios:
@@ -172,6 +174,7 @@ async def launch(
                     "execution": scenario.execution.model_copy(update={"repeats": options.repeats})
                 }
             )
+        store.save_scenario(run_id, scenario)
         if scenario.is_blocked:
             verdicts.append(skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'"))
             continue

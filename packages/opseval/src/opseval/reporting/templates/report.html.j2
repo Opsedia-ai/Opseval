@@ -31,6 +31,13 @@ details{margin:6px 0}summary{cursor:pointer}
 <h1>Opseval report</h1>
 <div class="muted">Suite <b>{{ result.suite }}</b> · run <code>{{ result.run_id }}</code> · target <code>{{ result.target }}</code> · profile <code>{{ result.profile }}</code> · Opseval {{ result.opseval_version }}</div>
 
+{% if result.rescore %}
+<div class="card"><b>Re-scored offline</b> from run <code>{{ result.rescore.of_run_id }}</code> at {{ result.rescore.rescored_at.strftime('%Y-%m-%d %H:%M UTC') }} (scenarios from the {{ result.rescore.scenario_source }}). The agent was not contacted.
+{% if result.rescore.scorer_changes %}<ul>{% for c in result.rescore.scorer_changes %}<li><code>{{ c.scorer_id }}</code> {{ c.what }}: <code>{{ c.before }}</code> → <code>{{ c.after }}</code></li>{% endfor %}</ul>{% else %}<p class="muted" style="margin:4px 0 0">No scorer version or judge prompt changed.</p>{% endif %}
+{% if result.rescore.verdict_changes %}<p style="margin:4px 0 0">Verdicts that moved: {% for v in result.rescore.verdict_changes %}<code>{{ v.test_id }}</code> {{ v.before.value }} → <b>{{ v.after.value }}</b>{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
+{% if result.rescore.reused_judge_scores %}<p class="muted" style="margin:4px 0 0">{{ result.rescore.reused_judge_scores }} judge score(s) reused from the original run (same prompt, no judge configured).</p>{% endif %}
+</div>
+{% endif %}
 <div class="card gate {{ result.gate.status }}">
   <div><span class="badge {{ 'passed' if result.gate.status == 'pass' else 'failed' }}">{{ 'RELEASE: PASS' if result.gate.status == 'pass' else 'RELEASE: BLOCKED' }}</span>
   <span class="muted">exit code {{ result.exit_code }}</span></div>
@@ -82,6 +89,7 @@ details{margin:6px 0}summary{cursor:pointer}
   {% if f.kind.value == 'resume' %}<div class="decision">▶ customer decision: <code>{{ f.payload.get('action', '') }}</code></div>{% endif %}
 {% endfor %}
 {% if rec.infra_errors %}<pre>{{ rec.infra_errors | join('\n') }}</pre>{% endif %}
+{% if rec.transport_events %}<p><strong>Connection:</strong> {% for e in rec.transport_events %}{{ e.kind }}{% if e.close_code %} (code {{ e.close_code }}){% endif %}{% if e.attempt %} #{{ e.attempt }}{% endif %}{% if not loop.last %} → {% endif %}{% endfor %}</p>{% endif %}
 </details>
 {% if rec.trace_coverage == 'full' %}
 <details><summary>Tool calls from the agent's trace ({{ rec.tool_calls | length }})</summary>

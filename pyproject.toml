@@ -91,5 +91,11 @@ type = "forbidden"
 source_modules = ["opseval.scoring"]
 forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
 
+[[tool.importlinter.contracts]]
+name = "Re-scoring is offline: no transports, driver, simulator or runner"
+type = "forbidden"
+source_modules = ["opseval.rescore"]
+forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
+
 [tool.bandit]
 exclude_dirs = ["packages/opseval/tests"]
