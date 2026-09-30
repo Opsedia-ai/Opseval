@@ -89,6 +89,7 @@ details{margin:6px 0}summary{cursor:pointer}
   {% if f.kind.value == 'resume' %}<div class="decision">▶ customer decision: <code>{{ f.payload.get('action', '') }}</code></div>{% endif %}
 {% endfor %}
 {% if rec.infra_errors %}<pre>{{ rec.infra_errors | join('\n') }}</pre>{% endif %}
+{% if rec.transport_events %}<p><strong>Connection:</strong> {% for e in rec.transport_events %}{{ e.kind }}{% if e.close_code %} (code {{ e.close_code }}){% endif %}{% if e.attempt %} #{{ e.attempt }}{% endif %}{% if not loop.last %} → {% endif %}{% endfor %}</p>{% endif %}
 </details>
 {% if rec.trace_coverage == 'full' %}
 <details><summary>Tool calls from the agent's trace ({{ rec.tool_calls | length }})</summary>

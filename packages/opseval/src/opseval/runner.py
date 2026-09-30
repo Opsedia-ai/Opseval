@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from opseval import __version__
+from opseval.auth import HS256Tokens, TokenSource
 from opseval.catalogue import load_catalogue, load_profile
 from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.driver import Driver
@@ -65,15 +66,32 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
         raise ConfigError("no target: pass --target (e.g. ws://localhost:8765)")
     target = options.target
     token = settings.static_token.get_secret_value() if settings.static_token else None
+    signing_key = settings.token_signing_key
+
+    def credentials(profile: SutProfile) -> str | TokenSource | None:
+        """A fresh token source per attempt: HS256 when the profile asks for it."""
+        if profile.token is None:
+            return token
+        if signing_key is None:
+            raise ConfigError(
+                f"profile {profile.name!r} mints HS256 tokens: set OPSEVAL_TOKEN_SIGNING_KEY"
+            )
+        return HS256Tokens(
+            signing_key.get_secret_value(),
+            ttl_seconds=profile.token.ttl_seconds,
+            refresh_before_seconds=profile.token.refresh_before_seconds,
+            claims=profile.token.claims,
+        )
+
     if options.transport == "websocket":
         check_url_allowed(target, settings.allowlist(), secure_schemes=("wss",))
-        return lambda profile: WebSocketTransport(target, profile, token=token)
+        return lambda profile: WebSocketTransport(target, profile, token=credentials(profile))
     if options.transport == "http-json":
         check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: HttpJsonTransport(target, profile, token=token)
+        return lambda profile: HttpJsonTransport(target, profile, token=credentials(profile))
     if options.transport == "openai-chat":
         check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: OpenAIChatTransport(target, profile, token=token)
+        return lambda profile: OpenAIChatTransport(target, profile, token=credentials(profile))
     raise ConfigError(
         f"unknown transport {options.transport!r}; use websocket, http-json or openai-chat"
     )

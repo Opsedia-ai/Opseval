@@ -8,7 +8,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 
 - 🟢 Declarative YAML scenarios and suites, with fail-closed validation (`opseval validate`)
 - 🟢 SUT profiles that map any agent's wire protocol to canonical frames
-- 🟢 Transports: `http-json`, `websocket`, `openai-chat` (any OpenAI-compatible endpoint), `python` callable (⚪ still to do: websocket resume/token refresh)
+- 🟢 Transports: `http-json`, `websocket` (with session resume and short-lived HS256 token refresh), `openai-chat` (any OpenAI-compatible endpoint), `python` callable
 - 🟢 Customer simulator: scripted and LLM personas, seeded runs, English + Arabic language packs (Gulf, Egyptian, MSA), keyboard-aware typing noise
 - 🟢 Checkpoint policies (approve / reject / script), stop points, and the **committed-outcome guard**
 - 🟢 Immutable run records with secret redaction
