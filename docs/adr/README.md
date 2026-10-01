@@ -16,5 +16,6 @@
 | [0012](0012-websocket-resume-and-token-refresh.md) | WebSocket resume and short-lived tokens | Proposed |
 | [0013](0013-offline-rescore.md) | Offline re-scoring from a self-contained run folder | Proposed |
 | [0014](0014-judge-votes-and-planted-injections.md) | Harness-axis persona judge, planted injections and 3-vote security judges | Proposed |
+| [0015](0015-ci-integrations.md) | CI integrations: a composite GitHub Action and a pytest plugin | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

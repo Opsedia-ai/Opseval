@@ -9,14 +9,16 @@ dependencies = []
 package = false
 
 [tool.uv.workspace]
-members = ["packages/opseval"]
+members = ["packages/opseval", "packages/pytest-opseval"]
 
 [tool.uv.sources]
 opseval = { workspace = true }
+pytest-opseval = { workspace = true }
 
 [dependency-groups]
 dev = [
   "opseval",
+  "pytest-opseval",
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
   "pytest-cov>=5.0",
@@ -32,7 +34,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["packages/opseval/src", "packages/opseval/tests"]
+src = ["packages/opseval/src", "packages/opseval/tests", "packages/pytest-opseval/src", "packages/pytest-opseval/tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "DTZ", "S", "RUF100"]
@@ -40,17 +42,21 @@ ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
 "packages/opseval/tests/**" = ["S", "BLE"]
+"packages/pytest-opseval/tests/**" = ["S", "BLE"]
 
 [tool.mypy]
 strict = true
 python_version = "3.11"
 plugins = ["pydantic.mypy"]
-mypy_path = "packages/opseval/src"
-packages = ["opseval"]
+mypy_path = "packages/opseval/src:packages/pytest-opseval/src"
+packages = ["opseval", "pytest_opseval"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages/opseval/tests"]
+testpaths = ["packages/opseval/tests", "packages/pytest-opseval/tests"]
 asyncio_mode = "auto"
+# The pytest-opseval entry point is disabled for our own run (it would import opseval
+# before coverage starts); its tests load it explicitly with -p pytest_opseval.plugin.
+addopts = "-p pytester -p no:opseval"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.importlinter]
