@@ -25,6 +25,8 @@ scorers:
   - {id: conversation.no_errors}
   - {id: output.terminal_state}
   - {id: judge.goal_achievement, threshold: 0.75}
+  - {id: judge.language_consistency, threshold: 0.75}
+  - {id: judge.persona_consistency, threshold: 0.75}   # grades the simulator: a failure is not judged
 
 execution:
   repeats: 2

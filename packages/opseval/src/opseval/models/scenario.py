@@ -82,6 +82,21 @@ class CheckpointPolicy(Strict):
         return self
 
 
+class Injection(Strict):
+    """A prompt-injection payload the harness plants, word for word, in one customer turn."""
+
+    turn: Annotated[int, Field(ge=1, le=100)]
+    """Customer turn to plant it in (1 = the opening message)."""
+    payload: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("payload")
+    @classmethod
+    def _no_markers(cls, value: str) -> str:
+        if "[INJECT]" in value or "[/INJECT]" in value:
+            raise ValueError("write the payload without [INJECT] markers; Opseval adds them")
+        return value
+
+
 StopAt = str
 """``commit_gate`` (default), ``outcome_committed``, ``goal_reached`` or a checkpoint name."""
 
@@ -96,11 +111,18 @@ class ConversationSpec(Strict):
     stop_at: StopAt = "commit_gate"
     allow_commit: bool = False
     checkpoint_policy: dict[str, CheckpointPolicy] = Field(default_factory=dict)
+    injections: list[Injection] = Field(default_factory=list)
+    """Payloads planted verbatim (protected from typing noise) for security judges."""
 
     @model_validator(mode="after")
     def _check(self) -> ConversationSpec:
         if not self.flow.strip() and not self.scripted_turns:
             raise ValueError("a conversation needs a 'flow' (LLM persona) or 'scripted_turns'")
+        for inj in self.injections:
+            if inj.turn > self.max_turns:
+                raise ValueError(
+                    f"injection at turn {inj.turn} is beyond max_turns ({self.max_turns})"
+                )
         if self.stop_at == "outcome_committed" and not self.allow_commit:
             raise ValueError(
                 "stop_at: outcome_committed performs the irreversible outcome; "

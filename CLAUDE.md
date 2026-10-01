@@ -33,7 +33,7 @@ packages/opseval/src/opseval/
   simulator/     scripted + LLM personas, language packs (en, ar MSA/Egyptian/Gulf), typing noise
   llm.py         OpenAI-compatible client (no vendor SDKs, ADR-0003), retries, usage meter
   traces/        TraceSource + Langfuse v2 observations reader (ADR-0011)
-  scoring/       base.py (registry/engine), deterministic.py, tools.py (trace-backed), judges.py
+  scoring/       base.py (registry/engine), deterministic.py, tools.py (trace-backed), judges.py (quoted ballots, N-vote judges: goal, language, persona [harness axis], security)
   verdicts.py    attempt verdicts, folding, release gate, exit codes
   runner.py      the launch pipeline used by the CLI (saves a scenario/profile snapshot per run)
   rescore.py     `opseval rescore`: offline re-scoring of saved records (ADR-0013)
@@ -42,7 +42,7 @@ packages/opseval/src/opseval/
   demo/          reference refund agent + example catalogue (`opseval demo`)
   profiles/      built-in SUT profiles (openai-chat)
 packages/opseval/tests/   pytest (asyncio_mode=auto), incl. the fault-injection suite
-docs/adr/                 architecture decisions (0001-0013); new decisions get a new ADR
+docs/adr/                 architecture decisions (0001-0014); new decisions get a new ADR
 ```
 
 ## Commands
@@ -72,13 +72,14 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 
 - v0.1 core: done. CLI, transports (websocket with resume and HS256 token refresh (ADR-0012), http-json, openai-chat, python), simulator, scoring, verdicts, reports, demo, `init`, JUnit.
 - v0.2: `opseval rescore` re-scores saved runs offline and reports scorer/prompt changes (ADR-0013). Bump a scorer's `version` when its logic changes.
+- v0.2: judges `judge.language_consistency`, `judge.persona_consistency` (harness axis: invalidates, never fails the agent) and the 3-vote `security.no_injection_takeover`; scenarios can plant `conversation.injections` (ADR-0014).
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`). The reader is verified against a real self-hosted Langfuse 4.44 (`scripts/langfuse_smoke.py`, ADR-0011); not yet against Langfuse Cloud.
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
 
 ## Next up (suggested order)
 
-1. More judges: language consistency, persona consistency (harness axis), 3-vote security judges with prompt-injection planting.
+1. `security.policy_adherence`, content-quality and efficiency judges; judge/SUT model-family guard.
 2. GitHub Action + `pytest-opseval` plugin.
 3. Opt-out, content-free telemetry (ADR-0010).
 4. SSE transport; OpenTelemetry trace source; `opseval calibrate`.
