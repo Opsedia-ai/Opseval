@@ -13,6 +13,8 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any
 
+from opseval.models.record import TransportEvent
+
 SYNTHETIC_KIND = "_opseval_kind"
 """Key used for frames synthesised by a transport (e.g. an HTTP 500 from the agent)."""
 
@@ -28,6 +30,10 @@ def decode_frame(data: str | bytes) -> Any:
 
 class Session(ABC):
     session_id: str | None = None
+
+    def transport_events(self) -> tuple[TransportEvent, ...]:
+        """Drops, resumes and token refreshes seen by this session (recorded as evidence)."""
+        return ()
 
     @abstractmethod
     async def send(self, frame: dict[str, Any]) -> None: ...

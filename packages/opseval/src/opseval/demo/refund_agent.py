@@ -228,8 +228,24 @@ class Conversation:
         return [{"type": "error", "code": "unknown_checkpoint", "message": checkpoint}]
 
 
-async def _handle(conn: ServerConnection, bug: Bug | None) -> None:
+@dataclass
+class AgentOptions:
+    """Test hooks for connection behaviour (not exposed by ``opseval demo``)."""
+
+    drop_after_turns: int | None = None
+    """Close the connection once, with ``drop_code``, after this many customer turns."""
+    drop_code: int = 1011
+    resumable: bool = True
+    """Honour ``resume_session`` frames; if False, a resume starts a new session."""
+    forget_on_resume: bool = False
+    """A buggy agent: after a resume it has lost the conversation state."""
+    sessions: dict[str, Conversation] = field(default_factory=dict)
+    dropped: set[str] = field(default_factory=set)
+
+
+async def _handle(conn: ServerConnection, bug: Bug | None, opts: AgentOptions) -> None:
     conv = Conversation(bug=bug)
+    opts.sessions[conv.session_id] = conv
     await conn.send(json.dumps({"type": "session_created", "session_id": conv.session_id}))
     try:
         async for raw in conn:
@@ -240,6 +256,17 @@ async def _handle(conn: ServerConnection, bug: Bug | None) -> None:
                 continue
             kind = frame.get("type") if isinstance(frame, dict) else None
             if kind == "auth":
+                continue
+            if kind == "resume_session":
+                wanted = str(frame.get("session_id"))
+                if opts.resumable and wanted in opts.sessions:
+                    conv = opts.sessions[wanted]
+                    if opts.forget_on_resume:
+                        conv = Conversation(bug=bug, session_id=wanted)
+                        opts.sessions[wanted] = conv
+                await conn.send(
+                    json.dumps({"type": "session_resumed", "session_id": conv.session_id})
+                )
                 continue
             if kind == "user_message":
                 replies = conv.on_user_message(str(frame.get("text", "")))
@@ -254,16 +281,28 @@ async def _handle(conn: ServerConnection, bug: Bug | None) -> None:
             if bug == "crash" and conv.turns >= 1:
                 await conn.close(code=1011, reason="simulated crash")
                 return
+            if (
+                opts.drop_after_turns is not None
+                and conv.turns >= opts.drop_after_turns
+                and conv.session_id not in opts.dropped
+            ):
+                opts.dropped.add(conv.session_id)
+                await conn.close(code=opts.drop_code, reason="simulated drop")
+                return
     except ConnectionClosed:
         return
 
 
 @asynccontextmanager
 async def run_agent(
-    host: str = "127.0.0.1", port: int = 0, bug: Bug | None = None
+    host: str = "127.0.0.1",
+    port: int = 0,
+    bug: Bug | None = None,
+    options: AgentOptions | None = None,
 ) -> AsyncIterator[str]:
     """Run the agent in the background; yields its ``ws://`` URL."""
-    server: Server = await serve(lambda c: _handle(c, bug), host, port)
+    opts = options or AgentOptions()
+    server: Server = await serve(lambda c: _handle(c, bug, opts), host, port)
     try:
         sock_port = next(iter(server.sockets)).getsockname()[1]
         yield f"ws://{host}:{sock_port}"
