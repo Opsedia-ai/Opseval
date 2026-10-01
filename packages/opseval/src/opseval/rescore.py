@@ -152,8 +152,17 @@ async def rescore_run(
 
     meter = UsageMeter()
     judge = client_for_role(settings, "judge", meter)
+    # The simulator that produced these records, not whatever is configured now.
+    config = store.load_manifest(run_id).get("config")
+    sim_model = config.get("simulator_model") if isinstance(config, dict) else None
     rescorer = _Rescorer(
-        ScoringEngine(judge=judge, judge_concurrency=settings.judge_concurrency), judge is not None
+        ScoringEngine(
+            judge=judge,
+            judge_concurrency=settings.judge_concurrency,
+            simulator_model=sim_model if isinstance(sim_model, str) else None,
+            judge_independence=settings.judge_independence,
+        ),
+        judge is not None,
     )
     tests: list[TestVerdict] = []
     before_scores: list[ScoreResult] = []

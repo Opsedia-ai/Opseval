@@ -153,6 +153,9 @@ class Expectations(Strict):
     expected_tools: ExpectedTools = Field(default_factory=ExpectedTools)
     expected_outcome: str | None = None
     invariants: list[str] = Field(default_factory=list)
+    policy: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(default_factory=list)
+    """Rules the agent must not break, one per line, in plain language. Graded by
+    ``security.policy_adherence``; without them that scorer is not measurable."""
 
 
 class ScorerSpec(Strict):
