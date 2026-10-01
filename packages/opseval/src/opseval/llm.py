@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from opseval.config import Settings, check_url_allowed
 from opseval.errors import LLMInfraError, LLMRequestError
 from opseval.models.results import ModelUsage
 
@@ -185,3 +186,21 @@ def _strip_fences(text: str) -> str:
         if stripped.rstrip().endswith("```"):
             stripped = stripped.rstrip()[:-3]
     return stripped.strip()
+
+
+def client_for_role(settings: Settings, role: str, meter: UsageMeter) -> ChatClient | None:
+    """The configured client for ``simulator`` or ``judge``, or ``None`` if not configured."""
+    base = getattr(settings, f"{role}_base_url")
+    model = getattr(settings, f"{role}_model")
+    key = getattr(settings, f"{role}_api_key")
+    if not base or not model:
+        return None
+    if key is not None:
+        check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
+    return ChatClient(
+        base_url=base,
+        model=model,
+        api_key=key.get_secret_value() if key else None,
+        role=role,
+        meter=meter,
+    )

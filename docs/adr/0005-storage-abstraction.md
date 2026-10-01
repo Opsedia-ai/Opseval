@@ -18,3 +18,4 @@ Opseval must run on a laptop or in CI with no database (local mode), and also as
 
 - Offline `rescore` and migration between modes need only the layout contract.
 - ClickHouse is not needed at evaluation data volumes. We will revisit if Cloud analytics require it.
+- Run folders also hold `profile.json` and `scenarios/` (the run's snapshot) and `rescore-*/` folders; see ADR-0013.
