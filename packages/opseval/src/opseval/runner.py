@@ -143,7 +143,12 @@ async def launch(
     meter = UsageMeter()
     sim_client = client_for_role(settings, "simulator", meter)
     judge_client = client_for_role(settings, "judge", meter)
-    engine = ScoringEngine(judge=judge_client, judge_concurrency=settings.judge_concurrency)
+    engine = ScoringEngine(
+        judge=judge_client,
+        judge_concurrency=settings.judge_concurrency,
+        simulator_model=sim_client.model if sim_client else None,
+        judge_independence=settings.judge_independence,
+    )
     store = FileStore(settings.reports_dir)
 
     started = datetime.now(UTC)

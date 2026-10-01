@@ -7,7 +7,7 @@ No other module reads environment variables directly.
 from __future__ import annotations
 
 import ipaddress
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import SecretStr
@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     judge_api_key: SecretStr | None = None
     judge_model: str | None = None
     judge_concurrency: int = 4
+    judge_independence: Literal["error", "warn", "off"] = "error"
+    """What to do when a judge and the model it grades share a vendor family (ADR-0016).
+    ``error`` is not measured, ``warn`` scores but marks the result degraded."""
 
     # Trace source (Langfuse public API)
     langfuse_host: str | None = None

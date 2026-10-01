@@ -204,3 +204,37 @@ def client_for_role(settings: Settings, role: str, meter: UsageMeter) -> ChatCli
         role=role,
         meter=meter,
     )
+
+
+# --- model families (judge independence, ADR-0016) ------------------------------------
+
+_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("anthropic", ("claude", "fable")),
+    ("openai", ("gpt", "chatgpt", "o1-", "o3-", "o4-", "davinci", "babbage")),
+    ("google", ("gemini", "gemma", "palm", "bison")),
+    ("meta", ("llama", "codellama")),
+    ("mistral", ("mistral", "mixtral", "magistral", "codestral", "ministral")),
+    ("qwen", ("qwen",)),
+    ("deepseek", ("deepseek",)),
+    ("cohere", ("command-", "command.", "cohere")),
+    ("xai", ("grok",)),
+    ("microsoft", ("phi-", "phi.")),
+    ("amazon", ("nova-micro", "nova-lite", "nova-pro", "nova-premier", "titan")),
+)
+
+
+def model_family(model: str | None) -> str | None:
+    """The vendor family behind a model id, or ``None`` when it cannot be told.
+
+    Deployment prefixes and suffixes are ignored, so ``us.anthropic.claude-opus-5``,
+    ``openai/gpt-5`` and ``azure/gpt-4o-2024-08-06`` resolve the same way as the bare ids.
+    ``None`` means *unknown*, never *independent*: callers must not read it as a
+    guarantee that two models come from different vendors.
+    """
+    if not model:
+        return None
+    needle = model.strip().lower().replace("_", "-")
+    for family, markers in _FAMILIES:
+        if family in needle or any(marker in needle for marker in markers):
+            return family
+    return None

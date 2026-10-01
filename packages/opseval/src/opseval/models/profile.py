@@ -88,6 +88,10 @@ class SutProfile(BaseModel):
 
     name: str
     description: str = ""
+    sut_model: str | None = None
+    """The model the agent runs on, when you know it. Opseval cannot see inside a
+    black-box agent, so declaring it here is what lets the judge-independence guard
+    work (ADR-0016). Leaving it unset means *unknown*, not *independent*."""
 
     # --- inbound frame classification -------------------------------------------------
     kind_field: str = "type"
@@ -174,6 +178,13 @@ class SutProfile(BaseModel):
     def trace_names(self) -> dict[str, str]:
         """Map trace observation name -> tool name."""
         return {(spec.trace_name or name): name for name, spec in self.tools.items()}
+
+    def declared_model(self) -> str | None:
+        """The agent's model if it is knowable: declared, or set for the openai-chat transport."""
+        if self.sut_model:
+            return self.sut_model
+        model = self.transport_options.get("model")
+        return model if isinstance(model, str) and model else None
 
     def frame_verifiable(self, tool: str) -> bool:
         """Can frames alone show whether ``tool`` ran?"""

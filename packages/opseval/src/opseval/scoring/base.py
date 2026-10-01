@@ -26,6 +26,16 @@ class ScoringContext:
     scenario: Scenario
     profile: SutProfile
     judge: ChatClient | None = None
+    simulator_model: str | None = None
+    """The persona model, for the independence guard on HARNESS-axis judges (ADR-0016)."""
+    judge_independence: str = "error"
+    """``error`` | ``warn`` | ``off`` (see ``OPSEVAL_JUDGE_INDEPENDENCE``)."""
+
+    def graded_model(self, axis: Axis) -> str | None:
+        """The model a judge on ``axis`` grades: the simulator for HARNESS, else the agent."""
+        if axis is Axis.HARNESS:
+            return self.simulator_model
+        return self.profile.declared_model()
 
 
 class Scorer(ABC):
@@ -127,14 +137,29 @@ def effective_specs(scenario: Scenario) -> list[ScorerSpec]:
 
 
 class ScoringEngine:
-    def __init__(self, judge: ChatClient | None = None, judge_concurrency: int = 4) -> None:
+    def __init__(
+        self,
+        judge: ChatClient | None = None,
+        judge_concurrency: int = 4,
+        *,
+        simulator_model: str | None = None,
+        judge_independence: str = "error",
+    ) -> None:
         self.judge = judge
+        self.simulator_model = simulator_model
+        self.judge_independence = judge_independence
         self._judge_slots = asyncio.Semaphore(max(1, judge_concurrency))
 
     async def score(
         self, record: RunRecord, scenario: Scenario, profile: SutProfile
     ) -> list[ScoreResult]:
-        ctx = ScoringContext(scenario=scenario, profile=profile, judge=self.judge)
+        ctx = ScoringContext(
+            scenario=scenario,
+            profile=profile,
+            judge=self.judge,
+            simulator_model=self.simulator_model,
+            judge_independence=self.judge_independence,
+        )
         specs = effective_specs(scenario)
         return list(await asyncio.gather(*(self._one(record, spec, ctx) for spec in specs)))
 

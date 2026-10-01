@@ -48,6 +48,17 @@ class FileStore:
         _atomic_write(path, json.dumps(manifest, indent=2, ensure_ascii=False, default=str))
         return path
 
+    def load_manifest(self, run_id: str) -> dict[str, Any]:
+        """The run's manifest, or ``{}`` if it is missing or unreadable.
+
+        Re-scoring an older run must not fail just because its manifest is absent.
+        """
+        try:
+            data = json.loads((self.run_dir(run_id) / "manifest.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def save_profile(self, run_id: str, profile: SutProfile) -> Path:
         path = self.run_dir(run_id) / "profile.json"
         _atomic_write(path, profile.model_dump_json(indent=2))
