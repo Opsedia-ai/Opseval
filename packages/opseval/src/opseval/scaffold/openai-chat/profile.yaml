@@ -4,6 +4,11 @@
 name: my-agent
 description: My agent, tested over its OpenAI-compatible chat endpoint.
 
+# The model your agent runs on, if you know it. Opseval cannot see inside the agent, so
+# this is what lets it refuse a judge from the same vendor family (ADR-0016). Leaving it
+# unset means unknown, not independent, and the check stays inert.
+# sut_model: gpt-4o
+
 kind_field: type
 kinds:
   message: message

@@ -149,6 +149,12 @@ def check_references(
                 errors.append(
                     f"scorers: unknown scorer id {spec.id!r} (see `opseval list-scorers`)"
                 )
+            if spec.id == "security.policy_adherence" and not scenario.expectations.policy:
+                errors.append(
+                    "scorers: 'security.policy_adherence' grades the agent against "
+                    "expectations.policy, which is empty; list the rules it must not break, "
+                    "or drop the scorer"
+                )
     return errors
 
 

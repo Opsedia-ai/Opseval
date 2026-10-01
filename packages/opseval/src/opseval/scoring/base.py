@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from pydantic import ValidationError
 
-from opseval.llm import ChatClient
+from opseval.errors import ConfigError
+from opseval.llm import ChatClient, model_family
 from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import Axis, ScoreResult, ScoreStatus
@@ -134,6 +136,79 @@ def effective_specs(scenario: Scenario) -> list[ScorerSpec]:
             seen.add(spec.id)
             out.append(spec)
     return out
+
+
+def independence_conflicts(
+    scenarios: Iterable[Scenario],
+    profile: SutProfile,
+    *,
+    judge_model: str | None,
+    simulator_model: str | None,
+) -> list[str]:
+    """Judges that would grade a model from their own vendor family (ADR-0016).
+
+    This is pure configuration, knowable before the first frame is sent, which is why it
+    is enforced at launch rather than per score: an ``infra_error`` judge is dropped from
+    the measured set by :func:`opseval.verdicts.attempt_verdict`, so refusing a judge
+    *during* scoring would quietly lose coverage instead of reporting it.
+    """
+    judge_family = model_family(judge_model)
+    if judge_family is None:
+        return []
+    agent, simulator = profile.declared_model(), simulator_model
+    graded_by_axis = {
+        True: (simulator, model_family(simulator)),
+        False: (agent, model_family(agent)),
+    }
+    conflicts: dict[str, str] = {}
+    for scenario in scenarios:
+        for spec in effective_specs(scenario):
+            cls = REGISTRY.get(spec.id)
+            if cls is None or cls.requires != "llm":
+                continue
+            harness = cls.axis is Axis.HARNESS
+            graded, graded_family = graded_by_axis[harness]
+            if graded_family is None or graded_family != judge_family:
+                continue
+            subject = "the simulated customer" if harness else "the agent"
+            conflicts[spec.id] = (
+                f"{spec.id}: the judge ({judge_model}) and {subject} ({graded}) are both "
+                f"{judge_family} models, so a pass would grade that family against itself"
+            )
+    return [conflicts[key] for key in sorted(conflicts)]
+
+
+def check_judge_independence(
+    scenarios: Iterable[Scenario],
+    profile: SutProfile,
+    *,
+    judge_model: str | None,
+    simulator_model: str | None,
+    mode: str,
+    log: Callable[[str], None] = lambda _msg: None,
+) -> list[str]:
+    """Refuse, or warn about, judges that would grade their own vendor family (ADR-0016).
+
+    Checked before any conversation happens, so a misconfigured run costs nothing. An
+    unrecognised ``mode`` is treated as ``error``: the strict reading is the safe one.
+    """
+    if mode == "off":
+        return []
+    conflicts = independence_conflicts(
+        scenarios, profile, judge_model=judge_model, simulator_model=simulator_model
+    )
+    if not conflicts:
+        return []
+    listed = "\n".join(f"  - {c}" for c in conflicts)
+    if mode == "warn":
+        log(f"warning: judge independence (scores will be marked degraded):\n{listed}")
+        return conflicts
+    raise ConfigError(
+        "judge independence (ADR-0016):\n"
+        f"{listed}\n"
+        "Use a judge from another vendor, or set OPSEVAL_JUDGE_INDEPENDENCE=warn to score "
+        "anyway and mark the results degraded (off disables the check)."
+    )
 
 
 class ScoringEngine:

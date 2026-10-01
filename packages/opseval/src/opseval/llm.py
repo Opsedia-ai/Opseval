@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -208,33 +209,52 @@ def client_for_role(settings: Settings, role: str, meter: UsageMeter) -> ChatCli
 
 # --- model families (judge independence, ADR-0016) ------------------------------------
 
-_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("anthropic", ("claude", "fable")),
-    ("openai", ("gpt", "chatgpt", "o1-", "o3-", "o4-", "davinci", "babbage")),
-    ("google", ("gemini", "gemma", "palm", "bison")),
-    ("meta", ("llama", "codellama")),
-    ("mistral", ("mistral", "mixtral", "magistral", "codestral", "ministral")),
-    ("qwen", ("qwen",)),
-    ("deepseek", ("deepseek",)),
-    ("cohere", ("command-", "command.", "cohere")),
-    ("xai", ("grok",)),
-    ("microsoft", ("phi-", "phi.")),
-    ("amazon", ("nova-micro", "nova-lite", "nova-pro", "nova-premier", "titan")),
+# Specific vendors first; ``openai`` last, because "openai" is also the name of the
+# OpenAI-*compatible* API dialect ("openai/deepseek-chat") and must never outrank the
+# vendor named in the model itself.
+_FAMILIES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    # family        substrings in the model id            whole tokens
+    ("anthropic", ("claude", "fable"), ()),
+    ("deepseek", ("deepseek",), ()),
+    ("qwen", ("qwen",), ()),
+    ("google", ("gemini", "gemma", "palm", "bison"), ()),
+    ("mistral", ("mistral", "mixtral", "magistral", "codestral", "ministral"), ()),
+    ("meta", ("llama",), ()),
+    ("cohere", ("cohere",), ("command",)),
+    ("xai", ("grok",), ()),
+    ("microsoft", ("phi",), ()),
+    ("amazon", ("titan", "nova"), ()),
+    ("openai", ("gpt", "chatgpt", "davinci", "babbage"), ("o1", "o3", "o4")),
 )
+
+# Vendor names that identify a vendor when they appear as a deployment prefix
+# ("us.anthropic.<id>", "mistral/<id>"). ``openai`` is absent on purpose: as a prefix it
+# denotes the API dialect, not the vendor.
+_PREFIX_VENDORS = frozenset(f for f, _, _ in _FAMILIES if f != "openai")
 
 
 def model_family(model: str | None) -> str | None:
     """The vendor family behind a model id, or ``None`` when it cannot be told.
 
-    Deployment prefixes and suffixes are ignored, so ``us.anthropic.claude-opus-5``,
-    ``openai/gpt-5`` and ``azure/gpt-4o-2024-08-06`` resolve the same way as the bare ids.
+    The model id itself decides, so ``openai/deepseek-chat`` is ``deepseek`` (the
+    ``openai/`` prefix only says the endpoint speaks the OpenAI dialect). A vendor named
+    in a deployment prefix is used only as a fallback, as in ``us.anthropic.<new-id>``.
+
     ``None`` means *unknown*, never *independent*: callers must not read it as a
     guarantee that two models come from different vendors.
     """
     if not model:
         return None
-    needle = model.strip().lower().replace("_", "-")
-    for family, markers in _FAMILIES:
-        if family in needle or any(marker in needle for marker in markers):
+    normalised = model.strip().lower().replace("_", "-")
+    segment = normalised.rsplit("/", 1)[-1]
+    tokens = set(re.split(r"[-.:@]+", segment))
+    for family, substrings, whole in _FAMILIES:
+        if any(s in segment for s in substrings) or tokens & set(whole):
+            return family
+    # Fall back to a vendor named in a deployment prefix: every "/"- or "."-separated
+    # component except the model id itself ("us.anthropic.<new-id>" -> anthropic).
+    prefix = set(re.split(r"[/.]+", normalised)[:-1])
+    for family in _PREFIX_VENDORS:
+        if family in prefix:
             return family
     return None

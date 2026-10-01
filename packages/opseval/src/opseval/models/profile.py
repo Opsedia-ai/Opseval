@@ -89,9 +89,9 @@ class SutProfile(BaseModel):
     name: str
     description: str = ""
     sut_model: str | None = None
-    """The model the agent runs on, when you know it. Opseval cannot see inside a
-    black-box agent, so declaring it here is what lets the judge-independence guard
-    work (ADR-0016). Leaving it unset means *unknown*, not *independent*."""
+    """The model the agent runs on, when you know it (e.g. ``gpt-4o``). Opseval cannot see
+    inside a black-box agent, so declaring it here is the only thing that lets the
+    judge-independence check work (ADR-0016). Unset means *unknown*, not *independent*."""
 
     # --- inbound frame classification -------------------------------------------------
     kind_field: str = "type"
@@ -180,11 +180,13 @@ class SutProfile(BaseModel):
         return {(spec.trace_name or name): name for name, spec in self.tools.items()}
 
     def declared_model(self) -> str | None:
-        """The agent's model if it is knowable: declared, or set for the openai-chat transport."""
-        if self.sut_model:
-            return self.sut_model
-        model = self.transport_options.get("model")
-        return model if isinstance(model, str) and model else None
+        """The agent's model, only if it was declared explicitly.
+
+        ``transport_options["model"]`` is deliberately *not* used as a fallback: many
+        agent gateways ignore the field (the scaffold ships ``model: default``), so
+        reading it would infer a model the agent never ran.
+        """
+        return self.sut_model or None
 
     def frame_verifiable(self, tool: str) -> bool:
         """Can frames alone show whether ``tool`` ran?"""
