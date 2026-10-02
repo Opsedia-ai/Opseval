@@ -30,6 +30,7 @@ from opseval.traces.langfuse import LangfuseTraceSource
 from opseval.transport import (
     HttpJsonTransport,
     OpenAIChatTransport,
+    SseTransport,
     Transport,
     WebSocketTransport,
 )
@@ -93,8 +94,11 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
     if options.transport == "openai-chat":
         check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
         return lambda profile: OpenAIChatTransport(target, profile, token=credentials(profile))
+    if options.transport == "sse":
+        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
+        return lambda profile: SseTransport(target, profile, token=credentials(profile))
     raise ConfigError(
-        f"unknown transport {options.transport!r}; use websocket, http-json or openai-chat"
+        f"unknown transport {options.transport!r}; use websocket, http-json, sse or openai-chat"
     )
 
 

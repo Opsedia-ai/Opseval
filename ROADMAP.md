@@ -8,7 +8,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 
 - 🟢 Declarative YAML scenarios and suites, with fail-closed validation (`opseval validate`)
 - 🟢 SUT profiles that map any agent's wire protocol to canonical frames
-- 🟢 Transports: `http-json`, `websocket` (with session resume and short-lived HS256 token refresh), `openai-chat` (any OpenAI-compatible endpoint), `python` callable
+- 🟢 Transports: `http-json`, `websocket` (with session resume and short-lived HS256 token refresh), `sse`, `openai-chat` (any OpenAI-compatible endpoint), `python` callable
 - 🟢 Customer simulator: scripted and LLM personas, seeded runs, English + Arabic language packs (Gulf, Egyptian, MSA), keyboard-aware typing noise
 - 🟢 Checkpoint policies (approve / reject / script), stop points, and the **committed-outcome guard**
 - 🟢 Immutable run records with secret redaction
@@ -26,7 +26,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 `opseval rescore` (offline, self-contained run folders) · 🟢 `opseval calibrate` (judge ↔ human agreement, ADR-0018)
 - 🟢 Prompt-injection planting and 3-vote security judges (`security.no_injection_takeover`, `security.policy_adherence`) · 🟢 content-quality and efficiency judges · 🟢 judge-independence guard (ADR-0016) · 🟢 visible degraded evidence, rubric digests, independent ballots (ADR-0017)
 - ⚪ Flow map, preflight checks (🟢 pass^k and JUnit shipped early)
-- ⚪ SSE transport and protocol probes
+- 🟢 SSE transport (ADR-0019) · ⚪ protocol probes
 - ⚪ Stable scorer plugin API with a contract test kit
 
 ## v0.5: "Teams can share it" ⚪

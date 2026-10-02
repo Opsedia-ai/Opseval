@@ -80,6 +80,25 @@ auth_frame: {type: auth, token: "{token}"}
 
 A drop Opseval can't resume, or a resume answered with a different session, ends the attempt as *not judged*. It is never counted as an agent failure. Add the `conversation.connection_stable` scorer if the agent dropping the connection should fail the scenario even when the session resumed ([ADR-0012](docs/adr/0012-websocket-resume-and-token-refresh.md)).
 
+### Streaming agents (Server-Sent Events)
+
+If your agent answers a POST with `text/event-stream`, point Opseval at it:
+
+```bash
+opseval run suites/smoke.yaml --profile profile.yaml \
+  --transport sse --target https://your-agent.example.com/chat
+```
+
+One turn is one stream. If your agent puts the message type in the SSE `event:` name rather than
+the payload, Opseval uses it as the frame kind — unless the payload already declares one, in
+which case the profile's `kind_field` wins.
+
+Stream faults are attributed deliberately: a stream that stalls is the agent's fault
+(`TransportTimeout`, counts against it), while a connection that drops mid-turn is the harness's
+(`TransportClosed`, the attempt is *not judged*). An event Opseval cannot decode is recorded
+verbatim and never given a kind, so a broken stream cannot read as a clean empty turn. See
+[ADR-0019](docs/adr/0019-sse-transport.md).
+
 ### Re-score a run offline
 
 Changed a rubric, a judge prompt or a scorer? Re-score the saved conversations without talking to the agent again:

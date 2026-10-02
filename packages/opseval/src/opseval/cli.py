@@ -142,7 +142,7 @@ def run(
         str, typer.Option("--target", "-t", help="Agent URL (ws://, wss://, http(s)://).")
     ],
     transport: Annotated[
-        str, typer.Option(help="websocket | http-json | openai-chat")
+        str, typer.Option(help="websocket | http-json | sse | openai-chat")
     ] = "websocket",
     repeats: Annotated[Optional[int], typer.Option(min=1, max=20, help="Override repeats.")] = None,  # noqa: UP045
     allow_commit: Annotated[
