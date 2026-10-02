@@ -37,6 +37,7 @@ packages/opseval/src/opseval/
   verdicts.py    attempt verdicts, folding, release gate, exit codes
   runner.py      the launch pipeline used by the CLI (saves a scenario/profile snapshot per run)
   rescore.py     `opseval rescore`: offline re-scoring of saved records (ADR-0013)
+  calibrate.py   `opseval calibrate`: judge agreement with human labels (ADR-0018)
   reporting/     self-contained HTML report, console summary, JUnit XML, Markdown gate summary
   scaffold/      `opseval init` templates
   demo/          reference refund agent + example catalogue (`opseval demo`)
@@ -44,7 +45,7 @@ packages/opseval/src/opseval/
 packages/opseval/tests/   pytest (asyncio_mode=auto), incl. the fault-injection suite
 packages/pytest-opseval/  pytest plugin: scenarios as pytest items (entry point disabled in our own run)
 action.yml                composite GitHub Action (dogfooded by the `action` CI job)
-docs/adr/                 architecture decisions (0001-0017); new decisions get a new ADR
+docs/adr/                 architecture decisions (0001-0018); new decisions get a new ADR
 ```
 
 ## Commands
@@ -78,17 +79,19 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 - v0.2: CI integrations: `action.yml` (composite GitHub Action), `opseval summary`, and the `pytest-opseval` package (ADR-0015).
 - v0.2: `security.policy_adherence` (needs `expectations.policy`; empty is a load error), `judge.content_quality`, `judge.efficiency`, and judge independence: a judge sharing a vendor family with the model it grades (the simulator on the HARNESS axis) is refused at **launch** with a `ConfigError` (exit 3), never as a per-score `infra_error` — an `infra_error` is dropped from `measured`, so refusing while scoring would pass the suite with the coverage gone. Declare `profile.sut_model`; `OPSEVAL_JUDGE_INDEPENDENCE=warn|off` (ADR-0016).
 - v0.2: a degraded score is named in the gate summary, JUnit and console (never only in the HTML); every judge declares a scenario-derived `rubric()` whose digest `rescore` checks before reusing a score; multi-vote ballots are concurrent and rotate the criteria so they are distinct prompts (ADR-0017).
+- v0.2: `opseval calibrate <run> --labels` measures a scorer against human labels and reports the false-pass rate separately, because aggregate agreement hides the dangerous direction. Offline and read-only; exit codes 0/1/2/3 as usual (ADR-0018).
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`). The reader is verified against a real self-hosted Langfuse 4.44 (`scripts/langfuse_smoke.py`, ADR-0011); not yet against Langfuse Cloud.
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
 
 ## Next up (suggested order)
 
-1. Opt-out, content-free telemetry (ADR-0010).
-2. `opseval calibrate` (judge ↔ human agreement): measure judge bias instead of inferring it
-   from the vendor name (ADR-0016).
-3. SSE transport; OpenTelemetry trace source.
-4. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
+1. Opt-out, content-free telemetry (ADR-0010) — **blocked**: the design in PR #12 needs a
+   product/privacy decision before any code.
+2. SSE transport and protocol probes; OpenTelemetry trace source.
+3. Flow map and preflight checks; argument schemas for trace-backed tool scorers.
+4. Stable scorer plugin API with a contract test kit.
+5. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
 
 ## Planning documents
 

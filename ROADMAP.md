@@ -23,7 +23,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 
 - 🟢 GitHub Action (report artifact, job summary, PR comment, exit code passthrough) and `pytest-opseval`
 - 🟢 Langfuse trace reader and trace-backed tool scorers (ordering, approval gating, call success) · ⚪ argument schemas
-- 🟢 `opseval rescore` (offline, self-contained run folders) · ⚪ `opseval calibrate` (judge ↔ human agreement)
+- 🟢 `opseval rescore` (offline, self-contained run folders) · 🟢 `opseval calibrate` (judge ↔ human agreement, ADR-0018)
 - 🟢 Prompt-injection planting and 3-vote security judges (`security.no_injection_takeover`, `security.policy_adherence`) · 🟢 content-quality and efficiency judges · 🟢 judge-independence guard (ADR-0016) · 🟢 visible degraded evidence, rubric digests, independent ballots (ADR-0017)
 - ⚪ Flow map, preflight checks (🟢 pass^k and JUnit shipped early)
 - ⚪ SSE transport and protocol probes
