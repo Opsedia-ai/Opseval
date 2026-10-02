@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from pydantic import ValidationError
@@ -32,6 +32,10 @@ class ScoringContext:
     """The persona model, for the independence guard on HARNESS-axis judges (ADR-0016)."""
     judge_independence: str = "error"
     """``error`` | ``warn`` | ``off`` (see ``OPSEVAL_JUDGE_INDEPENDENCE``)."""
+    ballot_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    """Caps judge requests in flight. A multi-vote judge fans its ballots out
+    concurrently, so without a shared bound peak concurrency would be
+    ``judge_concurrency x votes`` and a 3-vote judge could triple the request rate."""
 
     def graded_model(self, axis: Axis) -> str | None:
         """The model a judge on ``axis`` grades: the simulator for HARNESS, else the agent."""
@@ -226,6 +230,9 @@ class ScoringEngine:
         self.simulator_model = simulator_model
         self.judge_independence = judge_independence
         self._judge_slots = asyncio.Semaphore(max(1, judge_concurrency))
+        # Shared by every ballot of every judge, so the fan-out inside a multi-vote
+        # judge cannot push more requests at the provider than judge_concurrency.
+        self._ballot_slots = asyncio.Semaphore(max(1, judge_concurrency))
 
     async def score(
         self, record: RunRecord, scenario: Scenario, profile: SutProfile
@@ -236,6 +243,7 @@ class ScoringEngine:
             judge=self.judge,
             simulator_model=self.simulator_model,
             judge_independence=self.judge_independence,
+            ballot_slots=self._ballot_slots,
         )
         specs = effective_specs(scenario)
         return list(await asyncio.gather(*(self._one(record, spec, ctx) for spec in specs)))

@@ -39,7 +39,13 @@ data but never reached the person reading the result.
 - the JUnit XML, as a suite property, a per-case property, and a `system-out` note. The note
   matters because a passed case carries no `failure` or `error` element, so without it the
   weaker evidence has nowhere to appear;
-- the console summary, under the scenario it belongs to.
+- the console summary, under the scenario it belongs to;
+- the HTML report, as a banner above the scenario table and a marker on the row — not only
+  as a badge on an individual score row several screens below the verdict.
+
+In the JUnit XML the note is emitted **after** any `failure`/`error` element, because the Ant
+sequence is `properties, (error|failure)*, system-out`, and a schema-validating consumer can
+drop a failure that follows a `system-out`.
 
 Degradation does **not** change a status, a pass rate or an exit code. It is a caveat on a
 score, not a verdict of its own, and the JUnit counts are asserted unchanged. Making it fail
@@ -55,12 +61,20 @@ shows why: its prompt carries turn counts, which are record data. A digest inclu
 differ on every attempt, so no score could ever match and nothing would be reusable — the check
 would degrade into "never reuse", which is useless rather than honest.
 
-`opseval rescore` compares the digest before reusing a score and now says *which* condition
-failed: the judge was never scored, the prompt changed, the scenario data changed, or the run
-predates rubric digests so the rubric cannot be verified. That last case refuses reuse for every
-pre-existing run. That is a real loss of convenience and the honest answer: an unverifiable
-rubric is not a verified one, and ADR-0013 exists to stop a verdict moving without an
-attributable cause.
+`opseval rescore` compares the digest before reusing a score and says *which* condition failed:
+the judge was never scored, the prompt changed, the scenario data changed, or the run predates
+rubric digests so the rubric cannot be verified.
+
+**The comparison applies only when the scenarios came from `--catalogue`.** Against the run's own
+snapshot the scenario *is* the one that produced the score, so the rubric cannot have changed, and
+comparing digests there could only refuse a score for a harness-version reason. That refusal
+would be an `infra_error`, and `attempt_verdict` drops `infra_error` from `measured` — so every
+pre-upgrade run would have reported **green with its judges silently unmeasured** on any suite
+that also had a passing deterministic scorer. That is the failure ADR-0016 was written to fix, and
+scoping the check to catalogue mode is what keeps it fixed.
+
+The digest carries a format version, so changing the formula is reported as such rather than as
+"the scenario data changed" on a scenario that never moved.
 
 **3. Ballots are concurrent and differ by construction.** The votes of a multi-vote judge are
 cast with `asyncio.gather` (inside the engine's existing judge slot, so the concurrency bound is
@@ -76,8 +90,18 @@ canonical.
 
 `temperature` stays `0.0`. The variation is in the prompt, not in the sampling, so a run remains
 reproducible — a judge that disagreed with itself because of temperature would be noise, not a
-signal. The score is computed from the declared order whatever the presentation, and
-`prompt_hash` is unchanged, so earlier results stay comparable.
+signal. The score is computed from the declared order whatever the presentation.
+
+`prompt_hash` now includes the ballot format for multi-vote judges. The ballot prompt genuinely
+changed, so leaving the hash alone would let a security verdict move with no attributable cause in
+`opseval rescore`, and would let a score produced by a prompt that no longer exists be reused as
+current — exactly what ADR-0013 forbids. Single-vote prompts are byte-identical to before and keep
+their hash, so every judge with one stays comparable.
+
+The ballots share a semaphore with the engine's judge slots, so a 3-vote judge cannot push three
+times the request rate at the provider and turn a working configuration into rate-limit
+`infra_error`s. `gather` uses `return_exceptions=True`: an unexpected error in one ballot must not
+leave its siblings running unawaited, each holding a client and a billed request nobody reads.
 
 ## Consequences
 

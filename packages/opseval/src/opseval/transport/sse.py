@@ -21,6 +21,7 @@ Which errors belong to whom is the whole point here:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -107,11 +108,13 @@ class SseSession(Session):
         profile: SutProfile,
         *,
         request_timeout: float,
+        max_turn_bytes: int = 32 * 1024 * 1024,
     ) -> None:
         self._client = client
         self._url = url
         self._profile = profile
         self._timeout = request_timeout
+        self._max_turn_bytes = max_turn_bytes
         self._queue: list[Any] = []
 
     def _stamp(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -128,20 +131,33 @@ class SseSession(Session):
 
     async def _read_stream(self, response: httpx.Response) -> list[str]:
         lines: list[str] = []
+        size = 0
         async for line in response.aiter_lines():
+            size += len(line) + 1
+            if size > self._max_turn_bytes:
+                raise TransportTimeout(
+                    f"agent streamed more than {self._max_turn_bytes} bytes in one turn "
+                    "without ending it"
+                )
             lines.append(line)
         return lines
 
     async def send(self, frame: dict[str, Any]) -> None:
         payload = self._stamp(frame)
         try:
-            async with self._client.stream(
-                "POST",
-                self._url,
-                json=payload,
-                timeout=self._timeout,
-                headers={"Accept": SSE_MEDIA_TYPE},
-            ) as response:
+            # httpx's `timeout` bounds each read, not the stream, so an agent that
+            # trickles keep-alive comments could hold the turn open indefinitely. This
+            # bounds the turn itself, which is what the docstring promises.
+            async with (
+                asyncio.timeout(self._timeout),
+                self._client.stream(
+                    "POST",
+                    self._url,
+                    json=payload,
+                    timeout=self._timeout,
+                    headers={"Accept": SSE_MEDIA_TYPE},
+                ) as response,
+            ):
                 if response.status_code >= 500:
                     # The agent answered, with an error: that is agent behaviour.
                     await response.aread()
@@ -159,14 +175,23 @@ class SseSession(Session):
                         f"agent rejected the request with HTTP {response.status_code}"
                     )
                 media = (response.headers.get("content-type") or "").split(";")[0].strip()
-                if media.endswith("json"):
+                if media and media != SSE_MEDIA_TYPE:
+                    # A JSON body, a proxy's HTML login page or a redirect would parse to
+                    # zero events, and an empty turn is scored against the agent. Refusing
+                    # here keeps a harness or configuration problem out of the agent's
+                    # record. An absent header is still allowed: some gateways omit it.
                     await response.aread()
+                    hint = (
+                        " use --transport http-json for a plain JSON endpoint;"
+                        if media.endswith("json")
+                        else ""
+                    )
                     raise TransportError(
-                        f"{self._url} answered {media!r}, not {SSE_MEDIA_TYPE}; "
-                        "use --transport http-json for a plain JSON endpoint"
+                        f"{self._url} answered {media!r}, not {SSE_MEDIA_TYPE};{hint}"
+                        " check the URL and that it is an event-stream endpoint"
                     )
                 lines = await self._read_stream(response)
-        except httpx.TimeoutException as exc:
+        except (httpx.TimeoutException, TimeoutError) as exc:
             # The agent held the stream open without finishing its turn.
             raise TransportTimeout(
                 f"agent did not finish its turn within {self._timeout:.1f}s"
@@ -198,12 +223,14 @@ class SseTransport(Transport):
         *,
         token: str | TokenSource | None = None,
         request_timeout: float = 120.0,
+        max_turn_bytes: int = 32 * 1024 * 1024,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self._url = url
         self._profile = profile
         self._tokens = as_token_source(token)
         self._timeout = request_timeout
+        self._max_turn_bytes = max_turn_bytes
         self._client_factory = client_factory
 
     @property
@@ -214,7 +241,13 @@ class SseTransport(Transport):
         client = self._client_factory() if self._client_factory else httpx.AsyncClient()
         if self._tokens is not None:
             client.auth = BearerAuth(self._tokens)
-        return SseSession(client, self._url, self._profile, request_timeout=self._timeout)
+        return SseSession(
+            client,
+            self._url,
+            self._profile,
+            request_timeout=self._timeout,
+            max_turn_bytes=self._max_turn_bytes,
+        )
 
 
 __all__ = [

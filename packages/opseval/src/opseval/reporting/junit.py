@@ -76,15 +76,6 @@ def render_junit(result: SuiteResult) -> str:
                 name="degraded_scorers",
                 value=",".join(t.degraded_scorers),
             )
-            # A passed case carries no failure/error element, so without this the
-            # weaker evidence would be invisible in the XML a CI system renders.
-            note = ET.SubElement(case, "system-out")
-            note.text = (
-                "degraded evidence: "
-                + ", ".join(t.degraded_scorers)
-                + " scored on weaker evidence than they ask for; these scores counted "
-                "toward the verdict"
-            )
         if t.status is VerdictStatus.FAILED:
             counts["failures"] += 1
             el = ET.SubElement(case, "failure", message=t.reason or "failed", type="failed")
@@ -98,6 +89,18 @@ def render_junit(result: SuiteResult) -> str:
         elif t.status in (VerdictStatus.SKIPPED_PRECONDITION, VerdictStatus.BLOCKED):
             counts["skipped"] += 1
             ET.SubElement(case, "skipped", message=f"{t.status.value}: {t.reason or ''}")
+        if t.degraded_scorers:
+            # Added last: the JUnit sequence is properties, (error|failure)*, system-out,
+            # and a schema-validating consumer may drop a failure that follows it. A
+            # passed case has no failure element, so this is the only place the weaker
+            # evidence can appear at all.
+            note = ET.SubElement(case, "system-out")
+            note.text = (
+                "degraded evidence: "
+                + ", ".join(t.degraded_scorers)
+                + " scored on weaker evidence than they ask for; these scores counted "
+                "toward the verdict"
+            )
 
     if result.load_errors:
         counts["tests"] += 1

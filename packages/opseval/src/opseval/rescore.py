@@ -99,9 +99,12 @@ def _changes(before: list[ScoreResult], after: list[ScoreResult]) -> list[Scorer
 
 
 class _Rescorer:
-    def __init__(self, engine: ScoringEngine, judge_configured: bool) -> None:
+    def __init__(
+        self, engine: ScoringEngine, judge_configured: bool, scenario_source: str = "catalogue"
+    ) -> None:
         self.engine = engine
         self.judge_configured = judge_configured
+        self.scenario_source = scenario_source
         self.reused = 0
 
     async def score(
@@ -125,15 +128,22 @@ class _Rescorer:
             return self._unavailable(fresh, spec, cls, "the judge prompt changed")
         # prompt_hash is a class property, so it cannot see scenario-supplied criteria
         # (the goal, the persona language, the policy rules). The rubric digest does.
-        old_rubric, new_rubric = old.details.get("rubric_hash"), fresh.details.get("rubric_hash")
-        if old_rubric != new_rubric:
-            why = (
-                "it predates rubric digests, so the scenario it was graded against cannot "
-                "be verified"
-                if old_rubric is None
-                else "the scenario data it grades against changed"
-            )
-            return self._unavailable(fresh, spec, cls, why)
+        #
+        # Only worth checking when the scenarios came from --catalogue. Against the run's
+        # own snapshot the scenario *is* the one that produced the score, so the rubric
+        # cannot have changed, and comparing digests there can only refuse a score for a
+        # harness-version reason - which would drop every pre-upgrade judge out of the
+        # measured set and let a mixed suite report green with its judges gone.
+        if self.scenario_source == "catalogue":
+            old_rubric = old.details.get("rubric_hash")
+            if old_rubric != fresh.details.get("rubric_hash"):
+                why = (
+                    "it predates rubric digests, so the scenario it was graded against "
+                    "cannot be verified"
+                    if old_rubric is None
+                    else "the scenario data it grades against changed"
+                )
+                return self._unavailable(fresh, spec, cls, why)
         self.reused += 1
         return old.model_copy(update={"details": {**old.details, "reused": True}})
 
@@ -196,6 +206,7 @@ async def rescore_run(
             judge_independence=settings.judge_independence,
         ),
         judge is not None,
+        source,
     )
     tests: list[TestVerdict] = []
     before_scores: list[ScoreResult] = []

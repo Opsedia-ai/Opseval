@@ -210,3 +210,32 @@ class TestConsoleSummary:
     def test_silent_when_nothing_was_degraded(self) -> None:
         text = console_summary(suite(verdict("t-001", attempt(score("output.terminal_state")))))
         assert "degraded" not in text
+
+
+class TestHtmlReport:
+    """The HTML report is the primary artifact, so it cannot be the one output that
+    stays silent about weaker evidence."""
+
+    def html(self, result: SuiteResult) -> str:
+        from opseval.reporting import render_html
+
+        return render_html(result, [])
+
+    def test_a_banner_names_them_above_the_scenario_table(self) -> None:
+        out = self.html(
+            suite(verdict("t-001", attempt(score("judge.content_quality", degraded=True))))
+        )
+        assert "Degraded evidence" in out
+        assert "judge.content_quality" in out
+        assert "counted toward the verdict" in out
+        assert out.index("Degraded evidence") < out.index("<h2>Scenarios</h2>")
+
+    def test_the_scenario_row_is_marked(self) -> None:
+        out = self.html(suite(verdict("t-001", attempt(score("tools.ordering", degraded=True)))))
+        row = out.split("<h2>Scenarios</h2>")[1]
+        assert "degraded" in row
+        assert "tools.ordering" in row
+
+    def test_silent_when_nothing_was_degraded(self) -> None:
+        out = self.html(suite(verdict("t-001", attempt(score("output.terminal_state")))))
+        assert "Degraded evidence" not in out

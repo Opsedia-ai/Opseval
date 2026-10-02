@@ -24,6 +24,11 @@ class Label(StrEnum):
     FAILED = "failed"
 
 
+REVIEW_SENTINEL = "REVIEW"
+"""What ``--template-for`` writes. Rejected on load, so a half-filled template cannot be
+scored as if every label agreed with the judge."""
+
+
 class HumanLabel(Strict):
     """One human judgement of one scorer on one attempt."""
 

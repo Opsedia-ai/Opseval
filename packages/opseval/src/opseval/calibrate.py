@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -25,6 +26,7 @@ import yaml
 from opseval import __version__
 from opseval.errors import ConfigError
 from opseval.models.calibration import (
+    REVIEW_SENTINEL,
     AgreementStatus,
     CalibrationResult,
     HumanLabel,
@@ -51,6 +53,15 @@ def load_labels(path: str | Path) -> LabelSet:
         raise ConfigError(f"{file}: not valid YAML ({exc})") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{file}: expected a mapping with a 'labels' list")
+    rows = raw.get("labels")
+    if isinstance(rows, list):
+        left = sum(1 for r in rows if isinstance(r, dict) and r.get("verdict") == REVIEW_SENTINEL)
+        if left:
+            raise ConfigError(
+                f"{file}: {left} label(s) still say {REVIEW_SENTINEL}. Replace each with "
+                "passed or failed, or delete the row - an unreviewed label would be "
+                "scored as agreement."
+            )
     try:
         labels = LabelSet.model_validate(raw)
     except ValueError as exc:
@@ -88,10 +99,22 @@ def _kappa(table: dict[tuple[Label, Label], int], total: int) -> tuple[float | N
     observed = sum(n for (h, j), n in table.items() if h == j) / total
     human_pass = sum(n for (h, _), n in table.items() if h is Label.PASSED) / total
     judge_pass = sum(n for (_, j), n in table.items() if j is Label.PASSED) / total
+    # Either rater being uniform makes kappa meaningless: with a degenerate marginal the
+    # statistic collapses toward 0 regardless of how well the two actually agree, which
+    # reads as "no better than chance" on a sample that simply cannot tell.
+    uniform = [
+        who
+        for who, rate in (("the humans", human_pass), ("the judge", judge_pass))
+        if rate in (0.0, 1.0)
+    ]
+    if uniform:
+        return None, (
+            f"undefined: {' and '.join(uniform)} used only one verdict in this sample "
+            "(label some of the opposite outcome too)"
+        )
     expected = human_pass * judge_pass + (1 - human_pass) * (1 - judge_pass)
-    if expected >= 1.0:
-        who = "the humans" if human_pass in (0.0, 1.0) else "the judge"
-        return None, f"undefined: {who} used only one verdict in this sample"
+    if expected >= 1.0:  # pragma: no cover - unreachable once a uniform rater is caught
+        return None, "undefined: expected agreement is 1 for this sample"
     return round((observed - expected) / (1 - expected), 4), None
 
 
@@ -181,6 +204,14 @@ def calibrate_run(
             + ". Check the run folder, or the test_id and attempt_index in the label file."
         )
 
+    scored_ids = {scorer for _t, _a, scorer in scores}
+    misspelled = sorted({i.scorer_id for i in label_set.labels} - scored_ids)
+    if misspelled:
+        raise ConfigError(
+            f"labels name scorers that run {run_id} never scored: {', '.join(misspelled)}. "
+            f"Scored in this run: {', '.join(sorted(scored_ids))}."
+        )
+
     by_scorer: dict[str, list[HumanLabel]] = defaultdict(list)
     for item in label_set.labels:
         by_scorer[item.scorer_id].append(item)
@@ -224,9 +255,20 @@ def calibrate_run(
 
 
 def save_calibration(run_dir: str | Path, result: CalibrationResult) -> Path:
-    """Write ``calibration.json`` beside the run. The run itself is never modified."""
-    path = Path(run_dir) / "calibration.json"
-    path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    """Write the calibration beside the run, never over the run's own files.
+
+    Each calibration gets its own file so a second reviewer's labels cannot silently
+    replace the first's. Raises :class:`ConfigError` (exit code 3) if the folder cannot
+    be written — a read-only CI artifact directory is a configuration problem, and
+    letting ``OSError`` escape would exit 1, which in Opseval means the agent failed.
+    """
+    folder = Path(run_dir)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    path = folder / f"calibration-{stamp}.json"
+    try:
+        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"cannot write {path}: {exc}") from exc
     return path
 
 
@@ -271,7 +313,9 @@ def label_template(result: SuiteResult, scorer_id: str) -> str:
             "test_id": test.test_id,
             "attempt_index": attempt.attempt_index,
             "scorer_id": scorer_id,
-            "verdict": "passed",
+            # Not a real verdict: an unedited template must fail to load rather than
+            # report that every label agrees with the judge.
+            "verdict": "REVIEW",
         }
         for test in result.tests
         for attempt in test.attempts
@@ -284,8 +328,9 @@ def label_template(result: SuiteResult, scorer_id: str) -> str:
         )
     head = (
         f"# Human labels for {scorer_id} on run {result.run_id}.\n"
-        "# Set each verdict to what a human reviewer concluded: passed | failed.\n"
+        "# Replace every REVIEW with what a human reviewer concluded: passed | failed.\n"
         "# Delete rows you have not reviewed; a guessed label is worse than a missing one.\n"
+        "# A leftover REVIEW is rejected on load, so a half-filled file cannot be scored.\n"
     )
     body = yaml.safe_dump(
         {"schema": "opseval/v1", "labels": rows}, sort_keys=False, allow_unicode=True

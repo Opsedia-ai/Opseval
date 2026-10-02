@@ -29,6 +29,10 @@ from opseval.models.scenario import ScorerSpec
 from opseval.scoring.base import Scorer, ScoringContext, register
 from opseval.scoring.tools import gather
 
+RUBRIC_FORMAT = "1"
+"""Rubric digest format. Bump when the digest formula changes, so a refusal to
+reuse a score says "the digest format changed" rather than blaming the scenario."""
+
 
 @dataclass(frozen=True)
 class Criterion:
@@ -56,11 +60,18 @@ class Judge(Scorer):
     quotes_from: ClassVar[str] = "transcript"
     """``transcript`` (any line) or ``customer`` (the simulated customer's lines only)."""
 
+    BALLOT_FORMAT = "rotate-1"
+    """How a ballot's prompt is built. Bump when that changes, so a moved verdict has an
+    attributable cause in ``opseval rescore`` (ADR-0013)."""
+
     @classmethod
     def prompt_hash(cls) -> str:
         blob = cls.instructions + "".join(f"{c.id}|{c.question}|{c.weight}" for c in cls.criteria)
         if cls.votes != 1:
-            blob += f"|votes={cls.votes}"
+            # Multi-vote ballots vary the criterion order, so the construction is part of
+            # the prompt. Single-vote prompts are byte-identical to before and keep their
+            # hash, which preserves comparability for every judge that has one.
+            blob += f"|votes={cls.votes}|ballots={cls.BALLOT_FORMAT}"
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
     def digest(self, record: RunRecord, ctx: ScoringContext) -> str:
@@ -102,7 +113,7 @@ class Judge(Scorer):
         the old ones, which is the one thing ADR-0013 exists to prevent.
         """
         parts = self.rubric(ctx)
-        blob = f"{self.id}|" + "".join(f"{len(p)}:{p}" for p in parts)
+        blob = f"{RUBRIC_FORMAT}|{self.id}|" + "".join(f"{len(p)}:{p}" for p in parts)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
     def _haystack(self, record: RunRecord, transcript: str) -> str:
@@ -156,6 +167,7 @@ class Judge(Scorer):
 
     async def _ballot(
         self,
+        slots: asyncio.Semaphore,
         judge: ChatClient,
         record: RunRecord,
         context: str,
@@ -181,7 +193,8 @@ class Judge(Scorer):
             },
         ]
         try:
-            raw = await judge.complete_json(messages, seed=record.seed + vote, temperature=0.0)
+            async with slots:
+                raw = await judge.complete_json(messages, seed=record.seed + vote, temperature=0.0)
         except HarnessError as exc:
             return _Ballot(error=f"JUDGE_ERROR: {exc}")
         return self._tally(raw, haystack)
@@ -208,14 +221,21 @@ class Judge(Scorer):
         transcript = self.digest(record, ctx)
         context = "\n".join(self.context(record, ctx))
         haystack = self._haystack(record, transcript)
-        ballots = list(
-            await asyncio.gather(
-                *(
-                    self._ballot(ctx.judge, record, context, transcript, haystack, vote)
-                    for vote in range(self.votes)
+        # return_exceptions keeps a bug in one ballot from leaving its siblings running
+        # unawaited, each holding an httpx client and a billed request nobody reads.
+        cast_ballots = await asyncio.gather(
+            *(
+                self._ballot(
+                    ctx.ballot_slots, ctx.judge, record, context, transcript, haystack, vote
                 )
-            )
+                for vote in range(self.votes)
+            ),
+            return_exceptions=True,
         )
+        ballots = [
+            b if isinstance(b, _Ballot) else _Ballot(error=f"JUDGE_ERROR: {type(b).__name__}: {b}")
+            for b in cast_ballots
+        ]
         model = ctx.judge.model
         if self.votes == 1:
             only = ballots[0]
@@ -577,7 +597,11 @@ class ContentQuality(Judge):
     )
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
-        return (ctx.scenario.goal,)
+        # Tool visibility decides which of three `grounded` instructions the judge gets,
+        # and it comes from the profile, so a profile edit must change the digest.
+        visible = sorted(t for t in ctx.profile.tools if ctx.profile.frame_verifiable(t))
+        traced = "traced" if ctx.profile.traces is not None else "untraced"
+        return (ctx.scenario.goal, traced, *visible)
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
         evidence = gather(record, ctx.profile)

@@ -31,7 +31,7 @@ transports, so the driver cannot tell them apart.
 | Connection refused, reset, or dies mid-stream | `TransportClosed` (a `HarnessError`) | Opseval could not keep the session. Never the agent's fault, so the attempt is *not judged*. |
 | HTTP 5xx | synthetic `error` frame | The agent answered, with an error. That is behaviour, and it gets scored. |
 | HTTP 4xx | `TransportError` | Opseval's request was rejected: a harness or configuration problem. |
-| Response is `application/json` | `TransportError` naming `--transport http-json` | Almost certainly the wrong transport for this endpoint. |
+| Response is any content type other than `text/event-stream` | `TransportError`, naming `--transport http-json` when it was JSON | A JSON body, a proxy's HTML login page or a redirect parses to zero events, and an empty turn is scored against the agent. |
 | Undecodable event payload | `_raw` frame | Recorded verbatim; it can never be mistaken for a clean turn. |
 
 **The event name may supply the frame kind.** Many SSE agents put the message type in `event:` and
@@ -43,10 +43,12 @@ profile classify it as, say, a `message` with no text — turning garbage into s
 like a clean, empty turn. That is exactly the failure mode the one rule exists to prevent, so the
 `_raw` frame stays unclassified and surfaces as `unknown`.
 
-**Only a JSON content type is refused.** A missing header, or `text/plain` from a sloppy gateway,
-is accepted. Being strict there would invent a harness failure for a server that actually works,
-while `application/json` is a real signal that the operator pointed `sse` at the wrong endpoint
-and would otherwise see "the agent said nothing" instead of a useful error.
+**Only an absent content type is tolerated.** Some gateways omit the header, and refusing there
+would invent a harness failure for a server that works. Anything else that is not
+`text/event-stream` is refused, because it parses to zero events and an empty turn is scored
+*against the agent* — so a proxy login page, an auth redirect or the wrong URL would be recorded
+as the agent failing to answer. That inversion is what the one rule forbids, and it is worth more
+than tolerating a mislabelled but working stream.
 
 **An empty stream is a turn with nothing in it**, not an error: the agent answered and chose to
 say nothing, which the scorers can judge. A stream that ends without a trailing blank line still
@@ -62,7 +64,12 @@ Parsing never raises.
 
 - Streaming agents are testable without a bespoke profile hack, and the driver, scorers, records
   and reports need no changes at all.
-- One `send` blocks until the agent's turn ends, so a turn is bounded by `request_timeout` rather
+- One `send` blocks until the agent's turn ends. The turn is bounded by `request_timeout` through
+  an explicit `asyncio.timeout` around the whole stream, not by httpx's `timeout` argument, which
+  bounds each individual read: an agent trickling keep-alive comments would satisfy every read and
+  hold the turn open indefinitely. A turn is also capped at `max_turn_bytes` (32 MiB), since the
+  stream is buffered before parsing and an endless stream would otherwise grow the harness heap.
+  Both limits surface as `TransportTimeout`, which is the agent's fault. Bounded this way rather
   than by `turn_quiet_ms`. An agent that holds the stream open after it has finished speaking
   therefore reads as a timeout; `turn_end_field` does not shorten the wait, because the transport
   consumes the whole stream before handing any frame over.

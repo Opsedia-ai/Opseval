@@ -25,14 +25,21 @@ A single agreement percentage hides the second case whenever most attempts genui
 `opseval calibrate <run> --labels labels.yaml` compares the scores a finished run recorded with
 human labels for the same attempts. It is offline and read-only — an import-linter contract
 forbids it from reaching transports, the driver, the simulator or the runner, like
-`opseval rescore` — and it writes `calibration.json` beside the run without touching it.
+`opseval rescore` — and it writes a timestamped `calibration-<stamp>.json` beside the run without touching it — one
+file per calibration, so a second reviewer's labels cannot silently replace the first's. A folder
+it cannot write (a read-only CI artifact directory) is a `ConfigError` → exit 3; letting `OSError`
+escape would exit 1, which in Opseval's scheme means the thing under test failed.
 
 **Labels are explicit and validated.** A label is `{test_id, attempt_index, scorer_id, verdict}`
 with `verdict: passed | failed`, in a file with `extra="forbid"`. A duplicate label for the same
 cell is a load error rather than last-one-wins: two reviewers disagreeing is real information,
 and silently keeping one of them is not an answer to it. `--template-for <scorer id>` prints a
-ready-to-fill file for every attempt in the run that has that score, with a comment saying to
-delete rows you have not reviewed, because a guessed label is worse than a missing one.
+ready-to-fill file for every attempt in the run that has that score. Each row's verdict is the
+sentinel `REVIEW`, which is **rejected on load**: pre-filling "passed" would mean an unedited or
+half-filled template reported 100% agreement and exit 0, certifying a judge nobody had reviewed.
+A label naming a scorer the run never scored is likewise a load error, not a silently dropped
+row — the module's own promise is that a mistake in a label file cannot quietly shrink the sample
+a judge is measured on.
 
 **Per scorer, it reports:** usable labels, agreement, Cohen's kappa, false passes, false fails,
 and the false-pass *rate* — the share of the attempts humans failed that the judge passed. That
@@ -49,10 +56,12 @@ as honest as the thing it measures:
 - A rate over an empty denominator is `None`, not `0.0`. If humans failed nothing, there is no
   false-pass rate, and printing 0% would read as "this judge never lets a failure through" on
   evidence that says nothing at all.
-- **Kappa is `None` when undefined.** If either rater used a single verdict across the sample,
-  expected agreement is 1 and kappa's denominator collapses. Reporting 0.0 there would read as
-  "no better than chance" when the truth is "this sample cannot tell", so the result carries a
-  `kappa_note` explaining which rater was uniform.
+- **Kappa is `None` when undefined.** If *either* rater used a single verdict across the sample,
+  the statistic is meaningless: with a degenerate marginal it collapses toward 0 however well the
+  two actually agree. Ten labels all marked "passed" against a judge that passed eight gives
+  kappa 0.0, which reads as "no better than chance" on a sample that simply cannot tell. The
+  guard therefore tests each rater's marginal rather than only the combined expected agreement,
+  and the result carries a `kappa_note` naming which rater was uniform.
 - A label naming an attempt that is not in the run is a configuration error (exit 3), not a
   skipped row. A typo that silently shrank the sample would quietly weaken the very check being
   run.

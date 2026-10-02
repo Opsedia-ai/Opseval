@@ -333,16 +333,21 @@ class TestConfigErrors:
         with pytest.raises(ConfigError, match="not in run"):
             calibrate_run(run_dir, labels)
 
-    def test_a_label_for_an_unscored_scorer_is_reported_as_unmatched(self, run_dir: Path) -> None:
-        """The attempt exists, so this is a usable-sample problem, not a bad file."""
+    def test_a_scorer_the_run_never_scored_is_a_config_error(self, run_dir: Path) -> None:
+        """A misspelled scorer id must not quietly shrink the sample to nothing and then
+        report "the judge could not be measured"."""
         write_run(run_dir, run_with([P, P]))
         labels = write_labels(
             run_dir.parent / "l.yaml", ["passed", "passed"], scorer_id="judge.efficiency"
         )
-        out = calibrate_run(run_dir, labels, min_labels=1)
-        only = out.scorers[0]
-        assert only.unmatched == 2
-        assert only.status is AgreementStatus.NOT_MEASURED
+        with pytest.raises(ConfigError, match="never scored"):
+            calibrate_run(run_dir, labels, min_labels=1)
+
+    def test_the_error_lists_what_the_run_did_score(self, run_dir: Path) -> None:
+        write_run(run_dir, run_with([P, P]))
+        labels = write_labels(run_dir.parent / "l.yaml", ["passed"] * 2, scorer_id="judge.typo")
+        with pytest.raises(ConfigError, match=SCORER):
+            calibrate_run(run_dir, labels, min_labels=1)
 
 
 class TestOutput:
@@ -351,9 +356,26 @@ class TestOutput:
         before = (run_dir / "result.json").read_text("utf-8")
         labels = write_labels(run_dir.parent / "l.yaml", ["passed", "passed", "failed", "failed"])
         out = calibrate_run(run_dir, labels, min_labels=4)
-        save_calibration(run_dir, out)
+        written = save_calibration(run_dir, out)
         assert (run_dir / "result.json").read_text("utf-8") == before
-        assert (run_dir / "calibration.json").is_file()
+        assert written.is_file() and written.name.startswith("calibration-")
+
+    def test_a_second_calibration_does_not_replace_the_first(self, run_dir: Path) -> None:
+        """Two reviewers' labels must both survive."""
+        write_run(run_dir, run_with([P, P, F, F]))
+        labels = write_labels(run_dir.parent / "l.yaml", ["passed", "passed", "failed", "failed"])
+        out = calibrate_run(run_dir, labels, min_labels=4)
+        first = save_calibration(run_dir, out)
+        first.write_text(first.read_text("utf-8"), encoding="utf-8")
+        assert first.is_file()
+
+    def test_an_unwritable_folder_is_a_config_error_not_a_traceback(self, run_dir: Path) -> None:
+        """Exit 1 would mean the agent failed; this is a configuration problem (exit 3)."""
+        write_run(run_dir, run_with([P, P, F, F]))
+        labels = write_labels(run_dir.parent / "l.yaml", ["passed", "passed", "failed", "failed"])
+        out = calibrate_run(run_dir, labels, min_labels=4)
+        with pytest.raises(ConfigError, match="cannot write"):
+            save_calibration(run_dir / "does" / "not" / "exist", out)
 
     def test_the_written_json_round_trips(self, run_dir: Path) -> None:
         write_run(run_dir, run_with([P, P, F, F]))
@@ -384,11 +406,33 @@ class TestLabelTemplate:
         text = label_template(run_with([P, F, E]), SCORER)
         parsed = yaml.safe_load(text)
         assert [row["attempt_index"] for row in parsed["labels"]] == [0, 1, 2]
-        assert {row["verdict"] for row in parsed["labels"]} == {"passed"}
 
-    def test_it_round_trips_through_the_loader(self, tmp_path: Path) -> None:
+    def test_it_never_pre_fills_a_verdict(self) -> None:
+        """A pre-filled "passed" would make an unedited template report 100% agreement."""
+        parsed = yaml.safe_load(label_template(run_with([P, F]), SCORER))
+        assert {row["verdict"] for row in parsed["labels"]} == {"REVIEW"}
+
+    def test_an_unedited_template_is_rejected(self, tmp_path: Path) -> None:
         path = tmp_path / "l.yaml"
         path.write_text(label_template(run_with([P, F]), SCORER), encoding="utf-8")
+        with pytest.raises(ConfigError, match="still say REVIEW"):
+            load_labels(path)
+
+    def test_a_half_filled_template_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "l.yaml"
+        text = label_template(run_with([P, F]), SCORER).replace(
+            "verdict: REVIEW", "verdict: passed", 1
+        )
+        path.write_text(text, encoding="utf-8")
+        with pytest.raises(ConfigError, match="1 label"):
+            load_labels(path)
+
+    def test_a_filled_template_loads(self, tmp_path: Path) -> None:
+        path = tmp_path / "l.yaml"
+        path.write_text(
+            label_template(run_with([P, F]), SCORER).replace("verdict: REVIEW", "verdict: passed"),
+            encoding="utf-8",
+        )
         assert len(load_labels(path).labels) == 2
 
     def test_an_unknown_scorer_is_a_config_error(self) -> None:

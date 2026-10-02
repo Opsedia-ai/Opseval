@@ -45,6 +45,14 @@ details{margin:6px 0}summary{cursor:pointer}
   {% if result.gate.warnings %}<p class="muted" style="margin:4px 0 0">Warnings: {{ result.gate.warnings | join('; ') }}</p>{% endif %}
 </div>
 
+{% if result.degraded_scorers %}
+<div class="card"><h3 class="inconclusive">Degraded evidence</h3>
+<p class="muted">These scorers produced a score on weaker evidence than they ask for &mdash;
+frame evidence instead of traces, or a judge from the graded model&rsquo;s own vendor family.
+<strong>Their scores counted toward the verdict above.</strong></p>
+<ul>{% for s in result.degraded_scorers %}<li><code>{{ s }}</code></li>{% endfor %}</ul></div>
+{% endif %}
+
 {% if result.load_errors %}
 <div class="card"><h3 class="inconclusive">Scenarios that could not be loaded (never run)</h3>
 <ul>{% for e in result.load_errors %}<li><code>{{ e }}</code></li>{% endfor %}</ul></div>
@@ -58,7 +66,7 @@ details{margin:6px 0}summary{cursor:pointer}
 <td>{{ t.criticality.value }}</td>
 <td class="{{ t.status.value }}"><b>{{ t.status.value }}</b></td>
 <td>{{ t.pass_rate | score }}</td><td>{{ t.pass_hat_k | score }}</td>
-<td>{% if t.flaky %}<span class="badge inconclusive">flaky</span> {% endif %}{% if t.unstable_scorers %}<span class="muted">unstable: {{ t.unstable_scorers | join(', ') }}</span>{% endif %}<span class="muted" dir="auto">{{ t.reason or '' }}</span></td></tr>
+<td>{% if t.flaky %}<span class="badge inconclusive">flaky</span> {% endif %}{% if t.degraded_scorers %}<span class="badge">degraded</span> <span class="muted">{{ t.degraded_scorers | join(', ') }}</span> {% endif %}{% if t.unstable_scorers %}<span class="muted">unstable: {{ t.unstable_scorers | join(', ') }}</span>{% endif %}<span class="muted" dir="auto">{{ t.reason or '' }}</span></td></tr>
 {% endfor %}
 </table>
 

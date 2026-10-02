@@ -276,13 +276,47 @@ class TestHarnessFaults:
             await session.send({"type": "user_message"})
         await session.close()
 
-    async def test_an_unexpected_text_content_type_is_accepted(self) -> None:
-        """A sloppy but working server must not be turned into a harness failure."""
+    async def test_an_html_page_is_a_harness_error_not_an_agent_silence(self) -> None:
+        """A proxy login page or redirect parses to zero events; blaming the agent for
+        saying nothing would invert the one rule."""
         session = await transport(
-            stream('data: {"type": "message", "text": "ok"}\n\n', headers={})
+            stream("<html>login</html>", headers={"content-type": "text/html"})
         ).connect()
+        with pytest.raises(TransportError, match="text/html"):
+            await session.send({"type": "user_message"})
+        await session.close()
+
+    async def test_a_missing_content_type_is_still_accepted(self) -> None:
+        """Some gateways omit the header; refusing would invent a harness failure."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            response = httpx.Response(200, text='data: {"type": "message", "text": "ok"}\n\n')
+            del response.headers["content-type"]
+            return response
+
+        session = await transport(handler).connect()
         await session.send({"type": "user_message"})
         assert (await session.receive(1))["text"] == "ok"
+        await session.close()
+
+    async def test_a_turn_that_never_ends_is_a_timeout(self) -> None:
+        """httpx bounds each read, not the stream, so keep-alives could hold it open."""
+        import asyncio as _asyncio
+
+        async def slow(request: httpx.Request) -> httpx.Response:
+            await _asyncio.sleep(5)
+            return httpx.Response(200, headers=SSE_HEADERS, text="")
+
+        session = await transport(slow, request_timeout=0.05).connect()
+        with pytest.raises(TransportTimeout, match="did not finish its turn"):
+            await session.send({"type": "user_message"})
+        await session.close()
+
+    async def test_an_oversized_turn_is_a_timeout(self) -> None:
+        big = "".join(f'data: {{"type": "message", "n": {i}}}\n\n' for i in range(200))
+        session = await transport(stream(big), max_turn_bytes=200).connect()
+        with pytest.raises(TransportTimeout, match="without ending it"):
+            await session.send({"type": "user_message"})
         await session.close()
 
 
