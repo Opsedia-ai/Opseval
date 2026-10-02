@@ -52,6 +52,8 @@ def console_summary(result: SuiteResult) -> str:
         )
         if t.reason:
             lines.append(f"  {'':<13} ↳ {t.reason}")
+        if t.degraded_scorers:
+            lines.append(f"  {'':<13} ↳ degraded: {', '.join(t.degraded_scorers)}")
     for err in result.load_errors:
         lines.append(f"  LOAD ERROR    {err}")
     lines += ["", f"Gate: {result.gate.status.upper()} — {result.gate.summary}"]

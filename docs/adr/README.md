@@ -18,5 +18,6 @@
 | [0014](0014-judge-votes-and-planted-injections.md) | Harness-axis persona judge, planted injections and 3-vote security judges | Proposed |
 | [0015](0015-ci-integrations.md) | CI integrations: a composite GitHub Action and a pytest plugin | Proposed |
 | [0016](0016-judge-independence-and-quality-judges.md) | Judge independence guard, plus policy, content-quality and efficiency judges | Proposed |
+| [0017](0017-degraded-visibility-rubric-digests-and-ballot-independence.md) | Degraded evidence is visible in every output, rubric digests for every judge, independent ballots | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

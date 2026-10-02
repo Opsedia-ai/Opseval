@@ -117,7 +117,7 @@ refused runs, and a run refused for an unverifiable reason is as dishonest as a 
 whose criteria *are* scenario data reports `rubric_hash` in its details, and `opseval rescore`
 compares it before reusing a score. Without this, editing `expectations.policy` and re-scoring
 offline would reuse grades awarded against the old rules and present them as current — the one
-thing ADR-0013 exists to prevent.
+thing ADR-0013 exists to prevent. ADR-0017 extends this from this one judge to all of them.
 
 ## Consequences
 
@@ -135,18 +135,11 @@ thing ADR-0013 exists to prevent.
   black-box harness cannot discover the agent's model on its own.
 - `judge.content_quality` and `judge.efficiency` are strict against the default `threshold: 1.0`;
   the README tells teams to lower it rather than gate releases on style.
-- `security.policy_adherence` costs three judge calls per attempt. Those ballots are still
-  sequential, same-prompt, `temperature=0.0` calls that differ only by `seed` (ADR-0014's
-  machinery), so on gateways that ignore `seed` they are not independent samples and
-  `JUDGE_DISAGREEMENT` can rarely trigger. Making votes genuinely independent, and running them
-  concurrently under the existing judge semaphore, is follow-up work that applies to every
-  multi-vote judge, not just this one.
-- **`degraded` is weakly surfaced.** It appears as a badge in the HTML report but is not read by
-  `verdicts.py`, `exit_code()`, the JUnit writer or the Markdown gate summary that `opseval summary`
-  and the GitHub Action post. So under `warn` — and for any library caller driving `ScoringEngine`
-  directly, which bypasses the launch check entirely — a self-graded pass is exit 0 with no
-  CI-visible signal. `error` is the default precisely because of this, but carrying `degraded` into
-  the gate summary and JUnit output is necessary follow-up before `warn` can be recommended.
+- `security.policy_adherence` costs three judge calls per attempt. Those ballots were initially
+  sequential, same-prompt, `temperature=0.0` calls differing only by `seed`, which made them
+  poor samples on gateways that ignore `seed`. Resolved for every multi-vote judge by ADR-0017.
+- **`degraded` was weakly surfaced** — a badge in the HTML report only, invisible to the gate
+  summary, JUnit and the console, which made `warn` a silent setting. Resolved by ADR-0017.
 - `opseval calibrate` (judge ↔ human agreement) remains the natural follow-up: it would let a team
   *measure* judge bias on their own data instead of inferring it from the vendor name, at which
   point the family check becomes a cheap default rather than the only defence.
