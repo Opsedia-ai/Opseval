@@ -21,5 +21,6 @@
 | [0017](0017-degraded-visibility-rubric-digests-and-ballot-independence.md) | Degraded evidence is visible in every output, rubric digests for every judge, independent ballots | Proposed |
 | [0018](0018-judge-calibration-against-human-labels.md) | `opseval calibrate`: judge agreement with human labels, false passes reported apart | Proposed |
 | [0019](0019-sse-transport.md) | Server-Sent Events transport, and which stream faults belong to the agent | Proposed |
+| [0020](0020-preflight-health-checks.md) | Preflight health checks: a dependency outage skips, an unreachable agent refuses | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

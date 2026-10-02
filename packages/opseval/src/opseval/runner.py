@@ -16,12 +16,14 @@ from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.driver import Driver
 from opseval.errors import ConfigError
 from opseval.llm import UsageMeter, client_for_role
+from opseval.models.preflight import PreflightReport
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.scenario import Scenario
+from opseval.preflight import preflight
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
-from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine
+from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
 from opseval.scoring.base import check_judge_independence
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 from opseval.storage import FileStore
@@ -59,6 +61,10 @@ class RunOptions:
     transport_factory: TransportFactory | None = None
     trace_source: TraceSource | None = None
     """Inject a trace source (tests); otherwise one is built from settings."""
+    preflight: bool = True
+    """Check dependencies before running, so an outage skips instead of failing."""
+    verify_llm: bool = False
+    """Spend one token per LLM role proving the credentials actually work."""
 
 
 def build_transport_factory(options: RunOptions, settings: Settings) -> TransportFactory:
@@ -124,6 +130,34 @@ def _needs_llm_persona(scenario: Scenario) -> bool:
     return not scenario.conversation.scripted_turns
 
 
+def _unmet(scenario: Scenario, health: PreflightReport, no_simulator: bool) -> str | None:
+    """Why preflight says this scenario cannot produce a verdict, if it says so.
+
+    Only *dependency* outages reach here. An unreachable agent is refused by ``launch``
+    instead, because a skip is merely a gate warning and would let a suite that tested
+    nothing report "safe to release".
+
+    Only dependencies that would leave *nothing* measurable count. A scenario with both
+    deterministic and judge scorers still produces a real verdict without the judge, so
+    skipping it would throw away the checks that can run.
+    """
+    needs_persona = _needs_llm_persona(scenario) and not no_simulator
+    if needs_persona and (reason := health.reason("simulator")) is not None:
+        return reason
+    requires = [
+        cls.requires
+        for spec in effective_specs(scenario)
+        if (cls := REGISTRY.get(spec.id)) is not None
+    ]
+    all_llm = bool(requires) and all(r == "llm" for r in requires)
+    if all_llm and (reason := health.reason("judge")) is not None:
+        return f"every scorer needs a judge, and {reason}"
+    all_trace = bool(requires) and all(r == "trace" for r in requires)
+    if all_trace and (reason := health.reason("traces")) is not None:
+        return f"every scorer needs traces, and {reason}"
+    return None
+
+
 async def launch(
     catalogue_target: str | Path,
     options: RunOptions,
@@ -164,6 +198,31 @@ async def launch(
     )
     store = FileStore(settings.reports_dir)
 
+    health = PreflightReport()
+    if options.preflight:
+        health = await preflight(
+            catalogue.scenarios,
+            profile,
+            settings,
+            target=make_transport(profile).target,
+            transport=options.transport,
+            traces_enabled=options.traces and profile.traces is not None,
+            verify_llm=options.verify_llm,
+            probe_target_host=options.transport_factory is None,
+        )
+        sut = health.get("sut")
+        if sut is not None and sut.blocking:
+            # Not a skip. A skipped scenario is only a gate *warning*, so an unreachable
+            # agent would report "safe to release" on a suite that tested nothing. We
+            # could not reach what we were asked to test: that is a config error (exit 3).
+            raise ConfigError(
+                f"the agent is not reachable at {make_transport(profile).target}: "
+                f"{sut.detail}. Nothing was run. Check the target and the network, or "
+                "pass --no-preflight to try anyway."
+            )
+        for check in health.blocking():
+            log(f"preflight: {check.name} unavailable — {check.detail}")
+
     started = datetime.now(UTC)
     run_id = f"{started:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
     target_label = make_transport(profile).target
@@ -197,6 +256,10 @@ async def launch(
         store.save_scenario(run_id, scenario)
         if scenario.is_blocked:
             verdicts.append(skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'"))
+            continue
+        blocked_by = _unmet(scenario, health, sim_client is None)
+        if blocked_by is not None:
+            verdicts.append(skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, blocked_by))
             continue
         if _needs_llm_persona(scenario) and sim_client is None:
             verdicts.append(
@@ -269,6 +332,7 @@ async def launch(
         usage=meter.snapshot(),
         config_digest=config_digest(settings),
         load_errors=[str(p) for p in catalogue.problems],
+        preflight=health if options.preflight else None,
     )
     store.save_report(run_id, render_html(result, store.load_records(run_id)))
     store.save_junit(run_id, render_junit(result))

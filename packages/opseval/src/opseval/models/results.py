@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from opseval.models.preflight import PreflightReport
 from opseval.models.record import TerminalState
 from opseval.models.scenario import Criticality
 
@@ -173,6 +174,8 @@ class SuiteResult(BaseModel):
     config_digest: dict[str, Any] = Field(default_factory=dict)
     load_errors: list[str] = Field(default_factory=list)
     rescore: RescoreInfo | None = None
+    preflight: PreflightReport | None = None
+    """What the dependency checks found before the run (ADR-0020)."""
 
     @property
     def degraded_scorers(self) -> list[str]:

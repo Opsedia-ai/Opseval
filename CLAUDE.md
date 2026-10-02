@@ -38,6 +38,7 @@ packages/opseval/src/opseval/
   runner.py      the launch pipeline used by the CLI (saves a scenario/profile snapshot per run)
   rescore.py     `opseval rescore`: offline re-scoring of saved records (ADR-0013)
   calibrate.py   `opseval calibrate`: judge agreement with human labels (ADR-0018)
+  preflight.py   dependency health checks before a run (ADR-0020)
   reporting/     self-contained HTML report, console summary, JUnit XML, Markdown gate summary
   scaffold/      `opseval init` templates
   demo/          reference refund agent + example catalogue (`opseval demo`)
@@ -45,7 +46,7 @@ packages/opseval/src/opseval/
 packages/opseval/tests/   pytest (asyncio_mode=auto), incl. the fault-injection suite
 packages/pytest-opseval/  pytest plugin: scenarios as pytest items (entry point disabled in our own run)
 action.yml                composite GitHub Action (dogfooded by the `action` CI job)
-docs/adr/                 architecture decisions (0001-0019); new decisions get a new ADR
+docs/adr/                 architecture decisions (0001-0020); new decisions get a new ADR
 ```
 
 ## Commands
@@ -81,6 +82,7 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 - v0.2: a degraded score is named in the gate summary, JUnit and console (never only in the HTML); every judge declares a scenario-derived `rubric()` whose digest `rescore` checks before reusing a score; multi-vote ballots are concurrent and rotate the criteria so they are distinct prompts (ADR-0017).
 - v0.2: `opseval calibrate <run> --labels` measures a scorer against human labels and reports the false-pass rate separately, because aggregate agreement hides the dangerous direction. Offline and read-only; exit codes 0/1/2/3 as usual (ADR-0018).
 - v0.2: `--transport sse` for agents that stream a turn as Server-Sent Events. A stalled stream is a `TransportTimeout` (the agent's fault); a dropped one is `TransportClosed` (not judged); an undecodable event stays `_raw` and is never given a kind, so garbage cannot look like a clean turn (ADR-0019).
+- v0.2: preflight health checks run before the first frame. A **dependency** outage skips only the scenarios it silences (`skipped_precondition`); an **unreachable agent** raises `ConfigError` (exit 3) rather than skipping, because a skip is only a gate warning and would report "safe to release" on a suite that tested nothing. `opseval preflight` runs the checks alone; `--no-preflight` and `--verify-llm` on `run` (ADR-0020).
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`). The reader is verified against a real self-hosted Langfuse 4.44 (`scripts/langfuse_smoke.py`, ADR-0011); not yet against Langfuse Cloud.
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
@@ -90,7 +92,7 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 1. Opt-out, content-free telemetry (ADR-0010) — **blocked**: the design in PR #12 needs a
    product/privacy decision before any code.
 2. Protocol probes (SSE transport shipped, ADR-0019); OpenTelemetry trace source.
-3. Flow map and preflight checks; argument schemas for trace-backed tool scorers.
+3. Flow map (FR-RPT-05); argument schemas for trace-backed tool scorers.
 4. Stable scorer plugin API with a contract test kit.
 5. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
 

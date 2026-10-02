@@ -23,7 +23,7 @@ from opseval.reporting import console_summary
 from opseval.runner import RunOptions, launch
 from opseval.scaffold import TEMPLATES, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY
-from opseval.verdicts import EXIT_HARNESS
+from opseval.verdicts import EXIT_HARNESS, EXIT_NOT_JUDGED
 
 app = typer.Typer(
     add_completion=False,
@@ -149,6 +149,13 @@ def run(
         bool, typer.Option(help="Allow scenarios to perform the irreversible outcome.")
     ] = False,
     fail_fast: Annotated[bool, typer.Option(help="Stop after the first failed scenario.")] = False,
+    preflight: Annotated[
+        bool,
+        typer.Option(help="Check dependencies first, so an outage skips instead of failing."),
+    ] = True,
+    verify_llm: Annotated[
+        bool, typer.Option(help="Spend one token per LLM role proving the credentials work.")
+    ] = False,
     filter_: Annotated[
         list[str] | None, typer.Option("--filter", help="tag=…, id=… or criticality=…")
     ] = None,
@@ -174,6 +181,8 @@ def run(
         fail_fast=fail_fast,
         filters=filter_ or [],
         traces=traces,
+        preflight=preflight,
+        verify_llm=verify_llm,
     )
     raise typer.Exit(_execute(path, options, settings, open_report, junit))
 
@@ -245,6 +254,53 @@ def summary(
         typer.secho(f"error: {path}: not a finished run ({exc})", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
     typer.echo(markdown_summary(result, report_url=report_url))
+
+
+@app.command()
+def preflight(
+    catalogue: Annotated[Path, typer.Argument(help="Suite or scenario folder to check for.")],
+    profile: Annotated[str, typer.Option("--profile", "-p", help="SUT profile file.")],
+    target: Annotated[str, typer.Option("--target", "-t", help="Agent URL.")],
+    transport: Annotated[
+        str, typer.Option(help="websocket | http-json | sse | openai-chat")
+    ] = "websocket",
+    traces: Annotated[bool, typer.Option(help="Include the trace source check.")] = True,
+    verify_llm: Annotated[
+        bool, typer.Option(help="Spend one token per LLM role proving the credentials work.")
+    ] = False,
+) -> None:
+    """Check what a suite depends on, without running it.
+
+    Exit codes: 0 everything needed is available, 2 something is missing (scenarios
+    depending on it would be skipped, not failed), 3 configuration error.
+    """
+    from opseval.preflight import preflight as run_preflight
+
+    settings = Settings()
+    try:
+        sut_profile = load_profile(profile)
+        found, _name = load_catalogue(
+            catalogue,
+            sut_profile,
+            known_scorers=REGISTRY.keys(),
+            known_invariants=set(INVARIANTS),
+        )
+        report = asyncio.run(
+            run_preflight(
+                found.scenarios,
+                sut_profile,
+                settings,
+                target=target,
+                transport=transport,
+                traces_enabled=traces and sut_profile.traces is not None,
+                verify_llm=verify_llm,
+            )
+        )
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+    typer.echo(report.summary())
+    raise typer.Exit(EXIT_NOT_JUDGED if report.blocking() else 0)
 
 
 def _finished_run(run_dir: Path) -> SuiteResult:

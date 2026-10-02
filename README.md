@@ -80,6 +80,24 @@ auth_frame: {type: auth, token: "{token}"}
 
 A drop Opseval can't resume, or a resume answered with a different session, ends the attempt as *not judged*. It is never counted as an agent failure. Add the `conversation.connection_stable` scorer if the agent dropping the connection should fail the scenario even when the session resumed ([ADR-0012](docs/adr/0012-websocket-resume-and-token-refresh.md)).
 
+### Check your setup before a run
+
+```bash
+opseval preflight suites/smoke.yaml --profile profile.yaml --target wss://your-agent/ws
+```
+
+Checks the agent, token minting, the simulator and judge endpoints, and the trace source — then
+says which scenarios would be skipped and why. `opseval run` does the same automatically:
+
+- a **dependency** outage skips only the scenarios it silences (`skipped_precondition`), so a
+  scenario that still has a deterministic scorer keeps running;
+- an **unreachable agent** stops the run with exit 3 instead of skipping, because a skip is only a
+  gate warning and would report "safe to release" on a suite that tested nothing.
+
+A reachable LLM endpoint reports `unverified`, not `ok`: a probe cannot prove a key works. Pass
+`--verify-llm` to spend one token proving it, or `--no-preflight` to skip the checks. See
+[ADR-0020](docs/adr/0020-preflight-health-checks.md).
+
 ### Streaming agents (Server-Sent Events)
 
 If your agent answers a POST with `text/event-stream`, point Opseval at it:
