@@ -143,7 +143,15 @@ def payload(res: SuiteResult | None = None, **kw: Any) -> TelemetryPayload:
 
 
 def settings(**kw: Any) -> Settings:
+    """Settings with the ambient environment pinned.
+
+    `Settings()` reads CI and DO_NOT_TRACK from the real environment, so without this a
+    run under GitHub Actions takes the "off in CI" branch before reaching the one the
+    test is about. Tests that are *about* those switches pass them explicitly.
+    """
     kw.setdefault("allowed_hosts", "")
+    kw.setdefault("ci", False)
+    kw.setdefault("do_not_track", False)
     return Settings(**kw)
 
 
@@ -246,7 +254,7 @@ class TestDecide:
 
     def test_do_not_track_is_honoured(self, tmp_path: Path) -> None:
         decision = decide(
-            Settings(
+            settings(
                 do_not_track=True,
                 telemetry_endpoint="https://t.example.com",
                 allowed_hosts="t.example.com",
@@ -258,7 +266,7 @@ class TestDecide:
 
     def test_ci_is_off_by_default(self, tmp_path: Path) -> None:
         decision = decide(
-            Settings(
+            settings(
                 ci=True, telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"
             ),
             tmp_path / "c.json",
@@ -269,7 +277,7 @@ class TestDecide:
     def test_ci_can_be_overridden_explicitly(self, tmp_path: Path) -> None:
         mark_notice_shown(tmp_path / "c.json")
         decision = decide(
-            Settings(
+            settings(
                 ci=True,
                 telemetry="true",
                 telemetry_endpoint="https://t.example.com",
@@ -287,14 +295,14 @@ class TestDecide:
 
     def test_plain_http_is_refused(self, tmp_path: Path) -> None:
         decision = decide(
-            Settings(telemetry_endpoint="http://t.example.com", allowed_hosts="t.example.com"),
+            settings(telemetry_endpoint="http://t.example.com", allowed_hosts="t.example.com"),
             tmp_path / "c.json",
         )
         assert decision.send is False
 
     def test_the_first_run_prints_a_notice_and_sends_nothing(self, tmp_path: Path) -> None:
         decision = decide(
-            Settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
+            settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
             tmp_path / "c.json",
         )
         assert decision.send is False
@@ -304,7 +312,7 @@ class TestDecide:
         config = tmp_path / "c.json"
         mark_notice_shown(config)
         decision = decide(
-            Settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
+            settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
             config,
         )
         assert decision.send is True
@@ -314,7 +322,7 @@ class TestDecide:
         mark_notice_shown(config)
         set_enabled(False, config)
         decision = decide(
-            Settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
+            settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
             config,
         )
         assert decision.send is False
@@ -383,7 +391,7 @@ class TestCannotAffectTheRun:
         mark_notice_shown(config)
         decision = await report(
             result(),
-            Settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
+            settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
             event=TelemetryEvent.RUN,
             transports=["websocket"],
             languages=["en"],
@@ -426,7 +434,7 @@ class TestCannotAffectTheRun:
         mark_notice_shown(config)
         await report(
             result(),
-            Settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
+            settings(telemetry_endpoint="https://t.example.com", allowed_hosts="t.example.com"),
             event=TelemetryEvent.RUN,
             transports=["websocket"],
             languages=["en"],
@@ -437,6 +445,36 @@ class TestCannotAffectTheRun:
 
 
 # --- the CLI --------------------------------------------------------------------------
+
+
+class TestPrecedence:
+    """The order of the switches is load-bearing, so it is pinned."""
+
+    def test_ci_is_checked_before_the_endpoint(self, tmp_path: Path) -> None:
+        """Found by CI itself: under GitHub Actions this branch wins, which is correct —
+        a CI run must not send even if an endpoint is configured and allowlisted."""
+        decision = decide(
+            settings(
+                ci=True,
+                telemetry_endpoint="https://t.example.com",
+                allowed_hosts="t.example.com",
+            ),
+            tmp_path / "c.json",
+        )
+        assert decision.send is False
+        assert "CI" in decision.reason
+
+    def test_explicit_false_beats_everything(self, tmp_path: Path) -> None:
+        decision = decide(
+            settings(
+                telemetry="false",
+                telemetry_endpoint="https://t.example.com",
+                allowed_hosts="t.example.com",
+            ),
+            tmp_path / "c.json",
+        )
+        assert decision.send is False
+        assert "OPSEVAL_TELEMETRY=false" in decision.reason
 
 
 class TestCli:
