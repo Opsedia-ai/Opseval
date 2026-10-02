@@ -13,6 +13,7 @@ from opseval import __version__
 from opseval.auth import HS256Tokens, TokenSource
 from opseval.catalogue import load_catalogue, load_profile
 from opseval.config import Settings, check_url_allowed, config_digest
+from opseval.demo import catalogue_dir as demo_catalogue_dir
 from opseval.driver import Driver
 from opseval.errors import ConfigError
 from opseval.llm import UsageMeter, client_for_role
@@ -20,6 +21,7 @@ from opseval.models.preflight import PreflightReport
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.scenario import Scenario
+from opseval.models.telemetry import TelemetryEvent
 from opseval.preflight import preflight
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
@@ -27,6 +29,7 @@ from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
 from opseval.scoring.base import check_judge_independence
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 from opseval.storage import FileStore
+from opseval.telemetry import report as report_telemetry
 from opseval.traces import TraceSource, enrich
 from opseval.traces.langfuse import LangfuseTraceSource
 from opseval.transport import (
@@ -337,4 +340,15 @@ async def launch(
     store.save_report(run_id, render_html(result, store.load_records(run_id)))
     store.save_junit(run_id, render_junit(result))
     store.save_result(result)  # written last: marks the run as complete
+    # After the result is on disk, so a slow or dead collector cannot cost anything.
+    await report_telemetry(
+        result,
+        settings,
+        event=TelemetryEvent.RUN,
+        transports=[options.transport],
+        languages=[s.persona.language for s in catalogue.scenarios],
+        trace_source=trace_source.name if trace_source else None,
+        demo_target=str(catalogue_target).startswith(str(demo_catalogue_dir())),
+        log=log,
+    )
     return result

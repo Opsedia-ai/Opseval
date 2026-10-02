@@ -17,7 +17,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 Self-contained HTML + JSON report
 - 🟢 `opseval demo` with a reference refund agent · 🟢 `opseval init` starter catalogues
 - 🟢 JUnit XML output for CI test reports
-- ⚪ Opt-out, content-free telemetry
+- 🟢 Opt-out, content-free telemetry (built; no endpoint ships, ADR-0021)
 
 ## v0.2 Beta: "It gates releases" ⚪
 

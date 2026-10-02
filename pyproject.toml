@@ -98,6 +98,18 @@ source_modules = ["opseval.rescore"]
 forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
 
 [[tool.importlinter.contracts]]
+name = "Telemetry sees results, never conversations: no records, driver, transports or simulator"
+type = "forbidden"
+source_modules = ["opseval.telemetry"]
+forbidden_modules = [
+  "opseval.driver",
+  "opseval.transport",
+  "opseval.simulator",
+  "opseval.traces",
+  "opseval.storage",
+]
+
+[[tool.importlinter.contracts]]
 name = "Calibration is offline and read-only: no transports, driver, simulator or runner"
 type = "forbidden"
 source_modules = ["opseval.calibrate"]

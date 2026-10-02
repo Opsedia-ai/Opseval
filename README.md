@@ -286,6 +286,28 @@ Leaving `sut_model` unset means *unknown*, not *independent*: the check stays in
 claims independence it has not verified. See
 [ADR-0016](docs/adr/0016-judge-independence-and-quality-judges.md).
 
+## Telemetry
+
+Opseval can send anonymous, content-free usage counts, and **sends nothing today**: no collector
+endpoint ships, so a fresh install reports "no endpoint configured". See exactly what it would
+send:
+
+```bash
+opseval telemetry show --sample
+```
+
+It never sends conversations, scenarios, prompts, hosts, keys or file paths — counts are bucketed,
+and a third-party transport or scorer name is reported as `custom`. The install id is a random
+UUID, not derived from your machine. Turn it off for good with any one of:
+
+```bash
+opseval telemetry disable      # or OPSEVAL_TELEMETRY=false, or DO_NOT_TRACK=1
+```
+
+It is off in CI by default, the first run that would send prints a notice and sends nothing, and a
+dead collector can never change an exit code. See
+[ADR-0010](docs/adr/0010-telemetry.md) and [ADR-0021](docs/adr/0021-telemetry-shipped-dark.md).
+
 ## How Opseval fits with other tools
 
 | Tool type | Examples | Relationship |

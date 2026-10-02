@@ -256,6 +256,89 @@ def summary(
     typer.echo(markdown_summary(result, report_url=report_url))
 
 
+telemetry_app = typer.Typer(
+    help="See, enable or disable the anonymous usage counts (ADR-0010).", no_args_is_help=True
+)
+app.add_typer(telemetry_app, name="telemetry")
+
+
+def _sample_result() -> SuiteResult:
+    """A stand-in result, so `show --sample` needs no run."""
+    from datetime import UTC, datetime
+
+    from opseval.models.results import Gate
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    return SuiteResult(
+        opseval_version=__version__,
+        run_id="sample",
+        suite="smoke",
+        target="wss://agent.example.com/ws",
+        profile="my-agent",
+        started_at=now,
+        ended_at=now,
+        tests=[],
+        gate=Gate(status="pass", summary="sample"),
+        exit_code=0,
+    )
+
+
+@telemetry_app.command("show")
+def telemetry_show(
+    run_dir: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option(help="Show the payload for this finished run instead of a sample."),
+    ] = None,
+    sample: Annotated[
+        bool, typer.Option("--sample", help="Show a sample payload without reading a run.")
+    ] = False,
+) -> None:
+    """Print the status and the exact JSON that would be sent. Sends nothing."""
+    import json as _json
+
+    from opseval.models.telemetry import TelemetryEvent
+    from opseval.telemetry import build_payload, config_path, decide, install_id
+
+    settings = Settings()
+    decision = decide(settings)
+    typer.echo(f"Status:    {'enabled' if decision.send else 'not sending'} — {decision.reason}")
+    typer.echo(f"Endpoint:  {decision.endpoint or '(none configured; nothing is ever sent)'}")
+    typer.echo(f"Config:    {config_path()}")
+    typer.echo(f"Install:   {install_id()}")
+    typer.echo("")
+    result = _sample_result() if sample or run_dir is None else _finished_run(run_dir)
+    payload = build_payload(
+        result,
+        event=TelemetryEvent.RUN,
+        install=install_id(),
+        transports=["websocket"] if sample or run_dir is None else [],
+        languages=["en"] if sample or run_dir is None else [],
+        ci=settings.ci,
+    )
+    typer.echo("This is everything that would be sent:")
+    typer.echo(_json.dumps(payload.model_dump(by_alias=True, mode="json"), indent=2))
+
+
+@telemetry_app.command("disable")
+def telemetry_disable() -> None:
+    """Turn telemetry off for this user, permanently."""
+    from opseval.telemetry import set_enabled
+
+    typer.echo(f"Telemetry disabled in {set_enabled(False)}")
+
+
+@telemetry_app.command("enable")
+def telemetry_enable() -> None:
+    """Turn telemetry back on for this user."""
+    from opseval.telemetry import set_enabled
+
+    path = set_enabled(True)
+    typer.echo(
+        f"Telemetry enabled in {path}. It still sends nothing unless "
+        "OPSEVAL_TELEMETRY_ENDPOINT is set and allowlisted."
+    )
+
+
 @app.command()
 def preflight(
     catalogue: Annotated[Path, typer.Argument(help="Suite or scenario folder to check for.")],

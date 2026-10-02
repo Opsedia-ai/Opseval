@@ -10,7 +10,7 @@ import ipaddress
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from opseval.errors import AllowedHostError
@@ -48,6 +48,21 @@ class Settings(BaseSettings):
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None
     langfuse_secret_key: SecretStr | None = None
+
+    # Telemetry (ADR-0010). No default endpoint: the code ships dark, so nothing is sent
+    # until an operator sets one.
+    telemetry: Literal["auto", "true", "false"] = "auto"
+    """``auto`` means on unless CI or DO_NOT_TRACK says otherwise, and only ever to an
+    allowlisted endpoint. ``false`` disables it outright."""
+    telemetry_endpoint: str | None = None
+
+    # Not OPSEVAL_* but read here anyway, because no other module reads the environment.
+    ci: bool = Field(default=False, validation_alias=AliasChoices("CI", "OPSEVAL_CI"))
+    """Telemetry is off in CI unless OPSEVAL_TELEMETRY=true is set explicitly."""
+    do_not_track: bool = Field(
+        default=False, validation_alias=AliasChoices("DO_NOT_TRACK", "OPSEVAL_DO_NOT_TRACK")
+    )
+    """The community-standard opt-out. Honoured the same as OPSEVAL_TELEMETRY=false."""
 
     # Gate
     gate_fail_on_flaky: bool = False
