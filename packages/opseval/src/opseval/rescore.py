@@ -157,9 +157,16 @@ async def rescore_run(
 
     meter = UsageMeter()
     judge = client_for_role(settings, "judge", meter)
-    # The simulator the run actually used, not whatever is configured now. Older runs
-    # predate the key and report None, which reads as unknown rather than independent.
-    recorded = store.load_manifest(run_id).get("simulator_model")
+    # The simulator the run actually used, not whatever is configured now. Runs recorded
+    # before the key existed fall back to the config digest, which over-reports (it holds
+    # OPSEVAL_SIMULATOR_MODEL even when no simulator client was built) but keeps the check
+    # live on old runs instead of silently inert.
+    manifest = store.load_manifest(run_id)
+    if "simulator_model" in manifest:
+        recorded = manifest["simulator_model"]
+    else:
+        config = manifest.get("config")
+        recorded = config.get("simulator_model") if isinstance(config, dict) else None
     sim_model = recorded if isinstance(recorded, str) else None
     check_judge_independence(
         scenarios.values(),

@@ -162,6 +162,8 @@ def independence_conflicts(
     }
     conflicts: dict[str, str] = {}
     for scenario in scenarios:
+        if scenario.is_blocked:
+            continue  # skipped before scoring, so its judges never run
         for spec in effective_specs(scenario):
             cls = REGISTRY.get(spec.id)
             if cls is None or cls.requires != "llm":

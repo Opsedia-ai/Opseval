@@ -148,6 +148,16 @@ class TestModelFamily:
             ("mistral/some-new-id", "mistral"),
             # the base vendor wins over the distillation target
             ("deepseek-r1-distill-llama-70b", "deepseek"),
+            # a dotted *version* is not a deployment prefix
+            ("gemini-2.5-pro", "google"),
+            ("claude-3.5-sonnet", "anthropic"),
+            # a dotted prefix naming another vendor does not outrank the id
+            ("deepseek.qwen-7b", "qwen"),
+            ("mistral.cohere-command-r", "cohere"),
+            # short names are anchored to the first token
+            ("phi-4", "microsoft"),
+            ("nova-pro", "amazon"),
+            ("command-r", "cohere"),
             ("gemini-2.5-pro", "google"),
             ("llama-3.1-70b-instruct", "meta"),
             ("mistral-large-latest", "mistral"),
@@ -163,6 +173,23 @@ class TestModelFamily:
         "model", ["", None, "stub-judge", "our-internal-model-v3", "openai/our-internal-model"]
     )
     def test_unknown_is_none_not_a_guarantee(self, model: str | None) -> None:
+        assert model_family(model) is None
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "sophia-1",
+            "delphi-1",
+            "graphite-7b",
+            "seraphim",
+            "casanova",
+            "innovate-7b",
+            "alpha-nova",
+        ],
+    )
+    def test_short_vendor_names_do_not_match_inside_other_words(self, model: str) -> None:
+        """ "phi" and "nova" are substrings of unrelated names; matching them would refuse
+        a genuinely independent pairing with exit 3."""
         assert model_family(model) is None
 
     def test_case_and_separators_do_not_matter(self) -> None:
@@ -283,6 +310,12 @@ class TestIndependencePreflight:
             )
             == []
         )
+
+    def test_a_blocked_scenario_does_not_refuse_the_run(self, profile: SutProfile) -> None:
+        """A parked scenario is skipped before scoring, so its judges never run."""
+        parked = make_scenario(tags=["blocked"], scorers=[{"id": "judge.content_quality"}])
+        assert parked.is_blocked
+        assert self.preflight(with_model(profile, "claude-sonnet-5"), parked) == []
 
     def test_deterministic_scorers_are_never_a_conflict(self, profile: SutProfile) -> None:
         assert (
@@ -659,10 +692,19 @@ class TestManifestForRescore:
         store.write_manifest("run-1", {"simulator_model": "gpt-5", "config": {}})
         assert store.load_manifest("run-1")["simulator_model"] == "gpt-5"
 
-    def test_an_older_run_without_the_key_reads_as_unknown(self, tmp_path: Path) -> None:
+    def test_an_older_run_keeps_its_model_under_config(self, tmp_path: Path) -> None:
+        """Runs recorded before the top-level key must not make the check go inert."""
         store = FileStore(str(tmp_path))
         store.write_manifest("run-0", {"config": {"simulator_model": "claude-opus-5"}})
-        assert store.load_manifest("run-0").get("simulator_model") is None
+        manifest = store.load_manifest("run-0")
+        assert "simulator_model" not in manifest
+        assert manifest["config"]["simulator_model"] == "claude-opus-5"
+
+    def test_an_explicit_null_is_distinguished_from_a_missing_key(self, tmp_path: Path) -> None:
+        """Present-and-null means "no simulator was built"; absent means "old run"."""
+        store = FileStore(str(tmp_path))
+        store.write_manifest("run-n", {"simulator_model": None, "config": {}})
+        assert "simulator_model" in store.load_manifest("run-n")
 
     def test_a_missing_manifest_is_empty_not_an_error(self, tmp_path: Path) -> None:
         """Re-scoring an older run must not fail for want of a manifest."""
@@ -734,6 +776,16 @@ class TestRubricHash:
             self.ctx(profile, list(RULES))
         )
 
+    def test_a_joined_rule_cannot_collide_with_two_rules(self, profile: SutProfile) -> None:
+        judge = PolicyAdherence()
+        one = judge.rubric_hash(
+            self.ctx(profile, ["Never refund without approval\nNever offer credit"])
+        )
+        two = judge.rubric_hash(
+            self.ctx(profile, ["Never refund without approval", "Never offer credit"])
+        )
+        assert one != two
+
     def test_judges_without_a_scenario_rubric_report_none(self, profile: SutProfile) -> None:
         ctx = ScoringContext(scenario=make_scenario(), profile=profile)
         assert ContentQuality().rubric_hash(ctx) is None
@@ -750,35 +802,74 @@ class TestRubricHash:
 
 
 class TestPromptContent:
-    async def test_content_quality_lists_the_tools_it_cannot_see(self, profile: SutProfile) -> None:
-        """Tool results are not in the digest, so tool-sourced facts must not read as
-        invented against the heaviest criterion."""
+    """`grounded` is the heaviest criterion, so what the judge is told about tool
+    visibility decides whether a correct, tool-sourced fact reads as a hallucination."""
+
+    async def prompt(self, record: RunRecord, profile: SutProfile) -> str:
         judge = StubJudge(GOOD_QUALITY)
-        record = rec(CONVERSATION).model_copy(
-            update={
-                "tool_calls": (
-                    ToolCall(name="lookup_order", started_at=T0),
-                    ToolCall(name="check_eligibility", started_at=T0),
-                )
-            }
-        )
         await score_one(
             record, make_scenario(scorers=[{"id": "judge.content_quality"}]), profile, judge
         )
-        assert "lookup_order" in judge.prompts[0]
-        assert "check_eligibility" in judge.prompts[0]
+        return judge.prompts[0]
 
-    async def test_content_quality_says_so_when_no_tools_were_observed(
+    async def test_observed_tools_are_named(self, profile: SutProfile) -> None:
+        record = rec(CONVERSATION).model_copy(
+            update={
+                "trace_coverage": "full",
+                "tool_calls": (
+                    ToolCall(name="lookup_order", started_at=T0),
+                    ToolCall(name="check_eligibility", started_at=T0),
+                ),
+            }
+        )
+        text = await self.prompt(record, profile)
+        assert "lookup_order" in text
+        assert "check_eligibility" in text
+        assert "plausibly returned as grounded" in text
+
+    async def test_frame_evidence_is_used_when_there_are_no_traces(
         self, profile: SutProfile
     ) -> None:
-        judge = StubJudge(GOOD_QUALITY)
-        await score_one(
-            rec(CONVERSATION),
-            make_scenario(scorers=[{"id": "judge.content_quality"}]),
-            profile,
-            judge,
+        """`record.tool_calls` is only filled with full trace coverage, but the demo
+        profile proves tool calls from frames, so that evidence must still be read."""
+        frames = list(rec(CONVERSATION).frames)
+        frames.append(
+            FrameRecord(
+                seq=99,
+                at=T0,
+                direction="received",
+                kind=FrameKind.MESSAGE,
+                payload={"data": {"order_summary": {"id": "10482"}}},
+                text=None,
+            )
         )
-        assert "(none observed)" in judge.prompts[0]
+        record = rec(CONVERSATION).model_copy(update={"frames": tuple(frames)})
+        assert record.trace_coverage == "frames_only"
+        assert record.tool_calls == ()
+        text = await self.prompt(record, profile)
+        assert "lookup_order" in text, "frame evidence must not be ignored"
+
+    async def test_no_tools_called_is_stated_only_when_that_is_knowable(
+        self, profile: SutProfile
+    ) -> None:
+        text = await self.prompt(rec(CONVERSATION), profile)
+        assert "called no tools" in text
+
+    async def test_unavailable_tool_visibility_is_never_reported_as_none(
+        self, profile: SutProfile
+    ) -> None:
+        """CLAUDE.md: an unmeasured value renders as "not measured", never as 0. A
+        profile that cannot prove tool calls must not be told the agent called none."""
+        blind = profile.model_copy(
+            update={
+                "tools": {"notify_customer": profile.tools["notify_customer"]},
+                "tool_calls_field": None,
+            }
+        )
+        text = await self.prompt(rec(CONVERSATION), blind)
+        assert "NOT AVAILABLE" in text
+        assert "called no tools" not in text
+        assert "never grade this 0 when tool visibility is unavailable" in text
 
     async def test_policy_prompt_tells_the_judge_how_to_grade_rules_that_do_not_apply(
         self, profile: SutProfile

@@ -45,8 +45,14 @@ ADR-0014 left as follow-up once the vote machinery existed, plus content quality
   resolves.
 - Specific vendors are matched before `openai`, and `deepseek` before `meta`, so
   `deepseek-r1-distill-llama-70b` is `deepseek`.
-- Whole-token matching catches bare reasoning ids (`o3`, `o1`) without matching them inside
-  unrelated words.
+- Short names are matched **only as the first token**, never as substrings: `phi` and `nova`
+  occur inside `delphi`, `seraphim`, `casanova` and `alpha-nova`, and matching them there would
+  refuse a genuinely independent pairing with exit 3. The same anchoring catches bare reasoning
+  ids (`o1`, `o3`).
+- A deployment prefix is separated by stripping leading `/`- and `.`-components that are vendor
+  names or region/platform words (`us`, `azure`, `bedrock`, …). A dotted *version* is therefore
+  never mistaken for a prefix (`gemini-2.5-pro` stays Google), while a dotted prefix naming
+  another vendor does not outrank the id (`deepseek.qwen-7b` is Qwen).
 
 It returns `None` when the family cannot be told. **`None` means unknown, never independent** —
 no caller may read it as proof that two models come from different vendors.
@@ -96,10 +102,14 @@ refused runs, and a run refused for an unverifiable reason is as dishonest as a 
   conditional criteria instruct the judge to grade 1 when they do not apply and to reserve 0.5 for
   a partial breach; otherwise an agent that correctly refused would be reported as a breach.
 - **`judge.content_quality`** (output axis). Grounded (weight 3), clear (weight 2), appropriate
-  tone, actionable. Tool *results* are not in the judge's digest, so the prompt lists the tools the
-  agent called and states that facts a listed tool plausibly supplied are grounded — otherwise a
-  correct, tool-sourced amount reads as a hallucination and the harness's blind spot is charged to
-  the agent.
+  tone, actionable. Tool *results* are not in the judge's digest, so the prompt names the tools the
+  agent called — resolved through `scoring.tools.gather`, which reads trace evidence when coverage
+  is full and frame evidence otherwise, because `record.tool_calls` is only populated with full
+  trace coverage and traces are opt-in. The prompt distinguishes three cases, and the third is the
+  one that matters: when the profile cannot prove tool calls at all, the judge is told tool
+  visibility is **unavailable** and must not grade `grounded` 0 on that basis. Reporting "no tools
+  called" there would render an unmeasured value as zero and charge the harness's blind spot to the
+  agent.
 - **`judge.efficiency`** (flow axis). No repetition (weight 3), direct path (weight 2), no
   stalling, with turn counts supplied as context.
 
@@ -131,6 +141,12 @@ thing ADR-0013 exists to prevent.
   `JUDGE_DISAGREEMENT` can rarely trigger. Making votes genuinely independent, and running them
   concurrently under the existing judge semaphore, is follow-up work that applies to every
   multi-vote judge, not just this one.
+- **`degraded` is weakly surfaced.** It appears as a badge in the HTML report but is not read by
+  `verdicts.py`, `exit_code()`, the JUnit writer or the Markdown gate summary that `opseval summary`
+  and the GitHub Action post. So under `warn` — and for any library caller driving `ScoringEngine`
+  directly, which bypasses the launch check entirely — a self-graded pass is exit 0 with no
+  CI-visible signal. `error` is the default precisely because of this, but carrying `degraded` into
+  the gate summary and JUnit output is necessary follow-up before `warn` can be recommended.
 - `opseval calibrate` (judge ↔ human agreement) remains the natural follow-up: it would let a team
   *measure* judge bias on their own data instead of inferring it from the vendor name, at which
   point the family check becomes a cheap default rather than the only defence.

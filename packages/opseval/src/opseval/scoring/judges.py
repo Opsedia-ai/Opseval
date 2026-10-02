@@ -23,6 +23,7 @@ from opseval.models.record import RunRecord
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import ScorerSpec
 from opseval.scoring.base import Scorer, ScoringContext, register
+from opseval.scoring.tools import gather
 
 
 @dataclass(frozen=True)
@@ -456,7 +457,9 @@ class PolicyAdherence(Judge):
         rules = ctx.scenario.expectations.policy
         if not rules:
             return None
-        return hashlib.sha256("\n".join(rules).encode()).hexdigest()[:16]
+        # Length-prefixed so ["a\nb"] cannot hash like ["a", "b"].
+        blob = f"{self.id}|" + "".join(f"{len(r)}:{r}" for r in rules)
+        return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
     def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
         if not ctx.scenario.expectations.policy:
@@ -482,8 +485,8 @@ class ContentQuality(Judge):
             "grounded",
             "Did the agent avoid inventing specifics (amounts, dates, policies, order details) "
             "that the customer never gave, the conversation never established, and no tool "
-            "listed below could have returned? Facts a listed tool plausibly supplied are "
-            "grounded, even though its output is not shown to you.",
+            "named above could have returned? Follow the note above about which tools were "
+            "observed, and never grade this 0 when tool visibility is unavailable.",
             weight=3.0,
         ),
         Criterion(
@@ -504,12 +507,28 @@ class ContentQuality(Judge):
     )
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
-        tools = sorted({call.name for call in record.tool_calls})
-        listed = ", ".join(tools) if tools else "(none observed)"
-        return [
-            f"Customer goal: {ctx.scenario.goal}",
-            f"Tools the agent called, whose results are not in the transcript: {listed}",
-        ]
+        evidence = gather(record, ctx.profile)
+        tools = sorted({tool for tool, _when, _ok in evidence.calls})
+        if tools:
+            line = (
+                "Tools the agent called, whose results are NOT shown to you: "
+                + ", ".join(tools)
+                + ". Treat facts any of them plausibly returned as grounded."
+            )
+        elif evidence.verifiable_at_all(ctx.profile):
+            line = (
+                "The agent called no tools, so every specific it stated must come from "
+                "the conversation."
+            )
+        else:
+            # Neither traces nor frame evidence can show tool calls for this profile.
+            line = (
+                "Tool visibility is NOT AVAILABLE for this agent: it may have called tools "
+                "whose results are not shown to you. Do not treat a specific as invented "
+                "merely because the transcript does not establish it; judge 'grounded' only "
+                "on specifics that contradict the conversation."
+            )
+        return [f"Customer goal: {ctx.scenario.goal}", line]
 
     def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
         if not any(who == "agent" for who, _ in record.transcript()):
