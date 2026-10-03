@@ -22,6 +22,7 @@ from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.scenario import Scenario
 from opseval.models.telemetry import TelemetryEvent
+from opseval.plugins import load_scorers
 from opseval.preflight import preflight
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
@@ -170,6 +171,9 @@ async def launch(
 ) -> SuiteResult:
     """Load, run, score and persist a suite. Raises ConfigError for exit code 3."""
     settings = settings or Settings()
+    # Before the catalogue is validated, so a suite may name a plugin's scorer and a
+    # broken plugin is reported rather than becoming an UNKNOWN_SCORER later.
+    load_scorers()
     if options.profile is None:
         raise ConfigError("no SUT profile: pass --profile path/to/profile.yaml")
     profile = load_profile(options.profile)

@@ -308,6 +308,49 @@ It is off in CI by default, the first run that would send prints a notice and se
 dead collector can never change an exit code. See
 [ADR-0010](docs/adr/0010-telemetry.md) and [ADR-0021](docs/adr/0021-telemetry-shipped-dark.md).
 
+## Write your own scorer
+
+Declare it as an entry point in your own package:
+
+```toml
+[project.entry-points."opseval.scorers"]
+tone = "acme_opseval.scorers:ToneScorer"
+```
+
+```python
+from opseval.models.results import Axis
+from opseval.scoring import Scorer
+
+
+class ToneScorer(Scorer):
+    id = "acme.tone"  # namespaced, so it cannot collide with a built-in
+    axis = Axis.OUTPUT
+    requires = "frames"  # frames | trace | llm
+    version = "1"  # bump when the logic changes
+
+    async def score(self, record, spec, ctx):
+        said = [t for who, t in record.transcript() if who == "agent"]
+        if not said:
+            return self.infra(spec, "NO_AGENT_TEXT: nothing to grade")
+        return self.result(spec, 0.0 if any(t.isupper() for t in said) else 1.0)
+```
+
+Install it and `opseval list-scorers` shows `acme.tone … [acme-opseval]`. Prove compliance in your
+own CI with two lines:
+
+```python
+from opseval.testing import ScorerContract
+
+
+class TestToneScorer(ScorerContract):
+    scorer = ToneScorer
+```
+
+A plugin that cannot be imported, breaks the contract or reuses an existing id **stops the run**
+with exit 3 rather than being skipped — a silently missing scorer would let a suite pass with that
+check gone. Note that plugins run in-process with no sandbox: installing one is a trust decision
+like any dependency. See [ADR-0022](docs/adr/0022-scorer-plugin-api.md).
+
 ## How Opseval fits with other tools
 
 | Tool type | Examples | Relationship |
