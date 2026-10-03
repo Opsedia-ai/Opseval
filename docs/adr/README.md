@@ -25,5 +25,6 @@
 | [0021](0021-telemetry-shipped-dark.md) | Telemetry implemented with no endpoint: nothing is sent until an operator sets one | Proposed |
 | [0022](0022-scorer-plugin-api.md) | Scorer plugins over entry points, failing closed, with an honest contract kit | Proposed |
 | [0023](0023-flow-map.md) | Flow map of expected vs observed phases; refuses to guess, changes no verdict | Proposed |
+| [0024](0024-tool-argument-schemas.md) | `tools.args_valid` against a declared JSON Schema; vacuous passes are named | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

@@ -237,6 +237,35 @@ scorers:
 
 See [ADR-0014](docs/adr/0014-judge-votes-and-planted-injections.md).
 
+### Check how a tool was called
+
+Declare a JSON Schema for a tool's arguments in the profile, and `tools.args_valid` checks every
+traced call against it:
+
+```yaml
+# profile.yaml
+tools:
+  create_refund:
+    commits: true
+    args_schema:
+      type: object
+      required: [order_id, amount]
+      properties:
+        order_id: {type: string}
+        amount: {type: number, minimum: 0}
+      additionalProperties: false
+```
+
+Arguments only exist in traces, so this needs full trace coverage; frames-only evidence is
+`TRACE_UNAVAILABLE`, never a pass. A profile with no `args_schema` anywhere is *not measurable*,
+and a schema that is itself invalid is reported as **the schema** being broken rather than as the
+agent misbehaving. See [ADR-0024](docs/adr/0024-tool-argument-schemas.md).
+
+A scorer that passes because its situation never arose — nothing forbidden, no matching call, no
+rule to apply — is now labelled **passed vacuously** in the gate summary, the JUnit XML, the
+console and the report. The pass is honest; it is also evidence of nothing, and it used to look
+identical to a real one.
+
 ### Is the judge any good? Calibrate it
 
 The family check above infers unreliability from a vendor name. To measure it on your own

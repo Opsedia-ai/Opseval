@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
+import jsonschema
+
 from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import Axis, ScoreResult
@@ -284,3 +286,89 @@ class CallSuccess(Scorer):
             failed=failed,
             **_base_details(ev),
         )
+
+
+@register
+class ArgsValid(Scorer):
+    """FR-SCR-04: the agent's tool arguments match the schema the profile declares."""
+
+    id = "tools.args_valid"
+    axis = Axis.TOOLS
+    requires = "trace"
+    description = (
+        "Every observed call to a tool with an args_schema sent arguments matching it "
+        "(needs traces; arguments are not in frames)."
+    )
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        schemas = {
+            name: tool.args_schema
+            for name, tool in ctx.profile.tools.items()
+            if tool.args_schema is not None
+        }
+        if not schemas:
+            # Nothing to check against. A pass here would claim the arguments were
+            # verified when no rule exists to verify them against.
+            return self.infra(
+                spec,
+                "NOT_MEASURABLE: no tool in this profile declares an args_schema",
+            )
+        ev = gather(record, ctx.profile)
+        if ev.source != "trace":
+            return self.infra(spec, "TRACE_UNAVAILABLE: tool arguments are only visible in traces")
+
+        names = ctx.profile.trace_names()
+        checked = 0
+        unchecked: list[str] = []
+        problems: list[dict[str, Any]] = []
+        for call in record.tool_calls:
+            tool = names.get(call.name)
+            if tool is None:
+                continue  # an undeclared trace call; _base_details already reports it
+            schema = schemas.get(tool)
+            if schema is None:
+                if tool not in unchecked:
+                    unchecked.append(tool)
+                continue
+            checked += 1
+            problem = _schema_problem(schema, call.arguments)
+            if problem is not None:
+                problems.append({"tool": tool, "problem": problem})
+
+        if checked == 0:
+            return self.result(
+                spec,
+                1.0,
+                vacuous=True,
+                note="no call to a tool with an args_schema",
+                schemas=sorted(schemas),
+                unchecked=sorted(unchecked),
+                **_base_details(ev),
+            )
+        return self.result(
+            spec,
+            (checked - len(problems)) / checked,
+            checked=checked,
+            invalid=problems,
+            unchecked=sorted(unchecked),
+            **_base_details(ev),
+        )
+
+
+def _schema_problem(schema: dict[str, Any], arguments: Any) -> str | None:
+    """The first validation problem, or ``None``. Never raises.
+
+    A broken schema is the author's mistake, not the agent's, so it is reported as a
+    problem with the schema rather than letting a ``SchemaError`` reach the engine and
+    become an anonymous scorer crash.
+    """
+    try:
+        jsonschema.validate(arguments, schema)
+    except jsonschema.ValidationError as exc:
+        where = "/".join(str(p) for p in exc.absolute_path) or "(root)"
+        return f"{where}: {exc.message}"
+    except jsonschema.SchemaError as exc:
+        return f"the declared args_schema is not valid JSON Schema: {exc.message}"
+    except Exception as exc:  # noqa: BLE001 - validation must never crash the engine
+        return f"could not validate: {type(exc).__name__}: {exc}"
+    return None

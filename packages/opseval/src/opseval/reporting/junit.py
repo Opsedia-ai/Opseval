@@ -58,6 +58,13 @@ def render_junit(result: SuiteResult) -> str:
             name="degraded_scorers",
             value=",".join(result.degraded_scorers),
         )
+    if result.vacuous_scorers:
+        ET.SubElement(
+            props,
+            "property",
+            name="vacuous_scorers",
+            value=",".join(result.vacuous_scorers),
+        )
 
     for t in result.tests:
         case = ET.SubElement(

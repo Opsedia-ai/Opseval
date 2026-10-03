@@ -105,6 +105,23 @@ class TestVerdict(BaseModel):
         """
         return sorted({s.scorer_id for a in self.attempts for s in a.scores if s.degraded})
 
+    @property
+    def vacuous_scorers(self) -> list[str]:
+        """Scorers that passed because the situation they check never arose.
+
+        "No forbidden tool was called" is trivially true when nothing is forbidden. The
+        pass is honest, but it is evidence of nothing, and it looks identical to a real
+        pass unless it is named.
+        """
+        return sorted(
+            {
+                s.scorer_id
+                for a in self.attempts
+                for s in a.scores
+                if s.details.get("vacuous") is True
+            }
+        )
+
 
 class ModelUsage(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -181,3 +198,8 @@ class SuiteResult(BaseModel):
     def degraded_scorers(self) -> list[str]:
         """Every scorer that scored on degraded evidence anywhere in the run."""
         return sorted({sid for t in self.tests for sid in t.degraded_scorers})
+
+    @property
+    def vacuous_scorers(self) -> list[str]:
+        """Every scorer that passed vacuously anywhere in the run."""
+        return sorted({sid for t in self.tests for sid in t.vacuous_scorers})

@@ -31,6 +31,9 @@ class ToolSpec(BaseModel):
     trace_name: str | None = None
     """Observation name in traces, if it differs from the tool name."""
     commits: bool = False
+    args_schema: dict[str, Any] | None = None
+    """JSON Schema for this tool's arguments, checked by ``tools.args_valid``.
+    Arguments are only visible in traces, so the scorer needs full trace coverage."""
 
 
 class CheckpointSpec(BaseModel):
