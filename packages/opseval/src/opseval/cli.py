@@ -103,8 +103,20 @@ def validate(
 @app.command("list-scorers")
 def list_scorers() -> None:
     """List every scorer with its axis and the evidence it needs, plus built-in profiles."""
+    from opseval.plugins import THIRD_PARTY, load_scorers
+
+    try:
+        load_scorers()
+    except ConfigError as exc:
+        typer.secho(f"plugin error: {exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
     for sid, cls in sorted(REGISTRY.items()):
-        typer.echo(f"{sid:<32} {cls.axis.value:<9} needs {cls.requires:<7} {cls.description}")
+        origin = f"  [{THIRD_PARTY[sid]}]" if sid in THIRD_PARTY else ""
+        typer.echo(
+            f"{sid:<32} {cls.axis.value:<9} needs {cls.requires:<7} {cls.description}{origin}"
+        )
+    if THIRD_PARTY:
+        typer.echo(f"\n{len(THIRD_PARTY)} scorer(s) come from installed plugins, marked [dist].")
     typer.echo("\nInvariant bundles: " + ", ".join(f"{k} → {v}" for k, v in INVARIANTS.items()))
     typer.echo("Built-in profiles: " + ", ".join(f"builtin:{n}" for n in builtin_profiles()))
 

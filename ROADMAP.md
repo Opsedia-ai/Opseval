@@ -27,7 +27,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 Prompt-injection planting and 3-vote security judges (`security.no_injection_takeover`, `security.policy_adherence`) · 🟢 content-quality and efficiency judges · 🟢 judge-independence guard (ADR-0016) · 🟢 visible degraded evidence, rubric digests, independent ballots (ADR-0017)
 - 🟢 Preflight checks (ADR-0020) · ⚪ flow map (🟢 pass^k and JUnit shipped early)
 - 🟢 SSE transport (ADR-0019) · ⚪ protocol probes
-- ⚪ Stable scorer plugin API with a contract test kit
+- 🟢 Stable scorer plugin API with a contract test kit (ADR-0022)
 
 ## v0.5: "Teams can share it" ⚪
 

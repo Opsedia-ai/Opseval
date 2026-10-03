@@ -40,6 +40,8 @@ packages/opseval/src/opseval/
   calibrate.py   `opseval calibrate`: judge agreement with human labels (ADR-0018)
   preflight.py   dependency health checks before a run (ADR-0020)
   telemetry.py   opt-out, content-free counts; no endpoint ships (ADR-0010/0021)
+  plugins.py     `opseval.scorers` entry-point discovery, fail-closed (ADR-0022)
+  testing.py     public contract test kit for plugin authors (ADR-0022)
   reporting/     self-contained HTML report, console summary, JUnit XML, Markdown gate summary
   scaffold/      `opseval init` templates
   demo/          reference refund agent + example catalogue (`opseval demo`)
@@ -47,7 +49,7 @@ packages/opseval/src/opseval/
 packages/opseval/tests/   pytest (asyncio_mode=auto), incl. the fault-injection suite
 packages/pytest-opseval/  pytest plugin: scenarios as pytest items (entry point disabled in our own run)
 action.yml                composite GitHub Action (dogfooded by the `action` CI job)
-docs/adr/                 architecture decisions (0001-0021); new decisions get a new ADR
+docs/adr/                 architecture decisions (0001-0022); new decisions get a new ADR
 ```
 
 ## Commands
@@ -85,16 +87,17 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 - v0.2: `--transport sse` for agents that stream a turn as Server-Sent Events. A stalled stream is a `TransportTimeout` (the agent's fault); a dropped one is `TransportClosed` (not judged); an undecodable event stays `_raw` and is never given a kind, so garbage cannot look like a clean turn (ADR-0019).
 - v0.2: preflight health checks run before the first frame. A **dependency** outage skips only the scenarios it silences (`skipped_precondition`); an **unreachable agent** raises `ConfigError` (exit 3) rather than skipping, because a skip is only a gate warning and would report "safe to release" on a suite that tested nothing. `opseval preflight` runs the checks alone; `--no-preflight` and `--verify-llm` on `run` (ADR-0020).
 - v0.1: telemetry is implemented and **ships dark** — no default endpoint, so nothing is sent until an operator sets `OPSEVAL_TELEMETRY_ENDPOINT` *and* allowlists it. Payload is a `extra="forbid"` model, counts are bucketed, non-built-in names become `custom`, and an import contract plus a sentinel test keep conversation content out. Off via `OPSEVAL_TELEMETRY=false`, `DO_NOT_TRACK=1`, `CI=true` or `opseval telemetry disable` (ADR-0021). PR #12 is still the design record to review.
+- v0.2: scorer plugins via the `opseval.scorers` entry-point group. Discovery **fails closed**: an unimportable plugin, a contract violation or an id collision is a `ConfigError` (exit 3), never a skip — a skipped scorer becomes `UNKNOWN_SCORER`, an `infra_error`, which `attempt_verdict` drops from `measured`, so the suite would go green with the check gone. `opseval.testing.ScorerContract` is the public kit; it claims only what `ScoreResult` does not already validate (ADR-0022).
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`). The reader is verified against a real self-hosted Langfuse 4.44 (`scripts/langfuse_smoke.py`, ADR-0011); not yet against Langfuse Cloud.
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
 
 ## Next up (suggested order)
 
-1. Stable scorer plugin API with a contract test kit (FR-SCR-10).
-2. Flow map (FR-RPT-05); argument schemas for trace-backed tool scorers.
-3. Protocol probes (FR-RUN-07); OpenTelemetry trace source.
-4. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
+1. Flow map (FR-RPT-05); argument schemas for trace-backed tool scorers.
+2. Protocol probes (FR-RUN-07); OpenTelemetry trace source.
+3. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
+4. Plugin groups beyond scorers: transports, langpacks, trace sources, sinks (ADR-0022).
 
 **Needs a decision from the maintainers, not more code:** a telemetry collector and its
 data-processing terms (ADR-0010 decisions 2 and 3). The code is built and dark until then.

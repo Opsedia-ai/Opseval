@@ -23,5 +23,6 @@
 | [0019](0019-sse-transport.md) | Server-Sent Events transport, and which stream faults belong to the agent | Proposed |
 | [0020](0020-preflight-health-checks.md) | Preflight health checks: a dependency outage skips, an unreachable agent refuses | Proposed |
 | [0021](0021-telemetry-shipped-dark.md) | Telemetry implemented with no endpoint: nothing is sent until an operator sets one | Proposed |
+| [0022](0022-scorer-plugin-api.md) | Scorer plugins over entry points, failing closed, with an honest contract kit | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

@@ -116,4 +116,7 @@ source_modules = ["opseval.calibrate"]
 forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
 
 [tool.bandit]
-exclude_dirs = ["packages/opseval/tests"]
+# opseval/testing.py is the plugin contract test kit: its assertions are its product,
+# written in the pytest idiom so a plugin author's failures read normally. It is only
+# ever imported from a test suite, never on a run path.
+exclude_dirs = ["packages/opseval/tests", "packages/opseval/src/opseval/testing.py"]
