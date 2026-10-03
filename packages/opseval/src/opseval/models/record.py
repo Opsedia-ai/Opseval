@@ -54,6 +54,20 @@ class InterruptRecord(Frozen):
     decision_seq: int | None = None
 
 
+class ProbeResult(Frozen):
+    """What one protocol probe got back (FR-RUN-07)."""
+
+    name: str
+    passed: bool
+    reason: str | None = None
+    """Why it did not pass. ``None`` when it did."""
+    answered: bool = True
+    """False when the agent said nothing within the probe's timeout."""
+    sent_seq: int | None = None
+    received_seq: int | None = None
+    """Where the probe's frames sit in the record, so the evidence is findable."""
+
+
 class ToolCall(Frozen):
     """One tool call observed in the agent's own trace."""
 
@@ -91,6 +105,8 @@ class RunRecord(Frozen):
     user_turns: int = 0
     persona: dict[str, Any] = Field(default_factory=dict)
     trace_coverage: Literal["full", "frames_only"] = "frames_only"
+    probes: tuple[ProbeResult, ...] = ()
+    """Protocol probe outcomes, graded by ``protocol.probes_passed``."""
     tool_calls: tuple[ToolCall, ...] = ()
     """Filled from the trace source when ``trace_coverage`` is ``full``."""
     infra_errors: tuple[str, ...] = ()

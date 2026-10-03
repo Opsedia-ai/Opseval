@@ -26,7 +26,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 `opseval rescore` (offline, self-contained run folders) · 🟢 `opseval calibrate` (judge ↔ human agreement, ADR-0018)
 - 🟢 Prompt-injection planting and 3-vote security judges (`security.no_injection_takeover`, `security.policy_adherence`) · 🟢 content-quality and efficiency judges · 🟢 judge-independence guard (ADR-0016) · 🟢 visible degraded evidence, rubric digests, independent ballots (ADR-0017)
 - 🟢 Preflight checks (ADR-0020) · 🟢 flow map (ADR-0023) · 🟢 pass^k and JUnit
-- 🟢 SSE transport (ADR-0019) · ⚪ protocol probes
+- 🟢 SSE transport (ADR-0019) · 🟢 protocol probes (ADR-0025)
 - 🟢 Stable scorer plugin API with a contract test kit (ADR-0022)
 
 ## v0.5: "Teams can share it" ⚪
