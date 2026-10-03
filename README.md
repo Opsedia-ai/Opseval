@@ -80,6 +80,25 @@ auth_frame: {type: auth, token: "{token}"}
 
 A drop Opseval can't resume, or a resume answered with a different session, ends the attempt as *not judged*. It is never counted as an agent failure. Add the `conversation.connection_stable` scorer if the agent dropping the connection should fail the scenario even when the session resumed ([ADR-0012](docs/adr/0012-websocket-resume-and-token-refresh.md)).
 
+### Streaming agents (Server-Sent Events)
+
+If your agent answers a POST with `text/event-stream`, point Opseval at it:
+
+```bash
+opseval run suites/smoke.yaml --profile profile.yaml \
+  --transport sse --target https://your-agent.example.com/chat
+```
+
+One turn is one stream. If your agent puts the message type in the SSE `event:` name rather than
+the payload, Opseval uses it as the frame kind — unless the payload already declares one, in
+which case the profile's `kind_field` wins.
+
+Stream faults are attributed deliberately: a stream that stalls is the agent's fault
+(`TransportTimeout`, counts against it), while a connection that drops mid-turn is the harness's
+(`TransportClosed`, the attempt is *not judged*). An event Opseval cannot decode is recorded
+verbatim and never given a kind, so a broken stream cannot read as a clean empty turn. See
+[ADR-0019](docs/adr/0019-sse-transport.md).
+
 ### Re-score a run offline
 
 Changed a rubric, a judge prompt or a scorer? Re-score the saved conversations without talking to the agent again:
@@ -199,6 +218,28 @@ scorers:
 ```
 
 See [ADR-0014](docs/adr/0014-judge-votes-and-planted-injections.md).
+
+### Is the judge any good? Calibrate it
+
+The family check above infers unreliability from a vendor name. To measure it on your own
+conversations, label some attempts by hand and compare:
+
+```bash
+opseval calibrate reports/<run_id> --template-for judge.goal_achievement > labels.yaml
+# set each verdict to passed | failed, delete rows you have not reviewed
+opseval calibrate reports/<run_id> --labels labels.yaml
+```
+
+It reports agreement, Cohen's kappa, and — separately — the **false-pass rate**: the share of
+the attempts your reviewers failed that the judge passed. That is the number that matters,
+because a judge can agree 90% of the time and still wave through every real failure. Either a
+low agreement or a high false-pass rate fails on its own.
+
+Exit codes match a suite run: `0` agrees, `1` disagrees, `2` not enough usable labels to tell,
+`3` configuration error. Scores that were never measured are excluded rather than counted as
+agreement, and a number that cannot be computed says "not measured" instead of 0. The run is
+never modified; results go to `calibration.json`. See
+[ADR-0018](docs/adr/0018-judge-calibration-against-human-labels.md).
 
 ### Judge independence
 

@@ -95,6 +95,15 @@ class TestVerdict(BaseModel):
     unstable_scorers: list[str] = Field(default_factory=list)
     attempts: list[AttemptVerdict] = Field(default_factory=list)
 
+    @property
+    def degraded_scorers(self) -> list[str]:
+        """Scorers that produced a score on weaker evidence than they wanted.
+
+        A degraded score still counts toward the verdict, so it has to be visible
+        wherever the verdict is: a reader must not mistake it for a full measurement.
+        """
+        return sorted({s.scorer_id for a in self.attempts for s in a.scores if s.degraded})
+
 
 class ModelUsage(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -164,3 +173,8 @@ class SuiteResult(BaseModel):
     config_digest: dict[str, Any] = Field(default_factory=dict)
     load_errors: list[str] = Field(default_factory=list)
     rescore: RescoreInfo | None = None
+
+    @property
+    def degraded_scorers(self) -> list[str]:
+        """Every scorer that scored on degraded evidence anywhere in the run."""
+        return sorted({sid for t in self.tests for sid in t.degraded_scorers})

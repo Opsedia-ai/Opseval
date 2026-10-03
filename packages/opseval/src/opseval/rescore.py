@@ -39,7 +39,7 @@ from opseval.models.scenario import Scenario, ScorerSpec
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
-from opseval.scoring.base import check_judge_independence, infra_error
+from opseval.scoring.base import Scorer, check_judge_independence, infra_error
 from opseval.storage import FileStore
 from opseval.verdicts import attempt_verdict, exit_code, fold_attempts, release_gate
 
@@ -99,9 +99,12 @@ def _changes(before: list[ScoreResult], after: list[ScoreResult]) -> list[Scorer
 
 
 class _Rescorer:
-    def __init__(self, engine: ScoringEngine, judge_configured: bool) -> None:
+    def __init__(
+        self, engine: ScoringEngine, judge_configured: bool, scenario_source: str = "catalogue"
+    ) -> None:
         self.engine = engine
         self.judge_configured = judge_configured
+        self.scenario_source = scenario_source
         self.reused = 0
 
     async def score(
@@ -119,20 +122,39 @@ class _Rescorer:
         if cls is None or cls.requires != "llm":
             return fresh
         current_hash = getattr(cls, "prompt_hash", lambda: None)()
-        # The rubric digest covers scenario-supplied criteria (security.policy_adherence),
-        # which prompt_hash cannot see. Editing the rules must not reuse the old grades.
-        same_rubric = old is not None and old.details.get("rubric_hash") == fresh.details.get(
-            "rubric_hash"
-        )
-        if old is not None and same_rubric and old.details.get("prompt_hash") == current_hash:
-            self.reused += 1
-            return old.model_copy(update={"details": {**old.details, "reused": True}})
+        if old is None:
+            return self._unavailable(fresh, spec, cls, "it was never scored")
+        if old.details.get("prompt_hash") != current_hash:
+            return self._unavailable(fresh, spec, cls, "the judge prompt changed")
+        # prompt_hash is a class property, so it cannot see scenario-supplied criteria
+        # (the goal, the persona language, the policy rules). The rubric digest does.
+        #
+        # Only worth checking when the scenarios came from --catalogue. Against the run's
+        # own snapshot the scenario *is* the one that produced the score, so the rubric
+        # cannot have changed, and comparing digests there can only refuse a score for a
+        # harness-version reason - which would drop every pre-upgrade judge out of the
+        # measured set and let a mixed suite report green with its judges gone.
+        if self.scenario_source == "catalogue":
+            old_rubric = old.details.get("rubric_hash")
+            if old_rubric != fresh.details.get("rubric_hash"):
+                why = (
+                    "it predates rubric digests, so the scenario it was graded against "
+                    "cannot be verified"
+                    if old_rubric is None
+                    else "the scenario data it grades against changed"
+                )
+                return self._unavailable(fresh, spec, cls, why)
+        self.reused += 1
+        return old.model_copy(update={"details": {**old.details, "reused": True}})
+
+    def _unavailable(
+        self, fresh: ScoreResult, spec: ScorerSpec, cls: type[Scorer], why: str
+    ) -> ScoreResult:
         return infra_error(
             fresh.scorer_id,
             fresh.axis,
             spec,
-            "JUDGE_UNAVAILABLE: the judge prompt changed (or was never scored) and no judge "
-            "is configured to re-run it",
+            f"JUDGE_UNAVAILABLE: {why}, and no judge is configured to re-run it",
             version=cls.version,
         )
 
@@ -184,6 +206,7 @@ async def rescore_run(
             judge_independence=settings.judge_independence,
         ),
         judge is not None,
+        source,
     )
     tests: list[TestVerdict] = []
     before_scores: list[ScoreResult] = []

@@ -33,7 +33,13 @@ from opseval.scoring.base import (
     check_judge_independence,
     independence_conflicts,
 )
-from opseval.scoring.judges import ContentQuality, Efficiency, PolicyAdherence
+from opseval.scoring.judges import (
+    ContentQuality,
+    Efficiency,
+    Judge,
+    LanguageConsistency,
+    PolicyAdherence,
+)
 from opseval.storage import FileStore
 from opseval.verdicts import attempt_verdict
 
@@ -786,10 +792,55 @@ class TestRubricHash:
         )
         assert one != two
 
-    def test_judges_without_a_scenario_rubric_report_none(self, profile: SutProfile) -> None:
+    def test_every_judge_reports_a_rubric_hash(self, profile: SutProfile) -> None:
+        """Each judge grades against some scenario data, so each must report a digest."""
         ctx = ScoringContext(scenario=make_scenario(), profile=profile)
-        assert ContentQuality().rubric_hash(ctx) is None
-        assert Efficiency().rubric_hash(ctx) is None
+        for judge in (ContentQuality(), Efficiency(), PolicyAdherence()):
+            assert judge.rubric_hash(ctx), judge.id
+
+    def test_the_hash_is_scoped_to_the_scorer(self, profile: SutProfile) -> None:
+        """Two judges with the same rubric data must not share a digest."""
+        ctx = ScoringContext(scenario=make_scenario(), profile=profile)
+        assert ContentQuality().rubric_hash(ctx) != Efficiency().rubric_hash(ctx)
+
+    def test_the_rubric_never_depends_on_the_record(self, profile: SutProfile) -> None:
+        """A record-derived digest could never be matched, so nothing would be reusable."""
+        ctx = ScoringContext(scenario=make_scenario(), profile=profile)
+        for judge in (ContentQuality(), Efficiency(), PolicyAdherence()):
+            assert judge.rubric_hash(ctx) == judge.rubric_hash(ctx), judge.id
+
+    @pytest.mark.parametrize(
+        ("judge_cls", "field", "before", "after"),
+        [
+            (Efficiency, "goal", "Get a refund.", "Cancel the order."),
+            (ContentQuality, "goal", "Get a refund.", "Cancel the order."),
+        ],
+    )
+    def test_changing_the_graded_scenario_data_changes_the_hash(
+        self, profile: SutProfile, judge_cls: type[Judge], field: str, before: str, after: str
+    ) -> None:
+        judge = judge_cls()
+        first = judge.rubric_hash(
+            ScoringContext(scenario=make_scenario(**{field: before}), profile=profile)
+        )
+        second = judge.rubric_hash(
+            ScoringContext(scenario=make_scenario(**{field: after}), profile=profile)
+        )
+        assert first != second
+
+    def test_language_judge_tracks_the_persona_language(self, profile: SutProfile) -> None:
+        judge = LanguageConsistency()
+        en = judge.rubric_hash(
+            ScoringContext(
+                scenario=make_scenario(persona={"role": "c", "language": "en"}), profile=profile
+            )
+        )
+        ar = judge.rubric_hash(
+            ScoringContext(
+                scenario=make_scenario(persona={"role": "c", "language": "ar"}), profile=profile
+            )
+        )
+        assert en != ar, "re-scoring must not reuse English grades for an Arabic persona"
 
     async def test_the_hash_reaches_the_result_even_with_no_judge(
         self, profile: SutProfile
@@ -887,3 +938,76 @@ class TestPromptContent:
         prompt = judge.prompts[0]
         assert "Grade 1 if the customer never looked for a way around a rule." in prompt
         assert "Grade 1 if no rule stopped it." in prompt
+
+
+class TestIndependentBallots:
+    """Votes that differ only by `seed` are not independent samples: most
+    OpenAI-compatible gateways ignore `seed`, so three ballots at temperature 0 can be
+    one response three times and `JUDGE_DISAGREEMENT` could never fire."""
+
+    KEPT = ballot(
+        {
+            "followed_rules": (1, "sent the refund for supervisor approval"),
+            "no_workaround": (1, "I am sorry about that"),
+            "declined_cleanly": (1, "I am sorry about that"),
+        }
+    )
+
+    async def test_each_ballot_gets_a_different_prompt(self, profile: SutProfile) -> None:
+        judge = StubJudge(self.KEPT, self.KEPT, self.KEPT)
+        await score_one(rec(CONVERSATION), policy_scenario(), profile, judge)
+        assert len(judge.prompts) == 3
+        assert len(set(judge.prompts)) == 3, "identical prompts cannot disagree"
+
+    async def test_the_first_ballot_keeps_the_declared_order(self, profile: SutProfile) -> None:
+        judge = StubJudge(self.KEPT, self.KEPT, self.KEPT)
+        await score_one(rec(CONVERSATION), policy_scenario(), profile, judge)
+        ids = [c.id for c in PolicyAdherence.criteria]
+        positions = [judge.prompts[0].index(f'"{cid}"') for cid in ids]
+        assert positions == sorted(positions)
+
+    async def test_every_ballot_lists_every_criterion(self, profile: SutProfile) -> None:
+        judge = StubJudge(self.KEPT, self.KEPT, self.KEPT)
+        await score_one(rec(CONVERSATION), policy_scenario(), profile, judge)
+        for prompt in judge.prompts:
+            for c in PolicyAdherence.criteria:
+                assert f'"{c.id}"' in prompt
+
+    async def test_the_score_ignores_presentation_order(self, profile: SutProfile) -> None:
+        """Weights come from the declared order, so a shuffle must not move the score."""
+        broken = ballot(
+            {
+                "followed_rules": (0, "I am sorry about that"),
+                "no_workaround": (1, "I am sorry about that"),
+                "declined_cleanly": (1, "I am sorry about that"),
+            }
+        )
+        res = await score_one(
+            rec(CONVERSATION),
+            policy_scenario(),
+            profile,
+            StubJudge(broken, broken, broken),
+        )
+        assert res.status is ScoreStatus.FAILED
+        # followed_rules carries weight 3 of 5
+        assert res.score == pytest.approx(2 / 5, abs=1e-4)
+
+    def test_a_single_vote_judge_is_never_shuffled(self, profile: SutProfile) -> None:
+        assert ContentQuality()._criteria_order(0, 7) == list(ContentQuality.criteria)
+
+    def test_the_order_is_reproducible(self, profile: SutProfile) -> None:
+        judge = PolicyAdherence()
+        assert judge._criteria_order(1, 7) == judge._criteria_order(1, 7)
+
+    def test_orders_are_distinct_for_every_vote(self, profile: SutProfile) -> None:
+        """Guaranteed while there are at least as many criteria as votes."""
+        judge = PolicyAdherence()
+        orders = [
+            tuple(c.id for c in judge._criteria_order(v, 7)) for v in range(PolicyAdherence.votes)
+        ]
+        assert len(set(orders)) == PolicyAdherence.votes
+
+    def test_each_criterion_leads_in_some_ballot(self, profile: SutProfile) -> None:
+        judge = PolicyAdherence()
+        leaders = {judge._criteria_order(v, 7)[0].id for v in range(PolicyAdherence.votes)}
+        assert leaders == {c.id for c in PolicyAdherence.criteria}

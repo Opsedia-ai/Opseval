@@ -97,5 +97,11 @@ type = "forbidden"
 source_modules = ["opseval.rescore"]
 forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
 
+[[tool.importlinter.contracts]]
+name = "Calibration is offline and read-only: no transports, driver, simulator or runner"
+type = "forbidden"
+source_modules = ["opseval.calibrate"]
+forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
+
 [tool.bandit]
 exclude_dirs = ["packages/opseval/tests"]

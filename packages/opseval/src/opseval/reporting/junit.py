@@ -3,7 +3,8 @@
 
 Mapping keeps the core promise: ``failed`` is a failure; ``inconclusive`` is an
 *error* (never a pass); ``skipped_precondition`` and ``blocked`` are skipped. Scenarios
-that could not be loaded appear as one errored case, so they cannot vanish silently.
+that could not be loaded appear as one errored case, so they cannot vanish silently, and
+a score made on degraded evidence is named even when the case passed.
 """
 
 from __future__ import annotations
@@ -50,6 +51,13 @@ def render_junit(result: SuiteResult) -> str:
         ("exit_code", str(result.exit_code)),
     ):
         ET.SubElement(props, "property", name=key, value=value)
+    if result.degraded_scorers:
+        ET.SubElement(
+            props,
+            "property",
+            name="degraded_scorers",
+            value=",".join(result.degraded_scorers),
+        )
 
     for t in result.tests:
         case = ET.SubElement(
@@ -61,6 +69,13 @@ def render_junit(result: SuiteResult) -> str:
             ET.SubElement(case_props, "property", name="pass_rate", value=f"{t.pass_rate:.4f}")
         if t.flaky:
             ET.SubElement(case_props, "property", name="flaky", value="true")
+        if t.degraded_scorers:
+            ET.SubElement(
+                case_props,
+                "property",
+                name="degraded_scorers",
+                value=",".join(t.degraded_scorers),
+            )
         if t.status is VerdictStatus.FAILED:
             counts["failures"] += 1
             el = ET.SubElement(case, "failure", message=t.reason or "failed", type="failed")
@@ -74,6 +89,18 @@ def render_junit(result: SuiteResult) -> str:
         elif t.status in (VerdictStatus.SKIPPED_PRECONDITION, VerdictStatus.BLOCKED):
             counts["skipped"] += 1
             ET.SubElement(case, "skipped", message=f"{t.status.value}: {t.reason or ''}")
+        if t.degraded_scorers:
+            # Added last: the JUnit sequence is properties, (error|failure)*, system-out,
+            # and a schema-validating consumer may drop a failure that follows it. A
+            # passed case has no failure element, so this is the only place the weaker
+            # evidence can appear at all.
+            note = ET.SubElement(case, "system-out")
+            note.text = (
+                "degraded evidence: "
+                + ", ".join(t.degraded_scorers)
+                + " scored on weaker evidence than they ask for; these scores counted "
+                "toward the verdict"
+            )
 
     if result.load_errors:
         counts["tests"] += 1

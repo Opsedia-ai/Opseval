@@ -2,8 +2,9 @@
 """A short Markdown gate summary for PR comments and CI job summaries.
 
 Content rules match the HTML report: unmeasured values say "not measured", inconclusive
-is never shown as a pass, and scenario text is escaped so a scenario name cannot inject
-Markdown or mentions into a pull-request comment.
+is never shown as a pass, degraded evidence is named rather than passing as a full
+measurement, and scenario text is escaped so a scenario name cannot inject Markdown or
+mentions into a pull-request comment.
 """
 
 from __future__ import annotations
@@ -70,6 +71,15 @@ def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> s
         lines += ["", "<details><summary>Why</summary>", ""]
         lines += [f"- `{_code(t.test_id, 60)}`: {_md(t.reason or '', 300)}" for t in details]
         lines += ["", "</details>"]
+    degraded = result.degraded_scorers
+    if degraded:
+        listed = ", ".join(f"`{_code(s, 60)}`" for s in degraded)
+        lines += [
+            "",
+            f"⚠️ **Degraded evidence** · {listed} scored on weaker evidence than they ask for "
+            "(frame evidence instead of traces, or a judge from the graded model's own vendor "
+            "family). These scores counted toward the verdict above.",
+        ]
     if result.load_errors:
         lines += ["", f"⚠️ {len(result.load_errors)} scenario file(s) could not be loaded."]
     footer = f"Run `{_code(result.run_id)}`"

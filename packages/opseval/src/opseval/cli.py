@@ -142,7 +142,7 @@ def run(
         str, typer.Option("--target", "-t", help="Agent URL (ws://, wss://, http(s)://).")
     ],
     transport: Annotated[
-        str, typer.Option(help="websocket | http-json | openai-chat")
+        str, typer.Option(help="websocket | http-json | sse | openai-chat")
     ] = "websocket",
     repeats: Annotated[Optional[int], typer.Option(min=1, max=20, help="Override repeats.")] = None,  # noqa: UP045
     allow_commit: Annotated[
@@ -245,6 +245,85 @@ def summary(
         typer.secho(f"error: {path}: not a finished run ({exc})", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
     typer.echo(markdown_summary(result, report_url=report_url))
+
+
+def _finished_run(run_dir: Path) -> SuiteResult:
+    path = run_dir / "result.json"
+    try:
+        return SuiteResult.model_validate_json(path.read_text("utf-8"))
+    except (OSError, ValueError) as exc:
+        typer.secho(f"error: {path}: not a finished run ({exc})", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+
+
+@app.command()
+def calibrate(
+    run_dir: Annotated[Path, typer.Argument(help="A finished run folder, e.g. reports/<run_id>.")],
+    labels: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option(help="YAML file of human labels to compare the scores against."),
+    ] = None,
+    template_for: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(
+            "--template-for",
+            help="Instead of calibrating, print a blank label file for this scorer id.",
+        ),
+    ] = None,
+    min_labels: Annotated[
+        int, typer.Option(min=1, max=10_000, help="Usable labels needed before reporting.")
+    ] = 5,
+    min_agreement: Annotated[float, typer.Option(min=0.0, max=1.0)] = 0.8,
+    max_false_pass_rate: Annotated[
+        float,
+        typer.Option(min=0.0, max=1.0, help="Share of human-failed attempts the judge may pass."),
+    ] = 0.1,
+    labelled_by: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(help="Who produced the labels (recorded in calibration.json)."),
+    ] = None,
+) -> None:
+    """Measure how well a scorer agrees with human labels (offline, read-only).
+
+    Exit codes follow the suite: 0 agrees, 1 disagrees, 2 not enough usable labels to
+    tell, 3 configuration error.
+    """
+    from opseval.calibrate import (
+        calibrate_run,
+        calibration_summary,
+        label_template,
+        save_calibration,
+    )
+
+    if template_for:
+        try:
+            typer.echo(label_template(_finished_run(run_dir), template_for))
+        except ConfigError as exc:
+            typer.secho(f"configuration error: {exc}", fg="red", err=True)
+            raise typer.Exit(EXIT_HARNESS) from exc
+        return
+    if labels is None:
+        typer.secho(
+            "error: pass --labels path/to/labels.yaml, or --template-for <scorer id> to start one",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(EXIT_HARNESS)
+    try:
+        result = calibrate_run(
+            run_dir,
+            labels,
+            min_labels=min_labels,
+            min_agreement=min_agreement,
+            max_false_pass_rate=max_false_pass_rate,
+            labelled_by=labelled_by,
+        )
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+    typer.echo(calibration_summary(result))
+    typer.echo(f"Written: {save_calibration(run_dir, result)}")
+    raise typer.Exit(result.exit_code)
 
 
 @app.command()
