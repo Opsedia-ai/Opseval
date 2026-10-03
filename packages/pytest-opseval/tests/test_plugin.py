@@ -126,8 +126,10 @@ def test_unreachable_agent_is_an_error_never_a_failure(pytester: pytest.Pytester
         "1",
         SMOKE,
     )
+    # Still an error for every scenario, never a pass. Preflight now refuses up front
+    # with the reason, instead of each scenario burning its repeats on transport errors.
     result.assert_outcomes(errors=3)
-    result.stdout.fnmatch_lines(["*not judged*transport_failure*"])
+    result.stdout.fnmatch_lines(["*not reachable*"])
 
 
 def test_missing_target_is_an_error(pytester: pytest.Pytester) -> None:

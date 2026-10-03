@@ -23,7 +23,7 @@ from opseval.reporting import console_summary
 from opseval.runner import RunOptions, launch
 from opseval.scaffold import TEMPLATES, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY
-from opseval.verdicts import EXIT_HARNESS
+from opseval.verdicts import EXIT_HARNESS, EXIT_NOT_JUDGED
 
 app = typer.Typer(
     add_completion=False,
@@ -149,6 +149,13 @@ def run(
         bool, typer.Option(help="Allow scenarios to perform the irreversible outcome.")
     ] = False,
     fail_fast: Annotated[bool, typer.Option(help="Stop after the first failed scenario.")] = False,
+    preflight: Annotated[
+        bool,
+        typer.Option(help="Check dependencies first, so an outage skips instead of failing."),
+    ] = True,
+    verify_llm: Annotated[
+        bool, typer.Option(help="Spend one token per LLM role proving the credentials work.")
+    ] = False,
     filter_: Annotated[
         list[str] | None, typer.Option("--filter", help="tag=…, id=… or criticality=…")
     ] = None,
@@ -174,6 +181,8 @@ def run(
         fail_fast=fail_fast,
         filters=filter_ or [],
         traces=traces,
+        preflight=preflight,
+        verify_llm=verify_llm,
     )
     raise typer.Exit(_execute(path, options, settings, open_report, junit))
 
@@ -245,6 +254,136 @@ def summary(
         typer.secho(f"error: {path}: not a finished run ({exc})", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
     typer.echo(markdown_summary(result, report_url=report_url))
+
+
+telemetry_app = typer.Typer(
+    help="See, enable or disable the anonymous usage counts (ADR-0010).", no_args_is_help=True
+)
+app.add_typer(telemetry_app, name="telemetry")
+
+
+def _sample_result() -> SuiteResult:
+    """A stand-in result, so `show --sample` needs no run."""
+    from datetime import UTC, datetime
+
+    from opseval.models.results import Gate
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    return SuiteResult(
+        opseval_version=__version__,
+        run_id="sample",
+        suite="smoke",
+        target="wss://agent.example.com/ws",
+        profile="my-agent",
+        started_at=now,
+        ended_at=now,
+        tests=[],
+        gate=Gate(status="pass", summary="sample"),
+        exit_code=0,
+    )
+
+
+@telemetry_app.command("show")
+def telemetry_show(
+    run_dir: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option(help="Show the payload for this finished run instead of a sample."),
+    ] = None,
+    sample: Annotated[
+        bool, typer.Option("--sample", help="Show a sample payload without reading a run.")
+    ] = False,
+) -> None:
+    """Print the status and the exact JSON that would be sent. Sends nothing."""
+    import json as _json
+
+    from opseval.models.telemetry import TelemetryEvent
+    from opseval.telemetry import build_payload, config_path, decide, install_id
+
+    settings = Settings()
+    decision = decide(settings)
+    typer.echo(f"Status:    {'enabled' if decision.send else 'not sending'} — {decision.reason}")
+    typer.echo(f"Endpoint:  {decision.endpoint or '(none configured; nothing is ever sent)'}")
+    typer.echo(f"Config:    {config_path()}")
+    typer.echo(f"Install:   {install_id()}")
+    typer.echo("")
+    result = _sample_result() if sample or run_dir is None else _finished_run(run_dir)
+    payload = build_payload(
+        result,
+        event=TelemetryEvent.RUN,
+        install=install_id(),
+        transports=["websocket"] if sample or run_dir is None else [],
+        languages=["en"] if sample or run_dir is None else [],
+        ci=settings.ci,
+    )
+    typer.echo("This is everything that would be sent:")
+    typer.echo(_json.dumps(payload.model_dump(by_alias=True, mode="json"), indent=2))
+
+
+@telemetry_app.command("disable")
+def telemetry_disable() -> None:
+    """Turn telemetry off for this user, permanently."""
+    from opseval.telemetry import set_enabled
+
+    typer.echo(f"Telemetry disabled in {set_enabled(False)}")
+
+
+@telemetry_app.command("enable")
+def telemetry_enable() -> None:
+    """Turn telemetry back on for this user."""
+    from opseval.telemetry import set_enabled
+
+    path = set_enabled(True)
+    typer.echo(
+        f"Telemetry enabled in {path}. It still sends nothing unless "
+        "OPSEVAL_TELEMETRY_ENDPOINT is set and allowlisted."
+    )
+
+
+@app.command()
+def preflight(
+    catalogue: Annotated[Path, typer.Argument(help="Suite or scenario folder to check for.")],
+    profile: Annotated[str, typer.Option("--profile", "-p", help="SUT profile file.")],
+    target: Annotated[str, typer.Option("--target", "-t", help="Agent URL.")],
+    transport: Annotated[
+        str, typer.Option(help="websocket | http-json | sse | openai-chat")
+    ] = "websocket",
+    traces: Annotated[bool, typer.Option(help="Include the trace source check.")] = True,
+    verify_llm: Annotated[
+        bool, typer.Option(help="Spend one token per LLM role proving the credentials work.")
+    ] = False,
+) -> None:
+    """Check what a suite depends on, without running it.
+
+    Exit codes: 0 everything needed is available, 2 something is missing (scenarios
+    depending on it would be skipped, not failed), 3 configuration error.
+    """
+    from opseval.preflight import preflight as run_preflight
+
+    settings = Settings()
+    try:
+        sut_profile = load_profile(profile)
+        found, _name = load_catalogue(
+            catalogue,
+            sut_profile,
+            known_scorers=REGISTRY.keys(),
+            known_invariants=set(INVARIANTS),
+        )
+        report = asyncio.run(
+            run_preflight(
+                found.scenarios,
+                sut_profile,
+                settings,
+                target=target,
+                transport=transport,
+                traces_enabled=traces and sut_profile.traces is not None,
+                verify_llm=verify_llm,
+            )
+        )
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+    typer.echo(report.summary())
+    raise typer.Exit(EXIT_NOT_JUDGED if report.blocking() else 0)
 
 
 def _finished_run(run_dir: Path) -> SuiteResult:

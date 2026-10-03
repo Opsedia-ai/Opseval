@@ -80,6 +80,24 @@ auth_frame: {type: auth, token: "{token}"}
 
 A drop Opseval can't resume, or a resume answered with a different session, ends the attempt as *not judged*. It is never counted as an agent failure. Add the `conversation.connection_stable` scorer if the agent dropping the connection should fail the scenario even when the session resumed ([ADR-0012](docs/adr/0012-websocket-resume-and-token-refresh.md)).
 
+### Check your setup before a run
+
+```bash
+opseval preflight suites/smoke.yaml --profile profile.yaml --target wss://your-agent/ws
+```
+
+Checks the agent, token minting, the simulator and judge endpoints, and the trace source — then
+says which scenarios would be skipped and why. `opseval run` does the same automatically:
+
+- a **dependency** outage skips only the scenarios it silences (`skipped_precondition`), so a
+  scenario that still has a deterministic scorer keeps running;
+- an **unreachable agent** stops the run with exit 3 instead of skipping, because a skip is only a
+  gate warning and would report "safe to release" on a suite that tested nothing.
+
+A reachable LLM endpoint reports `unverified`, not `ok`: a probe cannot prove a key works. Pass
+`--verify-llm` to spend one token proving it, or `--no-preflight` to skip the checks. See
+[ADR-0020](docs/adr/0020-preflight-health-checks.md).
+
 ### Streaming agents (Server-Sent Events)
 
 If your agent answers a POST with `text/event-stream`, point Opseval at it:
@@ -267,6 +285,28 @@ because that is the model it grades.
 Leaving `sut_model` unset means *unknown*, not *independent*: the check stays inert, and no result
 claims independence it has not verified. See
 [ADR-0016](docs/adr/0016-judge-independence-and-quality-judges.md).
+
+## Telemetry
+
+Opseval can send anonymous, content-free usage counts, and **sends nothing today**: no collector
+endpoint ships, so a fresh install reports "no endpoint configured". See exactly what it would
+send:
+
+```bash
+opseval telemetry show --sample
+```
+
+It never sends conversations, scenarios, prompts, hosts, keys or file paths — counts are bucketed,
+and a third-party transport or scorer name is reported as `custom`. The install id is a random
+UUID, not derived from your machine. Turn it off for good with any one of:
+
+```bash
+opseval telemetry disable      # or OPSEVAL_TELEMETRY=false, or DO_NOT_TRACK=1
+```
+
+It is off in CI by default, the first run that would send prints a notice and sends nothing, and a
+dead collector can never change an exit code. See
+[ADR-0010](docs/adr/0010-telemetry.md) and [ADR-0021](docs/adr/0021-telemetry-shipped-dark.md).
 
 ## How Opseval fits with other tools
 

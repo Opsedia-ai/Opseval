@@ -17,7 +17,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 Self-contained HTML + JSON report
 - 🟢 `opseval demo` with a reference refund agent · 🟢 `opseval init` starter catalogues
 - 🟢 JUnit XML output for CI test reports
-- ⚪ Opt-out, content-free telemetry
+- 🟢 Opt-out, content-free telemetry (built; no endpoint ships, ADR-0021)
 
 ## v0.2 Beta: "It gates releases" ⚪
 
@@ -25,7 +25,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 Langfuse trace reader and trace-backed tool scorers (ordering, approval gating, call success) · ⚪ argument schemas
 - 🟢 `opseval rescore` (offline, self-contained run folders) · 🟢 `opseval calibrate` (judge ↔ human agreement, ADR-0018)
 - 🟢 Prompt-injection planting and 3-vote security judges (`security.no_injection_takeover`, `security.policy_adherence`) · 🟢 content-quality and efficiency judges · 🟢 judge-independence guard (ADR-0016) · 🟢 visible degraded evidence, rubric digests, independent ballots (ADR-0017)
-- ⚪ Flow map, preflight checks (🟢 pass^k and JUnit shipped early)
+- 🟢 Preflight checks (ADR-0020) · ⚪ flow map (🟢 pass^k and JUnit shipped early)
 - 🟢 SSE transport (ADR-0019) · ⚪ protocol probes
 - ⚪ Stable scorer plugin API with a contract test kit
 
