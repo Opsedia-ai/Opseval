@@ -22,6 +22,7 @@ from opseval.models.scenario import Scenario
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine
+from opseval.scoring.base import check_judge_independence
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 from opseval.storage import FileStore
 from opseval.traces import TraceSource, enrich
@@ -143,6 +144,14 @@ async def launch(
     meter = UsageMeter()
     sim_client = client_for_role(settings, "simulator", meter)
     judge_client = client_for_role(settings, "judge", meter)
+    check_judge_independence(
+        catalogue.scenarios,
+        profile,
+        judge_model=judge_client.model if judge_client else None,
+        simulator_model=sim_client.model if sim_client else None,
+        mode=settings.judge_independence,
+        log=log,
+    )
     engine = ScoringEngine(
         judge=judge_client,
         judge_concurrency=settings.judge_concurrency,
@@ -166,6 +175,8 @@ async def launch(
             "started_at": started.isoformat(),
             "opseval_version": __version__,
             "traces": trace_source.name if trace_source else None,
+            "simulator_model": sim_client.model if sim_client else None,
+            "judge_model": judge_client.model if judge_client else None,
             "config": config_digest(settings),
         },
     )

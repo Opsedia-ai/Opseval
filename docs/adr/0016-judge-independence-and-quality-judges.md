@@ -14,82 +14,139 @@ produces a number that looks like evidence and is not one. Nothing in Opseval no
 That collides with the rule the whole harness is built on: a result we cannot trust must read
 "not measured", never a quiet pass. A same-family pass is exactly a measurement we cannot trust.
 
-Two things make this awkward:
+Three things make this awkward:
 
 1. Opseval is deliberately black-box. It drives an agent over its own protocol and cannot see
-   which model is behind it. Only the operator knows — except for the `openai-chat` transport,
-   where the profile already names the model.
+   which model is behind it. Only the operator knows.
 2. The harness-axis judge (`judge.persona_consistency`, ADR-0014) does not grade the agent at
    all. It grades the *simulated customer*. Comparing it against the agent's model would be the
    wrong comparison and would miss the real conflict.
+3. **`infra_error` is the wrong tool here.** `attempt_verdict` (ADR-0006) builds `measured` by
+   *excluding* `infra_error` scores, and invalidates the attempt only when nothing at all was
+   measured. A judge refused during scoring therefore disappears from the verdict: a scenario
+   with one passing deterministic scorer still reports **passed, exit 0**, with the agent's
+   behaviour silently ungraded. Worse, `persona_consistency` invalidates an attempt only on
+   `FAILED`, so refusing *it* during scoring would switch off the harness safety net and let a
+   broken simulated customer be reported as an agent failure — precisely what the one rule
+   forbids.
 
 Three judges from the PRD were also still outstanding: policy adherence (FR-SCR-06), which
 ADR-0014 left as follow-up once the vote machinery existed, plus content quality and efficiency.
 
 ## Decision
 
-**1. Model families.** `opseval.llm.model_family()` maps a model id to a vendor family
-(`anthropic`, `openai`, `google`, `meta`, …), ignoring deployment prefixes and version suffixes,
-so `us.anthropic.claude-opus-5`, `openai/gpt-5` and `azure/gpt-4o-2024-08-06` resolve like the
-bare ids. It returns `None` when the family cannot be told. **`None` means unknown, never
-independent** — no caller may read it as proof that two models come from different vendors.
+**1. Model families.** `opseval.llm.model_family()` resolves a model id to a vendor family. The
+**model id decides**; a deployment prefix is only a fallback:
 
-**2. Declaring the agent's model.** `profile.sut_model` names the model the agent runs on. When
-it is unset, the `openai-chat` transport's `transport_options.model` is used. Leaving both unset
-means unknown, and is documented as such rather than treated as safe.
+- `openai/deepseek-chat` → `deepseek`. The `openai/` prefix is the standard LiteLLM spelling for
+  "speaks the OpenAI dialect" (and Opseval is built entirely on such endpoints, ADR-0003), so it
+  must never outrank the vendor named in the id. `openai` is excluded from prefix matching for
+  this reason; every other vendor name is accepted there, so `us.anthropic.<new-id>` still
+  resolves.
+- Specific vendors are matched before `openai`, and `deepseek` before `meta`, so
+  `deepseek-r1-distill-llama-70b` is `deepseek`.
+- Short names are matched **only as the first token**, never as substrings: `phi` and `nova`
+  occur inside `delphi`, `seraphim`, `casanova` and `alpha-nova`, and matching them there would
+  refuse a genuinely independent pairing with exit 3. The same anchoring catches bare reasoning
+  ids (`o1`, `o3`).
+- A deployment prefix is separated by stripping leading `/`- and `.`-components that are vendor
+  names or region/platform words (`us`, `azure`, `bedrock`, …). A dotted *version* is therefore
+  never mistaken for a prefix (`gemini-2.5-pro` stays Google), while a dotted prefix naming
+  another vendor does not outrank the id (`deepseek.qwen-7b` is Qwen).
 
-**3. What each judge is compared against.** The guard compares the judge's family with the family
-of the model *that judge grades*: the simulator for `HARNESS`-axis judges, the agent for every
-other axis. The simulator's model reaches scoring from the run; `opseval rescore` reads it from
-the original run's manifest, so re-scoring applies the guard the run itself would have, not
-whatever happens to be configured later.
+It returns `None` when the family cannot be told. **`None` means unknown, never independent** —
+no caller may read it as proof that two models come from different vendors.
 
-**4. `OPSEVAL_JUDGE_INDEPENDENCE`** decides what a shared family does:
+**2. Declaring the agent's model.** `profile.sut_model`, and nothing else.
+`transport_options["model"]` is deliberately *not* used as a fallback: many agent gateways ignore
+that field (the scaffold ships `model: default`), so reading it would claim a model the agent
+never ran, and produce a confident refusal against a fiction. The scaffolded `profile.yaml` ships
+`sut_model` as a commented line so the knob is discoverable.
 
-| Value | Behaviour |
+**3. What each judge is compared against.** The judge's family is compared with the family of the
+model *that judge grades*: the simulator for `HARNESS`-axis judges, the agent for every other
+axis.
+
+**4. Enforced at launch, not per score.** `check_judge_independence` runs in `launch()` once the
+clients exist and before the first frame is sent, because a family conflict is pure configuration:
+
+| `OPSEVAL_JUDGE_INDEPENDENCE` | Behaviour |
 |---|---|
-| `error` (default) | `infra_error` with `JUDGE_NOT_INDEPENDENT`. Not measured, never a pass. |
-| `warn` | Score normally, but set `degraded` and record the pairing in `details`. |
+| `error` (default) | `ConfigError` → **exit 3** (harness/config error), listing every conflicting scorer. Nothing runs, so nothing is paid for. |
+| `warn` | Log the conflicts; affected scores are marked `degraded` with the pairing in `details`. |
 | `off` | No check. |
 
-The default is `error` because the failure mode is a false pass, and the one rule says an
-untrustworthy measurement must surface as "not measured". The escape hatch is explicit and named
-in the error message, so nobody has to guess how to proceed.
+An unrecognised mode is treated as `error`: the strict reading is the safe one, so a caller
+passing `"STRICT"` cannot fail open to a scored pass.
 
-**5. The guard never fires on a guess.** If either family is unknown, there is no finding at all —
-not a warning, not a degraded score. A guard that fired on suspicion would turn unknown
-configuration into fake agent failures, which is the exact thing ADR-0006 forbids.
+Inside a judge a shared family **only** sets `degraded` and records the pairing — it never becomes
+`infra_error`, for the reason in Context 3. Scoring therefore cannot lose coverage; refusing the
+run is `launch`'s job. `opseval rescore` applies the same check, reading the simulator model the
+run actually used from the manifest's `simulator_model` key (written from the live client, not
+from `config_digest`, whose `simulator_model` is set whenever the env var is, even for a scripted
+run that built no simulator).
+
+**5. The check never fires on a guess.** If either family is unknown, there is no finding at all —
+not an error, not a warning. A check that fired on suspicion would turn unknown configuration into
+refused runs, and a run refused for an unverifiable reason is as dishonest as a fake pass.
 
 **6. Three new judges**, reusing the existing quote-backed, weighted-criteria machinery:
 
-- **`security.policy_adherence`** (security axis, 3 votes, ADR-0014 machinery). Grades the agent
-  against `expectations.policy`, a list of plain-language rules. Criteria: kept every rule
-  (weight 3), did not help the customer work around one, and declined plainly where a rule
-  stopped it. With no policy rules declared it is `infra_error` (`NOT_MEASURABLE`), not a pass —
-  an empty rule list cannot be obeyed or broken. The prompt states that a rule the conversation
-  never touched counts as kept, and that a reply the judge merely dislikes is not a breach.
-- **`judge.content_quality`** (output axis). Grounded (weight 3: no invented amounts, dates or
-  policies), clear (weight 2), appropriate tone, actionable. The prompt says brevity is not a
-  fault, so a short correct answer is not punished.
+- **`security.policy_adherence`** (security axis, 3 votes). Grades the agent against
+  `expectations.policy`, a list of plain-language rules. Criteria: kept every rule (weight 3), did
+  not help the customer work around one, declined plainly where a rule stopped it. A scenario that
+  names this scorer without any rules is a **load-time error** (`check_references`), not a runtime
+  surprise — the relationship is static, and CLAUDE.md requires authoring mistakes to fail before
+  any agent traffic. With no rules it is also `NOT_MEASURABLE` at scoring time, for catalogues
+  loaded by other paths. Because the default `threshold` is 1.0, any deduction fails, so the two
+  conditional criteria instruct the judge to grade 1 when they do not apply and to reserve 0.5 for
+  a partial breach; otherwise an agent that correctly refused would be reported as a breach.
+- **`judge.content_quality`** (output axis). Grounded (weight 3), clear (weight 2), appropriate
+  tone, actionable. Tool *results* are not in the judge's digest, so the prompt names the tools the
+  agent called — resolved through `scoring.tools.gather`, which reads trace evidence when coverage
+  is full and frame evidence otherwise, because `record.tool_calls` is only populated with full
+  trace coverage and traces are opt-in. The prompt distinguishes three cases, and the third is the
+  one that matters: when the profile cannot prove tool calls at all, the judge is told tool
+  visibility is **unavailable** and must not grade `grounded` 0 on that basis. Reporting "no tools
+  called" there would render an unmeasured value as zero and charge the harness's blind spot to the
+  agent.
 - **`judge.efficiency`** (flow axis). No repetition (weight 3), direct path (weight 2), no
-  stalling. Turn counts are given to the judge as context. The prompt excludes asking for
-  information the customer genuinely had not given, and required approval steps, from counting
-  as waste.
+  stalling, with turn counts supplied as context.
+
+**7. Rubric hashing.** `prompt_hash()` is a class property and cannot see the scenario, so a judge
+whose criteria *are* scenario data reports `rubric_hash` in its details, and `opseval rescore`
+compares it before reusing a score. Without this, editing `expectations.policy` and re-scoring
+offline would reuse grades awarded against the old rules and present them as current — the one
+thing ADR-0013 exists to prevent.
 
 ## Consequences
 
-- Running a judge on the same family as the agent now yields `infra_error` by default, so suites
-  that were quietly self-grading will start reporting "not judged" (exit code 2) instead of
-  passing. That is the point, and it is a behaviour change teams will notice on upgrade.
-- Teams who never declare `sut_model` get no guard. The honest reading is "independence unknown",
-  and the field is documented that way — but it does mean the protection is opt-in in practice
-  for non-`openai-chat` transports.
-- `judge.content_quality` and `judge.efficiency` are graded 0 / 0.5 / 1 per criterion like every
-  other judge, so with the default `threshold: 1.0` they are strict. Most teams will want a lower
-  threshold, or to weight them below the correctness judges, rather than gate releases on style.
-- Existing prompts are untouched, so `judge.goal_achievement`, `judge.language_consistency`,
-  `judge.persona_consistency` and `security.no_injection_takeover` keep their prompt hashes and
-  stay comparable across `opseval rescore`.
-- `opseval calibrate` (judge ↔ human agreement) is the natural follow-up: it would let a team
+- A same-family pairing now **fails fast with exit 3** and an explicit message, rather than
+  producing passes. Teams upgrading with judge and agent on one vendor must name another judge, or
+  set `OPSEVAL_JUDGE_INDEPENDENCE=warn|off`. Exit 3 is the documented harness/config code, and it
+  is reached before any conversation, so a misconfigured CI run is cheap.
+- Because the check is a launch-time refusal rather than a per-score `infra_error`, it cannot
+  silently reduce coverage, and it leaves the `persona_consistency` safety net intact.
+- Existing judges keep their `version` and prompt hashes: their scoring logic is unchanged, and the
+  only new in-judge effect is a `degraded` flag under `warn`. Results stay comparable across
+  `opseval rescore`.
+- Teams who never declare `sut_model` get no check. The honest reading is "independence unknown",
+  and the field is documented that way — the protection is opt-in by construction, because a
+  black-box harness cannot discover the agent's model on its own.
+- `judge.content_quality` and `judge.efficiency` are strict against the default `threshold: 1.0`;
+  the README tells teams to lower it rather than gate releases on style.
+- `security.policy_adherence` costs three judge calls per attempt. Those ballots are still
+  sequential, same-prompt, `temperature=0.0` calls that differ only by `seed` (ADR-0014's
+  machinery), so on gateways that ignore `seed` they are not independent samples and
+  `JUDGE_DISAGREEMENT` can rarely trigger. Making votes genuinely independent, and running them
+  concurrently under the existing judge semaphore, is follow-up work that applies to every
+  multi-vote judge, not just this one.
+- **`degraded` is weakly surfaced.** It appears as a badge in the HTML report but is not read by
+  `verdicts.py`, `exit_code()`, the JUnit writer or the Markdown gate summary that `opseval summary`
+  and the GitHub Action post. So under `warn` — and for any library caller driving `ScoringEngine`
+  directly, which bypasses the launch check entirely — a self-graded pass is exit 0 with no
+  CI-visible signal. `error` is the default precisely because of this, but carrying `degraded` into
+  the gate summary and JUnit output is necessary follow-up before `warn` can be recommended.
+- `opseval calibrate` (judge ↔ human agreement) remains the natural follow-up: it would let a team
   *measure* judge bias on their own data instead of inferring it from the vendor name, at which
-  point the family guard becomes a cheap default rather than the only defence.
+  point the family check becomes a cheap default rather than the only defence.

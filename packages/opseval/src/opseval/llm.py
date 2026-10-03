@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -208,33 +209,66 @@ def client_for_role(settings: Settings, role: str, meter: UsageMeter) -> ChatCli
 
 # --- model families (judge independence, ADR-0016) ------------------------------------
 
-_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("anthropic", ("claude", "fable")),
-    ("openai", ("gpt", "chatgpt", "o1-", "o3-", "o4-", "davinci", "babbage")),
-    ("google", ("gemini", "gemma", "palm", "bison")),
-    ("meta", ("llama", "codellama")),
-    ("mistral", ("mistral", "mixtral", "magistral", "codestral", "ministral")),
-    ("qwen", ("qwen",)),
-    ("deepseek", ("deepseek",)),
-    ("cohere", ("command-", "command.", "cohere")),
-    ("xai", ("grok",)),
-    ("microsoft", ("phi-", "phi.")),
-    ("amazon", ("nova-micro", "nova-lite", "nova-pro", "nova-premier", "titan")),
+# (family, substrings anywhere in the model id, tokens that must START it)
+# Short names that occur inside unrelated words ("phi" in delphi/seraphim, "nova" in
+# casanova, the bare reasoning ids) are matched only as the first token, never as a
+# substring. Specific vendors come before ``openai``, because "openai" also names the
+# OpenAI-*compatible* API dialect and must not outrank the vendor in the id itself.
+_FAMILIES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("anthropic", ("claude", "fable"), ()),
+    ("deepseek", ("deepseek",), ()),
+    ("qwen", ("qwen",), ()),
+    ("google", ("gemini", "gemma", "palm", "bison"), ()),
+    ("mistral", ("mistral", "mixtral", "magistral", "codestral", "ministral"), ()),
+    ("meta", ("llama",), ()),
+    ("cohere", ("cohere",), ("command",)),
+    ("xai", ("grok",), ()),
+    ("microsoft", (), ("phi",)),
+    ("amazon", ("titan",), ("nova",)),
+    ("openai", ("gpt", "chatgpt", "davinci", "babbage"), ("o1", "o3", "o4")),
 )
+
+_VENDORS: tuple[str, ...] = tuple(f for f, _, _ in _FAMILIES)
+# Deployment/region components that may precede the model id ("us.anthropic.<id>").
+# A component is only treated as a prefix if it is one of these or a vendor name, so a
+# dotted *version* ("gemini-2.5-pro") is never mistaken for a prefix.
+_PREFIX_WORDS = frozenset(
+    {"us", "eu", "uk", "apac", "global", "azure", "bedrock", "vertex", "gateway", "models"}
+)
+
+
+def _split_prefix(normalised: str) -> tuple[str, set[str]]:
+    """Separate the model id from any deployment prefix, returning (id, prefix vendors)."""
+    head, _, tail = normalised.rpartition("/")
+    vendors = {c for c in head.split("/") if c in _VENDORS} if head else set()
+    parts = tail.split(".")
+    while len(parts) > 1 and (parts[0] in _VENDORS or parts[0] in _PREFIX_WORDS):
+        if parts[0] in _VENDORS:
+            vendors.add(parts[0])
+        parts = parts[1:]
+    return ".".join(parts), vendors
 
 
 def model_family(model: str | None) -> str | None:
     """The vendor family behind a model id, or ``None`` when it cannot be told.
 
-    Deployment prefixes and suffixes are ignored, so ``us.anthropic.claude-opus-5``,
-    ``openai/gpt-5`` and ``azure/gpt-4o-2024-08-06`` resolve the same way as the bare ids.
+    The model id decides; a deployment prefix is only a fallback, so
+    ``openai/deepseek-chat`` is ``deepseek`` (the ``openai/`` prefix only says the
+    endpoint speaks the OpenAI dialect) while ``us.anthropic.<new-id>`` still resolves.
+
     ``None`` means *unknown*, never *independent*: callers must not read it as a
     guarantee that two models come from different vendors.
     """
     if not model:
         return None
-    needle = model.strip().lower().replace("_", "-")
-    for family, markers in _FAMILIES:
-        if family in needle or any(marker in needle for marker in markers):
+    normalised = model.strip().lower().replace("_", "-")
+    segment, prefix_vendors = _split_prefix(normalised)
+    first = re.split(r"[-:@.]", segment, maxsplit=1)[0]
+    for family, substrings, starts in _FAMILIES:
+        if any(s in segment for s in substrings) or first in starts:
+            return family
+    # "openai" as a prefix denotes the API dialect, not the vendor, so it never counts.
+    for family in _VENDORS:
+        if family != "openai" and family in prefix_vendors:
             return family
     return None

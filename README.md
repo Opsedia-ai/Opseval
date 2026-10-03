@@ -202,20 +202,29 @@ See [ADR-0014](docs/adr/0014-judge-votes-and-planted-injections.md).
 
 ### Judge independence
 
-A model grades its own family too generously, so by default Opseval refuses to turn a
-same-family pairing into a pass. Tell it what the agent runs on and the check does the rest:
+A model grades its own family too generously, so Opseval refuses to run a judge against a model
+from its own vendor. Opseval cannot see inside a black-box agent, so tell it what the agent runs
+on:
 
 ```yaml
 # profile.yaml
-sut_model: gpt-4o        # the openai-chat transport already knows this from transport_options
+sut_model: gpt-4o
 ```
 
-If the judge and the agent resolve to the same vendor family, the score is *not judged*
-(`JUDGE_NOT_INDEPENDENT`) rather than a pass. `judge.persona_consistency` is compared against the
-*simulator* instead, because that is the model it grades. Set
-`OPSEVAL_JUDGE_INDEPENDENCE=warn` to score anyway and mark the result degraded, or `off` to skip
-the check. Leaving `sut_model` unset means *unknown*, not *independent*: the check cannot fire,
-and no result claims independence it has not verified. See
+If the judge and the agent then resolve to the same vendor family, the **run stops before it
+starts** — a `ConfigError` and exit code 3, listing each conflicting scorer. The check happens at
+launch, not while scoring, so a misconfigured CI run costs nothing and no judge can quietly drop
+out of the scored set. `judge.persona_consistency` is compared against the *simulator* instead,
+because that is the model it grades.
+
+| `OPSEVAL_JUDGE_INDEPENDENCE` | |
+|---|---|
+| `error` (default) | Refuse the run: exit 3. |
+| `warn` | Run anyway; affected scores are marked `degraded`. |
+| `off` | Skip the check. |
+
+Leaving `sut_model` unset means *unknown*, not *independent*: the check stays inert, and no result
+claims independence it has not verified. See
 [ADR-0016](docs/adr/0016-judge-independence-and-quality-judges.md).
 
 ## How Opseval fits with other tools

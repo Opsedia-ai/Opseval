@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     judge_concurrency: int = 4
     judge_independence: Literal["error", "warn", "off"] = "error"
     """What to do when a judge and the model it grades share a vendor family (ADR-0016).
-    ``error`` is not measured, ``warn`` scores but marks the result degraded."""
+    ``error`` refuses the run at launch (exit 3), ``warn`` scores but marks the results
+    degraded, ``off`` skips the check."""
 
     # Trace source (Langfuse public API)
     langfuse_host: str | None = None

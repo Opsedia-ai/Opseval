@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Judge independence guard, and the policy, content-quality and efficiency judges.
+"""Judge independence, and the policy, content-quality and efficiency judges.
 
 Fault-injection view of the core rule:
-- harness half: a judge that shares a vendor family with the model it grades cannot
-  produce a pass (``JUDGE_NOT_INDEPENDENT``), an empty policy list is not measurable,
-  and an unknown family is never treated as proof of independence;
-- agent half: a genuinely failing agent still fails. The guard must not mask a real
-  breach, and switching the judge to another family does not rescue a bad transcript.
+- harness half: a judge sharing a vendor family with the model it grades is refused at
+  *launch* (ConfigError, exit 3) and is never turned into ``infra_error`` during scoring,
+  because an ``infra_error`` score is dropped from the measured set and would let a suite
+  pass with the judge silently gone. An empty policy list is not measurable, and an
+  unknown family is never read as proof of independence;
+- agent half: a genuinely failing agent still fails. Neither the guard nor an
+  independent judge rescues a bad transcript.
 """
 
 from __future__ import annotations
@@ -18,15 +20,22 @@ from typing import Any
 
 import pytest
 
+from opseval.catalogue import check_references
+from opseval.errors import ConfigError
 from opseval.llm import model_family
 from opseval.models.profile import FrameKind, SutProfile
-from opseval.models.record import FrameRecord, RunRecord, TerminalState
+from opseval.models.record import FrameRecord, RunRecord, TerminalState, ToolCall
 from opseval.models.results import Axis, ScoreResult, ScoreStatus
 from opseval.models.scenario import Scenario
-from opseval.scoring import ScoringEngine
-from opseval.scoring.base import ScoringContext
+from opseval.scoring import REGISTRY, ScoringEngine, effective_specs
+from opseval.scoring.base import (
+    ScoringContext,
+    check_judge_independence,
+    independence_conflicts,
+)
 from opseval.scoring.judges import ContentQuality, Efficiency, PolicyAdherence
 from opseval.storage import FileStore
+from opseval.verdicts import attempt_verdict
 
 from .conftest import make_scenario
 
@@ -103,11 +112,11 @@ async def score_one(
 
 
 def policy_scenario(**overrides: Any) -> Scenario:
-    return make_scenario(
-        scorers=[{"id": "security.policy_adherence"}],
-        expectations={"policy": RULES},
-        **overrides,
-    )
+    base: dict[str, Any] = {
+        "scorers": [{"id": "security.policy_adherence"}],
+        "expectations": {"policy": RULES},
+    }
+    return make_scenario(**{**base, **overrides})
 
 
 def with_model(profile: SutProfile, model: str | None) -> SutProfile:
@@ -128,6 +137,27 @@ class TestModelFamily:
             ("openai/gpt-4o-2024-08-06", "openai"),
             ("azure/gpt-4o", "openai"),
             ("o3-mini", "openai"),
+            ("o3", "openai"),
+            ("o1", "openai"),
+            # an "openai/" prefix is the API dialect, not the vendor
+            ("openai/deepseek-chat", "deepseek"),
+            ("openai/qwen-max", "qwen"),
+            ("openai/command-r", "cohere"),
+            # a vendor named only in a deployment prefix
+            ("us.anthropic.brand-new-id", "anthropic"),
+            ("mistral/some-new-id", "mistral"),
+            # the base vendor wins over the distillation target
+            ("deepseek-r1-distill-llama-70b", "deepseek"),
+            # a dotted *version* is not a deployment prefix
+            ("gemini-2.5-pro", "google"),
+            ("claude-3.5-sonnet", "anthropic"),
+            # a dotted prefix naming another vendor does not outrank the id
+            ("deepseek.qwen-7b", "qwen"),
+            ("mistral.cohere-command-r", "cohere"),
+            # short names are anchored to the first token
+            ("phi-4", "microsoft"),
+            ("nova-pro", "amazon"),
+            ("command-r", "cohere"),
             ("gemini-2.5-pro", "google"),
             ("llama-3.1-70b-instruct", "meta"),
             ("mistral-large-latest", "mistral"),
@@ -139,8 +169,27 @@ class TestModelFamily:
     def test_known_families(self, model: str, family: str) -> None:
         assert model_family(model) == family
 
-    @pytest.mark.parametrize("model", ["", None, "stub-judge", "our-internal-model-v3"])
+    @pytest.mark.parametrize(
+        "model", ["", None, "stub-judge", "our-internal-model-v3", "openai/our-internal-model"]
+    )
     def test_unknown_is_none_not_a_guarantee(self, model: str | None) -> None:
+        assert model_family(model) is None
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "sophia-1",
+            "delphi-1",
+            "graphite-7b",
+            "seraphim",
+            "casanova",
+            "innovate-7b",
+            "alpha-nova",
+        ],
+    )
+    def test_short_vendor_names_do_not_match_inside_other_words(self, model: str) -> None:
+        """ "phi" and "nova" are substrings of unrelated names; matching them would refuse
+        a genuinely independent pairing with exit 3."""
         assert model_family(model) is None
 
     def test_case_and_separators_do_not_matter(self) -> None:
@@ -148,23 +197,18 @@ class TestModelFamily:
 
 
 class TestDeclaredModel:
-    def test_sut_model_wins(self, profile: SutProfile) -> None:
-        p = profile.model_copy(
-            update={"sut_model": "claude-opus-5", "transport_options": {"model": "gpt-5"}}
-        )
-        assert p.declared_model() == "claude-opus-5"
+    def test_only_an_explicit_sut_model_counts(self, profile: SutProfile) -> None:
+        assert with_model(profile, "claude-opus-5").declared_model() == "claude-opus-5"
 
-    def test_falls_back_to_the_openai_chat_model(self, profile: SutProfile) -> None:
+    def test_transport_options_model_is_not_inferred(self, profile: SutProfile) -> None:
+        """Many gateways ignore the field (the scaffold ships `model: default`), so
+        reading it would claim a model the agent never ran."""
         p = profile.model_copy(update={"transport_options": {"model": "gpt-5"}})
-        assert p.declared_model() == "gpt-5"
-
-    def test_unknown_when_neither_is_set(self, profile: SutProfile) -> None:
-        assert with_model(profile, None).declared_model() is None
-
-    @pytest.mark.parametrize("model", ["", 7, None])
-    def test_blank_and_non_string_are_unknown(self, profile: SutProfile, model: object) -> None:
-        p = profile.model_copy(update={"transport_options": {"model": model}})
         assert p.declared_model() is None
+
+    @pytest.mark.parametrize("model", ["", None])
+    def test_unset_is_unknown(self, profile: SutProfile, model: str | None) -> None:
+        assert with_model(profile, model).declared_model() is None
 
 
 class TestGradedModel:
@@ -193,43 +237,195 @@ GOOD_QUALITY = ballot(
 )
 
 
-class TestIndependenceGuard:
-    async def test_same_family_is_not_measured_and_never_a_pass(self, profile: SutProfile) -> None:
-        judge = StubJudge(GOOD_QUALITY, model="claude-opus-5")
-        res = await score_one(
-            rec(CONVERSATION),
-            make_scenario(scorers=[{"id": "judge.content_quality"}]),
+class TestIndependencePreflight:
+    """A family conflict is configuration, so it is refused before any frame is sent."""
+
+    def preflight(self, profile: SutProfile, scenario: Scenario, **kw: Any) -> list[str]:
+        kw.setdefault("judge_model", "claude-opus-5")
+        kw.setdefault("simulator_model", None)
+        kw.setdefault("mode", "error")
+        return check_judge_independence([scenario], profile, **kw)
+
+    def test_same_family_refuses_the_run(self, profile: SutProfile) -> None:
+        scenario = make_scenario(scorers=[{"id": "judge.content_quality"}])
+        with pytest.raises(ConfigError, match="judge independence") as exc:
+            self.preflight(with_model(profile, "claude-sonnet-5"), scenario)
+        message = str(exc.value)
+        assert "judge.content_quality" in message
+        assert "anthropic" in message
+        assert "OPSEVAL_JUDGE_INDEPENDENCE=warn" in message, "must name the escape hatch"
+
+    def test_warn_reports_without_raising(self, profile: SutProfile) -> None:
+        lines: list[str] = []
+        conflicts = self.preflight(
             with_model(profile, "claude-sonnet-5"),
-            judge,
-        )
-        assert res.status is ScoreStatus.INFRA_ERROR
-        assert res.score is None
-        assert "JUDGE_NOT_INDEPENDENT" in (res.reason or "")
-        assert res.details["shared_family"] == "anthropic"
-        assert judge.prompts == [], "the judge must not be called at all"
-
-    async def test_the_error_names_the_escape_hatch(self, profile: SutProfile) -> None:
-        res = await score_one(
-            rec(CONVERSATION),
             make_scenario(scorers=[{"id": "judge.content_quality"}]),
-            with_model(profile, "gpt-4o"),
-            StubJudge(GOOD_QUALITY, model="gpt-5"),
+            mode="warn",
+            log=lines.append,
         )
-        assert "OPSEVAL_JUDGE_INDEPENDENCE=warn" in (res.reason or "")
+        assert len(conflicts) == 1
+        assert lines and "degraded" in lines[0]
 
-    async def test_warn_scores_but_marks_the_result_degraded(self, profile: SutProfile) -> None:
+    def test_off_checks_nothing(self, profile: SutProfile) -> None:
+        assert (
+            self.preflight(
+                with_model(profile, "claude-sonnet-5"),
+                make_scenario(scorers=[{"id": "judge.content_quality"}]),
+                mode="off",
+            )
+            == []
+        )
+
+    def test_an_unrecognised_mode_is_treated_as_error(self, profile: SutProfile) -> None:
+        """The strict reading is the safe one: never fail open to a scored pass."""
+        with pytest.raises(ConfigError):
+            self.preflight(
+                with_model(profile, "claude-sonnet-5"),
+                make_scenario(scorers=[{"id": "judge.content_quality"}]),
+                mode="STRICT",
+            )
+
+    def test_different_families_are_accepted(self, profile: SutProfile) -> None:
+        assert (
+            self.preflight(
+                with_model(profile, "gpt-5"),
+                make_scenario(scorers=[{"id": "judge.content_quality"}]),
+            )
+            == []
+        )
+
+    @pytest.mark.parametrize(
+        ("sut", "judge_model"),
+        [(None, "claude-opus-5"), ("claude-opus-5", "our-judge"), (None, "our-judge")],
+    )
+    def test_an_unknown_family_never_fires(
+        self, profile: SutProfile, sut: str | None, judge_model: str
+    ) -> None:
+        """Unknown configuration must not become a refused run, nor a claim of independence."""
+        assert (
+            self.preflight(
+                with_model(profile, sut),
+                make_scenario(scorers=[{"id": "judge.content_quality"}]),
+                judge_model=judge_model,
+            )
+            == []
+        )
+
+    def test_a_blocked_scenario_does_not_refuse_the_run(self, profile: SutProfile) -> None:
+        """A parked scenario is skipped before scoring, so its judges never run."""
+        parked = make_scenario(tags=["blocked"], scorers=[{"id": "judge.content_quality"}])
+        assert parked.is_blocked
+        assert self.preflight(with_model(profile, "claude-sonnet-5"), parked) == []
+
+    def test_deterministic_scorers_are_never_a_conflict(self, profile: SutProfile) -> None:
+        assert (
+            self.preflight(
+                with_model(profile, "claude-sonnet-5"),
+                make_scenario(scorers=[{"id": "output.terminal_state"}]),
+            )
+            == []
+        )
+
+    def test_harness_axis_is_compared_against_the_simulator(self, profile: SutProfile) -> None:
+        scenario = make_scenario(scorers=[{"id": "judge.persona_consistency"}])
+        # shares the AGENT's family, but grades the simulator -> no conflict
+        assert (
+            self.preflight(with_model(profile, "claude-opus-5"), scenario, simulator_model="gpt-5")
+            == []
+        )
+        # shares the SIMULATOR's family -> refused, and says which subject
+        with pytest.raises(ConfigError, match="the simulated customer"):
+            self.preflight(with_model(profile, "gpt-5"), scenario, simulator_model="claude-opus-5")
+
+    def test_each_conflicting_scorer_is_listed_once(self, profile: SutProfile) -> None:
+        conflicts = independence_conflicts(
+            [
+                make_scenario(scorers=[{"id": "judge.content_quality"}]),
+                make_scenario(scorers=[{"id": "judge.content_quality"}]),
+                make_scenario(scorers=[{"id": "judge.efficiency"}]),
+            ],
+            with_model(profile, "claude-sonnet-5"),
+            judge_model="claude-opus-5",
+            simulator_model=None,
+        )
+        assert len(conflicts) == 2
+
+
+class TestGuardNeverLosesCoverage:
+    """The reason the check lives at launch and not in the scorer.
+
+    `attempt_verdict` drops `infra_error` from `measured`, so a judge refused *during*
+    scoring would vanish from the verdict and the suite could still exit 0 with the
+    agent's behaviour unmeasured.
+    """
+
+    def test_an_infra_error_judge_would_pass_a_scenario_silently(self, profile: SutProfile) -> None:
+        """Demonstrates the trap this design avoids (not the behaviour we ship)."""
+        scenario = policy_scenario(
+            scorers=[{"id": "conversation.no_errors"}, {"id": "security.policy_adherence"}]
+        )
+        specs = {s.id: s for s in effective_specs(scenario)}
+        deterministic = ScoreResult(
+            scorer_id="conversation.no_errors",
+            axis=Axis.FLOW,
+            status=ScoreStatus.PASSED,
+            score=1.0,
+            threshold=1.0,
+            weight=1.0,
+        )
+        refused = ScoreResult(
+            scorer_id="security.policy_adherence",
+            axis=Axis.SECURITY,
+            status=ScoreStatus.INFRA_ERROR,
+            score=None,
+            threshold=specs["security.policy_adherence"].threshold,
+            weight=1.0,
+            reason="JUDGE_NOT_INDEPENDENT",
+        )
+        verdict = attempt_verdict(rec(CONVERSATION), [deterministic, refused], "p")
+        assert verdict.passed is True, "exactly the false green the launch check prevents"
+
+    async def test_a_shared_family_degrades_the_score_instead(self, profile: SutProfile) -> None:
+        """What we ship: the judge still measures, and the result is flagged degraded."""
         res = await score_one(
             rec(CONVERSATION),
             make_scenario(scorers=[{"id": "judge.content_quality"}]),
             with_model(profile, "claude-sonnet-5"),
             StubJudge(GOOD_QUALITY, model="claude-opus-5"),
-            judge_independence="warn",
+            judge_independence="error",
         )
-        assert res.status is ScoreStatus.PASSED
+        assert res.status is not ScoreStatus.INFRA_ERROR, "must not drop out of `measured`"
+        assert res.score is not None
         assert res.degraded is True
         assert res.details["shared_family"] == "anthropic"
 
-    async def test_off_scores_normally(self, profile: SutProfile) -> None:
+    async def test_the_persona_safety_net_still_invalidates(self, profile: SutProfile) -> None:
+        """A harness-axis FAILED must still invalidate; the guard must not mute it."""
+        broke = ballot(
+            {
+                "in_character": (0, "Order 10482 arrived damaged"),
+                "pursues_goal": (1, "refund to my original card please"),
+                "consistent_facts": (1, "Order 10482"),
+                "language": (1, "refund to my original card please"),
+            }
+        )
+        scores = await ScoringEngine(
+            judge=StubJudge(broke, model="claude-sonnet-5"),
+            simulator_model="claude-opus-5",
+            judge_independence="error",
+        ).score(
+            rec(CONVERSATION),
+            make_scenario(scorers=[{"id": "judge.persona_consistency"}]),
+            with_model(profile, "gpt-5"),
+        )
+        assert scores[0].status is ScoreStatus.FAILED
+        verdict = attempt_verdict(rec(CONVERSATION), scores, "p")
+        assert verdict.passed is None
+        assert verdict.invalid_reason == "the simulated customer broke character"
+
+
+class TestDegradedNote:
+    async def test_off_leaves_no_note(self, profile: SutProfile) -> None:
         res = await score_one(
             rec(CONVERSATION),
             make_scenario(scorers=[{"id": "judge.content_quality"}]),
@@ -241,7 +437,7 @@ class TestIndependenceGuard:
         assert res.degraded is False
         assert "shared_family" not in res.details
 
-    async def test_different_families_score_normally(self, profile: SutProfile) -> None:
+    async def test_independent_judges_are_not_degraded(self, profile: SutProfile) -> None:
         res = await score_one(
             rec(CONVERSATION),
             make_scenario(scorers=[{"id": "judge.content_quality"}]),
@@ -250,62 +446,6 @@ class TestIndependenceGuard:
         )
         assert res.status is ScoreStatus.PASSED
         assert res.degraded is False
-
-    @pytest.mark.parametrize(
-        ("sut", "judge_model"),
-        [
-            (None, "claude-opus-5"),  # agent model not declared
-            ("claude-opus-5", "our-internal-judge"),  # judge family unknown
-            (None, "our-internal-judge"),  # neither known
-        ],
-    )
-    async def test_an_unknown_family_never_fires_the_guard(
-        self, profile: SutProfile, sut: str | None, judge_model: str
-    ) -> None:
-        """Unknown must not become a fake failure, nor a claim of independence."""
-        res = await score_one(
-            rec(CONVERSATION),
-            make_scenario(scorers=[{"id": "judge.content_quality"}]),
-            with_model(profile, sut),
-            StubJudge(GOOD_QUALITY, model=judge_model),
-            judge_independence="error",
-        )
-        assert res.status is ScoreStatus.PASSED
-        assert res.degraded is False
-
-    async def test_harness_judge_is_guarded_against_the_simulator_not_the_agent(
-        self, profile: SutProfile
-    ) -> None:
-        """The persona judge grades the customer, so the agent's family is irrelevant."""
-        scenario = make_scenario(scorers=[{"id": "judge.persona_consistency"}])
-        persona_ballot = ballot(
-            {
-                "in_character": (1, "Order 10482 arrived damaged"),
-                "pursues_goal": (1, "refund to my original card please"),
-                "consistent_facts": (1, "Order 10482"),
-                "language": (1, "refund to my original card please"),
-            }
-        )
-        # judge shares the AGENT's family, but grades the simulator -> no conflict
-        clean = await score_one(
-            rec(CONVERSATION),
-            scenario,
-            with_model(profile, "claude-opus-5"),
-            StubJudge(persona_ballot, model="claude-sonnet-5"),
-            simulator_model="gpt-5",
-        )
-        assert clean.status is ScoreStatus.PASSED
-
-        # judge shares the SIMULATOR's family -> not measured
-        conflict = await score_one(
-            rec(CONVERSATION),
-            scenario,
-            with_model(profile, "gpt-5"),
-            StubJudge(persona_ballot, model="claude-sonnet-5"),
-            simulator_model="claude-opus-5",
-        )
-        assert conflict.status is ScoreStatus.INFRA_ERROR
-        assert "the simulated customer" in (conflict.reason or "")
 
     async def test_not_measurable_is_reported_before_a_family_conflict(
         self, profile: SutProfile
@@ -335,7 +475,6 @@ class TestIndependenceGuard:
             policy_scenario(),
             with_model(profile, "claude-sonnet-5"),
             StubJudge(kept, kept, kept, model="claude-opus-5"),
-            judge_independence="warn",
         )
         assert res.status is ScoreStatus.PASSED
         assert res.degraded is True
@@ -546,11 +685,26 @@ class TestEfficiency:
 
 
 class TestManifestForRescore:
-    def test_round_trips_the_simulator_model(self, tmp_path: Path) -> None:
+    def test_round_trips_the_effective_simulator_model(self, tmp_path: Path) -> None:
+        """Top-level, not `config`: config_digest reports OPSEVAL_SIMULATOR_MODEL even when
+        no simulator client was built, which would guard a run that never used one."""
         store = FileStore(str(tmp_path))
-        store.write_manifest("run-1", {"config": {"simulator_model": "gpt-5"}})
-        config = store.load_manifest("run-1")["config"]
-        assert config["simulator_model"] == "gpt-5"
+        store.write_manifest("run-1", {"simulator_model": "gpt-5", "config": {}})
+        assert store.load_manifest("run-1")["simulator_model"] == "gpt-5"
+
+    def test_an_older_run_keeps_its_model_under_config(self, tmp_path: Path) -> None:
+        """Runs recorded before the top-level key must not make the check go inert."""
+        store = FileStore(str(tmp_path))
+        store.write_manifest("run-0", {"config": {"simulator_model": "claude-opus-5"}})
+        manifest = store.load_manifest("run-0")
+        assert "simulator_model" not in manifest
+        assert manifest["config"]["simulator_model"] == "claude-opus-5"
+
+    def test_an_explicit_null_is_distinguished_from_a_missing_key(self, tmp_path: Path) -> None:
+        """Present-and-null means "no simulator was built"; absent means "old run"."""
+        store = FileStore(str(tmp_path))
+        store.write_manifest("run-n", {"simulator_model": None, "config": {}})
+        assert "simulator_model" in store.load_manifest("run-n")
 
     def test_a_missing_manifest_is_empty_not_an_error(self, tmp_path: Path) -> None:
         """Re-scoring an older run must not fail for want of a manifest."""
@@ -569,3 +723,167 @@ class TestManifestForRescore:
             json.dumps([1, 2, 3]), encoding="utf-8"
         )
         assert store.load_manifest("run-3") == {}
+
+
+# --- load-time validation, rubric hashing and prompt content --------------------------
+
+
+class TestLoadTimeValidation:
+    """CLAUDE.md: authoring mistakes must fail at load time, not after talking to the agent."""
+
+    def test_policy_adherence_without_rules_is_a_load_error(self, profile: SutProfile) -> None:
+        scenario = make_scenario(scorers=[{"id": "security.policy_adherence"}])
+        errors = check_references(
+            scenario, profile, known_scorers=REGISTRY.keys(), known_invariants=set()
+        )
+        assert any("expectations.policy" in e for e in errors), errors
+
+    def test_policy_adherence_with_rules_loads(self, profile: SutProfile) -> None:
+        errors = check_references(
+            policy_scenario(), profile, known_scorers=REGISTRY.keys(), known_invariants=set()
+        )
+        assert errors == []
+
+    def test_other_judges_do_not_need_policy(self, profile: SutProfile) -> None:
+        errors = check_references(
+            make_scenario(scorers=[{"id": "judge.content_quality"}]),
+            profile,
+            known_scorers=REGISTRY.keys(),
+            known_invariants=set(),
+        )
+        assert errors == []
+
+
+class TestRubricHash:
+    """`prompt_hash` is a class property, so scenario-supplied criteria need their own
+    digest or `opseval rescore` reuses grades given against the old rules."""
+
+    def ctx(self, profile: SutProfile, rules: list[str]) -> ScoringContext:
+        return ScoringContext(
+            scenario=policy_scenario(expectations={"policy": rules}), profile=profile
+        )
+
+    def test_changing_the_rules_changes_the_hash(self, profile: SutProfile) -> None:
+        judge = PolicyAdherence()
+        first = judge.rubric_hash(self.ctx(profile, RULES))
+        second = judge.rubric_hash(self.ctx(profile, [*RULES, "Never waive the restocking fee."]))
+        assert first is not None and second is not None
+        assert first != second
+
+    def test_the_same_rules_hash_the_same(self, profile: SutProfile) -> None:
+        judge = PolicyAdherence()
+        assert judge.rubric_hash(self.ctx(profile, RULES)) == judge.rubric_hash(
+            self.ctx(profile, list(RULES))
+        )
+
+    def test_a_joined_rule_cannot_collide_with_two_rules(self, profile: SutProfile) -> None:
+        judge = PolicyAdherence()
+        one = judge.rubric_hash(
+            self.ctx(profile, ["Never refund without approval\nNever offer credit"])
+        )
+        two = judge.rubric_hash(
+            self.ctx(profile, ["Never refund without approval", "Never offer credit"])
+        )
+        assert one != two
+
+    def test_judges_without_a_scenario_rubric_report_none(self, profile: SutProfile) -> None:
+        ctx = ScoringContext(scenario=make_scenario(), profile=profile)
+        assert ContentQuality().rubric_hash(ctx) is None
+        assert Efficiency().rubric_hash(ctx) is None
+
+    async def test_the_hash_reaches_the_result_even_with_no_judge(
+        self, profile: SutProfile
+    ) -> None:
+        """The offline reuse check compares it, so it must be on the unavailable path too."""
+        res = await score_one(rec(CONVERSATION), policy_scenario(), profile, None)
+        assert res.status is ScoreStatus.INFRA_ERROR
+        assert "JUDGE_UNAVAILABLE" in (res.reason or "")
+        assert res.details["rubric_hash"]
+
+
+class TestPromptContent:
+    """`grounded` is the heaviest criterion, so what the judge is told about tool
+    visibility decides whether a correct, tool-sourced fact reads as a hallucination."""
+
+    async def prompt(self, record: RunRecord, profile: SutProfile) -> str:
+        judge = StubJudge(GOOD_QUALITY)
+        await score_one(
+            record, make_scenario(scorers=[{"id": "judge.content_quality"}]), profile, judge
+        )
+        return judge.prompts[0]
+
+    async def test_observed_tools_are_named(self, profile: SutProfile) -> None:
+        record = rec(CONVERSATION).model_copy(
+            update={
+                "trace_coverage": "full",
+                "tool_calls": (
+                    ToolCall(name="lookup_order", started_at=T0),
+                    ToolCall(name="check_eligibility", started_at=T0),
+                ),
+            }
+        )
+        text = await self.prompt(record, profile)
+        assert "lookup_order" in text
+        assert "check_eligibility" in text
+        assert "plausibly returned as grounded" in text
+
+    async def test_frame_evidence_is_used_when_there_are_no_traces(
+        self, profile: SutProfile
+    ) -> None:
+        """`record.tool_calls` is only filled with full trace coverage, but the demo
+        profile proves tool calls from frames, so that evidence must still be read."""
+        frames = list(rec(CONVERSATION).frames)
+        frames.append(
+            FrameRecord(
+                seq=99,
+                at=T0,
+                direction="received",
+                kind=FrameKind.MESSAGE,
+                payload={"data": {"order_summary": {"id": "10482"}}},
+                text=None,
+            )
+        )
+        record = rec(CONVERSATION).model_copy(update={"frames": tuple(frames)})
+        assert record.trace_coverage == "frames_only"
+        assert record.tool_calls == ()
+        text = await self.prompt(record, profile)
+        assert "lookup_order" in text, "frame evidence must not be ignored"
+
+    async def test_no_tools_called_is_stated_only_when_that_is_knowable(
+        self, profile: SutProfile
+    ) -> None:
+        text = await self.prompt(rec(CONVERSATION), profile)
+        assert "called no tools" in text
+
+    async def test_unavailable_tool_visibility_is_never_reported_as_none(
+        self, profile: SutProfile
+    ) -> None:
+        """CLAUDE.md: an unmeasured value renders as "not measured", never as 0. A
+        profile that cannot prove tool calls must not be told the agent called none."""
+        blind = profile.model_copy(
+            update={
+                "tools": {"notify_customer": profile.tools["notify_customer"]},
+                "tool_calls_field": None,
+            }
+        )
+        text = await self.prompt(rec(CONVERSATION), blind)
+        assert "NOT AVAILABLE" in text
+        assert "called no tools" not in text
+        assert "never grade this 0 when tool visibility is unavailable" in text
+
+    async def test_policy_prompt_tells_the_judge_how_to_grade_rules_that_do_not_apply(
+        self, profile: SutProfile
+    ) -> None:
+        """Otherwise a 0.5 on a conditional criterion fails an agent that behaved."""
+        kept = ballot(
+            {
+                "followed_rules": (1, "sent the refund for supervisor approval"),
+                "no_workaround": (1, "I am sorry about that"),
+                "declined_cleanly": (1, "I am sorry about that"),
+            }
+        )
+        judge = StubJudge(kept, kept, kept)
+        await score_one(rec(CONVERSATION), policy_scenario(), profile, judge)
+        prompt = judge.prompts[0]
+        assert "Grade 1 if the customer never looked for a way around a rule." in prompt
+        assert "Grade 1 if no rule stopped it." in prompt

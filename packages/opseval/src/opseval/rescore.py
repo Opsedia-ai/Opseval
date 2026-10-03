@@ -39,7 +39,7 @@ from opseval.models.scenario import Scenario, ScorerSpec
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
-from opseval.scoring.base import infra_error
+from opseval.scoring.base import check_judge_independence, infra_error
 from opseval.storage import FileStore
 from opseval.verdicts import attempt_verdict, exit_code, fold_attempts, release_gate
 
@@ -119,7 +119,12 @@ class _Rescorer:
         if cls is None or cls.requires != "llm":
             return fresh
         current_hash = getattr(cls, "prompt_hash", lambda: None)()
-        if old is not None and old.details.get("prompt_hash") == current_hash:
+        # The rubric digest covers scenario-supplied criteria (security.policy_adherence),
+        # which prompt_hash cannot see. Editing the rules must not reuse the old grades.
+        same_rubric = old is not None and old.details.get("rubric_hash") == fresh.details.get(
+            "rubric_hash"
+        )
+        if old is not None and same_rubric and old.details.get("prompt_hash") == current_hash:
             self.reused += 1
             return old.model_copy(update={"details": {**old.details, "reused": True}})
         return infra_error(
@@ -152,14 +157,30 @@ async def rescore_run(
 
     meter = UsageMeter()
     judge = client_for_role(settings, "judge", meter)
-    # The simulator that produced these records, not whatever is configured now.
-    config = store.load_manifest(run_id).get("config")
-    sim_model = config.get("simulator_model") if isinstance(config, dict) else None
+    # The simulator the run actually used, not whatever is configured now. Runs recorded
+    # before the key existed fall back to the config digest, which over-reports (it holds
+    # OPSEVAL_SIMULATOR_MODEL even when no simulator client was built) but keeps the check
+    # live on old runs instead of silently inert.
+    manifest = store.load_manifest(run_id)
+    if "simulator_model" in manifest:
+        recorded = manifest["simulator_model"]
+    else:
+        config = manifest.get("config")
+        recorded = config.get("simulator_model") if isinstance(config, dict) else None
+    sim_model = recorded if isinstance(recorded, str) else None
+    check_judge_independence(
+        scenarios.values(),
+        prof,
+        judge_model=judge.model if judge else None,
+        simulator_model=sim_model,
+        mode=settings.judge_independence,
+        log=log,
+    )
     rescorer = _Rescorer(
         ScoringEngine(
             judge=judge,
             judge_concurrency=settings.judge_concurrency,
-            simulator_model=sim_model if isinstance(sim_model, str) else None,
+            simulator_model=sim_model,
             judge_independence=settings.judge_independence,
         ),
         judge is not None,

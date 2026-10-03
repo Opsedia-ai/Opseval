@@ -47,6 +47,14 @@ class Evidence:
             return tool in profile.tools
         return profile.frame_verifiable(tool)
 
+    def verifiable_at_all(self, profile: SutProfile) -> bool:
+        """Could this evidence show a tool call at all, for any declared tool?
+
+        ``False`` means absence of calls proves nothing, so a reader must not treat an
+        empty list as "the agent called no tools".
+        """
+        return any(self.verifiable(tool, profile) for tool in profile.tools)
+
     def compare(self, a: When, b: When) -> Literal["before", "after", "ambiguous"]:
         """Is ``a`` clearly before ``b``, clearly after, or too close to tell?"""
         if isinstance(a, datetime) and isinstance(b, datetime):
