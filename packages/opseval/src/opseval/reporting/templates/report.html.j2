@@ -53,6 +53,14 @@ frame evidence instead of traces, or a judge from the graded model&rsquo;s own v
 <ul>{% for s in result.degraded_scorers %}<li><code>{{ s }}</code></li>{% endfor %}</ul></div>
 {% endif %}
 
+{% if result.vacuous_scorers %}
+<div class="card"><h3>Passed vacuously</h3>
+<p class="muted">These scorers passed because the situation they check never arose &mdash; nothing
+forbidden, no matching call, no rule to apply. The passes are honest and they are
+<strong>evidence of nothing</strong>.</p>
+<ul>{% for s in result.vacuous_scorers %}<li><code>{{ s }}</code></li>{% endfor %}</ul></div>
+{% endif %}
+
 {% if result.load_errors %}
 <div class="card"><h3 class="inconclusive">Scenarios that could not be loaded (never run)</h3>
 <ul>{% for e in result.load_errors %}<li><code>{{ e }}</code></li>{% endfor %}</ul></div>

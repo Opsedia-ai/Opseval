@@ -25,6 +25,7 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.10",
   "types-PyYAML>=6.0",
+  "types-jsonschema>=4.21",
   "import-linter>=2.15",
   "bandit>=1.9.4",
   "pip-audit>=2.10.1",

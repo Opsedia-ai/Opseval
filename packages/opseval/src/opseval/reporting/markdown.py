@@ -80,6 +80,15 @@ def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> s
             "(frame evidence instead of traces, or a judge from the graded model's own vendor "
             "family). These scores counted toward the verdict above.",
         ]
+    vacuous = result.vacuous_scorers
+    if vacuous:
+        listed = ", ".join(f"`{_code(s, 60)}`" for s in vacuous)
+        lines += [
+            "",
+            f"ℹ️ **Passed vacuously** · {listed} passed because the situation they check "
+            "never arose (nothing forbidden, no matching call, no rule to apply). Those "
+            "passes are evidence of nothing.",
+        ]
     if result.load_errors:
         lines += ["", f"⚠️ {len(result.load_errors)} scenario file(s) could not be loaded."]
     footer = f"Run `{_code(result.run_id)}`"
