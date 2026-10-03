@@ -99,6 +99,32 @@ frame evidence instead of traces, or a judge from the graded model&rsquo;s own v
 {% if rec.infra_errors %}<pre>{{ rec.infra_errors | join('\n') }}</pre>{% endif %}
 {% if rec.transport_events %}<p><strong>Connection:</strong> {% for e in rec.transport_events %}{{ e.kind }}{% if e.close_code %} (code {{ e.close_code }}){% endif %}{% if e.attempt %} #{{ e.attempt }}{% endif %}{% if not loop.last %} → {% endif %}{% endfor %}</p>{% endif %}
 </details>
+{% set flow = flows.get((t.test_id, a.attempt_index)) %}
+{% if flow %}
+<details{% if not flow.clean %} open{% endif %}><summary>Flow map{% if not flow.measured %} — not measured{% elif flow.clean %} — as expected{% elif flow.unexpected %} — {{ flow.unexpected | length }} unexpected transition(s){% else %} — {{ flow.never_reached | length }} phase(s) never reached{% endif %}</summary>
+{% if not flow.measured %}
+<p class="muted">{{ flow.reason }}</p>
+{% else %}
+<p><strong>Expected:</strong> {% for p in flow.expected %}<code>{{ p }}</code>{% if not loop.last %} → {% endif %}{% endfor %}</p>
+<p><strong>Observed:</strong>
+{% for tr in flow.transitions %}<code title="{{ tr.kind.value }}">{{ tr.to }}</code>{% if tr.kind.value != 'expected' %}<span class="badge inconclusive">{{ tr.kind.value }}</span>{% endif %}{% if not loop.last %} → {% endif %}{% endfor %}
+</p>
+{% if flow.unexpected %}
+<table><tr><th>Transition</th><th>What</th><th>Detail</th><th>Frame</th></tr>
+{% for tr in flow.unexpected %}
+<tr><td><code>{{ tr.frm or '(start)' }}</code> → <code>{{ tr.to }}</code></td>
+    <td class="inconclusive">{{ tr.kind.value }}</td>
+    <td class="muted">{% if tr.over %}over {{ tr.over | join(', ') }}{% elif tr.kind.value == 'unknown' %}not a declared phase{% endif %}</td>
+    <td>#{{ tr.at_seq }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+{% if flow.never_reached %}<p class="muted">Never reached: {{ flow.never_reached | join(', ') }}</p>{% endif %}
+{% if flow.unknown_phases %}<p class="muted">Phases the profile does not declare: {{ flow.unknown_phases | join(', ') }}</p>{% endif %}
+{% if flow.ended_at %}<p class="muted">Came to rest in <code>{{ flow.ended_at }}</code>.</p>{% endif %}
+{% endif %}
+</details>
+{% endif %}
 {% if rec.trace_coverage == 'full' %}
 <details><summary>Tool calls from the agent's trace ({{ rec.tool_calls | length }})</summary>
 <table><tr><th>Tool</th><th>Started</th><th>Status</th><th>Arguments</th></tr>
