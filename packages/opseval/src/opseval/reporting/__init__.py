@@ -7,6 +7,8 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from opseval.flow import flow_maps
+from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
 
@@ -27,9 +29,17 @@ def fmt_score(value: float | None) -> str:
 _env.filters["score"] = fmt_score
 
 
-def render_html(result: SuiteResult, records: list[RunRecord]) -> str:
+def render_html(
+    result: SuiteResult, records: list[RunRecord], profile: SutProfile | None = None
+) -> str:
+    """Render the self-contained report.
+
+    ``profile`` supplies the declared phase order for the flow map (FR-RPT-05). Without
+    it the flow map reports itself unmeasured rather than inventing an expected order.
+    """
     by_key = {(r.test_id, r.attempt_index): r for r in records}
-    return _env.get_template("report.html.j2").render(result=result, records=by_key)
+    flows = flow_maps(records, profile) if profile is not None else {}
+    return _env.get_template("report.html.j2").render(result=result, records=by_key, flows=flows)
 
 
 STATUS_ICON = {

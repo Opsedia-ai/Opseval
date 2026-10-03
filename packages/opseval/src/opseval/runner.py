@@ -341,7 +341,7 @@ async def launch(
         load_errors=[str(p) for p in catalogue.problems],
         preflight=health if options.preflight else None,
     )
-    store.save_report(run_id, render_html(result, store.load_records(run_id)))
+    store.save_report(run_id, render_html(result, store.load_records(run_id), profile))
     store.save_junit(run_id, render_junit(result))
     store.save_result(result)  # written last: marks the run as complete
     # After the result is on disk, so a slow or dead collector cannot cost anything.
