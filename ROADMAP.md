@@ -19,7 +19,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 JUnit XML output for CI test reports
 - 🟢 Opt-out, content-free telemetry (built; no endpoint ships, ADR-0021)
 
-## v0.2 Beta: "It gates releases" ⚪
+## v0.2 Beta: "It gates releases" 🟢
 
 - 🟢 GitHub Action (report artifact, job summary, PR comment, exit code passthrough) and `pytest-opseval`
 - 🟢 Langfuse trace reader and trace-backed tool scorers (ordering, approval gating, call success) · 🟢 argument schemas (ADR-0024)
@@ -28,6 +28,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 Preflight checks (ADR-0020) · 🟢 flow map (ADR-0023) · 🟢 pass^k and JUnit
 - 🟢 SSE transport (ADR-0019) · 🟢 protocol probes (ADR-0025)
 - 🟢 Stable scorer plugin API with a contract test kit (ADR-0022)
+- 🟢 Published JSON Schemas for scenario, suite, profile, record and result, checked in CI (ADR-0026)
 
 ## v0.5: "Teams can share it" ⚪
 

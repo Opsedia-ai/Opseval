@@ -1,0 +1,533 @@
+{
+  "$defs": {
+    "CheckpointPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PolicyAction",
+          "default": "script"
+        },
+        "expected_target_phase": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Target Phase"
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feedback"
+        },
+        "max_rejections": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Max Rejections",
+          "type": "integer"
+        },
+        "sequence": {
+          "items": {
+            "$ref": "#/$defs/Decision"
+          },
+          "title": "Sequence",
+          "type": "array"
+        },
+        "via": {
+          "$ref": "#/$defs/DecisionChannel",
+          "default": "resume"
+        }
+      },
+      "title": "CheckpointPolicy",
+      "type": "object"
+    },
+    "ConversationSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_commit": {
+          "default": false,
+          "title": "Allow Commit",
+          "type": "boolean"
+        },
+        "checkpoint_policy": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CheckpointPolicy"
+          },
+          "title": "Checkpoint Policy",
+          "type": "object"
+        },
+        "flow": {
+          "default": "",
+          "title": "Flow",
+          "type": "string"
+        },
+        "injections": {
+          "items": {
+            "$ref": "#/$defs/Injection"
+          },
+          "title": "Injections",
+          "type": "array"
+        },
+        "max_turns": {
+          "default": 30,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Max Turns",
+          "type": "integer"
+        },
+        "opening_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Opening Message"
+        },
+        "scripted_turns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scripted Turns",
+          "type": "array"
+        },
+        "stop_at": {
+          "default": "commit_gate",
+          "title": "Stop At",
+          "type": "string"
+        }
+      },
+      "title": "ConversationSpec",
+      "type": "object"
+    },
+    "Criticality": {
+      "enum": [
+        "blocker",
+        "critical",
+        "normal"
+      ],
+      "title": "Criticality",
+      "type": "string"
+    },
+    "Decision": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/DecisionAction"
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feedback"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "Decision",
+      "type": "object"
+    },
+    "DecisionAction": {
+      "enum": [
+        "approve",
+        "reject"
+      ],
+      "title": "DecisionAction",
+      "type": "string"
+    },
+    "DecisionChannel": {
+      "enum": [
+        "resume",
+        "user_message"
+      ],
+      "title": "DecisionChannel",
+      "type": "string"
+    },
+    "Difficulty": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Difficulty",
+      "type": "string"
+    },
+    "ExecutionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_timeout_seconds": {
+          "default": 600.0,
+          "exclusiveMinimum": 0,
+          "title": "Attempt Timeout Seconds",
+          "type": "number"
+        },
+        "consistency_threshold": {
+          "default": 1.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Consistency Threshold",
+          "type": "number"
+        },
+        "repeats": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Repeats",
+          "type": "integer"
+        },
+        "turn_timeout_seconds": {
+          "default": 120.0,
+          "exclusiveMinimum": 0,
+          "title": "Turn Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "title": "ExecutionSpec",
+      "type": "object"
+    },
+    "Expectations": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_outcome": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Outcome"
+        },
+        "expected_tools": {
+          "$ref": "#/$defs/ExpectedTools"
+        },
+        "invariants": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Invariants",
+          "type": "array"
+        },
+        "kind": {
+          "default": "completion",
+          "enum": [
+            "completion",
+            "refusal"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "policy": {
+          "items": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Policy",
+          "type": "array"
+        }
+      },
+      "title": "Expectations",
+      "type": "object"
+    },
+    "ExpectedTools": {
+      "additionalProperties": false,
+      "properties": {
+        "forbidden_before": {
+          "items": {
+            "$ref": "#/$defs/ForbiddenBefore"
+          },
+          "title": "Forbidden Before",
+          "type": "array"
+        },
+        "must_call": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Must Call",
+          "type": "array"
+        },
+        "must_not_call": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Must Not Call",
+          "type": "array"
+        },
+        "ordering": {
+          "items": {
+            "$ref": "#/$defs/OrderingRule"
+          },
+          "title": "Ordering",
+          "type": "array"
+        }
+      },
+      "title": "ExpectedTools",
+      "type": "object"
+    },
+    "ForbiddenBefore": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint": {
+          "title": "Checkpoint",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "checkpoint"
+      ],
+      "title": "ForbiddenBefore",
+      "type": "object"
+    },
+    "Injection": {
+      "additionalProperties": false,
+      "description": "A prompt-injection payload the harness plants, word for word, in one customer turn.",
+      "properties": {
+        "payload": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Payload",
+          "type": "string"
+        },
+        "turn": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Turn",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn",
+        "payload"
+      ],
+      "title": "Injection",
+      "type": "object"
+    },
+    "OrderingRule": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "title": "After",
+          "type": "string"
+        },
+        "before": {
+          "title": "Before",
+          "type": "string"
+        }
+      },
+      "required": [
+        "before",
+        "after"
+      ],
+      "title": "OrderingRule",
+      "type": "object"
+    },
+    "Persona": {
+      "additionalProperties": false,
+      "properties": {
+        "dialect": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dialect"
+        },
+        "language": {
+          "default": "en",
+          "title": "Language",
+          "type": "string"
+        },
+        "role": {
+          "minLength": 1,
+          "title": "Role",
+          "type": "string"
+        },
+        "timezone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timezone"
+        },
+        "typing_noise": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Typing Noise",
+          "type": "number"
+        }
+      },
+      "required": [
+        "role"
+      ],
+      "title": "Persona",
+      "type": "object"
+    },
+    "PolicyAction": {
+      "enum": [
+        "approve",
+        "reject",
+        "script",
+        "sequence"
+      ],
+      "title": "PolicyAction",
+      "type": "string"
+    },
+    "ScorerSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "threshold": {
+          "default": 1.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "weight": {
+          "default": 1.0,
+          "exclusiveMinimum": 0.0,
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ScorerSpec",
+      "type": "object"
+    }
+  },
+  "$id": "https://opsedia.ai/schemas/v1/scenario.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Opseval opseval/v1 scenario contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
+  "properties": {
+    "conversation": {
+      "$ref": "#/$defs/ConversationSpec"
+    },
+    "criticality": {
+      "$ref": "#/$defs/Criticality",
+      "default": "normal"
+    },
+    "difficulty": {
+      "$ref": "#/$defs/Difficulty",
+      "default": "medium"
+    },
+    "execution": {
+      "$ref": "#/$defs/ExecutionSpec"
+    },
+    "expectations": {
+      "$ref": "#/$defs/Expectations"
+    },
+    "goal": {
+      "minLength": 1,
+      "title": "Goal",
+      "type": "string"
+    },
+    "id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
+      "title": "Id",
+      "type": "string"
+    },
+    "issue_refs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Issue Refs",
+      "type": "array"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "persona": {
+      "$ref": "#/$defs/Persona"
+    },
+    "schema": {
+      "default": "opseval/v1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "scorers": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ScorerSpec"
+          },
+          "type": "array"
+        },
+        {
+          "const": "default",
+          "type": "string"
+        }
+      ],
+      "default": "default",
+      "title": "Scorers"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "goal",
+    "persona",
+    "conversation"
+  ],
+  "title": "Scenario",
+  "type": "object"
+}

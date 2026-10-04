@@ -1,0 +1,531 @@
+{
+  "$defs": {
+    "FrameKind": {
+      "enum": [
+        "user_message",
+        "resume",
+        "message",
+        "needs_human",
+        "result",
+        "error",
+        "notification",
+        "handshake",
+        "unknown"
+      ],
+      "title": "FrameKind",
+      "type": "string"
+    },
+    "FrameRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "sent",
+            "received"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/FrameKind"
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latency Ms"
+        },
+        "payload": {
+          "title": "Payload"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phase"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "direction",
+        "kind",
+        "payload"
+      ],
+      "title": "FrameRecord",
+      "type": "object"
+    },
+    "InterruptRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action"
+        },
+        "checkpoint": {
+          "title": "Checkpoint",
+          "type": "string"
+        },
+        "decision_seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decision Seq"
+        },
+        "expected_target_phase": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Target Phase"
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feedback"
+        },
+        "occurrence": {
+          "title": "Occurrence",
+          "type": "integer"
+        },
+        "payload": {
+          "default": null,
+          "title": "Payload"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "via": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Via"
+        }
+      },
+      "required": [
+        "seq",
+        "checkpoint",
+        "occurrence"
+      ],
+      "title": "InterruptRecord",
+      "type": "object"
+    },
+    "ProbeResult": {
+      "additionalProperties": false,
+      "description": "What one protocol probe got back (FR-RUN-07).",
+      "properties": {
+        "answered": {
+          "default": true,
+          "title": "Answered",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "received_seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Received Seq"
+        },
+        "sent_seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sent Seq"
+        }
+      },
+      "required": [
+        "name",
+        "passed"
+      ],
+      "title": "ProbeResult",
+      "type": "object"
+    },
+    "TerminalState": {
+      "enum": [
+        "outcome_committed",
+        "stopped_at_checkpoint",
+        "goal_reached",
+        "max_turns_exhausted",
+        "error_frame",
+        "timeout",
+        "transport_failure",
+        "harness_failure"
+      ],
+      "title": "TerminalState",
+      "type": "string"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "description": "One tool call observed in the agent's own trace.",
+      "properties": {
+        "arguments": {
+          "default": null,
+          "title": "Arguments"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "observation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observation Id"
+        },
+        "ok": {
+          "default": true,
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "started_at"
+      ],
+      "title": "ToolCall",
+      "type": "object"
+    },
+    "TransportEvent": {
+      "additionalProperties": false,
+      "description": "Connection-level events: drops, resumes and token refreshes (never token values).",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "close_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Close Code"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "kind": {
+          "enum": [
+            "dropped",
+            "resumed",
+            "resume_failed",
+            "token_refreshed"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "kind"
+      ],
+      "title": "TransportEvent",
+      "type": "object"
+    }
+  },
+  "$id": "https://opsedia.ai/schemas/v1/record.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Opseval opseval/v1 record contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
+  "properties": {
+    "attempt_index": {
+      "title": "Attempt Index",
+      "type": "integer"
+    },
+    "ended_at": {
+      "format": "date-time",
+      "title": "Ended At",
+      "type": "string"
+    },
+    "frames": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FrameRecord"
+      },
+      "title": "Frames",
+      "type": "array"
+    },
+    "infra_errors": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Infra Errors",
+      "type": "array"
+    },
+    "interrupts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/InterruptRecord"
+      },
+      "title": "Interrupts",
+      "type": "array"
+    },
+    "notes": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Notes",
+      "type": "array"
+    },
+    "persona": {
+      "additionalProperties": true,
+      "title": "Persona",
+      "type": "object"
+    },
+    "planted_injections": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Planted Injections",
+      "type": "array"
+    },
+    "probes": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ProbeResult"
+      },
+      "title": "Probes",
+      "type": "array"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "seed": {
+      "title": "Seed",
+      "type": "integer"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "stop_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stop Reason"
+    },
+    "target": {
+      "title": "Target",
+      "type": "string"
+    },
+    "terminal_state": {
+      "$ref": "#/$defs/TerminalState"
+    },
+    "test_id": {
+      "title": "Test Id",
+      "type": "string"
+    },
+    "tool_calls": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ToolCall"
+      },
+      "title": "Tool Calls",
+      "type": "array"
+    },
+    "trace_coverage": {
+      "default": "frames_only",
+      "enum": [
+        "full",
+        "frames_only"
+      ],
+      "title": "Trace Coverage",
+      "type": "string"
+    },
+    "transport_events": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/TransportEvent"
+      },
+      "title": "Transport Events",
+      "type": "array"
+    },
+    "user_turns": {
+      "default": 0,
+      "title": "User Turns",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "run_id",
+    "test_id",
+    "attempt_index",
+    "seed",
+    "target",
+    "started_at",
+    "ended_at",
+    "terminal_state"
+  ],
+  "title": "RunRecord",
+  "type": "object"
+}

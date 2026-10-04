@@ -352,6 +352,38 @@ def telemetry_enable() -> None:
 
 
 @app.command()
+def schemas(
+    out: Annotated[Path, typer.Option(help="Where to write them.")] = Path("schemas/v1"),
+    check: Annotated[
+        bool,
+        typer.Option(
+            "--check", help="Do not write; fail if the committed schemas are out of date."
+        ),
+    ] = False,
+) -> None:
+    """Generate the published JSON Schemas from the models.
+
+    The models are the source of truth. `--check` is what CI runs: a committed schema
+    that has drifted is worse than none, because an editor would accept a file the
+    loader rejects.
+    """
+    from opseval.schemas import PUBLISHED, stale, write_all
+
+    if check:
+        problems = stale(out)
+        if problems:
+            typer.secho("the published schemas are out of date:", fg="red", err=True)
+            for problem in problems:
+                typer.secho(f"  {problem}", fg="red", err=True)
+            typer.secho("run `opseval schemas` and commit the result", fg="red", err=True)
+            raise typer.Exit(EXIT_HARNESS)
+        typer.echo(f"{len(PUBLISHED)} schema(s) match the models.")
+        return
+    for path in write_all(out):
+        typer.echo(f"wrote {path}")
+
+
+@app.command()
 def preflight(
     catalogue: Annotated[Path, typer.Argument(help="Suite or scenario folder to check for.")],
     profile: Annotated[str, typer.Option("--profile", "-p", help="SUT profile file.")],

@@ -1,0 +1,538 @@
+{
+  "$defs": {
+    "CheckpointSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "phase": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phase"
+        }
+      },
+      "title": "CheckpointSpec",
+      "type": "object"
+    },
+    "FrameKind": {
+      "enum": [
+        "user_message",
+        "resume",
+        "message",
+        "needs_human",
+        "result",
+        "error",
+        "notification",
+        "handshake",
+        "unknown"
+      ],
+      "title": "FrameKind",
+      "type": "string"
+    },
+    "Probe": {
+      "additionalProperties": false,
+      "description": "One raw frame sent before the conversation, with the answer it must get (FR-RUN-07).",
+      "properties": {
+        "expect": {
+          "$ref": "#/$defs/ProbeExpect"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "send": {
+          "additionalProperties": true,
+          "title": "Send",
+          "type": "object"
+        },
+        "timeout_seconds": {
+          "default": 10.0,
+          "exclusiveMinimum": 0,
+          "maximum": 120,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "send"
+      ],
+      "title": "Probe",
+      "type": "object"
+    },
+    "ProbeExpect": {
+      "additionalProperties": false,
+      "description": "What a correct answer to a probe looks like.\n\nEvery field given must hold. An empty expectation means \"any answer at all\", which\nis a real thing to assert about a protocol: that the agent replies rather than\nignoring the frame.",
+      "properties": {
+        "fields": {
+          "additionalProperties": true,
+          "title": "Fields",
+          "type": "object"
+        },
+        "has_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Has Fields",
+          "type": "array"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrameKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "ProbeExpect",
+      "type": "object"
+    },
+    "ReconnectConfig": {
+      "additionalProperties": false,
+      "description": "What to do when the connection drops mid-conversation (websocket transport).",
+      "properties": {
+        "backoff_seconds": {
+          "default": 0.5,
+          "maximum": 30,
+          "minimum": 0,
+          "title": "Backoff Seconds",
+          "type": "number"
+        },
+        "confirm_timeout_seconds": {
+          "default": 10.0,
+          "exclusiveMinimum": 0,
+          "maximum": 120,
+          "title": "Confirm Timeout Seconds",
+          "type": "number"
+        },
+        "max_attempts": {
+          "default": 3,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "resend_unanswered": {
+          "default": false,
+          "title": "Resend Unanswered",
+          "type": "boolean"
+        },
+        "resume_session_frame": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resume Session Frame"
+        }
+      },
+      "title": "ReconnectConfig",
+      "type": "object"
+    },
+    "TokenConfig": {
+      "additionalProperties": false,
+      "description": "Short-lived HS256 bearer tokens signed with ``OPSEVAL_TOKEN_SIGNING_KEY``.",
+      "properties": {
+        "claims": {
+          "additionalProperties": true,
+          "title": "Claims",
+          "type": "object"
+        },
+        "refresh_before_seconds": {
+          "default": 30,
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Refresh Before Seconds",
+          "type": "integer"
+        },
+        "refresh_frame": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Refresh Frame"
+        },
+        "ttl_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 10,
+          "title": "Ttl Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "TokenConfig",
+      "type": "object"
+    },
+    "ToolSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "args_schema": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Args Schema"
+        },
+        "commits": {
+          "default": false,
+          "title": "Commits",
+          "type": "boolean"
+        },
+        "evidence_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Key"
+        },
+        "trace_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trace Name"
+        }
+      },
+      "title": "ToolSpec",
+      "type": "object"
+    },
+    "TraceConfig": {
+      "additionalProperties": false,
+      "description": "Where to read the agent's own traces (ADR-0011).",
+      "properties": {
+        "clock_skew_ms": {
+          "default": 2000,
+          "maximum": 600000,
+          "minimum": 0,
+          "title": "Clock Skew Ms",
+          "type": "integer"
+        },
+        "poll_interval_seconds": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Poll Interval Seconds",
+          "type": "number"
+        },
+        "session_id": {
+          "default": "{session_id}",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "source": {
+          "const": "langfuse",
+          "default": "langfuse",
+          "title": "Source",
+          "type": "string"
+        },
+        "wait_seconds": {
+          "default": 15.0,
+          "maximum": 600,
+          "minimum": 0,
+          "title": "Wait Seconds",
+          "type": "number"
+        }
+      },
+      "title": "TraceConfig",
+      "type": "object"
+    }
+  },
+  "$id": "https://opsedia.ai/schemas/v1/profile.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Maps an agent's wire protocol onto Opseval's canonical model. Opseval opseval/v1 profile contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
+  "properties": {
+    "auth_frame": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Auth Frame"
+    },
+    "checkpoint_field": {
+      "default": "checkpoint",
+      "title": "Checkpoint Field",
+      "type": "string"
+    },
+    "checkpoints": {
+      "additionalProperties": {
+        "$ref": "#/$defs/CheckpointSpec"
+      },
+      "title": "Checkpoints",
+      "type": "object"
+    },
+    "commit_gate": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Commit Gate"
+    },
+    "committed_outcome": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Committed Outcome"
+    },
+    "data_field": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "data",
+      "title": "Data Field"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    },
+    "handshake_required": {
+      "default": false,
+      "title": "Handshake Required",
+      "type": "boolean"
+    },
+    "kind_field": {
+      "default": "type",
+      "title": "Kind Field",
+      "type": "string"
+    },
+    "kinds": {
+      "additionalProperties": {
+        "$ref": "#/$defs/FrameKind"
+      },
+      "title": "Kinds",
+      "type": "object"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "outcome_field": {
+      "default": "outcome",
+      "title": "Outcome Field",
+      "type": "string"
+    },
+    "payload_field": {
+      "default": "payload",
+      "title": "Payload Field",
+      "type": "string"
+    },
+    "phase_field": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "phase",
+      "title": "Phase Field"
+    },
+    "phases": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Phases",
+      "type": "array"
+    },
+    "probes": {
+      "items": {
+        "$ref": "#/$defs/Probe"
+      },
+      "title": "Probes",
+      "type": "array"
+    },
+    "reconnect": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReconnectConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "reject_via_message_allowed": {
+      "default": true,
+      "title": "Reject Via Message Allowed",
+      "type": "boolean"
+    },
+    "resume_frame": {
+      "additionalProperties": true,
+      "title": "Resume Frame",
+      "type": "object"
+    },
+    "session_id_field": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "session_id",
+      "title": "Session Id Field"
+    },
+    "sut_model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sut Model"
+    },
+    "text_field": {
+      "default": "text",
+      "title": "Text Field",
+      "type": "string"
+    },
+    "timezones": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Timezones",
+      "type": "array"
+    },
+    "token": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TokenConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "tool_calls_field": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tool Calls Field"
+    },
+    "tools": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ToolSpec"
+      },
+      "title": "Tools",
+      "type": "object"
+    },
+    "traces": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TraceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "transport_options": {
+      "additionalProperties": true,
+      "title": "Transport Options",
+      "type": "object"
+    },
+    "turn_end_field": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Turn End Field"
+    },
+    "turn_quiet_ms": {
+      "default": 400,
+      "maximum": 60000,
+      "minimum": 0,
+      "title": "Turn Quiet Ms",
+      "type": "integer"
+    },
+    "user_message_frame": {
+      "additionalProperties": true,
+      "title": "User Message Frame",
+      "type": "object"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "SutProfile",
+  "type": "object"
+}

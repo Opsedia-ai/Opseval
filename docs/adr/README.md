@@ -27,5 +27,6 @@
 | [0023](0023-flow-map.md) | Flow map of expected vs observed phases; refuses to guess, changes no verdict | Proposed |
 | [0024](0024-tool-argument-schemas.md) | `tools.args_valid` against a declared JSON Schema; vacuous passes are named | Proposed |
 | [0025](0025-protocol-probes.md) | Protocol probes in the PROBES state; an error reply fails by default | Proposed |
+| [0026](0026-published-json-schemas.md) | JSON Schemas generated from the models, with drift as a CI failure | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.
