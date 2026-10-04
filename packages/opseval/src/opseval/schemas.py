@@ -24,12 +24,14 @@ from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
 from opseval.models.scenario import SCHEMA_VERSION, Scenario, Suite
+from opseval.models.tenant import TenantPool
 
 SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 BASE_URI = "https://opsedia.ai/schemas/v1"
 VERSION_DIR = "v1"
 
 PUBLISHED: dict[str, type[BaseModel]] = {
+    "tenants": TenantPool,
     "scenario": Scenario,
     "suite": Suite,
     "profile": SutProfile,
@@ -38,7 +40,8 @@ PUBLISHED: dict[str, type[BaseModel]] = {
 }
 """Filename stem → model. Scenario and suite serve editor autocompletion (FR-CAT-11);
 result is the documented output contract (FR-RPT-02); record and profile are published
-because third parties read and write them."""
+because third parties read and write them; tenants because the pool file is hand-written
+and benefits most from autocompletion."""
 
 EDITOR_HINT = "# yaml-language-server: $schema={uri}"
 """What VS Code and friends look for at the top of a YAML file."""

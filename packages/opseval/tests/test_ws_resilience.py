@@ -397,7 +397,7 @@ class TestRunnerCredentials:
         settings = Settings(allowed_hosts="127.0.0.1", reports_dir=str(tmp_path))
         factory = build_transport_factory(RunOptions(target="ws://127.0.0.1:1"), settings)
         with pytest.raises(ConfigError, match="OPSEVAL_TOKEN_SIGNING_KEY"):
-            factory(self._profile(profile))
+            factory(self._profile(profile), None)
 
     def test_profile_token_mints_a_fresh_source_per_attempt(
         self, profile: SutProfile, tmp_path: Path
@@ -406,7 +406,10 @@ class TestRunnerCredentials:
             allowed_hosts="127.0.0.1", reports_dir=str(tmp_path), token_signing_key=KEY
         )
         factory = build_transport_factory(RunOptions(target="ws://127.0.0.1:1"), settings)
-        a, b = factory(self._profile(profile)), factory(self._profile(profile))
+        a, b = (
+            factory(self._profile(profile), None),
+            factory(self._profile(profile), None),
+        )
         assert isinstance(a, WebSocketTransport) and isinstance(b, WebSocketTransport)
         assert isinstance(a.tokens, HS256Tokens) and a.tokens is not b.tokens
         claims, ok = decode(a.tokens.current())

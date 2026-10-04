@@ -175,6 +175,14 @@ def run(
     traces: Annotated[
         bool, typer.Option(help="Read the agent's traces if the profile declares a source.")
     ] = True,
+    tenants: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option(help="Test-tenant pool YAML. Each scenario leases one tenant exclusively."),
+    ] = None,
+    lanes: Annotated[
+        Optional[int],  # noqa: UP045
+        typer.Option(min=1, help="Scenarios in flight. Never more than the pool has tenants."),
+    ] = None,
     junit: JunitOpt = None,
     open_report: Annotated[
         bool, typer.Option("--open", help="Open report.html when done.")
@@ -184,6 +192,10 @@ def run(
     settings = Settings()
     if reports_dir:
         settings.reports_dir = str(reports_dir)
+    if tenants:
+        settings.tenants_file = str(tenants)
+    if lanes is not None:
+        settings.lanes = lanes
     options = RunOptions(
         target=target,
         transport=transport,

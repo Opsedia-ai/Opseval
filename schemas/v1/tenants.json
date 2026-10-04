@@ -1,0 +1,82 @@
+{
+  "$defs": {
+    "Tenant": {
+      "additionalProperties": false,
+      "description": "One isolated test account.",
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "token_env": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Env"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "Tenant",
+      "type": "object"
+    }
+  },
+  "$id": "https://opsedia.ai/schemas/v1/tenants.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Opseval opseval/v1 tenants contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
+  "properties": {
+    "schema": {
+      "default": "opseval/v1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "tenants": {
+      "items": {
+        "$ref": "#/$defs/Tenant"
+      },
+      "minItems": 1,
+      "title": "Tenants",
+      "type": "array"
+    }
+  },
+  "required": [
+    "tenants"
+  ],
+  "title": "TenantPool",
+  "type": "object"
+}

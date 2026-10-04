@@ -29,6 +29,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - 🟢 SSE transport (ADR-0019) · 🟢 protocol probes (ADR-0025)
 - 🟢 Stable scorer plugin API with a contract test kit (ADR-0022)
 - 🟢 Published JSON Schemas for scenario, suite, profile, record and result, checked in CI (ADR-0026)
+- 🟢 Test-tenant pool with exclusive leases and parallel lanes, `lanes = min(tenants, requested, cap)` (ADR-0029)
 
 ## v0.5: "Teams can share it" ⚪
 

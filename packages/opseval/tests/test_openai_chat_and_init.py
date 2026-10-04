@@ -266,7 +266,7 @@ class TestInit:
             target="https://agent.example.com/v1",
             transport="openai-chat",
             profile=tmp_path / "cat" / "profile.yaml",
-            transport_factory=lambda p: transport(p, fake_agent),
+            transport_factory=lambda p, _tenant: transport(p, fake_agent),
         )
         result = await launch(tmp_path / "cat" / "suites" / "smoke.yaml", options, settings)
         assert profile.name == "my-agent"

@@ -42,6 +42,7 @@ packages/opseval/src/opseval/
   telemetry.py   opt-out, content-free counts; no endpoint ships (ADR-0010/0021)
   flow.py        flow map: expected vs observed phase transitions (ADR-0023)
   plugins.py     `opseval.scorers` + `opseval.sinks` discovery, fail-closed (ADR-0022/0027)
+  tenants.py     exclusive test-tenant leases (O_EXCL files, stale recovery); doubt never takes a lease (ADR-0029)
   sinks/         publish a finished run: webhook, Langfuse scores (ADR-0027)
   testing.py     public contract test kit for plugin authors (ADR-0022)
   reporting/     self-contained HTML report, console summary, JUnit XML, Markdown gate summary
@@ -52,7 +53,7 @@ packages/opseval/tests/   pytest (asyncio_mode=auto), incl. the fault-injection 
 schemas/v1/               published JSON Schemas, generated from the models (ADR-0026)
 packages/pytest-opseval/  pytest plugin: scenarios as pytest items (entry point disabled in our own run)
 action.yml                composite GitHub Action (dogfooded by the `action` CI job)
-docs/adr/                 architecture decisions (0001-0028); new decisions get a new ADR
+docs/adr/                 architecture decisions (0001-0029); new decisions get a new ADR
 ```
 
 ## Commands
@@ -97,6 +98,8 @@ Definition of done for any change: `make check` is green (which now includes `op
 - v0.1/v0.2: JSON Schemas for scenario, suite, profile, record and result are generated from the models into `schemas/v1/` (FR-RPT-02, FR-CAT-11). The models are the source of truth and **drift is a failure**: `opseval schemas --check` runs in `make check` and CI, because a stale schema would have an editor accept a file the loader rejects. Generated `by_alias`, so `schema` not `schema_`. `opseval init` writes the `yaml-language-server` hint (ADR-0026).
 - v0.5: sinks publish a finished run (`OPSEVAL_WEBHOOK_URL`, `OPSEVAL_LANGFUSE_PUSH_SCORES`). A sink can **never** change a verdict or exit code — every failure is caught — but it must **not** fail silently either: failures land in `result.sinks`, the console and the gate summary, because a sink was asked for. Destinations are allowlisted before the run (exit 3). An unmeasured verdict is pushed as a *category*, never as 0, since a 0 on a dashboard reads as an agent failure (ADR-0027).
 - v0.5: `traces.source: otlp-file` reads the OTLP-JSON the OpenTelemetry Collector's file exporter writes (`OPSEVAL_OTLP_SPANS_PATH`), so tool calls can be verified without Langfuse (R-08). OTLP has no query API, so a backend fetcher is deliberately not built — the reusable part is the span→ToolCall mapping. An **empty list is a positive claim** ("the agent called no tools"), so unreadable spans raise `TraceUnavailable` rather than returning `[]`. Only OTLP status 2 (ERROR) is a failure; UNSET is not (ADR-0028).
+- v0.2: `--tenants tenants.yaml --lanes N` runs scenarios in parallel, each holding an exclusive lease on one test tenant (FR-RUN-08, FR-SAF-03). Lanes are `min(tenants, requested, `OPSEVAL_LANE_CAP`)`; no pool means sequential, unchanged. The lock's rule is **when in doubt, do not take the lease**: an unreadable or undated lease counts as held, a lease is only reclaimed when its heartbeat is provably stale (300 s; refreshed every 30 s), and `release()` refuses to delete another holder's file. No tenant is `skipped_precondition`, never a failure. Tokens live in the environment the pool file *names* (`token_env`), never in the file. Leases are per-filesystem, so two runners with separate disks do not interlock (ADR-0029).
+- Found while building the pool: `release_gate` said "Safe to release" when **every** scenario was skipped or not judged, contradicting its own exit code 2. It now blocks with "nothing was measured". An exhausted tenant pool is the easiest way to reach that state.
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`). The reader is verified against a real self-hosted Langfuse 4.44 (`scripts/langfuse_smoke.py`, ADR-0011); not yet against Langfuse Cloud.
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).

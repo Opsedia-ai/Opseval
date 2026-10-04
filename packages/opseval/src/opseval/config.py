@@ -7,7 +7,7 @@ No other module reads environment variables directly.
 from __future__ import annotations
 
 import ipaddress
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field, SecretStr
@@ -72,6 +72,15 @@ class Settings(BaseSettings):
     webhook_url: str | None = None
     langfuse_push_scores: bool = False
     langfuse_score_name: str = "opseval"
+
+    # Test-tenant pool (FR-RUN-08, ADR-0029). Tokens live in the environment the pool
+    # file names, never in the file itself.
+    tenants_file: str | None = None
+    lanes: int | None = None
+    """Requested lanes. Actual = min(tenants, requested, lane_cap)."""
+    lane_cap: Annotated[int, Field(ge=1, le=64)] = 8
+    tenant_lock_dir: str = ".opseval/tenant-locks"
+    tenant_stale_after_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300.0
 
     # Gate
     gate_fail_on_flaky: bool = False

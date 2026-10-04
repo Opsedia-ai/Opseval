@@ -59,7 +59,14 @@ class TestNotStale:
             assert (COMMITTED / f"{name}.json").is_file(), name
 
     def test_the_expected_contracts_are_published(self) -> None:
-        assert set(PUBLISHED) == {"scenario", "suite", "profile", "record", "result"}
+        assert set(PUBLISHED) == {
+            "scenario",
+            "suite",
+            "profile",
+            "record",
+            "result",
+            "tenants",
+        }
 
     def test_rendering_is_deterministic(self) -> None:
         """Sorted keys, so regenerating never produces a spurious diff."""

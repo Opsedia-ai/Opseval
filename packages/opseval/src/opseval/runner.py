@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,6 +24,7 @@ from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.scenario import Scenario
 from opseval.models.telemetry import TelemetryEvent
+from opseval.models.tenant import Tenant, lane_count
 from opseval.plugins import load_scorers
 from opseval.preflight import preflight
 from opseval.reporting import render_html
@@ -32,6 +35,7 @@ from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attemp
 from opseval.sinks import build_sinks, publish_all
 from opseval.storage import FileStore
 from opseval.telemetry import report as report_telemetry
+from opseval.tenants import TenantLeases, load_pool, token_for
 from opseval.traces import TraceSource, enrich
 from opseval.traces.langfuse import LangfuseTraceSource
 from opseval.traces.otlp import OtlpFileTraceSource
@@ -50,7 +54,9 @@ from opseval.verdicts import (
     skipped,
 )
 
-TransportFactory = Callable[[SutProfile], Transport]
+TransportFactory = Callable[[SutProfile, "Tenant | None"], Transport]
+"""Builds a transport for one attempt. The tenant, when the run uses a pool,
+supplies its own target and credentials (ADR-0029)."""
 
 
 @dataclass
@@ -78,14 +84,18 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
         return options.transport_factory
     if not options.target:
         raise ConfigError("no target: pass --target (e.g. ws://localhost:8765)")
-    target = options.target
+    default_target = options.target
     token = settings.static_token.get_secret_value() if settings.static_token else None
     signing_key = settings.token_signing_key
 
-    def credentials(profile: SutProfile) -> str | TokenSource | None:
-        """A fresh token source per attempt: HS256 when the profile asks for it."""
+    def credentials(profile: SutProfile, tenant: Tenant | None) -> str | TokenSource | None:
+        """A fresh token source per attempt: HS256 when the profile asks for it.
+
+        A tenant's own token wins over OPSEVAL_STATIC_TOKEN, because the whole point of
+        the pool is that each tenant authenticates as itself.
+        """
         if profile.token is None:
-            return token
+            return (tenant and token_for(tenant)) or token
         if signing_key is None:
             raise ConfigError(
                 f"profile {profile.name!r} mints HS256 tokens: set OPSEVAL_TOKEN_SIGNING_KEY"
@@ -98,17 +108,53 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
         )
 
     if options.transport == "websocket":
-        check_url_allowed(target, settings.allowlist(), secure_schemes=("wss",))
-        return lambda profile: WebSocketTransport(target, profile, token=credentials(profile))
+        # Eagerly, so a bad host fails before anything runs - like preflight and
+        # the sinks. A tenant with its own target is checked when it is used.
+        check_url_allowed(default_target, settings.allowlist(), secure_schemes=("wss",))
+
+        def _websocket(profile: SutProfile, tenant: Tenant | None) -> Transport:
+            where = tenant.target if tenant and tenant.target else default_target
+            if where != default_target:
+                check_url_allowed(where, settings.allowlist(), secure_schemes=("wss",))
+            return WebSocketTransport(where, profile, token=credentials(profile, tenant))
+
+        return _websocket
     if options.transport == "http-json":
-        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: HttpJsonTransport(target, profile, token=credentials(profile))
+        # Eagerly, so a bad host fails before anything runs - like preflight and
+        # the sinks. A tenant with its own target is checked when it is used.
+        check_url_allowed(default_target, settings.allowlist(), secure_schemes=("https",))
+
+        def _http_json(profile: SutProfile, tenant: Tenant | None) -> Transport:
+            where = tenant.target if tenant and tenant.target else default_target
+            if where != default_target:
+                check_url_allowed(where, settings.allowlist(), secure_schemes=("https",))
+            return HttpJsonTransport(where, profile, token=credentials(profile, tenant))
+
+        return _http_json
     if options.transport == "openai-chat":
-        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: OpenAIChatTransport(target, profile, token=credentials(profile))
+        # Eagerly, so a bad host fails before anything runs - like preflight and
+        # the sinks. A tenant with its own target is checked when it is used.
+        check_url_allowed(default_target, settings.allowlist(), secure_schemes=("https",))
+
+        def _openai_chat(profile: SutProfile, tenant: Tenant | None) -> Transport:
+            where = tenant.target if tenant and tenant.target else default_target
+            if where != default_target:
+                check_url_allowed(where, settings.allowlist(), secure_schemes=("https",))
+            return OpenAIChatTransport(where, profile, token=credentials(profile, tenant))
+
+        return _openai_chat
     if options.transport == "sse":
-        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: SseTransport(target, profile, token=credentials(profile))
+        # Eagerly, so a bad host fails before anything runs - like preflight and
+        # the sinks. A tenant with its own target is checked when it is used.
+        check_url_allowed(default_target, settings.allowlist(), secure_schemes=("https",))
+
+        def _sse(profile: SutProfile, tenant: Tenant | None) -> Transport:
+            where = tenant.target if tenant and tenant.target else default_target
+            if where != default_target:
+                check_url_allowed(where, settings.allowlist(), secure_schemes=("https",))
+            return SseTransport(where, profile, token=credentials(profile, tenant))
+
+        return _sse
     raise ConfigError(
         f"unknown transport {options.transport!r}; use websocket, http-json, sse or openai-chat"
     )
@@ -223,7 +269,7 @@ async def launch(
             catalogue.scenarios,
             profile,
             settings,
-            target=make_transport(profile).target,
+            target=make_transport(profile, None).target,
             transport=options.transport,
             traces_enabled=options.traces and profile.traces is not None,
             verify_llm=options.verify_llm,
@@ -235,7 +281,7 @@ async def launch(
             # agent would report "safe to release" on a suite that tested nothing. We
             # could not reach what we were asked to test: that is a config error (exit 3).
             raise ConfigError(
-                f"the agent is not reachable at {make_transport(profile).target}: "
+                f"the agent is not reachable at {make_transport(profile, None).target}: "
                 f"{sut.detail}. Nothing was run. Check the target and the network, or "
                 "pass --no-preflight to try anyway."
             )
@@ -244,7 +290,7 @@ async def launch(
 
     started = datetime.now(UTC)
     run_id = f"{started:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
-    target_label = make_transport(profile).target
+    target_label = make_transport(profile, None).target
     store.write_manifest(
         run_id,
         {
@@ -264,8 +310,24 @@ async def launch(
     )
     store.save_profile(run_id, profile)
 
-    verdicts: list[TestVerdict] = []
-    for scenario in catalogue.scenarios:
+    # Opt-in: without a tenant pool the run is sequential with no leases, exactly as
+    # before, so nothing changes for anyone not using one.
+    pool = load_pool(settings.tenants_file) if settings.tenants_file else None
+    lanes = lane_count(len(pool.tenants), settings.lanes, settings.lane_cap) if pool else 1
+    leases = (
+        TenantLeases(
+            pool,
+            settings.tenant_lock_dir,
+            holder=f"{run_id}:{os.getpid()}",
+            stale_after=settings.tenant_stale_after_seconds,
+        )
+        if pool
+        else None
+    )
+    if pool:
+        log(f"tenant pool: {len(pool.tenants)} tenant(s), {lanes} lane(s)")
+
+    async def run_one(scenario: Scenario) -> TestVerdict:
         if options.repeats:
             scenario = scenario.model_copy(
                 update={
@@ -274,67 +336,103 @@ async def launch(
             )
         store.save_scenario(run_id, scenario)
         if scenario.is_blocked:
-            verdicts.append(skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'"))
-            continue
+            return skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'")
         blocked_by = _unmet(scenario, health, sim_client is None)
         if blocked_by is not None:
-            verdicts.append(skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, blocked_by))
-            continue
+            return skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, blocked_by)
         if _needs_llm_persona(scenario) and sim_client is None:
-            verdicts.append(
-                skipped(
-                    scenario,
-                    VerdictStatus.SKIPPED_PRECONDITION,
-                    "needs an LLM persona: set OPSEVAL_SIMULATOR_BASE_URL and "
-                    "OPSEVAL_SIMULATOR_MODEL",
-                )
+            return skipped(
+                scenario,
+                VerdictStatus.SKIPPED_PRECONDITION,
+                "needs an LLM persona: set OPSEVAL_SIMULATOR_BASE_URL and OPSEVAL_SIMULATOR_MODEL",
             )
-            continue
         if scenario.conversation.stop_at == "outcome_committed" and not options.allow_commit:
-            verdicts.append(
-                skipped(
+            return skipped(
+                scenario,
+                VerdictStatus.SKIPPED_PRECONDITION,
+                "commit guard: this scenario performs the irreversible outcome; "
+                "re-run with --allow-commit against a test tenant",
+            )
+
+        tenant: Tenant | None = None
+        lease = None
+        if leases is not None:
+            lease = leases.acquire()
+            if lease is None:
+                # Not the agent's fault: the harness could not obtain a resource. Two
+                # scenarios sharing a tenant would produce false agent failures, which
+                # is far worse than a skip.
+                return skipped(
                     scenario,
                     VerdictStatus.SKIPPED_PRECONDITION,
-                    "commit guard: this scenario performs the irreversible outcome; "
-                    "re-run with --allow-commit against a test tenant",
+                    "no free test tenant: every tenant in the pool is leased by a live run",
                 )
-            )
-            continue
-        log(f"▶ {scenario.id} · {scenario.name}")
-        attempts = []
-        for i in range(scenario.execution.repeats):
-            seed = attempt_seed(scenario.id, i)
-            sim: Simulator = (
-                ScriptedSimulator(scenario, seed)
-                if scenario.conversation.scripted_turns or sim_client is None
-                else LLMSimulator(scenario, seed, sim_client)
-            )
-            driver = Driver(
-                scenario=scenario,
-                profile=profile,
-                transport=make_transport(profile),
-                simulator=sim,
-                run_id=run_id,
-                attempt_index=i,
-                seed=seed,
-                allow_commit=options.allow_commit,
-            )
-            record = await driver.run()
-            if trace_source is not None:
-                record = await enrich(record, trace_source, profile)
-            path = store.save_record(record)
-            scores = await engine.score(record, scenario, profile)
-            verdict = attempt_verdict(record, scores, str(path))
-            attempts.append(verdict)
-            state = (
-                "not judged" if verdict.passed is None else ("pass" if verdict.passed else "FAIL")
-            )
-            coverage = " · traces" if record.trace_coverage == "full" else ""
-            log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
-        verdicts.append(fold_attempts(scenario, attempts))
-        if options.fail_fast and verdicts[-1].status is VerdictStatus.FAILED:
-            log("fail-fast: stopping after the first failed scenario")
-            break
+            tenant = lease.tenant
+        try:
+            where = f" · tenant {tenant.id}" if tenant else ""
+            log(f"▶ {scenario.id} · {scenario.name}{where}")
+            attempts = []
+            for i in range(scenario.execution.repeats):
+                seed = attempt_seed(scenario.id, i)
+                sim: Simulator = (
+                    ScriptedSimulator(scenario, seed)
+                    if scenario.conversation.scripted_turns or sim_client is None
+                    else LLMSimulator(scenario, seed, sim_client)
+                )
+                driver = Driver(
+                    scenario=scenario,
+                    profile=profile,
+                    transport=make_transport(profile, tenant),
+                    simulator=sim,
+                    run_id=run_id,
+                    attempt_index=i,
+                    seed=seed,
+                    allow_commit=options.allow_commit,
+                )
+                record = await driver.run()
+                if lease is not None:
+                    # Between attempts, so a long scenario is never mistaken for a dead
+                    # holder and its tenant stolen mid-run.
+                    lease.heartbeat()
+                if trace_source is not None:
+                    record = await enrich(record, trace_source, profile)
+                path = store.save_record(record)
+                scores = await engine.score(record, scenario, profile)
+                verdict = attempt_verdict(record, scores, str(path))
+                attempts.append(verdict)
+                state = (
+                    "not judged"
+                    if verdict.passed is None
+                    else ("pass" if verdict.passed else "FAIL")
+                )
+                coverage = " · traces" if record.trace_coverage == "full" else ""
+                log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
+            return fold_attempts(scenario, attempts)
+        finally:
+            if lease is not None:
+                lease.release()
+
+    verdicts: list[TestVerdict] = []
+    if lanes <= 1:
+        for scenario in catalogue.scenarios:
+            verdicts.append(await run_one(scenario))
+            if options.fail_fast and verdicts[-1].status is VerdictStatus.FAILED:
+                log("fail-fast: stopping after the first failed scenario")
+                break
+    else:
+        # Bounded by the lane count, which is bounded by the pool, so no two scenarios
+        # in flight can want the same tenant.
+        slots = asyncio.Semaphore(lanes)
+
+        async def lane(scenario: Scenario) -> TestVerdict:
+            async with slots:
+                return await run_one(scenario)
+
+        verdicts = list(await asyncio.gather(*(lane(s) for s in catalogue.scenarios)))
+        if options.fail_fast and any(v.status is VerdictStatus.FAILED for v in verdicts):
+            # Honest about the limit: with lanes in flight, fail-fast cannot un-start
+            # work that had already begun.
+            log("fail-fast: a scenario failed; scenarios already in flight still finished")
 
     gate = release_gate(verdicts, fail_on_flaky=settings.gate_fail_on_flaky)
     result = SuiteResult(

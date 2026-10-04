@@ -84,6 +84,8 @@ def _with_editor_hint(rel: Path, text: str) -> str:
         name = "suite"
     elif rel.name.startswith("profile"):
         name = "profile"
+    elif rel.name.startswith("tenants"):
+        name = "tenants"
     else:
         return text
     return f"{editor_hint(name)}\n{text}"

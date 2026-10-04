@@ -128,6 +128,33 @@ opseval rescore reports/<run_id> --catalogue opseval/suites/full.yaml --profile 
 
 The original run is never modified. The new result goes to `reports/<run_id>/rescore-<time>/`, listing which scorer versions and judge prompts changed and which verdicts moved. The exit code follows the new result. Without a judge configured, judge scores are reused only if their prompt is unchanged ([ADR-0013](docs/adr/0013-offline-rescore.md)).
 
+### Run scenarios in parallel, safely
+
+A suite that takes twenty minutes does not get run on every pull request. Running scenarios at the same time fixes that, but not against a shared account: two attempts refunding from the same order list see each other's state, and the mess gets recorded as the agent misbehaving. So parallelism is opt-in *through* the isolation it needs. Declare a pool of test tenants:
+
+```yaml
+# tenants.yaml
+schema: opseval/v1
+tenants:
+  - id: tenant-a
+    token_env: OPSEVAL_TENANT_A_TOKEN   # the variable's NAME, never the token
+  - id: tenant-b
+    token_env: OPSEVAL_TENANT_B_TOKEN
+  - id: tenant-c
+    token_env: OPSEVAL_TENANT_C_TOKEN
+    target: https://tenant-c.example.com/v1    # optional, if tenants are separate deployments
+```
+
+```bash
+opseval run suites/full.yaml -p profile.yaml -t wss://… --tenants tenants.yaml --lanes 3
+```
+
+Each scenario leases one tenant for its whole attempt and releases it at the end, so no two scenarios ever share an account. Lanes are capped by the pool: `--lanes 9` against three tenants runs three. With no `--tenants`, the run is sequential exactly as before.
+
+The lock errs towards not running. A scenario that cannot get a tenant is *skipped* — a harness problem, not an agent failure — and a lease whose file cannot be read counts as held rather than free, because guessing "free" is how two runs end up on one account. A lease is only reclaimed once its heartbeat is provably stale (five minutes by default; the holder refreshes it every thirty seconds). If every tenant is busy the whole suite comes back *not judged* at exit 2, never a pass ([ADR-0029](docs/adr/0029-test-tenant-pool.md)).
+
+Because the pool file is meant to be committed, tokens stay out of it: each tenant names the environment variable holding its own, and a declared variable that is unset stops the run with exit 3 rather than authenticating as nobody.
+
 ### Gate releases in CI
 
 **GitHub Actions**: the step fails exactly when Opseval says the release is blocked, and the gate summary is posted on the pull request:

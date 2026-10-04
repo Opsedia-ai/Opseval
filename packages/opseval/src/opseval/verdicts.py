@@ -146,6 +146,14 @@ def release_gate(tests: list[TestVerdict], *, fail_on_flaky: bool = False) -> Ga
             warnings.append(f"{t.test_id}: flaky")
     if not tests:
         blocking.append("no scenarios were run")
+    measured = [t for t in tests if t.status in (VerdictStatus.PASSED, VerdictStatus.FAILED)]
+    if tests and not measured:
+        # Every scenario was skipped, parked or not judged. "Safe to release" would be a
+        # claim about an agent nobody looked at - the exit code already says 2, and the
+        # sentence a human reads has to agree with it.
+        blocking.append(
+            f"nothing was measured: all {len(tests)} scenario(s) were skipped or not judged"
+        )
     status = "block" if blocking else "pass"
     passed = sum(1 for t in tests if t.status is VerdictStatus.PASSED)
     summary = f"{passed}/{len(tests)} scenarios passed. " + (

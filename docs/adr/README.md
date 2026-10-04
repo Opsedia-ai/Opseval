@@ -30,5 +30,6 @@
 | [0026](0026-published-json-schemas.md) | JSON Schemas generated from the models, with drift as a CI failure | Proposed |
 | [0027](0027-sinks.md) | Sinks: webhook and Langfuse score push; cannot change a verdict, must not fail silently | Proposed |
 | [0028](0028-otlp-trace-source.md) | OTLP spans read from the collector's file exporter; an empty trace is never fabricated | Proposed |
+| [0029](0029-test-tenant-pool.md) | Test-tenant pool with exclusive leases; lanes bounded by the pool, and doubt never takes the lease | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.
