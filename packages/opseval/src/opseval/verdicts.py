@@ -51,6 +51,7 @@ def attempt_verdict(
         terminal_state=record.terminal_state,
         scores=scores,
         record_path=record_path,
+        session_id=record.session_id,
         invalid_reason=reason,
     )
 

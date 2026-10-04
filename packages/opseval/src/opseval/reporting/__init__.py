@@ -68,6 +68,9 @@ def console_summary(result: SuiteResult) -> str:
             lines.append(f"  {'':<13} ↳ vacuous: {', '.join(t.vacuous_scorers)}")
     for err in result.load_errors:
         lines.append(f"  LOAD ERROR    {err}")
+    for outcome in result.sinks:
+        mark = "published" if outcome.published else "NOT PUBLISHED"
+        lines.append(f"  {mark:<13} {outcome.sink}: {outcome.detail}")
     lines += ["", f"Gate: {result.gate.status.upper()} — {result.gate.summary}"]
     lines.append(f"Exit code: {result.exit_code}")
     return "\n".join(lines)

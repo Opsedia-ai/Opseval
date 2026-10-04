@@ -29,6 +29,7 @@ from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
 from opseval.scoring.base import check_judge_independence
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
+from opseval.sinks import build_sinks, publish_all
 from opseval.storage import FileStore
 from opseval.telemetry import report as report_telemetry
 from opseval.traces import TraceSource, enrich
@@ -184,6 +185,9 @@ async def launch(
         known_invariants=set(INVARIANTS),
         filters=options.filters,
     )
+    # Built before the run: a destination that is not allowlisted is a configuration
+    # error, and finding that out after a suite has something to publish is too late.
+    sinks = build_sinks(settings)
     make_transport = build_transport_factory(options, settings)
     trace_source = build_trace_source(options, settings, profile)
     meter = UsageMeter()
@@ -341,6 +345,9 @@ async def launch(
         load_errors=[str(p) for p in catalogue.problems],
         preflight=health if options.preflight else None,
     )
+    # After the verdict exists and before it is written, so the outcomes are part of the
+    # saved result. A sink can never change the verdict; publish_all catches everything.
+    result = result.model_copy(update={"sinks": await publish_all(sinks, result, log=log)})
     store.save_report(run_id, render_html(result, store.load_records(run_id), profile))
     store.save_junit(run_id, render_junit(result))
     store.save_result(result)  # written last: marks the run as complete

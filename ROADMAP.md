@@ -36,7 +36,7 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 - ⚪ Web console: runs, live view, compare, trends, usage & cost, scenario editor, persona playground
 - ⚪ Local accounts, API keys, OIDC login; organisations and projects
 - ⚪ Docker Compose and Helm chart
-- ⚪ Langfuse score push, OpenTelemetry trace source, webhooks
+- 🟢 Langfuse score push and webhooks, over a `opseval.sinks` plugin group (ADR-0027) · ⚪ OpenTelemetry trace source
 
 ## v1.0 GA ⚪
 

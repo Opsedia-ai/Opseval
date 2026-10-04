@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     )
     """The community-standard opt-out. Honoured the same as OPSEVAL_TELEMETRY=false."""
 
+    # Sinks: where a finished run is published (ADR-0027). Each host is allowlisted
+    # like every other host that receives data.
+    webhook_url: str | None = None
+    langfuse_push_scores: bool = False
+    langfuse_score_name: str = "opseval"
+
     # Gate
     gate_fail_on_flaky: bool = False
 
