@@ -281,6 +281,31 @@ handled the probe, so the loosest expectation must not be the most forgiving one
 `expect: {kind: error}` when an error is the right answer. See
 [ADR-0025](docs/adr/0025-protocol-probes.md).
 
+### Traces without Langfuse (OTLP)
+
+Point the OpenTelemetry Collector's `file` exporter at a path and read the spans from there — no
+backend, no credentials, no listening port:
+
+```yaml
+# profile.yaml
+traces:
+  source: otlp-file
+  session_id: "{test_id}-{attempt_index}"   # whatever your agent puts on its spans
+```
+
+```bash
+export OPSEVAL_OTLP_SPANS_PATH=./spans            # a file, or a directory read recursively
+```
+
+Opseval correlates spans to attempts by a session attribute (`session.id`,
+`gen_ai.conversation.id` or `opseval.session_id` by default, configurable — there is no settled
+convention), takes the tool name from the span name unless `gen_ai.tool.name` overrides it, and
+treats **only** OTLP status `2` (ERROR) as a failed call, because `UNSET` is not a failure.
+
+Note that OTLP has no standard query API, so this reads exported spans rather than querying Tempo
+or Jaeger. A backend fetcher reusing the same mapping is follow-up work. See
+[ADR-0028](docs/adr/0028-otlp-trace-source.md).
+
 ### Check how a tool was called
 
 Declare a JSON Schema for a tool's arguments in the profile, and `tools.args_valid` checks every

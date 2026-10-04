@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     ``error`` refuses the run at launch (exit 3), ``warn`` scores but marks the results
     degraded, ``off`` skips the check."""
 
+    # Trace source: OTLP-JSON spans on disk (ADR-0028)
+    otlp_spans_path: str | None = None
+
     # Trace source (Langfuse public API)
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None
