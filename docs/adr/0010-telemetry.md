@@ -1,6 +1,6 @@
 # ADR-0010: Opt-out, content-free, documented telemetry
 
-- **Status:** Proposed (detailed design awaiting approval; nothing is implemented)
+- **Status:** Accepted. Implemented, with no endpoint, by [ADR-0021](0021-telemetry-shipped-dark.md)
 - **Date:** 2026-09-22 (design detail added 2026-09-24)
 - **Deciders:** Opseval maintainers
 
@@ -67,12 +67,17 @@ The first run that would send prints a one-time notice (stderr) saying what is s
 
 ## Decisions needed before implementation
 
-1. **Allowlist vs opt-out.** The project rule is that every host that receives data must be in `OPSEVAL_ALLOWED_HOSTS`. Applied to telemetry, that makes it effectively **opt-in** (nobody allowlists a telemetry host by accident).
+Three of the four were settled when this design was implemented; see
+[ADR-0021](0021-telemetry-shipped-dark.md) for what was chosen and why. **Decision 2 — the
+endpoint and its operator — is still open, and nothing is sent until it is answered.** The
+original wording is kept below as the record of what was being asked.
+
+1. **Allowlist vs opt-out.** *(Settled: option A, ADR-0021.)* The project rule is that every host that receives data must be in `OPSEVAL_ALLOWED_HOSTS`. Applied to telemetry, that makes it effectively **opt-in** (nobody allowlists a telemetry host by accident).
    - *Option A (recommended while the repo is private):* the telemetry host must be allowlisted. Telemetry is off in practice until design partners opt in. Revisit at public launch.
    - *Option B:* a documented exception for the fixed telemetry endpoint only. It receives no conversations or keys, so the allowlist's purpose (protecting credentials and conversations) is not at stake. This gives true opt-out.
-2. **Endpoint and operator.** There is no Opsedia collector yet. The options are a small self-run endpoint (e.g. `telemetry.opsedia.ai`, EU-hosted) or a privacy-focused analytics provider with a DPA. The data-processing terms must name it.
-3. **Timing.** Ship dark (code present, endpoint unset, so nothing is sent) now, and enable it only after the public release and the privacy notice. Or wait entirely until public launch.
-4. **`languages` and `demo_target`.** These fields serve the activation and language-coverage metrics. Keep them, or drop them for an even smaller payload?
+2. **Endpoint and operator.** *(STILL OPEN. No endpoint ships, so nothing is sent.)* There is no Opsedia collector yet. The options are a small self-run endpoint (e.g. `telemetry.opsedia.ai`, EU-hosted) or a privacy-focused analytics provider with a DPA. The data-processing terms must name it.
+3. **Timing.** *(Settled: shipped dark, ADR-0021.)* Ship dark (code present, endpoint unset, so nothing is sent) now, and enable it only after the public release and the privacy notice. Or wait entirely until public launch.
+4. **`languages` and `demo_target`.** *(Settled: kept, ADR-0021.)* These fields serve the activation and language-coverage metrics. Keep them, or drop them for an even smaller payload?
 
 ## Consequences
 
