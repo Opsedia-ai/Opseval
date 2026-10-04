@@ -70,6 +70,9 @@ class AttemptVerdict(BaseModel):
     terminal_state: TerminalState
     scores: list[ScoreResult]
     record_path: str
+    session_id: str | None = None
+    """The agent session this attempt judged, so a verdict can be correlated back to the
+    trace it came from without re-reading the record (ADR-0027)."""
     invalid_reason: str | None = None
 
 
@@ -173,6 +176,20 @@ class RescoreInfo(BaseModel):
     prompt hash is unchanged."""
 
 
+class SinkOutcome(BaseModel):
+    """Whether a finished run reached a sink (ADR-0027).
+
+    Recorded on the result so a publish that failed is visible after the fact, not only
+    in whatever console scrollback the operator happened to keep.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    sink: str
+    published: bool
+    detail: str
+    """What was sent, or why it was not."""
+
+
 class SuiteResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -193,6 +210,12 @@ class SuiteResult(BaseModel):
     rescore: RescoreInfo | None = None
     preflight: PreflightReport | None = None
     """What the dependency checks found before the run (ADR-0020)."""
+    sinks: list[SinkOutcome] = Field(default_factory=list)
+    """Where this run was published, and anything that failed (ADR-0027)."""
+
+    @property
+    def failed_sinks(self) -> list[str]:
+        return [s.sink for s in self.sinks if not s.published]
 
     @property
     def degraded_scorers(self) -> list[str]:

@@ -29,6 +29,7 @@ from opseval.models.results import Axis
 from opseval.scoring.base import REGISTRY, Scorer
 
 SCORER_GROUP = "opseval.scorers"
+SINK_GROUP = "opseval.sinks"
 VALID_REQUIRES = ("frames", "trace", "llm")
 
 _loaded: set[str] = set()
@@ -111,6 +112,50 @@ def load_scorers(*, group: str = SCORER_GROUP) -> dict[str, str]:
     return found
 
 
+def check_sink_contract(obj: Any, *, source: str) -> type[Any]:
+    """Validate one sink plugin. Raises :class:`ConfigError`."""
+    from opseval.sinks.base import Sink
+
+    if not inspect.isclass(obj) or not issubclass(obj, Sink):
+        raise ConfigError(
+            f"{source}: a sink plugin must be a class deriving from opseval.sinks.Sink, got {obj!r}"
+        )
+    name = getattr(obj, "name", None)
+    if not isinstance(name, str) or not name or name == "sink":
+        raise ConfigError(
+            f"{source}: sink {obj.__name__} needs its own 'name' (not the default 'sink')"
+        )
+    publish = getattr(obj, "publish", None)
+    if not callable(publish) or not inspect.iscoroutinefunction(publish):
+        raise ConfigError(f"{source}: sink {name!r} must define 'async def publish(result)'")
+    return obj
+
+
+def load_sinks(*, group: str = SINK_GROUP) -> dict[str, type[Any]]:
+    """Discover sink plugins (ADR-0027). Fails closed, like scorers.
+
+    A sink that cannot be imported is refused rather than skipped: an operator who
+    installed a publisher and got silence would reasonably assume it had published.
+    """
+    found: dict[str, type[Any]] = {}
+    for entry in sorted(_iter_entry_points(group), key=lambda e: e.name):
+        key = f"{group}:{entry.name}"
+        if key in _loaded:
+            continue
+        source = f"sink plugin {entry.name!r} ({entry.value})"
+        try:
+            obj = entry.load()
+        except Exception as exc:
+            raise ConfigError(
+                f"{source} could not be imported: {type(exc).__name__}: {exc}. "
+                "Fix or uninstall it; Opseval will not run with a broken sink plugin."
+            ) from exc
+        cls = check_sink_contract(obj, source=source)
+        found[cls.name] = cls
+        _loaded.add(key)
+    return found
+
+
 def reset_for_tests() -> None:
     """Forget what discovery has seen (tests only)."""
     _loaded.clear()
@@ -119,9 +164,12 @@ def reset_for_tests() -> None:
 
 __all__ = [
     "SCORER_GROUP",
+    "SINK_GROUP",
     "THIRD_PARTY",
     "VALID_REQUIRES",
     "check_contract",
+    "check_sink_contract",
     "load_scorers",
+    "load_sinks",
     "reset_for_tests",
 ]

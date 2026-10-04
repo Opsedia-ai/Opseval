@@ -359,6 +359,30 @@ Leaving `sut_model` unset means *unknown*, not *independent*: the check stays in
 claims independence it has not verified. See
 [ADR-0016](docs/adr/0016-judge-independence-and-quality-judges.md).
 
+## Publish a finished run
+
+```bash
+export OPSEVAL_ALLOWED_HOSTS=hooks.example.com,cloud.langfuse.com
+export OPSEVAL_WEBHOOK_URL=https://hooks.example.com/opseval   # POST the whole result
+export OPSEVAL_LANGFUSE_PUSH_SCORES=true                       # one score per scenario
+```
+
+A sink **cannot change the verdict** — it runs after the result exists, and every failure is
+caught. But it will not fail silently either: a publish that did not happen is named in
+`result.sinks`, the console, and the gate summary, because you asked for it and an operator who
+thinks a notification went out when it did not is the failure mode worth preventing. Note that CI
+stays green, so watch for the warning.
+
+Destinations are allowlisted and TLS-checked **before** the run starts, not after it has something
+to publish.
+
+Pushed scores keep the three-state contract: `passed` is 1, `failed` is 0, and a verdict that was
+never measured is pushed as a *category* — never as 0, which on a dashboard is indistinguishable
+from the agent failing.
+
+Third parties can add a sink over the `opseval.sinks` entry point with
+`async def publish(self, result) -> str`. See [ADR-0027](docs/adr/0027-sinks.md).
+
 ## Telemetry
 
 Opseval can send anonymous, content-free usage counts, and **sends nothing today**: no collector

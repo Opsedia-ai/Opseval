@@ -41,6 +41,18 @@
           "title": "Scores",
           "type": "array"
         },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
         "terminal_state": {
           "$ref": "#/$defs/TerminalState"
         }
@@ -389,6 +401,31 @@
       "title": "ScorerChange",
       "type": "object"
     },
+    "SinkOutcome": {
+      "additionalProperties": false,
+      "description": "Whether a finished run reached a sink (ADR-0027).\n\nRecorded on the result so a publish that failed is visible after the fact, not only\nin whatever console scrollback the operator happened to keep.",
+      "properties": {
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "published": {
+          "title": "Published",
+          "type": "boolean"
+        },
+        "sink": {
+          "title": "Sink",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sink",
+        "published",
+        "detail"
+      ],
+      "title": "SinkOutcome",
+      "type": "object"
+    },
     "TerminalState": {
       "enum": [
         "outcome_committed",
@@ -586,6 +623,13 @@
       "default": "opseval/v1",
       "title": "Schema Version",
       "type": "string"
+    },
+    "sinks": {
+      "items": {
+        "$ref": "#/$defs/SinkOutcome"
+      },
+      "title": "Sinks",
+      "type": "array"
     },
     "started_at": {
       "format": "date-time",

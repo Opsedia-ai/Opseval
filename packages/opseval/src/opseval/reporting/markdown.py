@@ -89,6 +89,13 @@ def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> s
             "never arose (nothing forbidden, no matching call, no rule to apply). Those "
             "passes are evidence of nothing.",
         ]
+    if result.failed_sinks:
+        listed = ", ".join(f"`{_code(s, 60)}`" for s in result.failed_sinks)
+        lines += [
+            "",
+            f"⚠️ **Not published** · {listed} failed. The verdict above is unaffected, but "
+            "whatever was supposed to receive this run did not.",
+        ]
     if result.load_errors:
         lines += ["", f"⚠️ {len(result.load_errors)} scenario file(s) could not be loaded."]
     footer = f"Run `{_code(result.run_id)}`"
