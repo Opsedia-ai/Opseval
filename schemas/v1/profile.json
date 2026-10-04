@@ -257,8 +257,11 @@
           "type": "string"
         },
         "source": {
-          "const": "langfuse",
           "default": "langfuse",
+          "enum": [
+            "langfuse",
+            "otlp-file"
+          ],
           "title": "Source",
           "type": "string"
         },

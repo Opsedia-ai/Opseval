@@ -34,6 +34,7 @@ from opseval.storage import FileStore
 from opseval.telemetry import report as report_telemetry
 from opseval.traces import TraceSource, enrich
 from opseval.traces.langfuse import LangfuseTraceSource
+from opseval.traces.otlp import OtlpFileTraceSource
 from opseval.transport import (
     HttpJsonTransport,
     OpenAIChatTransport,
@@ -120,6 +121,13 @@ def build_trace_source(
         return None
     if options.trace_source is not None:
         return options.trace_source
+    if profile.traces.source == "otlp-file":
+        if not settings.otlp_spans_path:
+            raise ConfigError(
+                f"profile {profile.name!r} reads OTLP spans: set OPSEVAL_OTLP_SPANS_PATH "
+                "to the file or directory the collector writes, or pass --no-traces"
+            )
+        return OtlpFileTraceSource(settings.otlp_spans_path)
     host = settings.langfuse_host
     public, secret = settings.langfuse_public_key, settings.langfuse_secret_key
     if not (host and public and secret):

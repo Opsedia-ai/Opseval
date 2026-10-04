@@ -45,7 +45,9 @@ class TraceConfig(BaseModel):
     """Where to read the agent's own traces (ADR-0011)."""
 
     model_config = ConfigDict(extra="forbid")
-    source: Literal["langfuse"] = "langfuse"
+    source: Literal["langfuse", "otlp-file"] = "langfuse"
+    """``otlp-file`` reads the OTLP-JSON the OpenTelemetry Collector's file exporter
+    writes (ADR-0028); its path comes from ``OPSEVAL_OTLP_SPANS_PATH``."""
     session_id: str = "{session_id}"
     """Template for the trace session id. Values: session_id, run_id, test_id, attempt_index."""
     clock_skew_ms: int = Field(default=2000, ge=0, le=600_000)
