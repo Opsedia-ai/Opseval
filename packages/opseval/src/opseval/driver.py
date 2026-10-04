@@ -16,8 +16,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from opseval.errors import HarnessError, TransportError, TransportTimeout
-from opseval.models.profile import FrameKind, SutProfile, render_frame
-from opseval.models.record import FrameRecord, InterruptRecord, RunRecord, TerminalState
+from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
+from opseval.models.record import (
+    FrameRecord,
+    InterruptRecord,
+    ProbeResult,
+    RunRecord,
+    TerminalState,
+)
 from opseval.models.scenario import (
     CheckpointPolicy,
     Decision,
@@ -52,10 +58,47 @@ class _Stop(Exception):
         self.reason = reason
 
 
+def _probe_problem(probe: Probe, payload: Any, kind: FrameKind) -> str | None:
+    """Why the answer does not meet the probe's expectation, or ``None``.
+
+    Field checks are a subset match: an agent may send more than the probe asks about.
+    An empty expectation asserts that it answered *and did not error*: an agent replying
+    "unknown_frame" has demonstrably not handled the probe, so treating that as a pass
+    would make the loosest expectation the most misleading one. A probe that is *about*
+    an error path says so with ``expect.kind: error``.
+    """
+    want = probe.expect
+    if want.kind is not None and kind is not want.kind:
+        return f"expected a {want.kind.value} frame, got {kind.value}"
+    if want.kind is None and kind is FrameKind.ERROR:
+        code = payload.get("code") if isinstance(payload, dict) else None
+        detail = f" ({code})" if isinstance(code, str) else ""
+        return (
+            f"the agent answered with an error frame{detail}; if that is the expected "
+            "answer, declare expect.kind: error"
+        )
+    if (want.fields or want.has_fields) and not isinstance(payload, dict):
+        return f"expected an object with fields, got {type(payload).__name__}"
+    if isinstance(payload, dict):
+        for key in want.has_fields:
+            if key not in payload:
+                return f"missing field {key!r}"
+        for key, expected in want.fields.items():
+            if key not in payload:
+                return f"missing field {key!r}"
+            if payload[key] != expected:
+                return f"field {key!r} is {payload[key]!r}, expected {expected!r}"
+    return None
+
+
 class Driver:
     """One attempt as a state machine.
 
-    CONNECT -> OPENING -> (AWAIT_RESPONSE -> SIMULATE_TURN | CHECKPOINT)* -> TERMINAL
+    CONNECT -> PROBES -> OPENING -> (AWAIT_RESPONSE -> SIMULATE_TURN | CHECKPOINT)* -> TERMINAL
+
+    Probes (FR-RUN-07) check the raw protocol once, before the conversation. They never
+    abort it: a protocol fault and whatever it causes downstream are both worth seeing in
+    one record, and `protocol.probes_passed` is what grades them.
     """
 
     def __init__(
@@ -80,6 +123,7 @@ class Driver:
         self.allow_commit = allow_commit and scenario.conversation.allow_commit
         self._frames: list[FrameRecord] = []
         self._interrupts: list[InterruptRecord] = []
+        self._probes: list[ProbeResult] = []
         self._notes: list[str] = []
         self._infra: list[str] = []
         self._injections: list[str] = []
@@ -179,6 +223,7 @@ class Driver:
             terminal_state=state,
             stop_reason=reason,
             frames=tuple(self._frames),
+            probes=tuple(self._probes),
             interrupts=tuple(self._interrupts),
             user_turns=self._user_turns,
             persona=self.s.persona.model_dump(mode="json"),
@@ -188,7 +233,50 @@ class Driver:
             transport_events=session.transport_events() if session else (),
         )
 
+    async def _probe(self, session: Session) -> None:
+        """Send each declared probe and record what came back.
+
+        A probe that goes unanswered within its own timeout is the agent failing to
+        answer, which counts against it, so it is recorded as a failed probe rather than
+        ending the attempt. A transport error is not caught here: that is the harness
+        losing the session, and `run` turns it into an invalidated attempt.
+        """
+        for probe in self.p.probes:
+            frame = render_frame(
+                probe.send, {"session_id": session.session_id, "text": None, "timezone": None}
+            )
+            sent = await self._send(session, frame, FrameKind.UNKNOWN, None)
+            try:
+                payload = await session.receive(probe.timeout_seconds)
+            except TransportTimeout:
+                self._probes.append(
+                    ProbeResult(
+                        name=probe.name,
+                        passed=False,
+                        answered=False,
+                        reason=f"no answer within {probe.timeout_seconds:g}s",
+                        sent_seq=sent,
+                    )
+                )
+                continue
+            kind = self.p.classify(payload)
+            text = payload.get(self.p.text_field) if isinstance(payload, dict) else None
+            received = self._record(
+                "received", payload, kind, text if isinstance(text, str) else None
+            )
+            problem = _probe_problem(probe, payload, kind)
+            self._probes.append(
+                ProbeResult(
+                    name=probe.name,
+                    passed=problem is None,
+                    reason=problem,
+                    sent_seq=sent,
+                    received_seq=received,
+                )
+            )
+
     async def _converse(self, session: Session) -> None:
+        await self._probe(session)
         turn = await self.sim.opening()
         self._injections += turn.injections
         await self._send_user(session, turn.text)

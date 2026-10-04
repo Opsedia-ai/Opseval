@@ -29,7 +29,7 @@ packages/opseval/src/opseval/
   catalogue.py   load + cross-check scenarios/suites/profiles (fail closed); builtin:<name> profiles
   auth.py        static and short-lived HS256 tokens (per attempt, refreshed before expiry)
   transport/     websocket.py (resume, token refresh), queued.py (http-json, python), openai_chat.py
-  driver.py      one attempt as a state machine; records, never judges
+  driver.py      one attempt as a state machine (CONNECT→PROBES→OPENING→…); records, never judges
   simulator/     scripted + LLM personas, language packs (en, ar MSA/Egyptian/Gulf), typing noise
   llm.py         OpenAI-compatible client (no vendor SDKs, ADR-0003), retries, usage meter
   traces/        TraceSource + Langfuse v2 observations reader (ADR-0011)
@@ -50,7 +50,7 @@ packages/opseval/src/opseval/
 packages/opseval/tests/   pytest (asyncio_mode=auto), incl. the fault-injection suite
 packages/pytest-opseval/  pytest plugin: scenarios as pytest items (entry point disabled in our own run)
 action.yml                composite GitHub Action (dogfooded by the `action` CI job)
-docs/adr/                 architecture decisions (0001-0024); new decisions get a new ADR
+docs/adr/                 architecture decisions (0001-0025); new decisions get a new ADR
 ```
 
 ## Commands
@@ -91,13 +91,14 @@ Definition of done for any change: `make check` is green, coverage stays ≥ 85%
 - v0.2: scorer plugins via the `opseval.scorers` entry-point group. Discovery **fails closed**: an unimportable plugin, a contract violation or an id collision is a `ConfigError` (exit 3), never a skip — a skipped scorer becomes `UNKNOWN_SCORER`, an `infra_error`, which `attempt_verdict` drops from `measured`, so the suite would go green with the check gone. `opseval.testing.ScorerContract` is the public kit; it claims only what `ScoreResult` does not already validate (ADR-0022).
 - v0.2: flow map in the HTML report — per attempt, expected vs observed phase transitions, opening itself when the path was not clean. No phases or no markers is *not measured* with the reason, never an empty diagram. It changes no status, score or exit code; `flow.phase_order` still decides. `render_html` takes an optional profile for the declared order (ADR-0023).
 - v0.2: `tools.args_valid` checks a call's arguments against the tool's `args_schema` (JSON Schema, needs full trace coverage; frames never carry arguments). No declared schema is `NOT_MEASURABLE`, a broken schema is reported as the *schema* being broken, and a called tool without one is `unchecked`, never failed. A **vacuous** pass (the situation never arose) is now named in the gate summary, JUnit, console and HTML — it was only in `details` before, so five scorers could pass on no evidence and look identical to a real pass. It changes no status or exit code (ADR-0024).
+- v0.2: protocol probes (`profile.probes`) run in the driver's PROBES state, after connect and before the opening message, graded by `protocol.probes_passed`. They never abort the conversation. No answer is a failed probe (the agent's fault); a transport error is `transport_failure` (not judged); declared-but-never-run is `NOT_MEASURABLE`. An **error reply fails even an empty expectation** unless the probe declares `expect.kind: error` — found against the reference agent, which answers an unknown frame with `error: unknown_frame` (ADR-0025).
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`). The reader is verified against a real self-hosted Langfuse 4.44 (`scripts/langfuse_smoke.py`, ADR-0011); not yet against Langfuse Cloud.
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
 
 ## Next up (suggested order)
 
-1. Protocol probes (FR-RUN-07); OpenTelemetry trace source.
+1. OpenTelemetry trace source.
 2. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
 3. Plugin groups beyond scorers: transports, langpacks, trace sources, sinks (ADR-0022).
 

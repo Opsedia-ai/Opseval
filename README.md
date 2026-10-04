@@ -237,6 +237,32 @@ scorers:
 
 See [ADR-0014](docs/adr/0014-judge-votes-and-planted-injections.md).
 
+### Probe the protocol directly
+
+A conversation exercises the wire protocol incidentally. Probes do it on purpose, once per
+attempt, before the conversation starts:
+
+```yaml
+# profile.yaml
+probes:
+  - name: version
+    send: {type: whoami}
+    expect: {has_fields: [version]}
+  - name: rejects-garbage
+    send: {type: "!!!"}
+    expect: {kind: error, has_fields: [code]}      # expecting an error is a real test
+```
+
+Graded by `protocol.probes_passed`. A failed probe never aborts the conversation — a protocol
+fault and whatever it causes downstream are both worth seeing in one record. No answer within the
+probe's timeout is a failed probe (the agent didn't answer); a transport error is the harness
+losing the session, so the attempt is *not judged*.
+
+An **error reply fails even an empty `expect`**: an agent answering `unknown_frame` has plainly not
+handled the probe, so the loosest expectation must not be the most forgiving one. Say
+`expect: {kind: error}` when an error is the right answer. See
+[ADR-0025](docs/adr/0025-protocol-probes.md).
+
 ### Check how a tool was called
 
 Declare a JSON Schema for a tool's arguments in the profile, and `tools.args_valid` checks every

@@ -226,3 +226,37 @@ class LanguageScript(Scorer):
         fraction = sum(ok) / len(ok)
         spec_eff = spec.model_copy(update={"threshold": float(minimum)})
         return self.result(spec_eff, fraction, messages=len(texts), in_script=sum(ok))
+
+
+@register
+class ProbesPassed(Scorer):
+    """FR-RUN-07: the agent answered the raw protocol probes as the profile declares."""
+
+    id = "protocol.probes_passed"
+    axis = Axis.OUTPUT
+    description = "Every protocol probe the profile declares got the answer it expects."
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        declared = [p.name for p in ctx.profile.probes]
+        if not declared:
+            return self.result(spec, 1.0, vacuous=True, note="the profile declares no probes")
+        if not record.probes:
+            # Declared but never run: the attempt died before PROBES, so this is the
+            # harness losing the session, not the agent answering wrongly.
+            return self.infra(
+                spec,
+                "NOT_MEASURABLE: the attempt ended before the probes ran "
+                f"({record.terminal_state.value})",
+                declared=declared,
+            )
+        failed = [
+            {"probe": p.name, "reason": p.reason, "answered": p.answered}
+            for p in record.probes
+            if not p.passed
+        ]
+        return self.result(
+            spec,
+            (len(record.probes) - len(failed)) / len(record.probes),
+            probes=len(record.probes),
+            failed=failed,
+        )

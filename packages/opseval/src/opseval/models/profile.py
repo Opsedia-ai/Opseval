@@ -84,6 +84,35 @@ class TokenConfig(BaseModel):
     new token is only used when the connection is next opened."""
 
 
+class ProbeExpect(BaseModel):
+    """What a correct answer to a probe looks like.
+
+    Every field given must hold. An empty expectation means "any answer at all", which
+    is a real thing to assert about a protocol: that the agent replies rather than
+    ignoring the frame.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: FrameKind | None = None
+    """The canonical kind the reply must classify as, via the profile's own ``kinds``."""
+    fields: dict[str, Any] = Field(default_factory=dict)
+    """Keys the reply must carry, with these exact values. A subset match, so an agent
+    may send more than this."""
+    has_fields: list[str] = Field(default_factory=list)
+    """Keys the reply must carry, with any value."""
+
+
+class Probe(BaseModel):
+    """One raw frame sent before the conversation, with the answer it must get (FR-RUN-07)."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    send: dict[str, Any]
+    """Sent verbatim, with ``"{session_id}"`` and ``"{token}"`` substituted."""
+    expect: ProbeExpect = Field(default_factory=lambda: ProbeExpect())
+    timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+
+
 class SutProfile(BaseModel):
     """Maps an agent's wire protocol onto Opseval's canonical model."""
 
@@ -134,6 +163,11 @@ class SutProfile(BaseModel):
     reconnect: ReconnectConfig | None = None
     token: TokenConfig | None = None
     """Mint HS256 tokens per attempt instead of using ``OPSEVAL_STATIC_TOKEN``."""
+    probes: list[Probe] = Field(default_factory=list)
+    """Raw protocol frames checked once per attempt, after connecting and before the
+    conversation starts (FR-RUN-04's PROBES state). Graded by ``protocol.probes_passed``;
+    they never abort the conversation, so a protocol fault and its consequences are both
+    visible in one record."""
 
     # --- conversation model -----------------------------------------------------------
     phases: list[str] = Field(default_factory=list)
