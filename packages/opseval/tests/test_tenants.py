@@ -14,6 +14,7 @@ as held.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -23,8 +24,12 @@ from typing import Any
 import pytest
 import yaml
 
+from opseval.catalogue import load_profile
+from opseval.config import AllowedHostError, Settings
+from opseval.demo.refund_agent import run_agent
 from opseval.errors import ConfigError
 from opseval.models.tenant import Tenant, TenantPool, lane_count
+from opseval.runner import RunOptions, build_transport_factory, launch
 from opseval.tenants import TenantLeases, load_pool, token_for
 
 
@@ -34,6 +39,20 @@ def pool(*ids: str, **kw: Any) -> TenantPool:
 
 def leases(tmp_path: Path, p: TenantPool, holder: str = "run-1", **kw: Any) -> TenantLeases:
     return TenantLeases(p, tmp_path / "locks", holder=holder, **kw)
+
+
+def lease_file(tmp_path: Path, tenant_id: str = "x") -> Path:
+    """The path `leases()` would use for this tenant, with its directory created."""
+    directory = tmp_path / "locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{tenant_id}.lease"
+
+
+def stale(path: Path, *, holder: str = "dead", age: float) -> Path:
+    path.write_text(
+        json.dumps({"holder": holder, "heartbeat_at": time.time() - age}), encoding="utf-8"
+    )
+    return path
 
 
 # --- lane arithmetic -------------------------------------------------------------------
@@ -127,19 +146,39 @@ class TestPoolFile:
 class TestCredentials:
     def test_a_token_is_read_from_the_named_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TENANT_A_TOKEN", "secret-a")
-        assert token_for(Tenant(id="a", token_env="TENANT_A_TOKEN")) == "secret-a"
+        assert token_for(Tenant(id="a", token_env="TENANT_A_TOKEN"), Settings()) == "secret-a"
+
+    def test_a_token_set_in_dot_env_is_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`opseval init` tells the operator to put tenant tokens in `.env`. A `.env`
+        value reaches Settings but is **never exported to os.environ**, so reading the
+        process environment directly would report every one of them unset."""
+        monkeypatch.delenv("TENANT_A_TOKEN", raising=False)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("TENANT_A_TOKEN=from-dot-env\n", encoding="utf-8")
+        assert token_for(Tenant(id="a", token_env="TENANT_A_TOKEN"), Settings()) == "from-dot-env"
+
+    def test_the_real_environment_wins_over_dot_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("TENANT_A_TOKEN=stale\n", encoding="utf-8")
+        monkeypatch.setenv("TENANT_A_TOKEN", "live")
+        assert token_for(Tenant(id="a", token_env="TENANT_A_TOKEN"), Settings()) == "live"
 
     def test_a_tenant_without_a_token_env_has_none(self) -> None:
-        assert token_for(Tenant(id="a")) is None
+        assert token_for(Tenant(id="a"), Settings()) is None
 
     def test_a_declared_but_unset_variable_is_a_config_error(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Running against a tenant with no credential would fail for a reason that has
         nothing to do with the agent."""
         monkeypatch.delenv("TENANT_B_TOKEN", raising=False)
+        monkeypatch.chdir(tmp_path)
         with pytest.raises(ConfigError, match="which is not set"):
-            token_for(Tenant(id="b", token_env="TENANT_B_TOKEN"))
+            token_for(Tenant(id="b", token_env="TENANT_B_TOKEN"), Settings())
 
     def test_a_tenant_cannot_declare_a_token_value(self) -> None:
         """Only the variable *name* is declarable, so a committed pool cannot leak. A
@@ -285,10 +324,13 @@ class TestLockDirectory:
         assert (target / "a.lease").is_file()
 
     def test_an_unwritable_location_is_a_config_error(self, tmp_path: Path) -> None:
+        """Only ConfigError, because only ConfigError exits 3. A raw OSError escapes
+        `cli._execute`, which catches ConfigError alone, and Typer exits **1** - a
+        harness problem reported as the agent failing."""
         blocker = tmp_path / "locks"
         blocker.write_text("not a directory", encoding="utf-8")
-        with pytest.raises((ConfigError, NotADirectoryError, FileExistsError)):
-            TenantLeases(pool("a"), blocker, holder="run-1").acquire()
+        with pytest.raises(ConfigError, match="cannot create tenant leases"):
+            TenantLeases(pool("a"), blocker / "under-a-file", holder="run-1").acquire()
 
     def test_the_lease_file_is_not_world_readable(self, tmp_path: Path) -> None:
         """It names the holder, not a secret, but there is no reason to publish it."""
@@ -405,3 +447,284 @@ class TestTheScaffoldedPool:
         env = (tmp_path / ".env.example").read_text("utf-8")
         for tenant in load_pool(tmp_path / "tenants.yaml").tenants:
             assert tenant.token_env and tenant.token_env in env
+
+
+# --- regressions found in review of the original pool PR -------------------------------
+
+
+class TestTheStealIsAtomic:
+    """Reclaiming a stale lease by unlink-then-create lets two processes both win."""
+
+    def test_two_racers_cannot_both_steal_the_same_stale_lease(self, tmp_path: Path) -> None:
+        a = leases(tmp_path, pool("x"), holder="run-a")
+        b = leases(tmp_path, pool("x"), holder="run-b")
+        stale(lease_file(tmp_path), holder="dead", age=10_000)
+
+        # Both have already decided the lease is stale: the interleaving is the one where
+        # each checks before either acts, which is what makes unlink-then-create unsafe.
+        assert a._held_by_other(lease_file(tmp_path)) is False
+        assert b._held_by_other(lease_file(tmp_path)) is False
+
+        first = a._steal(lease_file(tmp_path))
+        second = b._steal(lease_file(tmp_path))
+        # Exactly one process gets to clear it. os.rename is the atomic step.
+        assert [first, second] == [True, False]
+
+    def test_a_stale_lease_is_still_reclaimable(self, tmp_path: Path) -> None:
+        stale(lease_file(tmp_path), holder="dead", age=10_000)
+        lease = leases(tmp_path, pool("x")).acquire()
+        assert lease is not None and lease.tenant.id == "x"
+
+    def test_stealing_leaves_no_debris(self, tmp_path: Path) -> None:
+        stale(lease_file(tmp_path), holder="dead", age=10_000)
+        leases(tmp_path, pool("x")).acquire()
+        assert sorted(p.name for p in (tmp_path / "locks").iterdir()) == ["x.lease"]
+
+
+class TestACrashedWriteDoesNotRetireATenant:
+    def test_an_empty_lease_ages_out_by_its_own_mtime(self, tmp_path: Path) -> None:
+        """A kill between creating the lease and writing it leaves an empty file. With
+        no timestamp to age, "unreadable means held" would retire that tenant forever."""
+        path = lease_file(tmp_path)
+        path.write_text("", encoding="utf-8")
+        os.utime(path, (time.time() - 10_000, time.time() - 10_000))
+        lease = leases(tmp_path, pool("x")).acquire()
+        assert lease is not None
+
+    def test_a_freshly_emptied_lease_is_still_held(self, tmp_path: Path) -> None:
+        """The mtime fallback must not become a licence to steal a live lease."""
+        lease_file(tmp_path).write_text("", encoding="utf-8")
+        assert leases(tmp_path, pool("x")).acquire() is None
+
+    def test_the_heartbeat_is_never_a_partial_file(self, tmp_path: Path) -> None:
+        """Written to a temp file and replaced, so an interrupted write cannot truncate
+        the lease to nothing."""
+        lease = leases(tmp_path, pool("x")).acquire()
+        assert lease is not None
+        lease.heartbeat()
+        assert json.loads(lease.path.read_text("utf-8"))["holder"] == lease.holder
+        assert [p.name for p in (tmp_path / "locks").iterdir()] == ["x.lease"]
+
+
+class TestAGarbageHeartbeatIsNotAnInvitation:
+    @pytest.mark.parametrize("value", ["NaN", "true", '"2026-01-01"', "null", "Infinity"])
+    def test_a_heartbeat_that_is_not_a_timestamp_leaves_the_lease_held(
+        self, tmp_path: Path, value: str
+    ) -> None:
+        """`bool` is an `int` and `json` parses bare `NaN`: True ages to 1970 and every
+        NaN comparison is False, so both would read as stale and get a live tenant
+        stolen. A fresh file with an unusable heartbeat stays held."""
+        lease_file(tmp_path).write_text(
+            f'{{"holder": "other", "heartbeat_at": {value}}}', encoding="utf-8"
+        )
+        assert leases(tmp_path, pool("x")).acquire() is None
+
+
+class TestTheLockDirIsNotRelativeToTheCwd:
+    def test_two_checkouts_of_one_pool_share_a_lock_directory(self) -> None:
+        """A path relative to the working directory would let two CI jobs checking the
+        same repository out twice both lease the same account."""
+        from opseval.tenants import default_lock_dir
+
+        here, there = default_lock_dir(pool("a", "b")), default_lock_dir(pool("b", "a"))
+        assert here == there
+        assert here.is_absolute()
+
+    def test_different_pools_do_not_collide(self) -> None:
+        from opseval.tenants import default_lock_dir
+
+        assert default_lock_dir(pool("a")) != default_lock_dir(pool("a", "b"))
+
+
+class TestTheHeartbeatIsActuallyPeriodic:
+    async def test_a_long_attempt_keeps_its_tenant(self, tmp_path: Path) -> None:
+        """One refresh per finished attempt is not enough: a scenario that runs longer
+        than `stale_after` never reaches it, and has its tenant taken mid-conversation."""
+        from opseval.tenants import refreshing
+
+        mine = leases(tmp_path, pool("x"), holder="run-a", stale_after=0.05)
+        lease = mine.acquire()
+        assert lease is not None
+        rival = leases(tmp_path, pool("x"), holder="run-b", stale_after=0.05)
+        async with refreshing(lease, every=0.01):
+            await asyncio.sleep(0.2)  # Several multiples of stale_after.
+            assert rival.acquire() is None, "a live holder was mistaken for a dead one"
+
+    async def test_the_refresher_stops_with_the_block(self, tmp_path: Path) -> None:
+        """A task left running past the lease would keep a released tenant looking busy."""
+        from opseval.tenants import refreshing
+
+        lease = leases(tmp_path, pool("x")).acquire()
+        assert lease is not None
+        async with refreshing(lease, every=0.01):
+            await asyncio.sleep(0.05)
+        settled = json.loads(lease.path.read_text("utf-8"))["heartbeat_at"]
+        await asyncio.sleep(0.05)  # Several refresh intervals with nobody refreshing.
+        assert json.loads(lease.path.read_text("utf-8"))["heartbeat_at"] == settled
+
+    async def test_no_lease_is_not_an_error(self) -> None:
+        from opseval.tenants import refreshing
+
+        async with refreshing(None):
+            pass
+
+
+class TestWaitingForATenant:
+    async def test_a_lease_freed_a_moment_later_is_used(self, tmp_path: Path) -> None:
+        """A leftover lease from a killed run should not skip a scenario that could have
+        run a second later - with every scenario skipped the gate blocks the release."""
+        holder = leases(tmp_path, pool("x"), holder="run-a")
+        held = holder.acquire()
+        assert held is not None
+
+        async def free_it_soon() -> None:
+            await asyncio.sleep(0.05)
+            held.release()
+
+        task = asyncio.create_task(free_it_soon())
+        got = await leases(tmp_path, pool("x"), holder="run-b").acquire_waiting(
+            timeout=5.0, poll=0.01
+        )
+        await task
+        assert got is not None
+
+    async def test_waiting_still_gives_up(self, tmp_path: Path) -> None:
+        """Bounded: it never relaxes the lock, it only absorbs transient contention."""
+        leases(tmp_path, pool("x"), holder="run-a").acquire()
+        got = await leases(tmp_path, pool("x"), holder="run-b").acquire_waiting(
+            timeout=0.05, poll=0.01
+        )
+        assert got is None
+
+
+# --- what launch() refuses before the first frame --------------------------------------
+
+
+def write_pool(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "tenants.yaml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+class TestLaunchChecksThePoolUpFront:
+    """ "Authoring mistakes must fail at load time." Discovering an unset tenant token
+    halfway through kills the run after records are already on disk - and with one lane
+    the pool's later tenants may never be drawn, so it would not be discovered at all."""
+
+    def run_options(self, cat_dir: Path) -> RunOptions:
+        return RunOptions(target="ws://127.0.0.1:9", profile=cat_dir / "profile.yaml", repeats=1)
+
+    async def test_an_unset_tenant_token_fails_before_anything_runs(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("T_B", raising=False)
+        file = write_pool(
+            tmp_path,
+            "tenants:\n  - id: a\n    token_env: T_A\n  - id: b\n    token_env: T_B\n",
+        )
+        monkeypatch.setenv("T_A", "token-a")
+        settings = Settings(
+            allowed_hosts="127.0.0.1", reports_dir=str(tmp_path / "r"), tenants_file=str(file)
+        )  # type: ignore[arg-type]
+        with pytest.raises(ConfigError, match="T_B.*not set"):
+            await launch(cat_dir / "suites" / "smoke.yaml", self.run_options(cat_dir), settings)
+        # Nothing was started: no run folder, so no records to explain away.
+        assert not (tmp_path / "r").exists()
+
+    async def test_a_tenant_target_off_the_allowlist_fails_before_anything_runs(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        file = write_pool(
+            tmp_path, "tenants:\n  - id: a\n    target: wss://elsewhere.example.com/ws\n"
+        )
+        settings = Settings(
+            allowed_hosts="127.0.0.1", reports_dir=str(tmp_path / "r"), tenants_file=str(file)
+        )  # type: ignore[arg-type]
+        with pytest.raises(AllowedHostError):
+            await launch(cat_dir / "suites" / "smoke.yaml", self.run_options(cat_dir), settings)
+
+    async def test_lanes_without_a_pool_is_refused(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rather than silently running sequentially and taking four times as long."""
+        monkeypatch.chdir(tmp_path)
+        settings = Settings(allowed_hosts="127.0.0.1", reports_dir=str(tmp_path / "r"), lanes=4)  # type: ignore[arg-type]
+        with pytest.raises(ConfigError, match="needs --tenants"):
+            await launch(cat_dir / "suites" / "smoke.yaml", self.run_options(cat_dir), settings)
+
+    async def test_one_lane_without_a_pool_is_fine(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--lanes 1` asks for nothing a pool is needed for."""
+        monkeypatch.chdir(tmp_path)
+        settings = Settings(allowed_hosts="127.0.0.1", reports_dir=str(tmp_path / "r"), lanes=1)  # type: ignore[arg-type]
+        async with run_agent() as url:
+            result = await launch(
+                cat_dir / "suites" / "smoke.yaml",
+                RunOptions(target=url, profile=cat_dir / "profile.yaml", repeats=1),
+                settings,
+            )
+        assert result.exit_code == 0
+
+
+class TestMintedTokensCannotCarryATenant:
+    """The quiet failure: a profile that mints its own tokens knows nothing about
+    tenants, so every lane would authenticate as the *same* account while believing it
+    was isolated - the shared-state corruption the pool exists to prevent, recorded as
+    agent misbehaviour."""
+
+    async def test_a_minting_profile_with_a_credential_free_pool_is_refused(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        profile = yaml.safe_load((cat_dir / "profile.yaml").read_text("utf-8"))
+        profile["token"] = {"ttl_seconds": 300, "claims": {"sub": "fixed"}}
+        (tmp_path / "profile.yaml").write_text(yaml.safe_dump(profile), encoding="utf-8")
+        file = write_pool(tmp_path, "tenants:\n  - id: a\n  - id: b\n")
+        settings = Settings(
+            allowed_hosts="127.0.0.1",
+            reports_dir=str(tmp_path / "r"),
+            tenants_file=str(file),
+            token_signing_key="k" * 32,
+        )  # type: ignore[arg-type]
+        with pytest.raises(ConfigError, match="cannot tell one tenant from another"):
+            await launch(
+                cat_dir / "suites" / "smoke.yaml",
+                RunOptions(target="ws://127.0.0.1:9", profile=tmp_path / "profile.yaml", repeats=1),
+                settings,
+            )
+
+    async def test_a_tenant_token_beats_a_minted_one(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With a token_env each tenant authenticates as itself, so the combination is
+        allowed - the tenant's own credential wins over both minting and the static one."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("T_A", "token-a")
+        monkeypatch.setenv("T_B", "token-b")
+        profile = yaml.safe_load((cat_dir / "profile.yaml").read_text("utf-8"))
+        profile["token"] = {"ttl_seconds": 300}
+        (tmp_path / "profile.yaml").write_text(yaml.safe_dump(profile), encoding="utf-8")
+        file = write_pool(
+            tmp_path, "tenants:\n  - id: a\n    token_env: T_A\n  - id: b\n    token_env: T_B\n"
+        )
+        settings = Settings(
+            allowed_hosts="127.0.0.1",
+            reports_dir=str(tmp_path / "r"),
+            tenants_file=str(file),
+            tenant_lock_dir=str(tmp_path / "locks"),
+            static_token="static-should-lose",
+            token_signing_key="k" * 32,
+        )  # type: ignore[arg-type]
+        factory = build_transport_factory(
+            RunOptions(target="ws://127.0.0.1:9", profile=tmp_path / "profile.yaml"), settings
+        )
+        loaded = load_profile(tmp_path / "profile.yaml")
+        seen = {
+            t.id: factory(loaded, t).tokens.current()  # type: ignore[union-attr]
+            for t in load_pool(file).tenants
+        }
+        assert seen["a"] != seen["b"]
+        assert "token-a" in seen["a"] and "token-b" in seen["b"]

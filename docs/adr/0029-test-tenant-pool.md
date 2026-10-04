@@ -37,13 +37,52 @@ how two runs end up on one account.
 
 A lease is only ever reclaimed when its heartbeat is provably older than `stale_after` (default 300
 seconds — generously long, because reclaiming a live lease is the failure this module exists to
-prevent). The holder refreshes it every 30 seconds while it runs, and `release()` reads the file
-back and refuses to delete it if someone else now holds it, so a slow process cannot release its
-successor's lease.
+prevent). The holder refreshes it from a **background task** every 30 seconds for as long as the
+conversation runs, not once per finished attempt: one long attempt would never reach a
+between-attempts refresh and would have its tenant taken mid-conversation. `release()` reads the
+file back and refuses to delete it if someone else now holds it, so a slow process cannot release
+its successor's lease.
 
 The mechanism is a file created with `O_CREAT | O_EXCL`, which is atomic on POSIX and Windows. No
 daemon, no lock server, and two Opseval processes on the same machine — the CI case — interlock
 correctly. Cross-machine coordination would need shared storage and is not claimed.
+
+#### Clearing a stale lease is itself a race
+
+Unlinking a stale lease and re-creating it is **not** safe, and this is subtle enough to be worth
+recording: two processes can both read the same stale lease, both decide it is free, both unlink,
+and both then succeed at `O_EXCL` — the double-hold the whole module exists to prevent, reintroduced
+by the recovery path. `os.rename` to a unique name is the atomic step instead. Exactly one process
+can move a given file, so exactly one gets to clear it; the winner must still win `O_EXCL`
+afterwards, so a third process creating the lease in the gap costs us the tenant rather than the
+lock.
+
+#### A crash must not retire a tenant
+
+The heartbeat is written to a temporary file and `os.replace`d, because a truncating write that is
+interrupted leaves an **empty** lease — and "unreadable means held" would then make that tenant
+unusable forever rather than for five minutes. For the same reason, when no trustworthy heartbeat
+can be read the file's own mtime decides, and only an unreadable *age* counts as held.
+
+`bool` is an `int` and `json` parses a bare `NaN`, so `True` would age to 1970 and every `NaN`
+comparison is `False`: both would read as *stale* and get a live tenant stolen. Neither is a
+timestamp, and neither is accepted as one.
+
+#### Transient contention is not a skip
+
+`acquire` waits up to `OPSEVAL_TENANT_WAIT_SECONDS` (30 s) for a free tenant before giving up. One
+leftover lease from a killed run would otherwise skip a scenario that could have run a second later
+— and with every scenario skipped the gate now blocks the release over a purely harness-side
+condition. Waiting absorbs contention; it never relaxes the lock.
+
+#### The lock lives where the accounts do, not where the checkout does
+
+The default lock directory is machine-wide and named after a digest of the pool's tenant ids, not a
+path relative to the working directory. A relative path resolves to two different directories when a
+CI runner checks the same repository out twice, so both jobs would believe the pool was free and
+both would lease the same account — the failure the lock exists to prevent, reappearing because of
+*where the lock lives*. The shared resource is the set of accounts, so that is what the directory is
+named after. `OPSEVAL_TENANT_LOCK_DIR` overrides it, which is how to put the locks on shared storage.
 
 ### Lanes cannot exceed the pool
 
@@ -61,12 +100,31 @@ without first saying which isolated accounts it may use.
 A pool file is meant to be committed and reviewed, so each tenant carries `token_env` — the *name*
 of the environment variable holding its token — and never the token. A declared variable that is
 unset is a `ConfigError` (exit 3) rather than an attempt that authenticates as nobody and fails for
-a reason that has nothing to do with the agent. A tenant's own token beats `OPSEVAL_STATIC_TOKEN`,
-because the whole point of the pool is that each tenant authenticates as itself.
+a reason that has nothing to do with the agent. A tenant's own token beats both
+`OPSEVAL_STATIC_TOKEN` and a minted one, because the whole point of the pool is that each tenant
+authenticates as itself.
 
-Per-tenant `target` is checked against `OPSEVAL_ALLOWED_HOSTS` when it is used, and the default
-target is still validated eagerly before the first frame, so a typo in the common case fails
-immediately instead of after a suite has started.
+Resolution goes through `Settings.secret_named`, not `os.environ`. That keeps the "only `config`
+reads the environment" rule, and it fixes a trap worth naming: **`.env` is read into `Settings` and
+never exported to the process environment.** A token set exactly where `opseval init` says to put it
+would otherwise look unset, and every run would stop at exit 3.
+
+#### A minted token cannot carry a tenant
+
+A profile with a `token:` block mints HS256 tokens from the profile's own claims and knows nothing
+about tenants. Combined with a pool it would hand every lane the *same* identity while the operator
+believed the accounts were isolated — the shared-state corruption the pool exists to prevent, with
+the harness recording the result as agent misbehaviour. So a minting profile plus a tenant with no
+`token_env` is refused at launch, naming the fix. Rather than inventing a claim name to inject the
+tenant into, the operator says which variable holds each tenant's token.
+
+#### Every tenant is checked before the first frame
+
+The pool is loaded and *all* of its tokens and targets validated next to the sinks, before preflight
+and before the manifest is written. Checking lazily, as each tenant is first drawn, fails the run
+mid-suite after records are already on disk — and with one lane the later tenants may never be drawn
+at all, so the pool would silently degrade to a single account with nothing said. "Authoring
+mistakes must fail at load time" applies to the pool too.
 
 ### Fail-fast is honest about what it cannot do
 
@@ -84,10 +142,22 @@ from starting and says that, rather than implying it cancelled work it did not c
   `release_gate`: a suite in which nothing was measured was reporting a pass. Fixed here, because a
   pool is the easiest way to reach that state by accident.
 - Leases are per-filesystem. Two CI runners with separate disks will both believe the pool is free,
-  so the pool file belongs with the runner, or the lock directory on shared storage. A database- or
-  Redis-backed lease is the obvious extension and is not built.
-- A crashed run holds its tenants for up to five minutes. That is the cost of the asymmetry above;
+  whatever the lock directory is named: point `OPSEVAL_TENANT_LOCK_DIR` at shared storage, or keep
+  the pool with the runner. A database- or Redis-backed lease is the obvious extension and is not
+  built.
+- A crashed run holds its tenants for up to five minutes (minus the wait, so a scenario sees that as
+  a delay of `tenant_wait_seconds` and then a skip). That is the cost of the asymmetry above;
   `OPSEVAL_TENANT_STALE_AFTER_SECONDS` lowers it for anyone who would rather risk the other failure.
+- There is no `opseval` command to list or clear leases. The lock directory is printed at the start
+  of a pooled run, and the files are plain JSON, but recovery below `stale_after` means deleting
+  them by hand.
+- The lease is held across trace enrichment and scoring as well as the conversation, although
+  neither touches the tenant. This costs *this* run nothing — lanes never exceed the pool, so every
+  lane always has a tenant to hold and the lane count is the bottleneck, not the lease. It only
+  matters to a **second** process sharing the same pool, which waits longer than it strictly needs
+  to. Releasing at the end of the last attempt would fix that.
+- `python-dotenv` is now a declared dependency rather than one inherited from `pydantic-settings`,
+  because `Settings.secret_named` reads `.env` directly.
 - Scenario output is interleaved while lanes run, so the console prints the tenant with each
   scenario. The ordering of `result.tests` still follows the catalogue, not completion.
 - `tenants.yaml` is now a published contract (`schemas/v1/tenants.json`, ADR-0026) and `opseval

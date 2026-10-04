@@ -7,9 +7,12 @@ No other module reads environment variables directly.
 from __future__ import annotations
 
 import ipaddress
+import os
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
+from dotenv import dotenv_values
 from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -79,13 +82,39 @@ class Settings(BaseSettings):
     lanes: int | None = None
     """Requested lanes. Actual = min(tenants, requested, lane_cap)."""
     lane_cap: Annotated[int, Field(ge=1, le=64)] = 8
-    tenant_lock_dir: str = ".opseval/tenant-locks"
+    tenant_lock_dir: str | None = None
+    """Where tenant leases live. Default: a machine-wide directory keyed by the pool's
+    tenant ids, because a path relative to the working directory would let two checkouts
+    of the same pool lease the same account."""
     tenant_stale_after_seconds: Annotated[float, Field(gt=0, le=86_400)] = 300.0
+    tenant_wait_seconds: Annotated[float, Field(ge=0, le=3_600)] = 30.0
+    """How long to wait for a free tenant before skipping the scenario."""
 
     # Gate
     gate_fail_on_flaky: bool = False
 
     reports_dir: str = "reports"
+
+    def secret_named(self, name: str) -> str | None:
+        """A secret named by a *file* rather than by a field - a tenant's ``token_env``.
+
+        This lives here because ``config`` is the only module that reads the environment,
+        and because of a trap: ``.env`` is read into this model but is **never exported to
+        ``os.environ``**. A tenant token set in ``.env``, exactly as ``opseval init``
+        tells the operator to, would look unset to anything calling ``os.environ.get``.
+        So both are consulted, with the real environment winning.
+        """
+        from_env = os.environ.get(name)
+        if from_env:
+            return from_env
+        env_file = self.model_config.get("env_file")
+        if not env_file:
+            return None
+        path = Path(str(env_file))
+        if not path.is_file():
+            return None
+        value = dotenv_values(path).get(name)
+        return value or None
 
     def allowlist(self) -> set[str]:
         return {h.strip().lower() for h in self.allowed_hosts.split(",") if h.strip()}

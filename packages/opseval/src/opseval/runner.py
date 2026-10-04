@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 from opseval import __version__
 from opseval.auth import HS256Tokens, TokenSource
@@ -24,7 +25,7 @@ from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.scenario import Scenario
 from opseval.models.telemetry import TelemetryEvent
-from opseval.models.tenant import Tenant, lane_count
+from opseval.models.tenant import Tenant, TenantPool, lane_count
 from opseval.plugins import load_scorers
 from opseval.preflight import preflight
 from opseval.reporting import render_html
@@ -35,7 +36,13 @@ from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attemp
 from opseval.sinks import build_sinks, publish_all
 from opseval.storage import FileStore
 from opseval.telemetry import report as report_telemetry
-from opseval.tenants import TenantLeases, load_pool, token_for
+from opseval.tenants import (
+    TenantLeases,
+    default_lock_dir,
+    load_pool,
+    refreshing,
+    token_for,
+)
 from opseval.traces import TraceSource, enrich
 from opseval.traces.langfuse import LangfuseTraceSource
 from opseval.traces.otlp import OtlpFileTraceSource
@@ -79,6 +86,26 @@ class RunOptions:
     """Spend one token per LLM role proving the credentials actually work."""
 
 
+class _TransportCtor(Protocol):
+    """What every transport's constructor takes. ``Transport`` itself is the behavioural
+    interface and says nothing about construction, so the table needs this."""
+
+    def __call__(
+        self, target: str, profile: SutProfile, /, *, token: str | TokenSource | None = None
+    ) -> Transport: ...
+
+
+TRANSPORTS: dict[str, tuple[_TransportCtor, tuple[str, ...]]] = {
+    "websocket": (WebSocketTransport, ("wss",)),
+    "http-json": (HttpJsonTransport, ("https",)),
+    "openai-chat": (OpenAIChatTransport, ("https",)),
+    "sse": (SseTransport, ("https",)),
+}
+"""Transport class and the schemes that count as secure for it. One table so that a
+change to how a target is resolved cannot be made in three places and missed in the
+fourth, and so the error message lists what actually exists."""
+
+
 def build_transport_factory(options: RunOptions, settings: Settings) -> TransportFactory:
     if options.transport_factory is not None:
         return options.transport_factory
@@ -94,8 +121,11 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
         A tenant's own token wins over OPSEVAL_STATIC_TOKEN, because the whole point of
         the pool is that each tenant authenticates as itself.
         """
+        own = token_for(tenant, settings) if tenant else None
+        if own:
+            return own
         if profile.token is None:
-            return (tenant and token_for(tenant)) or token
+            return token
         if signing_key is None:
             raise ConfigError(
                 f"profile {profile.name!r} mints HS256 tokens: set OPSEVAL_TOKEN_SIGNING_KEY"
@@ -107,57 +137,22 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
             claims=profile.token.claims,
         )
 
-    if options.transport == "websocket":
-        # Eagerly, so a bad host fails before anything runs - like preflight and
-        # the sinks. A tenant with its own target is checked when it is used.
-        check_url_allowed(default_target, settings.allowlist(), secure_schemes=("wss",))
+    try:
+        cls, secure = TRANSPORTS[options.transport]
+    except KeyError:
+        raise ConfigError(
+            f"unknown transport {options.transport!r}; use {', '.join(sorted(TRANSPORTS))}"
+        ) from None
 
-        def _websocket(profile: SutProfile, tenant: Tenant | None) -> Transport:
-            where = tenant.target if tenant and tenant.target else default_target
-            if where != default_target:
-                check_url_allowed(where, settings.allowlist(), secure_schemes=("wss",))
-            return WebSocketTransport(where, profile, token=credentials(profile, tenant))
+    # Eagerly, so a bad host fails before anything runs - like preflight and the sinks.
+    # A tenant with its own target is checked in _check_pool, also before the first frame.
+    check_url_allowed(default_target, settings.allowlist(), secure_schemes=secure)
 
-        return _websocket
-    if options.transport == "http-json":
-        # Eagerly, so a bad host fails before anything runs - like preflight and
-        # the sinks. A tenant with its own target is checked when it is used.
-        check_url_allowed(default_target, settings.allowlist(), secure_schemes=("https",))
+    def build(profile: SutProfile, tenant: Tenant | None) -> Transport:
+        where = tenant.target if tenant and tenant.target else default_target
+        return cls(where, profile, token=credentials(profile, tenant))
 
-        def _http_json(profile: SutProfile, tenant: Tenant | None) -> Transport:
-            where = tenant.target if tenant and tenant.target else default_target
-            if where != default_target:
-                check_url_allowed(where, settings.allowlist(), secure_schemes=("https",))
-            return HttpJsonTransport(where, profile, token=credentials(profile, tenant))
-
-        return _http_json
-    if options.transport == "openai-chat":
-        # Eagerly, so a bad host fails before anything runs - like preflight and
-        # the sinks. A tenant with its own target is checked when it is used.
-        check_url_allowed(default_target, settings.allowlist(), secure_schemes=("https",))
-
-        def _openai_chat(profile: SutProfile, tenant: Tenant | None) -> Transport:
-            where = tenant.target if tenant and tenant.target else default_target
-            if where != default_target:
-                check_url_allowed(where, settings.allowlist(), secure_schemes=("https",))
-            return OpenAIChatTransport(where, profile, token=credentials(profile, tenant))
-
-        return _openai_chat
-    if options.transport == "sse":
-        # Eagerly, so a bad host fails before anything runs - like preflight and
-        # the sinks. A tenant with its own target is checked when it is used.
-        check_url_allowed(default_target, settings.allowlist(), secure_schemes=("https",))
-
-        def _sse(profile: SutProfile, tenant: Tenant | None) -> Transport:
-            where = tenant.target if tenant and tenant.target else default_target
-            if where != default_target:
-                check_url_allowed(where, settings.allowlist(), secure_schemes=("https",))
-            return SseTransport(where, profile, token=credentials(profile, tenant))
-
-        return _sse
-    raise ConfigError(
-        f"unknown transport {options.transport!r}; use websocket, http-json, sse or openai-chat"
-    )
+    return build
 
 
 def build_trace_source(
@@ -217,6 +212,33 @@ def _unmet(scenario: Scenario, health: PreflightReport, no_simulator: bool) -> s
     return None
 
 
+def _check_pool(
+    pool: TenantPool, profile: SutProfile, options: RunOptions, settings: Settings
+) -> None:
+    """Every tenant's credential and target, checked before the first frame.
+
+    A minted HS256 token is the trap here: it carries the profile's claims and knows
+    nothing about tenants, so every lane would authenticate as the *same* account while
+    believing it was isolated - the shared-state corruption the pool exists to prevent,
+    with the harness recording the result as agent misbehaviour.
+    """
+    minted = profile.token is not None
+    for tenant in pool.tenants:
+        own = token_for(tenant, settings)
+        if minted and not own:
+            raise ConfigError(
+                f"profile {profile.name!r} mints its own tokens, which cannot tell one "
+                f"tenant from another, so tenant {tenant.id!r} would authenticate as "
+                "every other one. Give each tenant a token_env."
+            )
+        if tenant.target:
+            check_url_allowed(
+                tenant.target,
+                settings.allowlist(),
+                secure_schemes=("wss",) if options.transport == "websocket" else ("https",),
+            )
+
+
 async def launch(
     catalogue_target: str | Path,
     options: RunOptions,
@@ -239,6 +261,21 @@ async def launch(
         known_invariants=set(INVARIANTS),
         filters=options.filters,
     )
+    # Loaded and fully validated before the run, for the same reason the sinks are: an
+    # unset tenant token or a non-allowlisted tenant target discovered mid-suite kills
+    # the run after records are already on disk - and with lanes=1 the pool's later
+    # tenants may never be drawn at all, so the misconfiguration would go unnoticed and
+    # the pool would silently degrade to one account.
+    pool = load_pool(settings.tenants_file) if settings.tenants_file else None
+    if pool is None and settings.lanes is not None and settings.lanes > 1:
+        raise ConfigError(
+            f"--lanes {settings.lanes} needs --tenants: scenarios may only run in "
+            "parallel once you have said which isolated accounts they may use"
+        )
+    lanes = lane_count(len(pool.tenants), settings.lanes, settings.lane_cap) if pool else 1
+    if pool:
+        _check_pool(pool, profile, options, settings)
+
     # Built before the run: a destination that is not allowlisted is a configuration
     # error, and finding that out after a suite has something to publish is too late.
     sinks = build_sinks(settings)
@@ -312,12 +349,11 @@ async def launch(
 
     # Opt-in: without a tenant pool the run is sequential with no leases, exactly as
     # before, so nothing changes for anyone not using one.
-    pool = load_pool(settings.tenants_file) if settings.tenants_file else None
-    lanes = lane_count(len(pool.tenants), settings.lanes, settings.lane_cap) if pool else 1
+    lock_dir = settings.tenant_lock_dir or (default_lock_dir(pool) if pool else None)
     leases = (
         TenantLeases(
             pool,
-            settings.tenant_lock_dir,
+            lock_dir or "",
             holder=f"{run_id}:{os.getpid()}",
             stale_after=settings.tenant_stale_after_seconds,
         )
@@ -325,7 +361,7 @@ async def launch(
         else None
     )
     if pool:
-        log(f"tenant pool: {len(pool.tenants)} tenant(s), {lanes} lane(s)")
+        log(f"tenant pool: {len(pool.tenants)} tenant(s), {lanes} lane(s) · locks {lock_dir}")
 
     async def run_one(scenario: Scenario) -> TestVerdict:
         if options.repeats:
@@ -357,7 +393,7 @@ async def launch(
         tenant: Tenant | None = None
         lease = None
         if leases is not None:
-            lease = leases.acquire()
+            lease = await leases.acquire_waiting(timeout=settings.tenant_wait_seconds)
             if lease is None:
                 # Not the agent's fault: the harness could not obtain a resource. Two
                 # scenarios sharing a tenant would produce false agent failures, which
@@ -365,7 +401,8 @@ async def launch(
                 return skipped(
                     scenario,
                     VerdictStatus.SKIPPED_PRECONDITION,
-                    "no free test tenant: every tenant in the pool is leased by a live run",
+                    "no free test tenant: every tenant in the pool is leased by a live run "
+                    f"(waited {settings.tenant_wait_seconds:g}s)",
                 )
             tenant = lease.tenant
         try:
@@ -389,11 +426,8 @@ async def launch(
                     seed=seed,
                     allow_commit=options.allow_commit,
                 )
-                record = await driver.run()
-                if lease is not None:
-                    # Between attempts, so a long scenario is never mistaken for a dead
-                    # holder and its tenant stolen mid-run.
-                    lease.heartbeat()
+                async with refreshing(lease):
+                    record = await driver.run()
                 if trace_source is not None:
                     record = await enrich(record, trace_source, profile)
                 path = store.save_record(record)
@@ -406,7 +440,10 @@ async def launch(
                     else ("pass" if verdict.passed else "FAIL")
                 )
                 coverage = " · traces" if record.trace_coverage == "full" else ""
-                log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
+                # With lanes in flight the lines interleave, so an unlabelled "attempt 0"
+                # reads as belonging to whichever header happened to print last.
+                whose = f"{scenario.id} " if lanes > 1 else ""
+                log(f"   {whose}attempt {i}: {state} ({record.terminal_state.value}{coverage})")
             return fold_attempts(scenario, attempts)
         finally:
             if lease is not None:
