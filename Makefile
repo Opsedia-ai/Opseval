@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test check audit demo
+.PHONY: install lint typecheck test check audit demo schemas
 
 # Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
 ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
@@ -18,7 +18,7 @@ typecheck:
 test:
 	uv run pytest --cov=opseval --cov=pytest_opseval --cov-report=term-missing --cov-fail-under=85
 
-check: lint typecheck test
+check: lint typecheck test schemas
 
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
@@ -33,3 +33,8 @@ audit:
 
 demo:
 	uv run opseval demo
+
+# The models are the source of truth; a drifted schema would make an editor accept a
+# file the loader rejects.
+schemas:
+	uv run opseval schemas --check

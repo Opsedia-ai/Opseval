@@ -237,6 +237,24 @@ scorers:
 
 See [ADR-0014](docs/adr/0014-judge-votes-and-planted-injections.md).
 
+### Editor autocompletion
+
+`opseval init` writes a schema hint at the top of every YAML file, so an editor validates your
+scenarios as you type — against the same rules the loader enforces:
+
+```yaml
+# yaml-language-server: $schema=https://opsedia.ai/schemas/v1/scenario.json
+```
+
+The schemas live in [`schemas/v1/`](schemas/v1/) for `scenario`, `suite`, `profile`, `record` and
+`result`, generated from the Pydantic models. A typo is flagged rather than ignored, because the
+models forbid unknown fields.
+
+They cannot drift: `opseval schemas --check` runs in CI, and `opseval schemas` regenerates them.
+Note that a JSON Schema describes shape only — `opseval validate` still catches what it cannot
+express, like an unknown scorer id or a `stop_at` that is not a declared checkpoint. See
+[ADR-0026](docs/adr/0026-published-json-schemas.md).
+
 ### Probe the protocol directly
 
 A conversation exercises the wire protocol incidentally. Probes do it on purpose, once per

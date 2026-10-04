@@ -1,0 +1,632 @@
+{
+  "$defs": {
+    "AttemptVerdict": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_index": {
+          "title": "Attempt Index",
+          "type": "integer"
+        },
+        "invalid_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Invalid Reason"
+        },
+        "passed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Passed"
+        },
+        "record_path": {
+          "title": "Record Path",
+          "type": "string"
+        },
+        "scores": {
+          "items": {
+            "$ref": "#/$defs/ScoreResult"
+          },
+          "title": "Scores",
+          "type": "array"
+        },
+        "terminal_state": {
+          "$ref": "#/$defs/TerminalState"
+        }
+      },
+      "required": [
+        "attempt_index",
+        "passed",
+        "terminal_state",
+        "scores",
+        "record_path"
+      ],
+      "title": "AttemptVerdict",
+      "type": "object"
+    },
+    "Axis": {
+      "enum": [
+        "output",
+        "flow",
+        "tools",
+        "security",
+        "harness"
+      ],
+      "title": "Axis",
+      "type": "string"
+    },
+    "CheckStatus": {
+      "enum": [
+        "ok",
+        "unavailable",
+        "not_configured",
+        "not_needed",
+        "unverified"
+      ],
+      "title": "CheckStatus",
+      "type": "string"
+    },
+    "Criticality": {
+      "enum": [
+        "blocker",
+        "critical",
+        "normal"
+      ],
+      "title": "Criticality",
+      "type": "string"
+    },
+    "Gate": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blocking",
+          "type": "array"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "Gate",
+      "type": "object"
+    },
+    "HealthCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "needed_by": {
+          "default": 0,
+          "title": "Needed By",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/CheckStatus"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "detail"
+      ],
+      "title": "HealthCheck",
+      "type": "object"
+    },
+    "ModelUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "calls": {
+          "default": 0,
+          "title": "Calls",
+          "type": "integer"
+        },
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "input_tokens": {
+          "default": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "output_tokens": {
+          "default": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "rate_limited_calls": {
+          "default": 0,
+          "title": "Rate Limited Calls",
+          "type": "integer"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "model"
+      ],
+      "title": "ModelUsage",
+      "type": "object"
+    },
+    "PreflightReport": {
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HealthCheck"
+          },
+          "title": "Checks",
+          "type": "array"
+        }
+      },
+      "title": "PreflightReport",
+      "type": "object"
+    },
+    "RescoreInfo": {
+      "additionalProperties": false,
+      "description": "Marks a result produced by ``opseval rescore`` from saved records (no agent contact).",
+      "properties": {
+        "of_run_id": {
+          "title": "Of Run Id",
+          "type": "string"
+        },
+        "rescored_at": {
+          "format": "date-time",
+          "title": "Rescored At",
+          "type": "string"
+        },
+        "reused_judge_scores": {
+          "default": 0,
+          "title": "Reused Judge Scores",
+          "type": "integer"
+        },
+        "scenario_source": {
+          "title": "Scenario Source",
+          "type": "string"
+        },
+        "scorer_changes": {
+          "items": {
+            "$ref": "#/$defs/ScorerChange"
+          },
+          "title": "Scorer Changes",
+          "type": "array"
+        },
+        "verdict_changes": {
+          "items": {
+            "$ref": "#/$defs/VerdictChange"
+          },
+          "title": "Verdict Changes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "of_run_id",
+        "rescored_at",
+        "scenario_source"
+      ],
+      "title": "RescoreInfo",
+      "type": "object"
+    },
+    "ScoreResult": {
+      "additionalProperties": false,
+      "properties": {
+        "axis": {
+          "$ref": "#/$defs/Axis"
+        },
+        "degraded": {
+          "default": false,
+          "title": "Degraded",
+          "type": "boolean"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Score"
+        },
+        "scorer_id": {
+          "title": "Scorer Id",
+          "type": "string"
+        },
+        "scorer_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scorer Version"
+        },
+        "status": {
+          "$ref": "#/$defs/ScoreStatus"
+        },
+        "threshold": {
+          "title": "Threshold",
+          "type": "number"
+        },
+        "weight": {
+          "default": 1.0,
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "scorer_id",
+        "axis",
+        "status",
+        "score",
+        "threshold"
+      ],
+      "title": "ScoreResult",
+      "type": "object"
+    },
+    "ScoreStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "infra_error"
+      ],
+      "title": "ScoreStatus",
+      "type": "string"
+    },
+    "ScorerChange": {
+      "additionalProperties": false,
+      "description": "A scorer whose logic (version) or judge prompt (hash) differs from the original run.",
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "After"
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Before"
+        },
+        "scorer_id": {
+          "title": "Scorer Id",
+          "type": "string"
+        },
+        "what": {
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scorer_id",
+        "what",
+        "before",
+        "after"
+      ],
+      "title": "ScorerChange",
+      "type": "object"
+    },
+    "TerminalState": {
+      "enum": [
+        "outcome_committed",
+        "stopped_at_checkpoint",
+        "goal_reached",
+        "max_turns_exhausted",
+        "error_frame",
+        "timeout",
+        "transport_failure",
+        "harness_failure"
+      ],
+      "title": "TerminalState",
+      "type": "string"
+    },
+    "TestVerdict": {
+      "additionalProperties": false,
+      "properties": {
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/AttemptVerdict"
+          },
+          "title": "Attempts",
+          "type": "array"
+        },
+        "criticality": {
+          "$ref": "#/$defs/Criticality"
+        },
+        "flaky": {
+          "default": false,
+          "title": "Flaky",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "pass_hat_k": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pass Hat K"
+        },
+        "pass_rate": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pass Rate"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "status": {
+          "$ref": "#/$defs/VerdictStatus"
+        },
+        "test_id": {
+          "title": "Test Id",
+          "type": "string"
+        },
+        "unstable_scorers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unstable Scorers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "test_id",
+        "name",
+        "criticality",
+        "status"
+      ],
+      "title": "TestVerdict",
+      "type": "object"
+    },
+    "VerdictChange": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/VerdictStatus"
+        },
+        "before": {
+          "$ref": "#/$defs/VerdictStatus"
+        },
+        "test_id": {
+          "title": "Test Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "test_id",
+        "before",
+        "after"
+      ],
+      "title": "VerdictChange",
+      "type": "object"
+    },
+    "VerdictStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "inconclusive",
+        "skipped_precondition",
+        "blocked"
+      ],
+      "title": "VerdictStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://opsedia.ai/schemas/v1/result.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Opseval opseval/v1 result contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
+  "properties": {
+    "config_digest": {
+      "additionalProperties": true,
+      "title": "Config Digest",
+      "type": "object"
+    },
+    "ended_at": {
+      "format": "date-time",
+      "title": "Ended At",
+      "type": "string"
+    },
+    "exit_code": {
+      "title": "Exit Code",
+      "type": "integer"
+    },
+    "gate": {
+      "$ref": "#/$defs/Gate"
+    },
+    "load_errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Load Errors",
+      "type": "array"
+    },
+    "opseval_version": {
+      "title": "Opseval Version",
+      "type": "string"
+    },
+    "preflight": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PreflightReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "profile": {
+      "title": "Profile",
+      "type": "string"
+    },
+    "rescore": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RescoreInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "opseval/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "suite": {
+      "title": "Suite",
+      "type": "string"
+    },
+    "target": {
+      "title": "Target",
+      "type": "string"
+    },
+    "tests": {
+      "items": {
+        "$ref": "#/$defs/TestVerdict"
+      },
+      "title": "Tests",
+      "type": "array"
+    },
+    "usage": {
+      "items": {
+        "$ref": "#/$defs/ModelUsage"
+      },
+      "title": "Usage",
+      "type": "array"
+    }
+  },
+  "required": [
+    "opseval_version",
+    "run_id",
+    "suite",
+    "target",
+    "profile",
+    "started_at",
+    "ended_at",
+    "tests",
+    "gate",
+    "exit_code"
+  ],
+  "title": "SuiteResult",
+  "type": "object"
+}

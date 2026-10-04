@@ -61,6 +61,29 @@ def scaffold(dest: Path, template: str = "openai-chat", *, force: bool = False) 
     for rel, text in planned:
         path = dest / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_text(_with_editor_hint(rel, text), encoding="utf-8")
         written.append(path)
     return written
+
+
+def _with_editor_hint(rel: Path, text: str) -> str:
+    """Prepend the yaml-language-server line so an editor validates as you type.
+
+    Which schema a YAML file follows is only knowable from where it sits, so the
+    mapping lives here rather than in the templates: a scaffolded file that pointed at
+    the wrong schema would flag valid fields and accept invalid ones.
+    """
+    from opseval.schemas import editor_hint
+
+    if rel.suffix not in (".yaml", ".yml") or text.lstrip().startswith("# yaml-language-server"):
+        return text
+    parts = rel.parts
+    if "scenarios" in parts:
+        name = "scenario"
+    elif "suites" in parts:
+        name = "suite"
+    elif rel.name.startswith("profile"):
+        name = "profile"
+    else:
+        return text
+    return f"{editor_hint(name)}\n{text}"
