@@ -19,6 +19,12 @@ the API's port and prints that link (ADR-0034). The dev server above is for work
 Every API request needs the bearer token `opseval serve` printed (ADR-0031). The link carries it
 in the URL fragment; `src/lib/api.ts` keeps it in `localStorage` and drops it from the address bar.
 
+`npm test` (Vitest, in CI; needs Node 22.22+ or 24.15+, see `engines`) pins the console's share of the one
+rule: only a safe run is green, a harness error never looks like an agent failure, an agent error
+is never drawn as a normal turn, an unmeasured count is never 0, progress is never a verdict, and
+the token is adopted from the link, kept across a reload and sent on every call. Components state
+what a colour means (`data-tone`), and the tests assert that meaning, not class names.
+
 `src/lib/api.gen.ts` is **generated** from `packages/opseval/src/opseval/server/schemas.py` by `scripts/console_types.py` (`make check` fails if it drifts); `src/lib/types.ts` only gives those types the console's names. Change a Python model, then run `uv run python scripts/console_types.py`. The browser never
 recomputes aggregates, and `null` from the API is rendered as "not measured", never as 0.
 

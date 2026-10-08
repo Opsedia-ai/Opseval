@@ -103,7 +103,9 @@ export function Pill({ children, tone = "neutral", dashed }: {
     mute: "bg-white text-muted-ink border-line",
   };
   return (
-    <span className={cx("inline-flex items-center rounded-full border px-3 py-0.5 text-xs font-semibold uppercase tracking-[0.08em]", tones[tone], dashed && "border-dashed")}>
+    // data-tone states what the colour means, so a test (or a screen reader rule) checks the
+    // meaning rather than a class name that a restyle could change.
+    <span data-tone={tone} data-dashed={dashed ? "true" : undefined} className={cx("inline-flex items-center rounded-full border px-3 py-0.5 text-xs font-semibold uppercase tracking-[0.08em]", tones[tone], dashed && "border-dashed")}>
       {children}
     </span>
   );

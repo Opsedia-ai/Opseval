@@ -5,7 +5,7 @@ CLAUDE.md, "Definition of done"). The summary below is **computed** from the tab
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-08** (`main` with the console's fonts bundled: no CDN, air-gap ready).
+**As of 2026-10-08** (`main` with the console's own test suite in CI).
 
 ## Completion
 
@@ -138,7 +138,7 @@ These are not in the percentage, and today they gate more than code does.
 | Area | Status | Evidence |
 |---|---|---|
 | Reliability | Done | fault-injection suite across transports, scorers and trace sources |
-| Code quality | Done | `mypy --strict`, ruff, coverage ≥ 85% (≈ 95%), scorer contract kit; console API types generated from the server models with a drift check; no transport contract kit |
+| Code quality | Done | `mypy --strict`, ruff, coverage ≥ 85% (≈ 95%), scorer contract kit; console API types generated from the server models with a drift check; console tests (Vitest) in CI; no transport contract kit |
 | Determinism | Done | seeds, prompt and rubric hashes, `opseval rescore` |
 | Security | Partial | bandit, pip-audit, SECURITY.md, console API token auth; no threat model, SBOM or signed images |
 | Privacy | Partial | content-free telemetry; credential values redacted (ADR-0033); console loads nothing from another origin (fonts bundled) |

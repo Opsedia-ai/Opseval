@@ -22,7 +22,7 @@ make audit         # needs network: pip-audit and licence check of runtime depen
 make demo          # runs the example refund agent + smoke suite
 ```
 
-Requirements: Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/). You need Node ≥ 22 only for the web console (from v0.5).
+Requirements: Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/). You need Node 22.22+ or 24.15+ only for the web console (see `engines` in `packages/console/package.json`).
 
 ## Pull request checklist
 

@@ -52,16 +52,19 @@ jobs:
           test $? -eq 3
 
   console:
-    # The web console typechecks and builds (ADR-0029). It is not yet run against a live API.
+    # The web console typechecks, passes its tests (the one rule as the console draws it, and the
+    # API token's handling) and builds (ADR-0029, ADR-0031). Vitest and jsdom need Node 22.22+ or 24.15+ (setup-node "22" installs the latest 22.x).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: packages/console/package-lock.json
       - run: npm ci
+        working-directory: packages/console
+      - run: npm test
         working-directory: packages/console
       - run: npm run build
         working-directory: packages/console

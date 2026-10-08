@@ -3,7 +3,7 @@ import type { TranscriptEntry } from "../lib/types";
 import { useApi } from "../lib/useApi";
 import { Callout, Data, Mono, NotMeasured, Pill, cx } from "./ui";
 
-function Entry({ e }: { e: TranscriptEntry }) {
+export function Entry({ e }: { e: TranscriptEntry }) {
   if (e.kind === "message") {
     const customer = e.who === "customer";
     return (
@@ -20,7 +20,7 @@ function Entry({ e }: { e: TranscriptEntry }) {
   }
   const label = { checkpoint: "⏸ checkpoint raised", decision: "▶ customer decision", result: "result", error: "error from the agent", notification: "notification", unknown: "unclassified frame" }[e.kind];
   return (
-    <div className={cx("rounded-xl border border-dashed px-3 py-1.5 text-sm", e.kind === "error" ? "border-deep-coral text-deep-coral" : "border-line text-muted-ink")}>
+    <div data-kind={e.kind} data-tone={e.kind === "error" ? "fail" : "mute"} className={cx("rounded-xl border border-dashed px-3 py-1.5 text-sm", e.kind === "error" ? "border-deep-coral text-deep-coral" : "border-line text-muted-ink")}>
       {label}{e.detail && <>: <Mono>{e.detail}</Mono></>}
     </div>
   );

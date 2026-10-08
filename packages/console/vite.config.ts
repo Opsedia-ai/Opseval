@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -12,5 +12,6 @@ export default defineConfig({
   // Never inline assets as data: URIs: the console's CSP is font-src 'self' (no data:), so an
   // inlined small font subset would be refused by the browser (ADR-0034).
   build: { assetsInlineLimit: 0 },
+  test: { environment: "jsdom", setupFiles: ["src/test-setup.ts"] },
   server: { port: 5173, proxy: { "/api": api } },
 });
