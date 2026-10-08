@@ -84,6 +84,13 @@ applies (a `ReadTimeout` is still the agent's fault on every HTTP transport).
   `commit_gate` is not refused at load time. Click turns Ctrl-C (and the SIGINT a cancelled CI
   job sends) into "Aborted!" with exit 1, the code for "the agent failed"; the job shows as
   cancelled, so the impact is small, but it is the same leak.
+
+  *Update (2026-10-08): all three are closed.* The driver pauses the attempt deadline for each
+  simulator call and moves it back by the time the call took; the call has its own limit
+  (`OPSEVAL_SIMULATOR_TIMEOUT_SECONDS`), and overrunning it is a `SimulatorError`, a harness
+  failure. The agent's own time still counts in full. A `committed_outcome` without a
+  `commit_gate` is a load error (ADR-0008 amendment). Typer 0.15 and later exit 130 on Ctrl-C,
+  so `typer>=0.15` is now required.
 - The console server (ADR-0029) launches runs in the background and must follow the same rule as
   `entrypoint`: an exception there is a harness error with a visible status, never a silent
   absence. It does not yet; that is part of hardening the server.

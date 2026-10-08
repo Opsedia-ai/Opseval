@@ -12,10 +12,11 @@ import asyncio
 import re
 import time
 from collections import Counter
+from collections.abc import Awaitable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 
-from opseval.errors import HarnessError, TransportError, TransportTimeout
+from opseval.errors import HarnessError, SimulatorError, TransportError, TransportTimeout
 from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
 from opseval.models.record import (
     FrameRecord,
@@ -36,6 +37,8 @@ from opseval.models.scenario import (
 from opseval.redaction import redact_text, redact_value
 from opseval.simulator import Simulator
 from opseval.transport.base import Session, Transport
+
+T = TypeVar("T")
 
 SECRET_KEY_RE = re.compile(r"token|secret|password|api[_-]?key|authorization|signature", re.I)
 REDACTED = "***redacted***"
@@ -114,6 +117,7 @@ class Driver:
         attempt_index: int,
         seed: int,
         allow_commit: bool = False,
+        simulator_timeout_seconds: float = 300.0,
     ) -> None:
         self.s = scenario
         self.p = profile
@@ -123,6 +127,8 @@ class Driver:
         self.attempt_index = attempt_index
         self.seed = seed
         self.allow_commit = allow_commit and scenario.conversation.allow_commit
+        self.simulator_timeout = simulator_timeout_seconds
+        self._deadline: asyncio.Timeout | None = None
         self._frames: list[FrameRecord] = []
         self._interrupts: list[InterruptRecord] = []
         self._probes: list[ProbeResult] = []
@@ -197,7 +203,8 @@ class Driver:
         state, reason = TerminalState.HARNESS_FAILURE, "not started"
         session: Session | None = None
         try:
-            async with asyncio.timeout(self.s.execution.attempt_timeout_seconds):
+            async with asyncio.timeout(self.s.execution.attempt_timeout_seconds) as deadline:
+                self._deadline = deadline
                 try:
                     session = await self.transport.connect()
                     await self._converse(session)
@@ -246,6 +253,32 @@ class Driver:
             transport_events=session.transport_events() if session else (),
             redaction=RedactionInfo(applied=True, found=tuple(sorted(self._redacted))),
         )
+
+    async def _simulate(self, call: Awaitable[T]) -> T:
+        """Run one simulator call off the agent's clock (the core rule).
+
+        The attempt deadline measures the agent. Time spent waiting on the simulator (an LLM
+        that is slow, rate-limited or retrying) is the harness's, so the deadline is paused
+        for the call and moved back by however long it took. The call has its own limit
+        instead, and overrunning it is a :class:`SimulatorError`: a harness failure, never
+        the agent's ``TIMEOUT``.
+        """
+        loop = asyncio.get_running_loop()
+        when = self._deadline.when() if self._deadline is not None else None
+        remaining = None if when is None else when - loop.time()
+        if self._deadline is not None:
+            self._deadline.reschedule(None)
+        try:
+            async with asyncio.timeout(self.simulator_timeout):
+                return await call
+        except TimeoutError as exc:
+            raise SimulatorError(
+                f"the simulator did not answer within {self.simulator_timeout:g}s "
+                "(OPSEVAL_SIMULATOR_TIMEOUT_SECONDS)"
+            ) from exc
+        finally:
+            if self._deadline is not None and remaining is not None:
+                self._deadline.reschedule(loop.time() + remaining)
 
     def _scrub(self, text: str) -> str:
         clean, kinds = redact_text(text)
@@ -296,7 +329,7 @@ class Driver:
 
     async def _converse(self, session: Session) -> None:
         await self._probe(session)
-        turn = await self.sim.opening()
+        turn = await self._simulate(self.sim.opening())
         self._injections += turn.injections
         await self._send_user(session, turn.text)
         while True:
@@ -304,7 +337,7 @@ class Driver:
             if ended_by == "checkpoint":
                 await self._checkpoint(session, frame)
                 continue
-            turn = await self.sim.next_turn(self.transcript())
+            turn = await self._simulate(self.sim.next_turn(self.transcript()))
             self._injections += turn.injections
             if turn.goal_reached:
                 raise _Stop(TerminalState.GOAL_REACHED, "the customer considers the goal reached")
@@ -404,7 +437,7 @@ class Driver:
         elif policy.action is PolicyAction.SEQUENCE:
             decision = policy.sequence[min(occurrence, len(policy.sequence)) - 1]
         else:
-            decision = await self.sim.decide(name, body, self.transcript())
+            decision = await self._simulate(self.sim.decide(name, body, self.transcript()))
 
         if decision.action is DecisionAction.REJECT:
             self._rejections[name] += 1

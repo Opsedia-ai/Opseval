@@ -369,6 +369,7 @@ async def launch(
                     attempt_index=i,
                     seed=seed,
                     allow_commit=options.allow_commit,
+                    simulator_timeout_seconds=settings.simulator_timeout_seconds,
                 )
                 record = await driver.run()
                 if trace_source is not None:
