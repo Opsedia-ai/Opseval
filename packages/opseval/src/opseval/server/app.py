@@ -357,6 +357,10 @@ def create_app(
     def start(body: s.LaunchIn) -> s.LaunchOut:
         return actions.start_run(ctx, body)
 
+    @app.post(API + "/runs/{run_id}/cancel", status_code=202)
+    def cancel(run_id: str) -> s.CancelOut:
+        return actions.cancel_run(ctx, _run_id(run_id))
+
     @app.put(f"{API}/suites")
     def save_suite(body: s.SuiteIn) -> s.SuiteOut:
         return actions.save_suite(ctx, body)

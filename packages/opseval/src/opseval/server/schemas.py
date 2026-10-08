@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from opseval.models.gate import Preset
-from opseval.models.results import Axis, ScoreStatus, VerdictStatus
+from opseval.models.results import Axis, ScoreStatus, SkipKind, StopCause, VerdictStatus
 from opseval.models.scenario import Criticality, Difficulty
 
 
@@ -61,6 +61,7 @@ class RunProgress(Api):
     attempts_recorded: int
     current: str | None  # the scenario being run now
     scenarios: list[ScenarioProgressOut]
+    cancel_requested: bool = False  # it stops before its next attempt (ADR-0035)
 
 
 class RunSummary(Api):
@@ -107,6 +108,26 @@ class TestOut(Api):
     flaky: bool
     attempts: list[AttemptOut]
     unmeasured_scorers: list[str] = []
+    skip_kind: SkipKind | None = None  # why a skipped scenario was not run
+    cut_short_of: int | None = None  # a cancel interrupted it: the repeats it planned
+
+
+class StopOut(Api):
+    """A stop policy (ADR-0035), every field resolved: what a run would do."""
+
+    fail_fast: bool
+    max_consecutive_failures: int | None
+    stop_on_critical_failure: bool
+    stop_on_rate_limit: bool
+    max_wall_clock_seconds: float | None
+
+
+class StoppedOut(Api):
+    """Why a run ended before every scenario ran."""
+
+    by: StopCause
+    after: str | None
+    detail: str
 
 
 class TranscriptEntry(Api):
@@ -185,6 +206,8 @@ class RunDetail(Api):
     vacuous_scorers: list[str] = []
     unmeasured_scorers: list[str] = []
     sinks: list[SinkOut] = []
+    stop_policy: StopOut | None = None  # the stop policy in force, when there was one
+    stopped: StoppedOut | None = None  # set when a stop policy or a cancel ended it early
 
 
 class ScenarioOut(Api):
@@ -211,6 +234,7 @@ class SuiteOut(Api):
     stop_at: str | None = None
     problem: str | None = None  # the file could not be read or validated
     gate: GateOut | None = None  # the release gate this suite runs with (ADR-0032)
+    stop: StopOut | None = None  # when its runs stop early; None: they never do (ADR-0035)
 
 
 class GateSettingOut(Api):
@@ -353,13 +377,30 @@ class PersonaOut(Api):
 Repeats = Annotated[int, Field(ge=1, le=20)]  # the same bounds as a scenario's execution
 
 
+class StopIn(ApiIn):
+    """Stop-policy fields (ADR-0035). For a run, a null field keeps the suite's own; for a
+    suite, a null field is left out of its ``stop:`` block."""
+
+    fail_fast: bool | None = None
+    max_consecutive_failures: Annotated[int, Field(ge=1, le=10_000)] | None = None
+    stop_on_critical_failure: bool | None = None
+    stop_on_rate_limit: bool | None = None
+    max_wall_clock_seconds: Annotated[float, Field(gt=0, le=604_800)] | None = None
+
+
 class LaunchIn(ApiIn):
     suite: str | None = None
     scenarios: Annotated[list[str], Field(max_length=500)] = []
     target: str | None = None
     repeats: Repeats | None = None
     allow_commit: bool = False
-    fail_fast: bool = False
+    stop: StopIn | None = None  # per-run overrides of the suite's stop policy
+
+
+class CancelOut(Api):
+    accepted: bool  # False: a cancel was already requested
+    run_id: str
+    message: str
 
 
 class LaunchOut(Api):
@@ -376,6 +417,7 @@ class SuiteIn(ApiIn):
     repeats: Repeats | None = None
     stop_at: str | None = None
     gate: GateIn | None = None  # omitted: keep the file's gate; null: remove it (standard)
+    stop: StopIn | None = None  # omitted: keep the file's stop policy; null: remove it
     overwrite: bool = False  # replacing an existing suite must be asked for
 
 

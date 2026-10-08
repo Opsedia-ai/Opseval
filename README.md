@@ -470,8 +470,10 @@ built-in demo, read-only. Open the console from the printed link: it carries the
 API request needs.
 
 It reads the run folders you already have. You can browse runs and their per-check scores,
-compare two runs, watch the trend, see token usage, edit suites and their **release gate**
-(a preset plus one dropdown per outcome, see below), bulk-import scenarios, and start a run.
+compare two runs, watch the trend, see token usage, edit suites with their **release gate**
+(a preset plus one dropdown per outcome, see below) and **when to stop early**, bulk-import
+scenarios, start a run (overriding the suite's stop policy for that run), and **cancel** a
+running one.
 
 The screen worth knowing about is **Simulator**. The simulator is the LLM that plays your
 customer; if it drifts out of character, every score downstream measured the wrong conversation.
@@ -499,7 +501,8 @@ Run detail opens the **conversation behind each attempt**: every turn (right to 
 personas), each checkpoint raised and the customer's decision, tool calls from the trace, and any
 harness error, with the record's redaction stated, never implied. A run in flight shows its
 **live progress**: scenarios done, attempts recorded, and the one running now; verdicts appear
-only when it ends. **Test cases are edited in the console**: the YAML with the same checks as
+only when it ends. **Cancel run** stops it before its next attempt, whether the console or the
+CLI started it; a run that stopped early says why, and what it did not run is listed as skipped. **Test cases are edited in the console**: the YAML with the same checks as
 `opseval validate` as you type (schema, scorer and checkpoint names, ids used elsewhere), saved
 only when valid and never over a newer version of the file; new ones start from a template. See
 [ADR-0029](docs/adr/0029-console-api.md).

@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { Play } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { useApi } from "../lib/useApi";
+import type { StopBody } from "../lib/types";
+import StopEditor, { NEVER, stopFields } from "../components/StopEditor";
 import { Callout, Card, CoralButton, Data, Explainer, Mono, NotMeasured, Page, PageHeader, Pill } from "../components/ui";
 
 const input = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ink";
@@ -20,12 +22,15 @@ export default function NewRun() {
   const [target, setTarget] = useState("");
   const [repeats, setRepeats] = useState<number | "">("");
   const [allowCommit, setAllowCommit] = useState(false);
-  const [failFast, setFailFast] = useState(false);
+  const [stop, setStop] = useState<StopBody>({});
   const [err, setErr] = useState<ApiError>();
   const [busy, setBusy] = useState(false);
 
   const chosenSuite = suite || suites.data?.[0]?.file || "";
-  const body = { ...(picked.length ? { scenarios: picked } : { suite: chosenSuite }), target: target || undefined, repeats: repeats === "" ? undefined : repeats, allowCommit: allowCommit && commitAllowed, failFast };
+  // A selection runs outside any suite, so there is no suite policy to fall back to.
+  const suiteStop = picked.length ? NEVER : (suites.data?.find((x) => x.file === chosenSuite)?.stop ?? NEVER);
+  const overrides = stopFields(stop);
+  const body = { ...(picked.length ? { scenarios: picked } : { suite: chosenSuite }), target: target || undefined, repeats: repeats === "" ? undefined : repeats, allowCommit: allowCommit && commitAllowed, ...(Object.keys(overrides).length ? { stop: overrides } : {}) };
   const start = async () => {
     setBusy(true); setErr(undefined);
     try { const { runId } = await api.startRun(body); nav(`/runs/${runId}`); } catch (e) { setErr(e as ApiError); }
@@ -57,10 +62,10 @@ export default function NewRun() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div><label className={lab}>Repeats (override)</label><input type="number" min={1} max={20} className={input} value={repeats} placeholder="as authored" onChange={(e) => setRepeats(e.target.value === "" ? "" : +e.target.value)} /></div>
               </div>
-              <label className="mt-4 flex items-center gap-3 text-ink"><input type="checkbox" checked={failFast} onChange={(e) => setFailFast(e.target.checked)} className="h-4 w-4 accent-coral" />Stop at the first failure (<Mono>--fail-fast</Mono>)</label>
               <div className="mt-4"><Callout><b>Stopping at the commit gate keeps this safe.</b> The irreversible outcome needs <Mono>allow_commit: true</Mono> in the scenario, the server started with <Mono>opseval serve --allow-commit</Mono>, <b>and</b> this switch (ADR-0008).</Callout></div>
               <label className={`mt-4 flex items-center gap-3 ${commitAllowed ? "text-ink" : "text-muted-ink"}`}><input type="checkbox" disabled={!commitAllowed} checked={allowCommit && commitAllowed} onChange={(e) => setAllowCommit(e.target.checked)} className="h-4 w-4 accent-coral" />Allow the committed outcome {allowCommit && commitAllowed && <Pill tone="fail">irreversible</Pill>}{!commitAllowed && <span className="text-sm">(the server was not started with <Mono>--allow-commit</Mono>)</span>}</label>
             </Card>
+            <StopEditor value={stop} onChange={setStop} base={suiteStop} baseLabel={picked.length ? "default" : "suite"} />
           </div>
           <div className="space-y-5">
             <Card title="Readiness"><Data res={readiness}>{(items) => (<ul className="space-y-3">{items.map((r) => (

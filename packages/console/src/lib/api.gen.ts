@@ -27,6 +27,7 @@ export interface RunProgress {
   attemptsRecorded: number;
   current: string | null;
   scenarios: ScenarioProgressOut[];
+  cancelRequested: boolean;
 }
 
 export interface RunSummary {
@@ -72,6 +73,24 @@ export interface TestOut {
   flaky: boolean;
   attempts: AttemptOut[];
   unmeasuredScorers: string[];
+  skipKind: "dependency" | "simulator" | "commit_guard" | "quarantine" | "fail_fast" | "stopped" | "cancelled" | null;
+  cutShortOf: number | null;
+}
+
+/** A stop policy (ADR-0035), every field resolved: what a run would do. */
+export interface StopOut {
+  failFast: boolean;
+  maxConsecutiveFailures: number | null;
+  stopOnCriticalFailure: boolean;
+  stopOnRateLimit: boolean;
+  maxWallClockSeconds: number | null;
+}
+
+/** Why a run ended before every scenario ran. */
+export interface StoppedOut {
+  by: "fail_fast" | "max_consecutive_failures" | "stop_on_critical_failure" | "stop_on_rate_limit" | "max_wall_clock_seconds" | "cancelled";
+  after: string | null;
+  detail: string;
 }
 
 /** One thing that happened in a conversation, in order. */
@@ -148,6 +167,8 @@ export interface RunDetail {
   vacuousScorers: string[];
   unmeasuredScorers: string[];
   sinks: SinkOut[];
+  stopPolicy: StopOut | null;
+  stopped: StoppedOut | null;
 }
 
 export interface ScenarioOut {
@@ -174,6 +195,7 @@ export interface SuiteOut {
   stopAt: string | null;
   problem: string | null;
   gate: GateOut | null;
+  stop: StopOut | null;
 }
 
 export interface GateSettingOut {
@@ -309,13 +331,28 @@ export interface PersonaOut {
   judgeModel: string | null;
 }
 
+/** Stop-policy fields (ADR-0035). For a run, a null field keeps the suite's own; for a suite, a null field is left out of its ``stop:`` block. */
+export interface StopIn {
+  failFast?: boolean | null;
+  maxConsecutiveFailures?: number | null;
+  stopOnCriticalFailure?: boolean | null;
+  stopOnRateLimit?: boolean | null;
+  maxWallClockSeconds?: number | null;
+}
+
 export interface LaunchIn {
   suite?: string | null;
   scenarios?: string[];
   target?: string | null;
   repeats?: number | null;
   allowCommit?: boolean;
-  failFast?: boolean;
+  stop?: StopIn | null;
+}
+
+export interface CancelOut {
+  accepted: boolean;
+  runId: string;
+  message: string;
 }
 
 export interface LaunchOut {
@@ -332,6 +369,7 @@ export interface SuiteIn {
   repeats?: number | null;
   stopAt?: string | null;
   gate?: GateIn | null;
+  stop?: StopIn | null;
   overwrite?: boolean;
 }
 

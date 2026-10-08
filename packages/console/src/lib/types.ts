@@ -34,6 +34,12 @@ export type GateView = G.GateOut;
 export type GateBody = Required<G.GateIn>;
 
 export type Suite = G.SuiteOut;
+/** A stop policy as edited: a null field falls back (to the suite's, or to "never"). ADR-0035. */
+export type StopBody = G.StopIn;
+/** A stop policy with every field resolved. */
+export type StopView = G.StopOut;
+export type Stopped = G.StoppedOut;
+export type Cancelled = G.CancelOut;
 export type Readiness = G.ReadinessItem;
 export type Check = G.CheckOut;
 export type RunUsage = G.RunUsage;

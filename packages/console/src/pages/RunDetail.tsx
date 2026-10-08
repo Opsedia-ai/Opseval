@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { ChevronDown } from "lucide-react";
 import { api } from "../lib/api";
+import { CancelRun, StoppedNotice } from "../components/RunControl";
 import { useApi } from "../lib/useApi";
 import type { Gate, RunDetail as Detail, RunProgress, TestResult } from "../lib/types";
 import Transcript from "../components/Transcript";
@@ -17,9 +18,10 @@ function Scenario({ run, t }: { run: string; t: TestResult }) {
     <Card className="p-0 [&>div]:p-0">
       <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-4 p-5 text-left">
         <Pill tone={tone(t.status)} dashed={tone(t.status) === "mute"}>{t.status.replace("_", " ")}</Pill>
+        {t.skipKind && NOT_RUN[t.skipKind] && <Pill tone="mute" dashed>{NOT_RUN[t.skipKind]}</Pill>}
         <div className="min-w-0 flex-1">
           <div className="font-semibold text-ink">{t.name}</div>
-          <div className="text-sm"><Mono>{t.id}</Mono> · {t.criticality}{t.flaky && " · flaky"}</div>
+          <div className="text-sm"><Mono>{t.id}</Mono> · {t.criticality}{t.flaky && " · flaky"}{t.cutShortOf !== null && t.cutShortOf !== undefined && ` · ${t.attempts.length} of ${t.cutShortOf} attempts ran`}</div>
         </div>
         <div className="hidden items-center gap-1.5 sm:flex" title="attempts">
           {t.attempts.map((a) => <span key={a.index} className={cx("h-3 w-3 rounded-full", a.passed === true ? "bg-teal" : a.passed === false ? "bg-deep-coral" : "border border-dashed border-muted-ink")} />)}
@@ -57,6 +59,8 @@ function Scenario({ run, t }: { run: string; t: TestResult }) {
     </Card>
   );
 }
+
+const NOT_RUN: Record<string, string> = { fail_fast: "not run · fail-fast", stopped: "not run · stopped", cancelled: "cancelled" };
 
 const HEADLINE: Record<Gate, string> = {
   safe: "Safe to release.",
@@ -102,12 +106,14 @@ export default function RunDetail() {
       <Page>
         {pending ? (<>
           <Callout>This run is still in progress. Verdicts appear when it ends; this page refreshes on its own.</Callout>
+          {flight?.stage !== "finishing" && <CancelRun id={id} requested={flight?.cancelRequested === true} onDone={res.reload} />}
           {flight && <><ProgressLine p={flight} /><ProgressTable p={flight} /></>}
         </>) : (
         <Data res={res}>{(r) => (<>
           <Callout tone={r.summary.gate === "safe" ? "info" : "warn"}><b>{r.summary.gate ? HEADLINE[r.summary.gate] : "In progress."}</b> {r.gateSummary}</Callout>
           {r.gatePolicy && <p className="text-sm">Gate policy: <Mono>{r.gatePolicy}</Mono>{r.ignored.length > 0 && <> · ignored by the policy: {r.ignored.join("; ")}</>}</p>}
           {r.looserThanStandard.length > 0 && <Callout tone="warn"><b>This run was gated with a policy looser than standard:</b> <Mono>{r.looserThanStandard.join(", ")}</Mono>. Its result is not comparable with a standard or strict run.</Callout>}
+          <StoppedNotice stopped={r.stopped} />
           <Caveats r={r} />
           {r.loadErrors.length > 0 && <Callout><b>Load errors (harness, not the agent):</b><ul className="list-disc pl-5">{r.loadErrors.map((e) => <li key={e}>{e}</li>)}</ul></Callout>}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

@@ -31,6 +31,7 @@ from opseval.llm import UsageMeter, client_for_role
 from opseval.models.gate import GatePolicy, from_flat, to_yaml_block
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario, Suite
+from opseval.models.stop import StopPolicy
 from opseval.runner import RunOptions, launch, new_run_id
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
@@ -213,7 +214,7 @@ def start_run(ctx: ServerContext, body: s.LaunchIn) -> s.LaunchOut:
         profile=ctx.profile_path,
         repeats=body.repeats,
         allow_commit=body.allow_commit and ctx.allow_commit,
-        fail_fast=body.fail_fast,
+        stop=stop_override(body.stop),
         run_id=run_id,
         only_ids=only_ids,
     )
@@ -269,11 +270,63 @@ def _suite_doc(body: s.SuiteIn, existing: dict[str, Any] | None) -> dict[str, An
             doc.pop("gate", None)  # the plain standard gate needs no block
         else:
             doc["gate"] = block
+    if "stop" in sent:
+        block = stop_block(body.stop)
+        if block:
+            doc["stop"] = block
+        else:
+            doc.pop("stop", None)  # no policy: every scenario runs
     if "repeats" in sent or existing is None:
         _set_nested(doc, ("overrides", "execution", "repeats"), body.repeats)
     if "stop_at" in sent or existing is None:
         _set_nested(doc, ("defaults", "conversation", "stop_at"), body.stop_at)
     return doc
+
+
+def stop_block(body: s.StopIn | None) -> dict[str, Any]:
+    """The fields a request set: a run's overrides, or a suite's ``stop:`` block."""
+    return {} if body is None else body.model_dump(exclude_none=True)
+
+
+def stop_override(body: s.StopIn | None) -> StopPolicy | None:
+    """Only the fields given, so each replaces that one field of the suite's policy."""
+    block = stop_block(body)
+    return StopPolicy.model_validate(block) if block else None
+
+
+def cancel_run(ctx: ServerContext, run_id: str) -> s.CancelOut:
+    """Ask a running run to stop before its next attempt (ADR-0035).
+
+    The request is a file in the run folder, so this cancels a run started by the CLI as
+    well as one started here. What the run did not do is recorded as cancelled.
+    """
+    from opseval.server.views import RunInProgress, run_detail
+
+    try:
+        detail = run_detail(ctx.store, run_id)
+    except RunInProgress as running:
+        if running.progress is not None and running.progress.stage == "finishing":
+            # Every attempt has run: there is no "next attempt" left to stop before.
+            raise ApiError(
+                409, "RUN_FINISHING", "this run is writing its result; it is too late to cancel"
+            ) from None
+        detail = None
+    else:
+        if detail is None:
+            raise ApiError(404, "UNKNOWN_RUN", f"no run {run_id!r}")
+        state = detail.summary.state
+        raise ApiError(
+            409,
+            "RUN_NOT_RUNNING",
+            "this run has finished" if state == "finished" else "this run is no longer running",
+        )
+    if ctx.store.request_cancel(run_id, by="console"):
+        return s.CancelOut(
+            accepted=True,
+            run_id=run_id,
+            message="cancel requested: it stops before its next attempt",
+        )
+    return s.CancelOut(accepted=False, run_id=run_id, message="a cancel was already requested")
 
 
 def gate_policy(body: s.GateIn) -> GatePolicy:
@@ -339,6 +392,7 @@ def save_suite(ctx: ServerContext, body: s.SuiteIn) -> s.SuiteOut:
         repeats=_nested_get(doc, "overrides", "execution", "repeats"),
         stop_at=_nested_get(doc, "defaults", "conversation", "stop_at"),
         gate=_gate_view(doc, ctx.settings.gate_fail_on_flaky),
+        stop=_stop_view(doc),
     )
 
 
@@ -349,6 +403,12 @@ def _nested_get(doc: dict[str, Any], *path: str) -> Any:
             return None
         cur = cur[key]
     return cur
+
+
+def _stop_view(doc: dict[str, Any]) -> s.StopOut | None:
+    from opseval.server.views import stop_out
+
+    return stop_out(StopPolicy.model_validate(doc["stop"])) if doc.get("stop") else None
 
 
 def _gate_view(doc: dict[str, Any], fail_on_flaky: bool) -> s.GateOut:

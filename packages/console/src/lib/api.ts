@@ -69,6 +69,7 @@ export const api = {
   config: () => call<T.SettingRow[]>("/config"),
   rehearse: (scenarioId: string, transcript: T.Turn[]) => post<T.Rehearsal>("/simulator/rehearse", { scenarioId, transcript }),
   startRun: (body: T.LaunchBody) => post<T.Launched>("/runs", body),
+  cancelRun: (id: string) => post<T.Cancelled>(`/runs/${encodeURIComponent(id)}/cancel`, {}),
   saveSuite: (body: T.SuiteBody) => call<T.Suite>("/suites", { method: "PUT", body: JSON.stringify(body) }),
   importScenarios: (family: string, files: { name: string; text: string }[]) =>
     post<{ imported: string[] }>("/scenarios/import", { family, files }),

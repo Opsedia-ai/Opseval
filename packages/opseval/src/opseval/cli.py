@@ -277,6 +277,14 @@ def cancel(
         typer.secho(f"error: {run_dir}: this run has already finished", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS)
     store = FileStore(folder.parent)
+    progress = store.load_progress(folder.name)
+    if progress is not None and progress.stage == "finishing":
+        typer.secho(
+            f"error: {run_dir}: this run is writing its result; it is too late to cancel",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(EXIT_HARNESS)
     if store.request_cancel(folder.name, by="cli"):
         typer.echo(f"Cancel requested: {folder.name} stops before its next attempt.")
     else:

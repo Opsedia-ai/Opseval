@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import { Count, GatePill, ResultBar } from "../components/ui";
 import { Entry } from "../components/Transcript";
 import { ProgressLine } from "../components/Progress";
+import StopEditor, { NEVER, budget, stopFields } from "../components/StopEditor";
+import { CancelRun, StoppedNotice } from "../components/RunControl";
 import type { Gate, RunProgress, TranscriptEntry } from "../lib/types";
 
 const tone = (el: Element | null) => el?.getAttribute("data-tone");
@@ -87,7 +89,7 @@ describe("the transcript", () => {
 describe("progress", () => {
   const p: RunProgress = {
     stage: "running", scenariosPlanned: 3, scenariosDone: 2, attemptsRecorded: 7, current: "rf-003",
-    scenarios: [],
+    scenarios: [], cancelRequested: false,
   };
 
   it("says how far a run has got, and nothing about how it did", () => {
@@ -101,5 +103,51 @@ describe("progress", () => {
   it("names the finishing stage", () => {
     render(<ProgressLine p={{ ...p, stage: "finishing", current: null, scenariosDone: 3 }} />);
     expect(screen.getByText(/writing the gate, reports and sinks/)).toBeTruthy();
+  });
+
+  it("says a run is cancelling once asked, and only then", () => {
+    expect(render(<ProgressLine p={p} />).container.querySelector('[data-state="cancelling"]')).toBeNull();
+    const asked = render(<ProgressLine p={{ ...p, cancelRequested: true }} />).container;
+    expect(asked.querySelector('[data-state="cancelling"]')?.textContent).toBe("cancelling");
+  });
+});
+
+describe("stopping early (ADR-0035)", () => {
+  it("a stopped run says so, and never as a pass", () => {
+    const { container } = render(<StoppedNotice stopped={{ by: "cancelled", after: "rf-001", detail: "cancelled by request" }} />);
+    const notice = container.querySelector('[data-state="stopped-early"]');
+    expect(notice?.textContent).toMatch(/Stopped early: cancelled by request/);
+    expect(notice?.textContent).toMatch(/skipped, not passed/);
+    expect(notice?.querySelector('[data-tone="pass"]')).toBeNull();
+  });
+
+  it("a run that was not stopped shows nothing", () => {
+    expect(render(<StoppedNotice stopped={null} />).container.textContent).toBe("");
+  });
+
+  it("once a cancel is requested, the button gives way to what will happen", () => {
+    render(<CancelRun id="r" requested />);
+    expect(screen.queryByRole("button", { name: /cancel run/i })).toBeNull();
+    expect(screen.getByText(/reported as cancelled, never as passed/)).toBeTruthy();
+  });
+
+  it("every stop choice names what it falls back to", () => {
+    const base = { ...NEVER, stopOnCriticalFailure: true, maxConsecutiveFailures: 3 };
+    render(<StopEditor value={{}} onChange={() => {}} base={base} baseLabel="suite" />);
+    const critical = screen.getByRole("combobox", { name: /critical or blocker/i }) as HTMLSelectElement;
+    expect(critical.selectedOptions[0].textContent).toBe("stop (suite)");
+    const failFast = screen.getByRole("combobox", { name: /first failure/i }) as HTMLSelectElement;
+    expect(failFast.selectedOptions[0].textContent).toBe("keep going (suite)");
+    expect((screen.getByLabelText("Failures in a row") as HTMLInputElement).placeholder).toBe("3 (suite)");
+  });
+
+  it("a time budget is whole minutes, and never a 0 the server would refuse", () => {
+    expect([budget("30"), budget("1.4"), budget("0.005"), budget("0"), budget(""), budget("-5")])
+      .toEqual([1800, 60, null, null, null, null]);
+  });
+
+  it("only what was set is sent: everything else keeps the suite's value", () => {
+    expect(stopFields({ failFast: false, stopOnRateLimit: null, maxConsecutiveFailures: undefined, maxWallClockSeconds: 600 }))
+      .toEqual({ failFast: false, maxWallClockSeconds: 600 });
   });
 });

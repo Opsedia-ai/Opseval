@@ -2,11 +2,23 @@ import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import GateEditor from "../components/GateEditor";
-import type { GateBody } from "../lib/types";
+import StopEditor, { NEVER, stopFields } from "../components/StopEditor";
+import type { GateBody, StopBody, StopView } from "../lib/types";
 import { Callout, Card, CoralButton, Data, Explainer, Mono, Page, PageHeader, Pill } from "../components/ui";
 
 const field = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ink";
 const lab = "text-xs font-semibold uppercase tracking-[0.08em]";
+
+const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+
+/** The suite's `stop:` block as an edit: a switch that is off is simply not set. */
+function fromView(v: StopView | null): StopBody {
+  if (!v) return {};
+  return stopFields({
+    failFast: v.failFast || null, stopOnCriticalFailure: v.stopOnCriticalFailure || null, stopOnRateLimit: v.stopOnRateLimit || null,
+    maxConsecutiveFailures: v.maxConsecutiveFailures, maxWallClockSeconds: v.maxWallClockSeconds,
+  });
+}
 
 export default function Suites() {
   const suites = useApi(api.suites);
@@ -25,6 +37,10 @@ export default function Suites() {
   const [gateEdited, setGateEdited] = useState(false);
   const gatePreview = useApi(() => api.resolveGate(gate), [JSON.stringify(gate)]);
   const editGate = (g: GateBody) => { setGate(g); setGateEdited(true); };
+  // As in the file: a field the suite does not set is null (it never stops for that reason).
+  const [stop, setStop] = useState<StopBody>({});
+  const [stopEdited, setStopEdited] = useState(false);
+  const editStop = (v: StopBody) => { setStop(v); setStopEdited(true); };
   const [msg, setMsg] = useState<{ ok: boolean; text: string }>();
 
   // "include" patterns are file paths relative to the catalogue, so the picker works on scenario ids via the tag-free path list
@@ -35,18 +51,21 @@ export default function Suites() {
     setFile(s.file); setName(s.displayName); setDesc(s.description); setPicked(s.include); setRepeats(s.repeats ?? "");
     setGate({ preset: s.gate?.preset ?? "standard", overrides: s.gate?.overrides ?? {} });
     setGateEdited(false);
+    setStop(fromView(s.stop ?? null)); setStopEdited(false);
   }, [sel, suites.data]);
   useEffect(() => { if (!sel && suites.data?.[0]) setSel(suites.data[0].file); }, [suites.data, sel]);
 
   // The gate block is the server's own serialisation (one serialiser, ADR-0032).
   const gateYaml = gatePreview.error ? "" : (gatePreview.data?.yaml ?? "");
-  const yaml = useMemo(() => [`name: ${name}`, `description: ${desc}`, "include:", ...picked.map((f) => `  - ${f}`), ...(repeats === "" ? [] : ["overrides:", `  execution.repeats: ${repeats}`])].join("\n") + (gateYaml ? `\n${gateYaml.trimEnd()}` : ""), [name, desc, picked, repeats, gateYaml]);
+  const stopSet = stopFields(stop);
+  const stopYaml = Object.keys(stopSet).length ? ["stop:", ...Object.entries(stopSet).map(([k, v]) => `  ${snake(k)}: ${v}`)] : [];
+  const yaml = useMemo(() => [`name: ${name}`, `description: ${desc}`, "include:", ...picked.map((f) => `  - ${f}`), ...(repeats === "" ? [] : ["overrides:", `  execution.repeats: ${repeats}`]), ...stopYaml].join("\n") + (gateYaml ? `\n${gateYaml.trimEnd()}` : ""), [name, desc, picked, repeats, gateYaml, stopYaml.join("|")]);
   const save = async () => {
     try {
       // Saving over the suite that is open in the editor is an edit; any other existing name is refused.
       // An empty repeats box clears the override (null); stop_at and every key this form does
       // not manage are left out, so the server keeps them as they are in the file.
-      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? null : repeats, ...(gateEdited ? { gate } : {}), overwrite: file === sel });
+      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? null : repeats, ...(gateEdited ? { gate } : {}), ...(stopEdited ? { stop: Object.keys(stopSet).length ? stopSet : null } : {}), overwrite: file === sel });
       setMsg({ ok: true, text: `Saved. Resolves to ${s.scenarioCount} scenario(s).` }); suites.reload();
     } catch (e) { setMsg({ ok: false, text: (e as ApiError).message }); }
   };
@@ -77,6 +96,7 @@ export default function Suites() {
               </Card>
               <Card title="Settings"><label className={lab}>Repeats per scenario</label><input type="number" min={1} max={20} className={`${field} max-w-40`} value={repeats} placeholder="as authored" onChange={(e) => setRepeats(e.target.value === "" ? "" : +e.target.value)} /></Card>
               <GateEditor value={gate} onChange={editGate} preview={gatePreview} readOnly={readOnly} />
+              <StopEditor value={stop} onChange={editStop} base={NEVER} baseLabel="not set" readOnly={readOnly} />
               <Card title="Which scenarios" aside={<Pill tone="pass">{picked.length} pattern(s)</Pill>}>
                 <ul className="divide-y divide-line">{ids.map((s, i) => (
                   <li key={s.id}><label className="flex items-center justify-between gap-3 py-2 text-ink">
