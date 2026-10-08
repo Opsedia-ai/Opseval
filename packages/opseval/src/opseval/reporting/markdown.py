@@ -64,6 +64,9 @@ def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> s
         head = "🔴 **Release blocked**"
     elif result.safe_to_release:
         head = "🟢 **Safe to release**"
+    elif all(t.status is VerdictStatus.PASSED for t in result.tests) and not result.load_errors:
+        # Every scenario passed, but the gate warns (flaky, unmeasured, …).
+        head = "🟡 **No blocking issues, with warnings**"
     else:
         # The gate passed, but something failed, was skipped, unmeasured or not loaded.
         head = "🟡 **No blocking issues, not everything passed**"

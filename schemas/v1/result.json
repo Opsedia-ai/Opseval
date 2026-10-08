@@ -702,7 +702,8 @@
                 "dependency",
                 "simulator",
                 "commit_guard",
-                "quarantine"
+                "quarantine",
+                "fail_fast"
               ],
               "type": "string"
             },

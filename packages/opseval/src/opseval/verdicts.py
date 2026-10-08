@@ -165,17 +165,16 @@ def release_gate(
     tests: list[TestVerdict],
     *,
     policy: ResolvedGatePolicy | None = None,
-    fail_on_flaky: bool = False,
     load_errors: int = 0,
 ) -> Gate:
     """Decide the release under a gate policy (ADR-0032; ``standard`` by default).
 
     What each outcome *is* is fixed; the policy decides whether it blocks, warns or is
     ignored. Two things are not up to the policy: a suite where nothing was judged always
-    blocks, and "Safe to release" is said only when nothing blocks or warns and, unless the
-    policy lets the gate decide the exit code, every scenario passed and loaded.
+    blocks, and "Safe to release" is said only when nothing blocks or warns and every
+    scenario passed and loaded, whatever the policy ignored.
     """
-    policy = policy or resolve(fail_on_flaky=fail_on_flaky)
+    policy = policy or resolve()
     std = PRESETS["standard"]
     declared = any(t.criticality is not Criticality.NORMAL for t in tests)
     d = _Decision()
@@ -199,7 +198,7 @@ def release_gate(
         elif t.status is VerdictStatus.SKIPPED_PRECONDITION:
             action: str
             standard: str
-            if t.skip_kind == "commit_guard":
+            if skip_kind(t) == "commit_guard":
                 action, standard = policy.commit_guard, std.commit_guard
             else:
                 action, standard = _at(policy.skipped, level), _at(std.skipped, level)
@@ -227,12 +226,16 @@ def release_gate(
     everything_passed = (
         bool(tests) and not load_errors and all(t.status is VerdictStatus.PASSED for t in tests)
     )
-    safe = not d.blocking and not d.warnings and (policy.exit_code == "gate" or everything_passed)
+    # "Safe to release" is never said beside a failed, skipped or unloaded scenario, under
+    # any policy: what a policy ignores can let the gate pass, never make the run clean.
+    safe = not d.blocking and not d.warnings and everything_passed
     passed = sum(1 for t in tests if t.status is VerdictStatus.PASSED)
     if d.blocking:
         verdict = "Release is BLOCKED by: " + "; ".join(d.blocking) + "."
     elif safe:
         verdict = "Safe to release."
+    elif everything_passed:  # every scenario passed, but something warns (e.g. flaky)
+        verdict = "No blocking issues, but: " + "; ".join(d.warnings) + "."
     else:
         gaps = d.warnings or [
             f"{t.test_id}: {t.status.value}" for t in tests if t.status is not VerdictStatus.PASSED
@@ -258,8 +261,9 @@ def release_gate(
 def exit_code(tests: list[TestVerdict], *, load_errors: int = 0, gate: Gate | None = None) -> int:
     """0 pass · 1 fail · 2 not judged · 3 harness. Exit 3 is a fact under every policy.
 
-    Under ``exit_code: gate`` the other codes follow the gate's decision; otherwise they
-    say what happened, whatever the policy chose to block.
+    Under ``exit_code: gate`` the other codes follow the gate's decision. Under ``strict``
+    they say what happened, with one floor: a gate that blocks never exits 0, or CI would
+    go green on a release the gate refused (a flaky or unmeasured block on a passing run).
     """
     attempts = [a for t in tests for a in t.attempts]
     all_infra = bool(attempts) and all(a.terminal_state.is_infra for a in attempts)
@@ -275,4 +279,27 @@ def exit_code(tests: list[TestVerdict], *, load_errors: int = 0, gate: Gate | No
         return EXIT_HARNESS
     if not tests or load_errors or any(t.status is not VerdictStatus.PASSED for t in tests):
         return EXIT_NOT_JUDGED
+    if gate is not None and gate.status != "pass":
+        return EXIT_FAIL if gate.agent_blocked else EXIT_NOT_JUDGED
     return EXIT_PASS
+
+
+def skip_kind(t: TestVerdict) -> SkipKind | None:
+    """Why a scenario was skipped. Results from before skip kinds were recorded (ADR-0032)
+    are read from the reason the runner wrote, so re-gating an old run under a policy can
+    never make a commit-guard skip block."""
+    if t.skip_kind is not None or t.reason is None:
+        return t.skip_kind
+    if t.reason.startswith("commit guard"):
+        return "commit_guard"
+    if t.status is VerdictStatus.BLOCKED:
+        return "quarantine"
+    return None
+
+
+def failure_blocks(policy: ResolvedGatePolicy, criticality: Criticality, declared: bool) -> bool:
+    """Whether the policy blocks a failure of this criticality (for ``--fail-fast``)."""
+    level = (
+        criticality.value if declared or policy.undeclared_criticality == "normal" else "critical"
+    )
+    return _at(policy.failed, level) == "block"
