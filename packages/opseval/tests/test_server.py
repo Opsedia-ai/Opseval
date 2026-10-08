@@ -892,6 +892,8 @@ def test_the_console_is_served_same_origin(tmp_path: Path, console_dir: Path) ->
     page = anon.get("/")
     assert page.status_code == 200 and "id=root" in page.text
     assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+    # Nothing from another origin, fonts included: a page view is reported to no one.
+    assert "https:" not in page.headers["content-security-policy"]
     assert page.headers["x-frame-options"] == "DENY" and page.headers["cache-control"] == "no-store"
     assert anon.get("/runs/20261008T000000Z-abc").text == page.text  # a console route
     asset = anon.get("/assets/app.js")

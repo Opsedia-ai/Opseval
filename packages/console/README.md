@@ -1,7 +1,9 @@
 # Opseval console
 
 React + TypeScript + Vite + Tailwind (ADR-0004), themed with the Opsedia "Coral Field" design system
-(`docs/Design system.pdf`). Tokens live in `src/index.css`.
+(`docs/Design system.pdf`). Tokens live in `src/index.css`. The typefaces (Bricolage Grotesque,
+Alexandria, Figtree, IBM Plex Mono and IBM Plex Sans Arabic, all OFL-1.1) are bundled from
+Fontsource packages, so the console makes no request to a font CDN and works air-gapped.
 
 ```bash
 # terminal 1: the API (reads ./reports, serves the demo catalogue read-only by default)
