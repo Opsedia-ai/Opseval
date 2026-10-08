@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 from pathlib import Path
@@ -32,7 +31,7 @@ from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import SAFE, FileStore
+from opseval.storage import FileStore
 from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
 
@@ -108,47 +107,25 @@ def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
             error=f"{error.get('code', 'HARNESS_ERROR')}: {error.get('message', '')}",
         )
     return s.RunSummary(
-        **common, state="running", gate=None, progress=progress(store, folder.name, m)
+        **common, state="running", gate=None, progress=_progress(store, folder.name)
     )
 
 
-def progress(store: FileStore, run_id: str, manifest: dict[str, Any]) -> s.RunProgress:
-    """Progress from what the runner has written: a scenario's snapshot when it starts,
-    a record per finished attempt. The runner goes one scenario at a time, so once a
-    later scenario has started, every earlier one is done (one that recorded no attempt
-    was skipped); the last one started is running until all its attempts are in."""
-    folder = store.run_dir(run_id)
-    planned = [str(x) for x in manifest.get("planned", [])]
-    repeats: dict[str, int] = {}
-    for path in sorted((folder / "scenarios").glob("*.json")):
-        try:
-            data = json.loads(path.read_text("utf-8"))
-            repeats[path.stem] = int(data.get("execution", {}).get("repeats", 1))
-        except (OSError, ValueError, TypeError, AttributeError):
-            continue  # a snapshot being written; it will read on the next poll
-    recorded: dict[str, int] = {}
-    for path in (folder / "records").glob("*__attempt*.json"):
-        key = path.name.rsplit("__attempt", 1)[0]
-        recorded[key] = recorded.get(key, 0) + 1
-    safe = [SAFE.sub("_", sid) for sid in planned]
-    started = [i for i, key in enumerate(safe) if key in repeats]
-    last = started[-1] if started else -1
-    rows: list[s.ScenarioProgress] = []
-    for i, (sid, key) in enumerate(zip(planned, safe, strict=True)):
-        count, want = recorded.get(key, 0), repeats.get(key)
-        if want is None:
-            state = "waiting"
-        elif i < last or count >= want:
-            state = "done"
-        else:
-            state = "running"
-        rows.append(s.ScenarioProgress(id=sid, state=state, attempts=count, repeats=want))
-    current = next((r.id for r in rows if r.state == "running"), None)
+def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
+    """The runner's own account of how far it got (progress.json), or ``None``."""
+    p = store.load_progress(run_id)
+    if p is None:
+        return None
+    rows = [
+        s.ScenarioProgressOut(id=r.id, state=r.state, attempts=r.attempts, repeats=r.repeats)
+        for r in p.scenarios
+    ]
     return s.RunProgress(
+        stage=p.stage,
         scenarios_planned=len(rows),
-        scenarios_done=sum(r.state == "done" for r in rows),
-        attempts_recorded=sum(recorded.values()),
-        current=current,
+        scenarios_done=sum(r.state in ("done", "skipped") for r in rows),
+        attempts_recorded=sum(r.attempts for r in rows),
+        current=p.current,
         scenarios=rows,
     )
 
@@ -201,7 +178,11 @@ def list_runs(store: FileStore) -> list[s.RunSummary]:
 
 
 class RunInProgress(Exception):
-    """The run exists but has not finished: there is no detail to show yet."""
+    """The run exists but has not finished: there is no detail yet, only its progress."""
+
+    def __init__(self, run_id: str, progress: s.RunProgress | None) -> None:
+        super().__init__(run_id)
+        self.progress = progress
 
 
 def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
@@ -210,7 +191,7 @@ def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
     if summary is None:
         return None  # no such run
     if summary.state == "running":
-        raise RunInProgress(run_id)
+        raise RunInProgress(run_id, summary.progress)
     m = store.load_manifest(run_id)
     return s.RunDetail(
         summary=summary,

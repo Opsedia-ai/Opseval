@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { ChevronDown } from "lucide-react";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
-import type { Gate, RunDetail as Detail, TestResult } from "../lib/types";
+import type { Gate, RunDetail as Detail, RunProgress, TestResult } from "../lib/types";
 import Transcript from "../components/Transcript";
 import { ProgressLine, ProgressTable } from "../components/Progress";
 import { AreaPill, Callout, Card, Data, GatePill, Mono, NotMeasured, Page, PageHeader, Pill, ResultBar, Stat, cx } from "../components/ui";
@@ -86,15 +86,16 @@ export default function RunDetail() {
   // A run in progress has no detail yet: wait for it. Any other error (an unknown id
   // included) is shown, never waited on for ever.
   const pending = res.error?.code === "RUN_IN_PROGRESS";
+  // Keep trying through a blip (offline, 5xx) as well as while the run is going; stop on 404.
+  const retry = !!res.error && (pending || res.error.code === "OFFLINE" || res.error.status >= 500);
   useEffect(() => {
-    if (!pending) return;
+    if (!retry) return;
     const t = setTimeout(res.reload, 2500);
     return () => clearTimeout(t);
-  }, [pending, res.reload, res.error]);
+  }, [retry, res.reload, res.error]);
   const gate = res.data?.summary.gate ?? null;
-  // While it runs, its progress comes from the runs list (no verdicts yet, by design).
-  const live = useApi(api.runs, [id, pending], (rs) => (pending && rs.some((r) => r.id === id && r.state === "running") ? 2500 : false));
-  const flight = pending ? live.data?.find((r) => r.id === id)?.progress : undefined;
+  // While it runs, the 409 itself carries the runner's progress (no verdicts yet, by design).
+  const flight = pending ? (res.error?.detail as { progress?: RunProgress | null } | undefined)?.progress ?? undefined : undefined;
   return (
     <>
       <PageHeader title="Run" sub={<Mono>{id}</Mono>} aside={res.data && <GatePill gate={gate} />} />
