@@ -27,6 +27,10 @@ class ApiIn(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
 
+Area = Literal["output", "flow", "tools", "security", "harness"]
+ScoreState = Literal["passed", "failed", "infra_error"]
+VerdictState = Literal["passed", "failed", "inconclusive", "skipped_precondition", "blocked"]
+CriticalityName = Literal["blocker", "critical", "normal"]
 RunState = Literal["running", "finished", "harness_error"]
 GateState = Literal["safe", "gaps", "blocked", "not_judged", "harness_error"]
 """What a run means for the release, decided here once (ADR-0029/0030):
@@ -54,8 +58,8 @@ class RunSummary(Api):
 
 class ScoreOut(Api):
     scorer_id: str
-    axis: str
-    status: str
+    axis: Area
+    status: ScoreState
     score: float | None
     threshold: float
     reason: str | None
@@ -75,8 +79,8 @@ class TestOut(Api):
     __test__ = False
     id: str
     name: str
-    criticality: str
-    status: str
+    criticality: CriticalityName
+    status: VerdictState
     reason: str | None
     pass_rate: float | None
     flaky: bool
@@ -103,7 +107,7 @@ class RunDetail(Api):
     summary: RunSummary
     target: str
     profile: str
-    gate_status: str
+    gate_status: Literal["pass", "block"]
     gate_summary: str
     blocking: list[str]
     warnings: list[str]
@@ -124,8 +128,8 @@ class RunDetail(Api):
 class ScenarioOut(Api):
     id: str
     title: str
-    difficulty: str
-    criticality: str
+    difficulty: Literal["low", "medium", "high"]
+    criticality: CriticalityName
     stop_at: str
     repeats: int
     tags: list[str]
@@ -161,7 +165,7 @@ class GateCatalogOut(Api):
 class GateOut(Api):
     """A suite's gate: what its YAML says, and what that resolves to."""
 
-    preset: str
+    preset: Preset
     overrides: dict[str, str]  # only the settings the suite changes from its preset
     effective: dict[str, str]  # every setting, as a run would use it
     describe: str  # "strict + flaky=warn"
@@ -177,9 +181,9 @@ class GateIn(ApiIn):
 class CheckOut(Api):
     id: str
     question: str
-    area: str
-    kind: str  # deterministic | judge
-    reads: str
+    area: Area
+    kind: Literal["deterministic", "judge"]
+    reads: Literal["chat", "trace", "frames"]
 
 
 class RunUsage(Api):
@@ -202,7 +206,7 @@ class SettingRow(Api):
 
 
 class Health(Api):
-    status: str
+    status: Literal["ok"]
     version: str
     reports_dir: str
     catalogue: str | None
@@ -214,12 +218,12 @@ class Health(Api):
 class Change(Api):
     test_id: str
     name: str
-    before: str
-    after: str
+    before: VerdictState
+    after: VerdictState
 
 
 class AreaDelta(Api):
-    area: str
+    area: Area
     before: float | None
     after: float | None
 
@@ -248,7 +252,7 @@ JsonDict = dict[str, Any]
 
 
 class Turn(Api):
-    who: str  # customer | agent
+    who: Literal["customer", "agent"]
     text: str
 
 

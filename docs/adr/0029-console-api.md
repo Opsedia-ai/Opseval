@@ -83,6 +83,10 @@ cost — the two can drift and nothing catches it — accepted because the gener
 with no home yet (`make schemas` covers the *file* schemas, not the API). Generating the client
 from the OpenAPI document FastAPI already serves is the obvious follow-up.
 
+*Update:* closed. `scripts/console_types.py` now generates `src/lib/api.gen.ts` from the
+pydantic models in `schemas.py`, which are the source the OpenAPI document is built from, with
+no extra npm dependency. `make check` and CI fail on drift, and `types.ts` only aliases names.
+
 ### The API is loopback-only because it has no authentication
 
 `--host` defaults to `127.0.0.1`, and `GET /config` returns the same `config_digest()` that stamps
@@ -111,5 +115,5 @@ not built; today Vite proxies `/api` to `:8000`, and CORS allows only the two de
   for installers, so `pip install opseval` is unchanged, but `make audit` now covers them.
 - CI builds the console (`make console-check`), so a type error in the front end fails the build.
   It does not yet run the console against a live API.
-- The hand-mirrored types are the weak seam. A field renamed in `schemas.py` typechecks fine on
-  both sides and breaks at runtime.
+- ~~The hand-mirrored types are the weak seam.~~ Closed: the console's API types are generated
+  from `schemas.py`, and a renamed field now fails the console typecheck.
