@@ -759,3 +759,110 @@ def test_serve_never_prints_a_configured_token(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("OPSEVAL_SERVE_TOKEN")
     out = CliRunner().invoke(cli, ["serve"]).output
     assert "#token=" in out and "this start only" in out
+
+
+# --- the gate editor (ADR-0032) --------------------------------------------------------------
+
+
+def test_the_gate_catalog_offers_only_what_the_loader_accepts(client: TestClient) -> None:
+    cat = client.get("/api/v1/gate").json()
+    choices = {s["key"]: s["choices"] for s in cat["settings"]}
+    assert choices["commit_guard"] == ["warn", "ignore"]  # never block
+    assert "ignore" not in choices["inconclusive"] and "ignore" not in choices["load_errors"]
+    assert set(cat["presets"]) == {"strict", "standard", "lenient"}
+    assert cat["presets"]["standard"]["failed.normal"] == "warn"
+    assert all(s["label"] and s["help"] for s in cat["settings"])
+
+
+def test_a_gate_edit_is_previewed_on_the_server(client: TestClient) -> None:
+    out = client.post(
+        "/api/v1/gate/resolve",
+        json={"preset": "lenient", "overrides": {"failed.normal": "block"}},
+    ).json()
+    assert out["describe"] == "lenient + failed.normal=block"
+    assert out["effective"]["failed.normal"] == "block"
+    assert out["yaml"] == "gate:\n  preset: lenient\n  failed:\n    normal: block\n"
+    assert "exit_code=gate" in out["looserThanStandard"]
+    bad = client.post("/api/v1/gate/resolve", json={"overrides": {"commit_guard": "block"}})
+    assert bad.status_code == 422 and bad.json()["code"] == "INVALID_GATE"
+    unknown = client.post("/api/v1/gate/resolve", json={"overrides": {"flakey": "warn"}})
+    assert unknown.status_code == 422
+
+
+def test_a_suite_gate_is_saved_kept_and_removed(tmp_path: Path) -> None:
+    import yaml
+
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    base = {"file": "g", "displayName": "g", "include": ["scenarios/rf-001*.yaml"]}
+    gate = {"preset": "strict", "overrides": {"flaky": "warn"}}
+    saved = c.put("/api/v1/suites", json={**base, "gate": gate}).json()
+    assert saved["gate"]["describe"] == "strict + flaky=warn"
+    doc = yaml.safe_load((cat / "suites" / "g.yaml").read_text())
+    assert doc["gate"] == {"preset": "strict", "flaky": "warn"}
+    # Listed with what it resolves to.
+    row = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "g")
+    assert (
+        row["gate"]["overrides"] == {"flaky": "warn"}
+        and row["gate"]["effective"]["flaky"] == "warn"
+    )
+    # Omitting the gate on an edit keeps it; an explicit null removes it (standard).
+    c.put("/api/v1/suites", json={**base, "displayName": "g2", "overwrite": True})
+    assert yaml.safe_load((cat / "suites" / "g.yaml").read_text())["gate"]["preset"] == "strict"
+    out = c.put("/api/v1/suites", json={**base, "gate": None, "overwrite": True}).json()
+    assert "gate" not in yaml.safe_load((cat / "suites" / "g.yaml").read_text())
+    assert out["gate"]["describe"] == "standard"
+    # A gate the loader would refuse is refused before anything is written.
+    r = c.put(
+        "/api/v1/suites",
+        json={**base, "gate": {"overrides": {"inconclusive": "ignore"}}, "overwrite": True},
+    )
+    assert r.status_code == 422 and "gate" not in yaml.safe_load(
+        (cat / "suites" / "g.yaml").read_text()
+    )
+
+
+def test_run_detail_names_the_policy_it_was_gated_with(tmp_path: Path) -> None:
+    from opseval.models.gate import PRESETS
+    from opseval.verdicts import release_gate
+
+    tests = [
+        TestVerdict(
+            test_id="a", name="a", criticality=Criticality.CRITICAL, status=VerdictStatus.PASSED
+        )
+    ]
+    r = _result("p1", 1, {"a": VerdictStatus.PASSED})
+    r = r.model_copy(
+        update={"tests": tests, "gate": release_gate(tests, policy=PRESETS["lenient"])}
+    )
+    FileStore(tmp_path).save_result(r)
+    d = (
+        connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+        .get("/api/v1/runs/p1")
+        .json()
+    )
+    assert d["gatePolicy"] == "lenient" and "exit_code=gate" in d["looserThanStandard"]
+
+
+def test_the_gate_preview_resolves_like_a_run(tmp_path: Path) -> None:
+    """OPSEVAL_GATE_FAIL_ON_FLAKY changes what a run does, so the editor must show it."""
+    app, _ = app_for(
+        tmp_path, settings=Settings(reports_dir=str(tmp_path / "r"), gate_fail_on_flaky=True)
+    )
+    c = connect(app)
+    out = c.post("/api/v1/gate/resolve", json={"preset": "standard"}).json()
+    assert out["effective"]["flaky"] == "block" and out["describe"] == "standard + flaky=block"
+    smoke = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "smoke")
+    assert smoke["gate"]["effective"]["flaky"] == "block"
+
+
+def test_saving_the_standard_gate_writes_no_block(tmp_path: Path) -> None:
+    import yaml
+
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    base = {"file": "plain", "displayName": "p", "include": ["scenarios/rf-001*.yaml"]}
+    body = {**base, "gate": {"preset": "standard", "overrides": {"failed.normal": "warn"}}}
+    out = c.put("/api/v1/suites", json=body).json()
+    assert "gate" not in yaml.safe_load((cat / "suites" / "plain.yaml").read_text())
+    assert out["gate"]["yaml"] == "" and out["gate"]["overrides"] == {}

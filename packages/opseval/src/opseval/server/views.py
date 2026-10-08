@@ -14,7 +14,18 @@ import yaml
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, config_digest
 from opseval.errors import ConfigError
-from opseval.models.gate import describe, looser_than_standard
+from opseval.models.gate import (
+    PRESETS,
+    SETTINGS,
+    GatePolicy,
+    choices,
+    describe,
+    flatten,
+    looser_than_standard,
+    overrides,
+    resolve,
+    to_yaml_block,
+)
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.scoring import INVARIANTS, REGISTRY
@@ -393,7 +404,9 @@ def load_scenarios(catalogue: Path | None, profile: SutProfile | None) -> s.Cata
     )
 
 
-def list_suites(catalogue: Path | None, profile: SutProfile | None) -> list[s.SuiteOut]:
+def list_suites(
+    catalogue: Path | None, profile: SutProfile | None, *, fail_on_flaky: bool = False
+) -> list[s.SuiteOut]:
     if catalogue is None or profile is None:
         return []
     out = []
@@ -428,9 +441,40 @@ def list_suites(catalogue: Path | None, profile: SutProfile | None) -> list[s.Su
                 scenario_count=count,
                 repeats=_nested(raw, "overrides", "execution", "repeats"),
                 stop_at=_nested(raw, "defaults", "conversation", "stop_at"),
+                # load_catalogue validated the file, so its gate block is well-formed here.
+                gate=gate_out(
+                    GatePolicy.model_validate(raw.get("gate") or {}), fail_on_flaky=fail_on_flaky
+                ),
             )
         )
     return out
+
+
+def gate_out(policy: GatePolicy, *, fail_on_flaky: bool = False) -> s.GateOut:
+    """A gate block as the console shows it, resolved exactly as a run would resolve it
+    (``OPSEVAL_GATE_FAIL_ON_FLAKY`` included). Resolution happens here, never in the browser.
+    """
+    resolved = resolve(policy, fail_on_flaky=fail_on_flaky)
+    block = to_yaml_block(policy)
+    return s.GateOut(
+        preset=policy.preset,
+        overrides=overrides(policy),
+        effective=flatten(resolved),
+        describe=describe(resolved),
+        looser_than_standard=looser_than_standard(resolved),
+        yaml="" if block is None else yaml.safe_dump({"gate": block}, sort_keys=False),
+    )
+
+
+def gate_catalog() -> s.GateCatalogOut:
+    """Every gate setting with the values it accepts, and every preset, for the editor."""
+    return s.GateCatalogOut(
+        settings=[
+            s.GateSettingOut(key=key, label=label, help=text, choices=list(choices(key)))
+            for key, label, text in SETTINGS
+        ],
+        presets={name: flatten(p) for name, p in PRESETS.items()},
+    )
 
 
 def _nested(raw: dict[str, Any], *path: str) -> Any:

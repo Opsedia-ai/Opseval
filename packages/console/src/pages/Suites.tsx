@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../lib/api";
 import { useApi } from "../lib/useApi";
+import GateEditor from "../components/GateEditor";
+import type { GateBody } from "../lib/types";
 import { Callout, Card, CoralButton, Data, Explainer, Mono, Page, PageHeader, Pill } from "../components/ui";
 
 const field = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ink";
@@ -17,6 +19,12 @@ export default function Suites() {
   const [desc, setDesc] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [repeats, setRepeats] = useState<number | "">("");
+  const [gate, setGate] = useState<GateBody>({ preset: "standard", overrides: {} });
+  // Sent only once edited: a suite listed with a load problem has no gate to show, and
+  // saving it must not replace the gate in its file with the standard one.
+  const [gateEdited, setGateEdited] = useState(false);
+  const gatePreview = useApi(() => api.resolveGate(gate), [JSON.stringify(gate)]);
+  const editGate = (g: GateBody) => { setGate(g); setGateEdited(true); };
   const [msg, setMsg] = useState<{ ok: boolean; text: string }>();
 
   // "include" patterns are file paths relative to the catalogue, so the picker works on scenario ids via the tag-free path list
@@ -25,16 +33,20 @@ export default function Suites() {
     const s = suites.data?.find((x) => x.file === sel);
     if (!s) return;
     setFile(s.file); setName(s.displayName); setDesc(s.description); setPicked(s.include); setRepeats(s.repeats ?? "");
+    setGate({ preset: s.gate?.preset ?? "standard", overrides: s.gate?.overrides ?? {} });
+    setGateEdited(false);
   }, [sel, suites.data]);
   useEffect(() => { if (!sel && suites.data?.[0]) setSel(suites.data[0].file); }, [suites.data, sel]);
 
-  const yaml = useMemo(() => [`name: ${name}`, `description: ${desc}`, "include:", ...picked.map((f) => `  - ${f}`), ...(repeats === "" ? [] : ["overrides:", `  execution.repeats: ${repeats}`])].join("\n"), [name, desc, picked, repeats]);
+  // The gate block is the server's own serialisation (one serialiser, ADR-0032).
+  const gateYaml = gatePreview.error ? "" : (gatePreview.data?.yaml ?? "");
+  const yaml = useMemo(() => [`name: ${name}`, `description: ${desc}`, "include:", ...picked.map((f) => `  - ${f}`), ...(repeats === "" ? [] : ["overrides:", `  execution.repeats: ${repeats}`])].join("\n") + (gateYaml ? `\n${gateYaml.trimEnd()}` : ""), [name, desc, picked, repeats, gateYaml]);
   const save = async () => {
     try {
       // Saving over the suite that is open in the editor is an edit; any other existing name is refused.
       // An empty repeats box clears the override (null); stop_at and every key this form does
       // not manage are left out, so the server keeps them as they are in the file.
-      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? null : repeats, overwrite: file === sel });
+      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? null : repeats, ...(gateEdited ? { gate } : {}), overwrite: file === sel });
       setMsg({ ok: true, text: `Saved. Resolves to ${s.scenarioCount} scenario(s).` }); suites.reload();
     } catch (e) { setMsg({ ok: false, text: (e as ApiError).message }); }
   };
@@ -64,6 +76,7 @@ export default function Suites() {
                 <div className="mt-4"><Callout><b>The file name labels your runs</b>, not the display name. Renaming a suite means a new file, otherwise old runs stop lining up in Compare and Trend.</Callout></div>
               </Card>
               <Card title="Settings"><label className={lab}>Repeats per scenario</label><input type="number" min={1} max={20} className={`${field} max-w-40`} value={repeats} placeholder="as authored" onChange={(e) => setRepeats(e.target.value === "" ? "" : +e.target.value)} /></Card>
+              <GateEditor value={gate} onChange={editGate} preview={gatePreview} readOnly={readOnly} />
               <Card title="Which scenarios" aside={<Pill tone="pass">{picked.length} pattern(s)</Pill>}>
                 <ul className="divide-y divide-line">{ids.map((s, i) => (
                   <li key={s.id}><label className="flex items-center justify-between gap-3 py-2 text-ink">

@@ -436,8 +436,9 @@ cd packages/console && npm ci && npm run dev        # console on http://localhos
 Without `--catalogue` it serves the built-in demo, read-only. Open the console from the printed
 link: it carries the token every API request needs.
 
-It reads the run folders you already have — browse runs and their per-check scores, compare two
-runs, watch the trend, see token usage, edit suites, bulk-import scenarios, and start a run.
+It reads the run folders you already have. You can browse runs and their per-check scores,
+compare two runs, watch the trend, see token usage, edit suites and their **release gate**
+(a preset plus one dropdown per outcome, see below), bulk-import scenarios, and start a run.
 
 The screen worth knowing about is **Simulator**. The simulator is the LLM that plays your
 customer; if it drifts out of character, every score downstream measured the wrong conversation.

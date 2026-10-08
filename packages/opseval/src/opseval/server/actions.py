@@ -26,6 +26,7 @@ from opseval.catalogue import check_references, load_catalogue
 from opseval.config import Settings
 from opseval.errors import ConfigError, OpsevalError
 from opseval.llm import UsageMeter, client_for_role
+from opseval.models.gate import GatePolicy, from_flat, to_yaml_block
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario, Suite
 from opseval.runner import RunOptions, launch, new_run_id
@@ -256,11 +257,32 @@ def _suite_doc(body: s.SuiteIn, existing: dict[str, Any] | None) -> dict[str, An
     doc: dict[str, Any] = dict(existing or {})
     doc.update(name=body.display_name, description=body.description, include=body.include)
     sent = body.model_fields_set
+    if "gate" in sent:
+        block = None if body.gate is None else to_yaml_block(gate_policy(body.gate))
+        if block is None:
+            doc.pop("gate", None)  # the plain standard gate needs no block
+        else:
+            doc["gate"] = block
     if "repeats" in sent or existing is None:
         _set_nested(doc, ("overrides", "execution", "repeats"), body.repeats)
     if "stop_at" in sent or existing is None:
         _set_nested(doc, ("defaults", "conversation", "stop_at"), body.stop_at)
     return doc
+
+
+def gate_policy(body: s.GateIn) -> GatePolicy:
+    """The ``gate:`` block for an edit, refused with 422 if any setting is not allowed."""
+    try:
+        return from_flat(body.preset, body.overrides)
+    except ValueError as exc:  # a pydantic ValidationError is a ValueError
+        raise ApiError(422, "INVALID_GATE", str(exc)) from exc
+
+
+def preview_gate(ctx: ServerContext, body: s.GateIn) -> s.GateOut:
+    """What an edited gate would resolve to, before it is saved."""
+    from opseval.server.views import gate_out
+
+    return gate_out(gate_policy(body), fail_on_flaky=ctx.settings.gate_fail_on_flaky)
 
 
 def save_suite(ctx: ServerContext, body: s.SuiteIn) -> s.SuiteOut:
@@ -310,6 +332,7 @@ def save_suite(ctx: ServerContext, body: s.SuiteIn) -> s.SuiteOut:
         scenario_count=count,
         repeats=_nested_get(doc, "overrides", "execution", "repeats"),
         stop_at=_nested_get(doc, "defaults", "conversation", "stop_at"),
+        gate=_gate_view(doc, ctx.settings.gate_fail_on_flaky),
     )
 
 
@@ -320,6 +343,12 @@ def _nested_get(doc: dict[str, Any], *path: str) -> Any:
             return None
         cur = cur[key]
     return cur
+
+
+def _gate_view(doc: dict[str, Any], fail_on_flaky: bool) -> s.GateOut:
+    from opseval.server.views import gate_out
+
+    return gate_out(GatePolicy.model_validate(doc.get("gate") or {}), fail_on_flaky=fail_on_flaky)
 
 
 def _problem(path: str, fld: str, message: str) -> s.Problem:

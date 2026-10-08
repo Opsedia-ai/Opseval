@@ -17,7 +17,7 @@ Two things are not configurable, because configuring them would break the one ru
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict
 
@@ -187,9 +187,11 @@ def resolve(
     return resolved
 
 
-def _flat(p: ResolvedGatePolicy) -> dict[str, str]:
+def _flatten(dump: dict[str, Any]) -> dict[str, str]:
+    """``{"failed": {"normal": "warn"}, "flaky": "block"}`` -> ``{"failed.normal": ..., ...}``
+    (the preset is not a setting)."""
     out: dict[str, str] = {}
-    for key, value in p.model_dump().items():
+    for key, value in dump.items():
         if key == "preset":
             continue
         if isinstance(value, dict):
@@ -197,6 +199,10 @@ def _flat(p: ResolvedGatePolicy) -> dict[str, str]:
         else:
             out[key] = value
     return out
+
+
+def _flat(p: ResolvedGatePolicy) -> dict[str, str]:
+    return _flatten(p.model_dump())
 
 
 def changes_from(p: ResolvedGatePolicy, base: Preset | None = None) -> list[str]:
@@ -226,3 +232,75 @@ def describe(p: ResolvedGatePolicy) -> str:
     """One line for reports: ``standard`` or ``standard + failed.normal=block``."""
     changes = changes_from(p)
     return p.preset if not changes else f"{p.preset} + " + ", ".join(changes)
+
+
+# --- the flat form the console edits (one dropdown per key) -----------------------------
+
+_OUTAGE = "Not run: a dependency or the simulator was down."
+
+SETTINGS: tuple[tuple[str, str, str], ...] = (
+    ("failed.blocker", "Failed: blocker scenario", "A scenario marked blocker failed."),
+    ("failed.critical", "Failed: critical scenario", "A scenario marked critical failed."),
+    ("failed.normal", "Failed: normal scenario", "A scenario of normal criticality failed."),
+    ("skipped.blocker", "Skipped (outage): blocker", _OUTAGE),
+    ("skipped.critical", "Skipped (outage): critical", _OUTAGE),
+    ("skipped.normal", "Skipped (outage): normal", _OUTAGE),
+    ("commit_guard", "Skipped by the commit guard", "Never blocks (ADR-0008)."),
+    ("quarantined", "Quarantined", "A scenario tagged blocked by its author."),
+    ("inconclusive", "Inconclusive", "Too few valid attempts to judge. Never ignored."),
+    ("flaky", "Flaky", "Passed, but not consistently across attempts."),
+    ("unmeasured", "Check not measured", "An agent-facing check could not run (harness error)."),
+    ("degraded", "Degraded evidence", "Scored on weaker evidence than the scorer wants."),
+    ("vacuous", "Passed vacuously", "The situation the check looks for never arose."),
+    ("load_errors", "Scenario files not loaded", "Files that failed validation. Never ignored."),
+    ("undeclared_criticality", "No criticality declared", "When no scenario declares one."),
+    ("exit_code", "CI exit code", "strict: say what happened. gate: follow this policy."),
+)
+"""Every setting the console offers, in display order: (key, label, help)."""
+
+
+def choices(key: str) -> tuple[str, ...]:
+    """The values a setting accepts, read from the model, so the console can never offer
+    one the loader would refuse (commit_guard=block, inconclusive=ignore)."""
+    group, _, leaf = key.partition(".")
+    model: type[BaseModel] = ByCriticality if leaf else ResolvedGatePolicy
+    annotation = model.model_fields[leaf or group].annotation
+    return tuple(get_args(annotation))
+
+
+def flatten(policy: ResolvedGatePolicy) -> dict[str, str]:
+    """``{"failed.normal": "warn", ...}`` for every setting (no preset)."""
+    return _flat(policy)
+
+
+def overrides(policy: GatePolicy) -> dict[str, str]:
+    """The settings a suite's ``gate:`` block sets on top of its preset, flattened."""
+    return _flatten(policy.model_dump(exclude_none=True))
+
+
+def from_flat(preset: Preset, settings: dict[str, str]) -> GatePolicy:
+    """The ``gate:`` block for a preset plus flat overrides, in canonical form: a setting
+    equal to what the preset already does is dropped, so "changed" always means changed.
+    Unknown keys, or values a setting does not accept, raise ``ValueError``."""
+    nested: dict[str, Any] = {"preset": preset}
+    base = _flat(PRESETS[preset])
+    for key, value in settings.items():
+        if key not in base:
+            raise ValueError(f"unknown gate setting {key!r}")
+        if base[key] == value:
+            continue
+        group, _, leaf = key.partition(".")
+        if leaf:
+            nested.setdefault(group, {})[leaf] = value
+        else:
+            nested[group] = value
+    return GatePolicy.model_validate(nested)
+
+
+def to_yaml_block(policy: GatePolicy) -> dict[str, Any] | None:
+    """The ``gate:`` value a suite file gets, or ``None`` for the plain standard gate (no
+    block at all). The one serialiser: the server writes it and the console shows it."""
+    dump = policy.model_dump(exclude_none=True)
+    if dump == {"preset": "standard"}:
+        return None
+    return dump

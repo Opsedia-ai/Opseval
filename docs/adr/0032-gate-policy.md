@@ -121,7 +121,11 @@ The scenarios it never reached are recorded as `skipped_precondition` with
   Results from before this change still read, and `safe_to_release` falls back to the
   ADR-0030 rule for them.
 - The console server reads `Gate.agent_blocked` instead of parsing the blocking strings. Run
-  detail shows the policy and any setting looser than standard. Editing the policy from the
-  console is the next step, behind the authenticated API of ADR-0031.
+  detail shows the policy and any setting looser than standard. The console edits the policy
+  per suite: `GET /api/v1/gate` lists every setting with only the values the loader accepts,
+  plus the presets, and `POST /api/v1/gate/resolve` previews an edit. Resolution stays on the
+  server; the browser decides nothing about the gate. The suite editor writes the same
+  `gate:` block a person would write by hand. Omitting `gate` on save keeps it, and `null`
+  removes it.
 - pytest-opseval still maps verdicts to pytest outcomes one test at a time. Following the
   suite's gate policy there is future work.
