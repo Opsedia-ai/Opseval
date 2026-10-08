@@ -1,0 +1,261 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Write-side of the API: rehearse the simulator, launch runs, save suites, import scenarios.
+
+Everything here either succeeds completely or leaves the catalogue exactly as it was.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import uuid
+from pathlib import Path
+
+import yaml
+from pydantic import ValidationError
+
+from opseval.catalogue import load_catalogue
+from opseval.config import Settings
+from opseval.errors import ConfigError, OpsevalError
+from opseval.llm import UsageMeter, client_for_role
+from opseval.models.profile import SutProfile
+from opseval.models.scenario import Scenario, Suite
+from opseval.runner import RunOptions, launch
+from opseval.scoring import INVARIANTS, REGISTRY
+from opseval.server import schemas as s
+from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
+
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+class ApiError(Exception):
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status, self.code, self.message = status, code, message
+
+
+def _scenario(catalogue: Path | None, profile: SutProfile | None, sid: str) -> Scenario:
+    if catalogue is None or profile is None:
+        raise ApiError(404, "NO_CATALOGUE", "the server was started without a catalogue")
+    root = catalogue / "scenarios" if (catalogue / "scenarios").is_dir() else catalogue
+    cat, _ = load_catalogue(root, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS))
+    for sc in cat.scenarios:
+        if sc.id == sid:
+            return sc
+    raise ApiError(404, "UNKNOWN_SCENARIO", f"no valid scenario {sid!r}")
+
+
+def persona(
+    settings: Settings, catalogue: Path | None, profile: SutProfile | None, sid: str
+) -> s.PersonaOut:
+    sc = _scenario(catalogue, profile, sid)
+    conv = sc.conversation
+    return s.PersonaOut(
+        scenario_id=sc.id,
+        role=sc.persona.role,
+        goal=sc.goal,
+        flow=conv.flow,
+        language=sc.persona.language,
+        dialect=sc.persona.dialect,
+        timezone=sc.persona.timezone,
+        typing_noise=sc.persona.typing_noise,
+        scripted=bool(conv.scripted_turns),
+        opening=conv.opening_message or (conv.scripted_turns[0] if conv.scripted_turns else None),
+        simulator_model=settings.simulator_model,
+        judge_model=settings.judge_model,
+    )
+
+
+async def rehearse(
+    settings: Settings, catalogue: Path | None, profile: SutProfile | None, body: s.RehearseIn
+) -> s.RehearseOut:
+    """One simulator turn against a transcript the human typed. Touches no agent."""
+    sc = _scenario(catalogue, profile, body.scenario_id)
+    transcript = [(t.who, t.text) for t in body.transcript][-40:]
+    if sum(len(t) for _, t in transcript) > 20_000:
+        raise ApiError(
+            413, "TRANSCRIPT_TOO_LONG", "the rehearsal transcript is capped at 20k characters"
+        )
+    sim: Simulator
+    model: str | None = None
+    if sc.conversation.scripted_turns:
+        sim = ScriptedSimulator(sc, attempt_seed(sc.id, 0))
+    else:
+        client = client_for_role(settings, "simulator", UsageMeter())
+        if client is None:
+            raise ApiError(
+                503,
+                "SIMULATOR_NOT_CONFIGURED",
+                "set OPSEVAL_SIMULATOR_BASE_URL and OPSEVAL_SIMULATOR_MODEL "
+                "to rehearse this persona",
+            )
+        sim, model = LLMSimulator(sc, attempt_seed(sc.id, 0), client), client.model
+    try:
+        if not transcript:
+            turn = await sim.opening()
+        else:
+            if isinstance(sim, ScriptedSimulator):
+                await sim.opening()
+                # replay: a scripted persona advances one turn per agent reply
+                for _ in range(sum(1 for who, _ in transcript if who == "agent") - 1):
+                    await sim.next_turn(transcript)
+            turn = await sim.next_turn(transcript)
+    except OpsevalError as exc:
+        raise ApiError(502, "SIMULATOR_FAILED", str(exc)) from exc
+    return s.RehearseOut(
+        turn=s.Turn(who="customer", text=turn.text), goal_reached=turn.goal_reached, model=model
+    )
+
+
+_tasks: set[asyncio.Task[object]] = set()
+
+
+def start_run(
+    settings: Settings,
+    catalogue: Path | None,
+    profile: SutProfile | None,
+    profile_path: str | Path,
+    default_target: str | None,
+    body: s.LaunchIn,
+) -> s.LaunchOut:
+    """Start a run in the background. The console polls /runs for its progress."""
+    if catalogue is None or profile is None:
+        raise ApiError(400, "NO_CATALOGUE", "the server was started without a catalogue")
+    target = body.target or default_target
+    if not target:
+        raise ApiError(400, "NO_TARGET", "give a target (ws://…) or start the server with --target")
+    temp: Path | None = None
+    if body.scenarios:
+        root = catalogue / "scenarios" if (catalogue / "scenarios").is_dir() else catalogue
+        cat, _ = load_catalogue(
+            root, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+        )
+        files = [
+            Path(cat.sources[i]).resolve().relative_to(catalogue.resolve()).as_posix()
+            for i in body.scenarios
+            if i in cat.sources
+        ]
+        if len(files) != len(set(body.scenarios)):
+            raise ApiError(404, "UNKNOWN_SCENARIO", "one of the chosen scenarios does not exist")
+        temp = catalogue / "suites" / f".console-{uuid.uuid4().hex[:8]}.yaml"
+        temp.write_text(yaml.safe_dump({"name": "console-selection", "include": files}), "utf-8")
+        suite_path = temp
+    elif (
+        body.suite
+        and SAFE_NAME.match(body.suite)
+        and (catalogue / "suites" / f"{body.suite}.yaml").is_file()
+    ):
+        suite_path = catalogue / "suites" / f"{body.suite}.yaml"
+    else:
+        raise ApiError(404, "UNKNOWN_SUITE", "choose an existing suite or some scenarios")
+    token = uuid.uuid4().hex[:8]
+
+    async def _go() -> None:
+        try:
+            opts = RunOptions(
+                target=target,
+                profile=profile_path,
+                repeats=body.repeats,
+                allow_commit=body.allow_commit,
+                fail_fast=body.fail_fast,
+            )
+            await launch(suite_path, opts, settings)
+        except (ConfigError, OpsevalError):
+            pass  # surfaces as a run with load_errors / a missing run; never as an agent failure
+        finally:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+
+    task = asyncio.create_task(_go())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+    return s.LaunchOut(accepted=True, token=token, message=f"run started against {target}")
+
+
+def save_suite(catalogue: Path | None, profile: SutProfile | None, body: s.SuiteIn) -> s.SuiteOut:
+    if catalogue is None or profile is None:
+        raise ApiError(400, "NO_CATALOGUE", "the server was started without a catalogue")
+    if not SAFE_NAME.match(body.file):
+        raise ApiError(422, "BAD_NAME", "file name may use letters, digits, '.', '_' and '-' only")
+    doc: dict[str, object] = {
+        "name": body.display_name,
+        "description": body.description,
+        "include": body.include,
+    }
+    if body.repeats:
+        doc["overrides"] = {"execution": {"repeats": body.repeats}}
+    if body.stop_at:
+        doc["defaults"] = {"conversation": {"stop_at": body.stop_at}}
+    try:
+        Suite.model_validate(doc)
+    except ValidationError as exc:
+        raise ApiError(422, "INVALID_SUITE", str(exc)) from exc
+    path = catalogue / "suites" / f"{body.file}.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), "utf-8")
+    try:
+        cat, _ = load_catalogue(
+            path, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+        )
+    except ConfigError as exc:
+        raise ApiError(422, "INVALID_SUITE", str(exc)) from exc
+    return s.SuiteOut(
+        file=body.file,
+        display_name=body.display_name,
+        description=body.description,
+        include=body.include,
+        scenario_count=len(cat.scenarios),
+    )
+
+
+def import_scenarios(
+    catalogue: Path | None, profile: SutProfile | None, body: s.ImportIn
+) -> s.ImportOut:
+    """All-or-nothing: validate every file first, write only if all are valid."""
+    if catalogue is None or profile is None:
+        raise ApiError(400, "NO_CATALOGUE", "the server was started without a catalogue")
+    if not SAFE_NAME.match(body.family):
+        raise ApiError(422, "BAD_FAMILY", "family may use letters, digits, '.', '_' and '-' only")
+    root = catalogue / "scenarios"
+    existing_ids = {sc.id for sc in load_scenarios_ids(root, profile)}
+    problems: list[s.Problem] = []
+    parsed: list[tuple[str, str, Scenario]] = []
+    for f in body.files:
+        name, text = f.get("name", ""), f.get("text", "")
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml$", name):
+            problems.append(
+                s.Problem(path=name, field="name", message="not a safe .yaml file name")
+            )
+            continue
+        try:
+            raw = yaml.safe_load(text)
+            sc = Scenario.model_validate(raw)
+        except (yaml.YAMLError, ValidationError, TypeError) as exc:
+            problems.append(s.Problem(path=name, field="", message=str(exc)[:500]))
+            continue
+        from opseval.catalogue import check_references
+
+        for msg in check_references(sc, profile, REGISTRY, set(INVARIANTS)):
+            problems.append(s.Problem(path=name, field="", message=msg))
+        parsed.append((name, text, sc))
+    if problems:
+        return s.ImportOut(imported=[], problems=problems)
+    clashes = [
+        s.Problem(path=name, field="id", message=f"would replace existing scenario {sc.id!r}")
+        for name, _, sc in parsed
+        if sc.id in existing_ids
+    ]
+    if clashes:  # never silently overwrite
+        return s.ImportOut(imported=[], problems=clashes)
+    folder = root / body.family
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, text, _ in parsed:
+        (folder / name).write_text(text, "utf-8")
+    return s.ImportOut(imported=[sc.id for _, _, sc in parsed], problems=[])
+
+
+def load_scenarios_ids(root: Path, profile: SutProfile) -> list[Scenario]:
+    if not root.is_dir():
+        return []
+    cat, _ = load_catalogue(root, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS))
+    return cat.scenarios
