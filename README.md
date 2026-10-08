@@ -545,7 +545,8 @@ Our pledge is in [GOVERNANCE.md](GOVERNANCE.md): **evaluation features are never
 | v0.5 | Self-hosted server and web console, Docker Compose and Helm |
 | v1.0 | Stable schemas and APIs, security review, Arabic UI |
 
-See [ROADMAP.md](ROADMAP.md) for details.
+See [ROADMAP.md](ROADMAP.md) for details, and [docs/STATUS.md](docs/STATUS.md) for where the
+project actually stands — 33 of 41 roadmap items, with the method and the caveats spelled out.
 
 ## Contributing
 

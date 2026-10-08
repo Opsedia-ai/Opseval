@@ -73,7 +73,7 @@ make console                 # the web console on :5173, proxying /api to :8000 
 make console-check           # typecheck + build the console (runs in CI)
 ```
 
-Definition of done for any change: `make check` is green (which now includes `opseval schemas --check`, so run `opseval schemas` after touching a model), coverage stays ≥ 85%, and the four demo exit codes are unchanged. New behaviour comes with tests, plus docs (README, ROADMAP or ADR) when a user would notice it.
+Definition of done for any change: `make check` is green (which now includes `opseval schemas --check`, so run `opseval schemas` after touching a model), coverage stays ≥ 85%, and the four demo exit codes are unchanged. New behaviour comes with tests, plus docs (README, ROADMAP or ADR) when a user would notice it. **If a change moves a 🟢/⚪ marker in `ROADMAP.md`, update `docs/STATUS.md` in the same commit** — it reports project completion, and every number in it must come from a command in the file, never from an estimate.
 
 ## Conventions
 
@@ -85,7 +85,7 @@ Definition of done for any change: `make check` is green (which now includes `op
 - Commits: Conventional Commits (`feat(scope): ...`), DCO sign-off for external contributors.
 - Keep the repo **private** until Gate 0 (IP clearance) is signed off. Never copy code, prompts, scenario content or names from any employer's internal systems (clean-room policy).
 
-## Current status (update this section when it changes)
+## Current status (update this section when it changes; the headline figure lives in `docs/STATUS.md`)
 
 - v0.1 core: done. CLI, transports (websocket with resume and HS256 token refresh (ADR-0012), http-json, openai-chat, python), simulator, scoring, verdicts, reports, demo, `init`, JUnit.
 - v0.2: `opseval rescore` re-scores saved runs offline and reports scorer/prompt changes (ADR-0013). Bump a scorer's `version` when its logic changes.
