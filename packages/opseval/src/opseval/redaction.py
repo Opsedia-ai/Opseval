@@ -50,7 +50,10 @@ _PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
     ("bearer_token", re.compile(r"\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{12,}")),
     ("basic_auth", re.compile(r"\b[Bb]asic\s+[A-Za-z0-9+/]{16,}={0,2}")),
     # Vendor key formats. These prefixes are reserved by their issuers.
-    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")),
+    # No hyphen in the body: `sk-[A-Za-z0-9_-]{16,}` also matches a hyphenated slug like
+    # `/sk-winter-jacket-blue`, and deleting a product code out of a refund conversation
+    # is exactly the false positive that costs evidence.
+    ("openai_key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_]{16,}\b")),
     ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{16,}\b")),
     ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b")),
     ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b")),
@@ -62,16 +65,38 @@ _PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
         "private_key",
         re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
     ),
-    # "api_key=…", "password: …" written inline in text. Bounded so it stops at the
-    # value and does not swallow the rest of the sentence.
+    # "api_key=…", "password: …" written inline in text.
+    #
+    # The label alone is not enough: "The secret: chocolate cake" and "password: forgotten"
+    # are ordinary sentences, and an earlier version deleted the next word out of both.
+    # So the value must also *look* like a token rather than a word — it needs a digit, a
+    # symbol, or mixed case. Quotes are matched with look-around so they are not consumed,
+    # which previously left `password: "[redacted:…]` with an unbalanced quote and
+    # corrupted any JSON kept as a raw string.
     (
         "labelled_secret",
         re.compile(
             r"(?i)\b(?:api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token)"
-            r"\s*[=:]\s*[\"']?([A-Za-z0-9._~+/=-]{8,})[\"']?"
+            r"[\"']?\s*[=:]\s*[\"']?([A-Za-z0-9._~+/=-]{8,})"
         ),
     ),
 )
+
+
+def _looks_like_a_secret(value: str) -> bool:
+    """Whether a labelled value is a token rather than an English word.
+
+    The label alone is not enough. "The secret: chocolate cake" and "password: forgotten"
+    are ordinary sentences, and matching on the label deleted the next word out of both.
+    A real token carries a digit, a symbol, or mixed case; a lowercase dictionary word
+    carries none of the three.
+    """
+    return (
+        any(c.isdigit() for c in value)
+        or any(c in "._~+/=-" for c in value)
+        or (value != value.lower() and value != value.upper())
+    )
+
 
 #: Ordered longest-prefix first so ``sk-ant-…`` is classified before ``sk-…``.
 PATTERNS: Final = tuple(
@@ -90,12 +115,17 @@ def redact_text(value: str) -> tuple[str, list[str]]:
     for kind, pattern in PATTERNS:
 
         def _sub(match: re.Match[str], kind: str = kind) -> str:
-            kinds.append(kind)
-            # A labelled secret keeps its label, so "api_key=[redacted:…]" still reads as
-            # a key assignment rather than losing the context that made it suspicious.
             if kind == "labelled_secret" and match.lastindex:
-                start = match.group(0).index(match.group(1))
-                return match.group(0)[:start] + _marker(kind)
+                if not _looks_like_a_secret(match.group(1)):
+                    return match.group(0)  # an ordinary sentence: leave it alone
+                # Keep the label, so "api_key=[redacted:…]" still reads as a key
+                # assignment rather than losing the context that made it suspicious.
+                # Offsets, not `.index()`: with `password=password` a search would find
+                # the label's own text at offset 0 and swallow the label.
+                keep = match.start(1) - match.start(0)
+                kinds.append(kind)
+                return match.group(0)[:keep] + _marker(kind)
+            kinds.append(kind)
             return _marker(kind)
 
         out = pattern.sub(_sub, out)
@@ -105,9 +135,12 @@ def redact_text(value: str) -> tuple[str, list[str]]:
 def redact_value(value: Any) -> tuple[Any, list[str]]:
     """Walk a payload redacting credential values in every string it contains.
 
-    Complements ``driver.redact``, which removes credential-shaped *keys*. A tool call's
-    arguments carry both shapes: ``{"headers": {"authorization": "..."}}`` is caught by
-    the key rule, ``{"note": "token is sk-..."}`` only by this one.
+    Complements ``driver.redact``, which removes credential-shaped *keys*. A payload
+    carries both shapes: ``{"headers": {"authorization": "..."}}`` is caught by the key
+    rule, ``{"note": "token is sk-..."}`` only by this one.
+
+    Tool-call arguments go through ``traces.enrich`` rather than here, because the trace
+    backend returns them after the driver has finished with the record.
     """
     found: list[str] = []
     if isinstance(value, str):

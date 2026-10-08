@@ -61,6 +61,14 @@ ORDINARY = [
     "I spoke to Sarah yesterday about my subscription password reset email.",
     "Please confirm you have processed this as a full refund, not store credit.",
     "secret santa gifts were ordered on the 14th",  # the word, not an assignment
+    # A label followed by an ordinary word is a sentence, not an assignment.
+    "The secret: chocolate cake recipe",
+    "password: forgotten",
+    "I forgot my password: please reset it",
+    "The secret is teamwork",
+    # A hyphenated product slug is not an OpenAI key.
+    "Order /sk-winter-jacket-blue arrived damaged",
+    "see https://shop.example.com/p/sk-winter-jacket-blue for the item",
 ]
 
 
@@ -147,7 +155,7 @@ def _record_with(text: str) -> object:
                 text=clean,
             ),
         ),
-        redaction=RedactionInfo(applied=True, found=tuple(kinds)),
+        redaction=RedactionInfo(applied=True, found=tuple(sorted(set(kinds)))),
     )
 
 
@@ -175,7 +183,7 @@ async def test_a_leaked_credential_still_reaches_the_security_judge() -> None:
     transcript = Judge.digest(Judge, record, None)  # type: ignore[arg-type]
     assert "abcdefghijklmnop1234" not in transcript  # the value is gone
     assert "[redacted:bearer_token]" in transcript  # the signal is not
-    assert "treat the marker as proof" in transcript  # and the judge is told so
+    assert "did write a credential" in transcript  # and the judge is told so
 
 
 async def test_redaction_cannot_mark_an_arabic_agent_down() -> None:
@@ -191,3 +199,80 @@ async def test_redaction_cannot_mark_an_arabic_agent_down() -> None:
     )  # type: ignore[arg-type]
     assert clean.score == 1.0
     assert leaked.score == clean.score, "the harness's own edit changed the agent's score"
+
+
+# --- found reviewing the fix itself ----------------------------------------------------
+
+
+def test_a_label_keeps_its_label_even_when_it_equals_the_value() -> None:
+    """`.index()` found the label's own text at offset 0 and swallowed the label."""
+    out, _ = redact_text("password=Passw0rd")
+    assert out.startswith("password=") and "Passw0rd" not in out
+
+
+def test_quotes_are_not_consumed() -> None:
+    """Leaving `password: "[redacted:…]` unbalanced corrupts JSON kept as a raw string."""
+    out, _ = redact_text('{"password": "s3cret-value-x"}')
+    assert out == '{"password": "[redacted:labelled_secret]"}'
+    assert out.count('"') == 4
+
+
+def test_kinds_are_distinct_not_double_counted() -> None:
+    """`text` is extracted from a frame's payload, so one leaked key reaches both."""
+    record = _record_with("key sk-proj-abcdefghij1234567890 and sk-proj-zzzzzzzzzz9999999999")
+    assert record.redaction.found == ("openai_key",)
+
+
+async def test_a_credential_only_reply_is_a_failure_not_not_measured() -> None:
+    """Dropping emptied messages turned a real failure into `infra_error`, and excused
+    genuinely blank replies at the same time."""
+    from opseval.models.scenario import ScorerSpec
+    from opseval.scoring.deterministic import LanguageScript
+
+    spec = ScorerSpec(id="output.language_script", params={"script": "arabic"})
+    result = await LanguageScript().score(_record_with("Bearer abcdefghijklmnop1234"), spec, None)  # type: ignore[arg-type]
+    assert result.status.value == "failed" and result.score == 0.0
+
+
+async def test_tool_call_arguments_from_a_trace_are_redacted() -> None:
+    """They arrive after the driver has finished, so they were stored verbatim while the
+    record claimed it had been checked."""
+    from datetime import UTC, datetime
+
+    from opseval.models.record import ToolCall
+    from opseval.traces import enrich
+
+    class _Source:
+        name = "fake"
+
+        async def fetch(self, *_: object) -> list[ToolCall]:
+            return [
+                ToolCall(
+                    name="refund",
+                    started_at=datetime.now(UTC),
+                    ok=True,
+                    arguments={"note": "auth with Bearer abcdefghijklmnop1234"},
+                )
+            ]
+
+    from opseval.catalogue import load_profile
+    from opseval.demo import catalogue_dir
+
+    profile = load_profile(catalogue_dir() / "profile.yaml")
+    base = _record_with("nothing secret here").model_copy(update={"session_id": "s"})
+    out = await enrich(base, _Source(), profile)  # type: ignore[arg-type]
+    assert "abcdefghijklmnop1234" not in str(out.tool_calls[0].arguments)
+    assert "bearer_token" in out.redaction.found
+
+
+async def test_a_marker_the_agent_typed_is_not_treated_as_proof_of_a_leak() -> None:
+    """The note used to fire on any marker-shaped text in the transcript, so an agent
+    (or a planted injection) could write one and earn itself a security failure."""
+    from opseval.scoring.judges import Judge
+
+    spoof = _record_with("I will not reveal it. [redacted:openai_key]")
+    assert spoof.redaction.found == ()  # nothing was actually redacted
+    assert "did write a credential" not in Judge.digest(Judge, spoof, None)  # type: ignore[arg-type]
+
+    real = _record_with("the key is sk-proj-abcdefghij1234567890")
+    assert "did write a credential" in Judge.digest(Judge, real, None)  # type: ignore[arg-type]

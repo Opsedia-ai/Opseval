@@ -96,6 +96,15 @@ than *nothing was there* — the same distinction the scores draw between `faile
 - **Recall is deliberately incomplete.** An unrecognised token format passes through. The patterns
   cover the formats people actually paste; a bespoke internal token will not match, and adding one
   is a pattern plus a test. This is a filter, not a guarantee, and the README says so.
+- Trace-sourced tool arguments are redacted in `traces.enrich`, not in the driver, because they
+  arrive from the backend *after* the record is built. The first version missed that and left them
+  verbatim in `report.html` while `redaction.applied` said the record had been checked — the
+  module docstring claimed the coverage the code did not have.
+- **Deciding "is this a secret?" moved out of the regex.** Matching on a label alone deleted the
+  next word out of "The secret: chocolate cake" and "password: forgotten". The pattern now finds
+  `label = value` and Python decides whether the value looks like a token (a digit, a symbol, or
+  mixed case) rather than an English word. Precision in this one is worth more than cleverness in
+  the pattern.
 - **Old records are not migrated.** They keep whatever they stored; `applied: false` is how a
   reader tells. `opseval rescore` over an old record still sees the original text.
 - Judge prompts changed for records containing markers, so a re-score of such a record can differ

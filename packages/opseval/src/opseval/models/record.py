@@ -100,7 +100,10 @@ class RedactionInfo(Frozen):
 
     applied: bool = False
     found: tuple[str, ...] = ()
-    """Kinds, in order, e.g. ``("bearer_token", "jwt")``. Values are never kept."""
+    """The distinct kinds found, sorted. Values are never kept.
+
+    Distinct rather than counted: ``text`` is extracted from a frame's payload, so a
+    single leaked key appears on both and a tally would say two."""
 
 
 class RunRecord(Frozen):

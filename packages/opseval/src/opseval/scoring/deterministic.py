@@ -222,8 +222,12 @@ class LanguageScript(Scorer):
         # Markers are the harness's own edit (FR-REC-03), and they are Latin script. Left
         # in, a redaction inside an Arabic reply could push it under the threshold and
         # mark the agent down for something the harness did to the evidence.
+        # Markers are stripped because they are the harness's own edit and they are Latin
+        # script (FR-REC-03). Messages that become empty are *kept*: a reply that was
+        # nothing but a credential is a real failure to answer in the expected script, and
+        # dropping it would report that as "not measured" and excuse genuinely blank
+        # replies into the bargain.
         texts = [strip_markers(f.text) for f in record.received() if f.text]
-        texts = [t for t in texts if t.strip()]
         if not texts:
             return self.infra(spec, "NOT_MEASURABLE: the agent sent no text")
         want, other = (ARABIC, LATIN) if script == "arabic" else (LATIN, ARABIC)

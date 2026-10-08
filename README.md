@@ -592,9 +592,9 @@ Please report vulnerabilities privately. See [SECURITY.md](SECURITY.md).
 Run records are written to `reports/`, embedded in `report.html`, and posted in full to any
 webhook sink — so what they contain is worth knowing.
 
-Credential **values** are removed from conversation text and from payloads before the record is
-written: JWTs, bearer and basic auth, vendor API keys, PEM private keys, and inline `api_key=…`
-assignments. The value is replaced by a marker naming the kind, so a leak stays gradeable — an
+Credential **values** are removed from conversation text, from payloads, and from trace-sourced
+tool-call arguments before the record is stored: JWTs, bearer and basic auth, vendor API keys, PEM
+private keys, and inline `api_key=…` assignments. The value is replaced by a marker naming the kind, so a leak stays gradeable — an
 agent that pasted a token still fails the security judge, without the token being stored.
 
 Two limits, deliberately:
