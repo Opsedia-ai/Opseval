@@ -304,7 +304,12 @@ def cancel_run(ctx: ServerContext, run_id: str) -> s.CancelOut:
 
     try:
         detail = run_detail(ctx.store, run_id)
-    except RunInProgress:
+    except RunInProgress as running:
+        if running.progress is not None and running.progress.stage == "finishing":
+            # Every attempt has run: there is no "next attempt" left to stop before.
+            raise ApiError(
+                409, "RUN_FINISHING", "this run is writing its result; it is too late to cancel"
+            ) from None
         detail = None
     else:
         if detail is None:

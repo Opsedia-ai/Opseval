@@ -1473,3 +1473,16 @@ def test_a_suite_stop_policy_is_saved_kept_and_removed(tmp_path: Path) -> None:
     assert out["stop"] is None
     plain = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "smoke")
     assert plain["stop"] is None
+
+
+def test_a_run_writing_its_result_is_too_late_to_cancel(tmp_path: Path) -> None:
+    """Every attempt has run: "stops before its next attempt" would be a false promise."""
+    log = _live(tmp_path, ["a"])
+    log.started("a", 1)
+    log.attempt("a")
+    log.ended(_verdict("a", VerdictStatus.PASSED))
+    log.finishing()
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    r = c.post("/api/v1/runs/live/cancel")
+    assert r.status_code == 409 and r.json()["code"] == "RUN_FINISHING"
+    assert not (tmp_path / "live" / "cancel.json").exists()

@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { Count, GatePill, ResultBar } from "../components/ui";
 import { Entry } from "../components/Transcript";
 import { ProgressLine } from "../components/Progress";
-import StopEditor, { NEVER, stopFields } from "../components/StopEditor";
+import StopEditor, { NEVER, budget, stopFields } from "../components/StopEditor";
 import { CancelRun, StoppedNotice } from "../components/RunControl";
 import type { Gate, RunProgress, TranscriptEntry } from "../lib/types";
 
@@ -139,6 +139,11 @@ describe("stopping early (ADR-0035)", () => {
     const failFast = screen.getByRole("combobox", { name: /first failure/i }) as HTMLSelectElement;
     expect(failFast.selectedOptions[0].textContent).toBe("keep going (suite)");
     expect((screen.getByLabelText("Failures in a row") as HTMLInputElement).placeholder).toBe("3 (suite)");
+  });
+
+  it("a time budget is whole minutes, and never a 0 the server would refuse", () => {
+    expect([budget("30"), budget("1.4"), budget("0.005"), budget("0"), budget(""), budget("-5")])
+      .toEqual([1800, 60, null, null, null, null]);
   });
 
   it("only what was set is sent: everything else keeps the suite's value", () => {

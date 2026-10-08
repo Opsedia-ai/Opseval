@@ -375,6 +375,16 @@ class TestCancelCommand:
         res = self.runner.invoke(app, ["cancel", str(folder)])
         assert res.exit_code == 3 and not (folder / "cancel.json").exists()
 
+    def test_a_run_writing_its_result_is_too_late_to_cancel(self, tmp_path: Path) -> None:
+        from opseval.progress import ProgressLog
+
+        folder = self.run_folder(tmp_path)
+        log = ProgressLog(FileStore(folder.parent), folder.name, [])
+        log.finishing()
+        res = self.runner.invoke(app, ["cancel", str(folder)])
+        assert res.exit_code == 3 and "too late" in res.output
+        assert not (folder / "cancel.json").exists()
+
     def test_a_folder_that_is_not_a_run_is_exit_3(self, tmp_path: Path) -> None:
         assert self.runner.invoke(app, ["cancel", str(tmp_path)]).exit_code == 3
 

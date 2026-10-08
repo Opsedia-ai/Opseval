@@ -82,8 +82,10 @@ justifies that cost.
   run, and it leaves no result. A cancel request is the clean way.
 - The console builds on the same pieces, with no runner behaviour of its own:
   - `POST /api/v1/runs/{id}/cancel` writes `cancel.json` (`by: console`). It answers 409
-    `RUN_NOT_RUNNING` for a finished or interrupted run, and `accepted: false` when a cancel was
-    already requested.
+    `RUN_NOT_RUNNING` for a finished or interrupted run, 409 `RUN_FINISHING` once every attempt
+    has run and the result is being written (as `opseval cancel` exits 3 then), and
+    `accepted: false` when a cancel was already requested. A cancel that races the run's last
+    moment can leave a `cancel.json` in a finished folder; nothing reads it after the run ends.
   - A running run's progress carries `cancelRequested`.
   - `LaunchIn.stop` overrides fields for one run. A null field keeps the suite's value.
   - `SuiteIn.stop` edits the suite's `stop:` block (omitted: kept; null: removed), and

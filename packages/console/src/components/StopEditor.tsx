@@ -13,6 +13,12 @@ const FLAGS: { key: Flag; label: string; help: string }[] = [
   { key: "stopOnRateLimit", label: "A rate limit outlasts its retries", help: "The agent's endpoint or an LLM kept answering 429 and an attempt could not be judged." },
 ];
 
+/** Whole minutes as seconds; anything under one minute is no budget, never a 0 the server refuses. */
+export function budget(minutesText: string): number | null {
+  const whole = Math.round(Number(minutesText));
+  return Number.isFinite(whole) && whole >= 1 ? whole * 60 : null;
+}
+
 /** Only the fields that were set: each one replaces the same field of what it falls back to. */
 export function stopFields(v: StopBody): StopBody {
   return Object.fromEntries(Object.entries(v).filter(([, x]) => x !== null && x !== undefined)) as StopBody;
@@ -60,10 +66,10 @@ export default function StopEditor({ value, onChange, base, baseLabel, readOnly 
               onChange={(e) => set({ maxConsecutiveFailures: e.target.value === "" ? null : Math.max(1, Math.round(+e.target.value)) })} /></td>
           </tr>
           <tr className="align-top">
-            <td className="py-2 pr-3"><div className="font-medium text-ink">Time budget</div><div className="text-xs text-muted-ink">Start no scenario once the run has taken this long (minutes). A scenario that has started finishes.</div></td>
-            <td className="py-2"><input aria-label="Time budget in minutes" type="number" min={1} disabled={readOnly} className={cx(select, "w-44", value.maxWallClockSeconds ? "border-ink" : "border-line")}
-              value={value.maxWallClockSeconds ? +(value.maxWallClockSeconds / 60).toFixed(2) : ""} placeholder={`${minutes(base.maxWallClockSeconds)} (${baseLabel})`}
-              onChange={(e) => set({ maxWallClockSeconds: e.target.value === "" || +e.target.value <= 0 ? null : Math.round(+e.target.value * 60) })} /></td>
+            <td className="py-2 pr-3"><div className="font-medium text-ink">Time budget</div><div className="text-xs text-muted-ink">Start no scenario once the run has taken this long (whole minutes). A scenario that has started finishes.</div></td>
+            <td className="py-2"><input aria-label="Time budget in minutes" type="number" min={1} step={1} disabled={readOnly} className={cx(select, "w-44", value.maxWallClockSeconds ? "border-ink" : "border-line")}
+              value={value.maxWallClockSeconds ? Math.max(1, Math.round(value.maxWallClockSeconds / 60)) : ""} placeholder={`${minutes(base.maxWallClockSeconds)} (${baseLabel})`}
+              onChange={(e) => set({ maxWallClockSeconds: budget(e.target.value) })} /></td>
           </tr>
         </tbody>
       </table>
