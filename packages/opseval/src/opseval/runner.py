@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,15 +17,23 @@ from opseval.auth import HS256Tokens, TokenSource
 from opseval.catalogue import load_catalogue, load_profile
 from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.demo import catalogue_dir as demo_catalogue_dir
-from opseval.driver import Driver
+from opseval.driver import RATE_LIMITED_NOTE, Driver
 from opseval.errors import ConfigError
 from opseval.llm import UsageMeter, client_for_role
-from opseval.models.gate import Preset
+from opseval.models.gate import Preset, ResolvedGatePolicy
 from opseval.models.gate import resolve as resolve_gate
 from opseval.models.preflight import PreflightReport
 from opseval.models.profile import SutProfile
-from opseval.models.results import SkipKind, SuiteResult, TestVerdict, VerdictStatus
+from opseval.models.results import (
+    SkipKind,
+    StopCause,
+    StoppedEarly,
+    SuiteResult,
+    TestVerdict,
+    VerdictStatus,
+)
 from opseval.models.scenario import Criticality, Scenario
+from opseval.models.stop import StopPolicy
 from opseval.models.telemetry import TelemetryEvent
 from opseval.plugins import load_scorers
 from opseval.preflight import llm_roles_needed, preflight
@@ -73,6 +82,9 @@ class RunOptions:
     repeats: int | None = None
     allow_commit: bool = False
     fail_fast: bool = False
+    """Shorthand for ``stop.fail_fast`` (kept for callers that set only this)."""
+    stop: StopPolicy | None = None
+    """Stop-policy fields that replace the suite's (``opseval run`` flags, the console)."""
     filters: list[str] = field(default_factory=list)
     traces: bool = True
     """Read the agent's traces when the profile declares a trace source."""
@@ -193,6 +205,109 @@ def _unmet(
     return None
 
 
+class _RunControl:
+    """Decides whether the next scenario starts: stop policies and cancel requests (ADR-0035).
+
+    It never changes a verdict. A scenario it holds back gets a ``skipped_precondition``
+    verdict naming the policy, so a stopped run reports what it did not run.
+    """
+
+    def __init__(
+        self,
+        stop: StopPolicy,
+        store: FileStore,
+        run_id: str,
+        policy: ResolvedGatePolicy,
+        declared: bool,
+    ) -> None:
+        self.stop = stop
+        self.store = store
+        self.run_id = run_id
+        self.policy = policy
+        self.declared = declared
+        self.started = time.monotonic()
+        self.stopped: StoppedEarly | None = None
+        self._last: str | None = None
+        self._consecutive = 0
+
+    def _halt(self, by: StopCause, detail: str) -> None:
+        if self.stopped is None:
+            self.stopped = StoppedEarly(by=by, after=self._last, detail=detail)
+
+    def before_scenario(self, scenario: Scenario) -> TestVerdict | None:
+        """The verdict for a scenario that must not start, or ``None`` to run it."""
+        if self.stopped is None and self.store.cancel_requested(self.run_id):
+            self._halt("cancelled", "cancelled by request")
+        limit = self.stop.max_wall_clock_seconds
+        if self.stopped is None and limit is not None:
+            elapsed = time.monotonic() - self.started
+            if elapsed >= limit:
+                self._halt(
+                    "max_wall_clock_seconds",
+                    f"max_wall_clock_seconds: the run had taken {elapsed:.0f}s of {limit:g}s",
+                )
+        if self.stopped is None:
+            return None
+        by = self.stopped.by
+        kind: SkipKind = by if by in ("fail_fast", "cancelled") else "stopped"
+        return skipped(
+            scenario, VerdictStatus.SKIPPED_PRECONDITION, f"not run: {self.stopped.detail}", kind
+        )
+
+    def cancel_requested(self, scenario: Scenario, *, done: int) -> bool:
+        """Checked before each attempt, so a cancel takes effect within one attempt."""
+        if self.stopped is None and self.store.cancel_requested(self.run_id):
+            self._halt(
+                "cancelled", f"cancelled by request during {scenario.id} (after {done} attempts)"
+            )
+        return self.stopped is not None and self.stopped.by == "cancelled"
+
+    def after_scenario(
+        self, scenario: Scenario, verdict: TestVerdict, *, rate_limited: bool
+    ) -> None:
+        self._last = scenario.id
+        if verdict.status is VerdictStatus.PASSED:
+            self._consecutive = 0
+        failed = verdict.status is VerdictStatus.FAILED
+        if failed:
+            self._consecutive += 1
+        stop = self.stop
+        if (
+            stop.fail_fast
+            and failed
+            # A failure the policy would not block is no reason to stop.
+            and failure_blocks(self.policy, scenario.criticality, self.declared)
+        ):
+            self._halt("fail_fast", f"fail_fast: {scenario.id} failed")
+        elif (
+            stop.stop_on_critical_failure
+            and failed
+            and scenario.criticality
+            in (
+                Criticality.CRITICAL,
+                Criticality.BLOCKER,
+            )
+        ):
+            self._halt(
+                "stop_on_critical_failure",
+                f"stop_on_critical_failure: {scenario.id} ({scenario.criticality.value}) failed",
+            )
+        elif (
+            stop.max_consecutive_failures is not None
+            and self._consecutive >= stop.max_consecutive_failures
+        ):
+            self._halt(
+                "max_consecutive_failures",
+                f"max_consecutive_failures: {self._consecutive} failed scenarios in a row, "
+                f"the last {scenario.id}",
+            )
+        elif stop.stop_on_rate_limit and rate_limited:
+            self._halt(
+                "stop_on_rate_limit",
+                f"stop_on_rate_limit: a rate limit outlasted its retries in {scenario.id}",
+            )
+
+
 async def launch(
     catalogue_target: str | Path,
     options: RunOptions,
@@ -306,9 +421,18 @@ async def launch(
     declared = any(sc.criticality is not Criticality.NORMAL for sc in catalogue.scenarios)
     verdicts: list[TestVerdict] = []
     tracker = ProgressLog(store, run_id, [sc.id for sc in catalogue.scenarios])
-    for position, scenario in enumerate(catalogue.scenarios):
+    stop = (catalogue.stop or StopPolicy()).merged(options.stop)
+    if options.fail_fast:
+        stop = stop.model_copy(update={"fail_fast": True})
+    control = _RunControl(stop, store, run_id, policy, declared)
+    for scenario in catalogue.scenarios:
         before = len(verdicts)
         try:
+            halt = control.before_scenario(scenario)
+            if halt is not None:
+                # Named, so what was not run cannot vanish from the result.
+                verdicts.append(halt)
+                continue
             if options.repeats:
                 scenario = scenario.model_copy(
                     update={
@@ -353,7 +477,10 @@ async def launch(
                 continue
             log(f"▶ {scenario.id} · {scenario.name}")
             attempts = []
+            rate_limited = False
             for i in range(scenario.execution.repeats):
+                if control.cancel_requested(scenario, done=i):
+                    break
                 seed = attempt_seed(scenario.id, i)
                 sim: Simulator = (
                     ScriptedSimulator(scenario, seed)
@@ -372,6 +499,7 @@ async def launch(
                     simulator_timeout_seconds=settings.simulator_timeout_seconds,
                 )
                 record = await driver.run()
+                rate_limited = rate_limited or RATE_LIMITED_NOTE in record.notes
                 if trace_source is not None:
                     record = await enrich(record, trace_source, profile)
                 path = store.save_record(record)
@@ -386,26 +514,28 @@ async def launch(
                 )
                 coverage = " · traces" if record.trace_coverage == "full" else ""
                 log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
-            verdicts.append(fold_attempts(scenario, attempts))
-            if (
-                options.fail_fast
-                and verdicts[-1].status is VerdictStatus.FAILED
-                # A failure the policy would not block is no reason to stop.
-                and failure_blocks(policy, scenario.criticality, declared)
-            ):
-                log("fail-fast: stopping after the first failed scenario the gate blocks on")
-                # Name what was not run, so it cannot vanish from the result.
-                reason = f"not run: --fail-fast stopped the run after {scenario.id} failed"
-                for rest in catalogue.scenarios[position + 1 :]:
-                    verdicts.append(
-                        skipped(rest, VerdictStatus.SKIPPED_PRECONDITION, reason, "fail_fast")
+            if len(attempts) < scenario.execution.repeats:
+                # Cancelled part-way. Never folded: a verdict from some of the repeats would
+                # claim a pass rate nobody measured. The attempts' records stay on disk.
+                verdicts.append(
+                    skipped(
+                        scenario,
+                        VerdictStatus.SKIPPED_PRECONDITION,
+                        f"cancelled after {len(attempts)} of {scenario.execution.repeats} "
+                        "attempts (their records are kept)",
+                        "cancelled",
                     )
-                break
+                )
+                continue
+            verdicts.append(fold_attempts(scenario, attempts))
+            control.after_scenario(scenario, verdicts[-1], rate_limited=rate_limited)
         finally:
-            # Every way out of an iteration (a skip, the end of its attempts, a fail-fast
-            # stop that also skips the rest) has appended its verdicts: record each one.
+            # Every way out of an iteration (a skip, the end of its attempts, a stop) has
+            # appended its verdict: record each one.
             for decided in verdicts[before:]:
                 tracker.ended(decided)
+    if control.stopped is not None:
+        log(f"stopped early: {control.stopped.detail}")
 
     tracker.finishing()
     gate = release_gate(verdicts, policy=policy, load_errors=len(catalogue.problems))
@@ -424,6 +554,8 @@ async def launch(
         config_digest=config_digest(settings),
         load_errors=[str(p) for p in catalogue.problems],
         preflight=health if options.preflight else None,
+        stop=stop if stop.active else None,
+        stopped=control.stopped,
     )
     # After the verdict exists and before it is written, so the outcomes are part of the
     # saved result. A sink can never change the verdict; publish_all catches everything.

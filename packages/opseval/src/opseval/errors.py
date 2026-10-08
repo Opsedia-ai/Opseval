@@ -48,6 +48,23 @@ class LLMInfraError(HarnessError):
     """The LLM provider failed (outage, rate limit exhausted, malformed response)."""
 
 
+class RateLimited(Exception):
+    """Marks an error caused by a rate limit that outlasted its retries.
+
+    Mixed in rather than a branch of its own, so each error keeps its place in the core
+    rule (a harness failure either way); it lets ``stop_on_rate_limit`` see the cause
+    without reading error text (ADR-0035).
+    """
+
+
+class TransportRateLimited(TransportError, RateLimited):
+    """The agent's endpoint kept answering HTTP 429."""
+
+
+class LLMRateLimited(LLMInfraError, RateLimited):
+    """An LLM role kept answering HTTP 429."""
+
+
 class TraceUnavailable(HarnessError):
     """The agent's trace could not be read (source down, not ingested yet, no session id)."""
 

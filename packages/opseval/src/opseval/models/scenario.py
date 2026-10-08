@@ -13,6 +13,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from opseval.models.gate import GatePolicy
+from opseval.models.stop import StopPolicy
 
 SCHEMA_VERSION = "opseval/v1"
 
@@ -220,3 +221,5 @@ class Suite(Strict):
     overrides: dict[str, object] = Field(default_factory=dict)
     gate: GatePolicy | None = None
     """What blocks the release for this suite (ADR-0032). ``None`` is the standard preset."""
+    stop: StopPolicy | None = None
+    """When a run of this suite stops early (ADR-0035). ``None`` runs every scenario."""

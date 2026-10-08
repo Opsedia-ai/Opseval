@@ -16,7 +16,13 @@ from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
-from opseval.errors import HarnessError, SimulatorError, TransportError, TransportTimeout
+from opseval.errors import (
+    HarnessError,
+    RateLimited,
+    SimulatorError,
+    TransportError,
+    TransportTimeout,
+)
 from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
 from opseval.models.record import (
     FrameRecord,
@@ -39,6 +45,9 @@ from opseval.simulator import Simulator
 from opseval.transport.base import Session, Transport
 
 T = TypeVar("T")
+
+RATE_LIMITED_NOTE = "rate_limited"
+"""Noted on a record whose attempt a rate limit ended (ADR-0035)."""
 
 SECRET_KEY_RE = re.compile(r"token|secret|password|api[_-]?key|authorization|signature", re.I)
 REDACTED = "***redacted***"
@@ -220,9 +229,11 @@ class Driver:
         except TransportError as exc:
             state, reason = TerminalState.TRANSPORT_FAILURE, str(exc)
             self._infra.append(f"transport: {exc}")
+            self._note_rate_limit(exc)
         except HarnessError as exc:
             state, reason = TerminalState.HARNESS_FAILURE, str(exc)
             self._infra.append(f"harness: {type(exc).__name__}: {exc}")
+            self._note_rate_limit(exc)
         except Exception as exc:  # noqa: BLE001 - any other bug is ours, never the agent's
             state, reason = TerminalState.HARNESS_FAILURE, f"{type(exc).__name__}: {exc}"
             self._infra.append(f"harness: unexpected {type(exc).__name__}: {exc}")
@@ -253,6 +264,11 @@ class Driver:
             transport_events=session.transport_events() if session else (),
             redaction=RedactionInfo(applied=True, found=tuple(sorted(self._redacted))),
         )
+
+    def _note_rate_limit(self, exc: Exception) -> None:
+        """Say so when a rate limit ended the attempt, for ``stop_on_rate_limit``."""
+        if isinstance(exc, RateLimited):
+            self._notes.append(RATE_LIMITED_NOTE)
 
     async def _simulate(self, call: Awaitable[T]) -> T:
         """Run one simulator call off the agent's clock (the core rule).

@@ -8,6 +8,7 @@
 <root>/<run_id>/result.json        (written last: marks completion)
 <root>/<run_id>/error.json         (instead of result.json: the run could not be carried out)
 <root>/<run_id>/progress.json      (while it runs: the runner's own account of how far it got)
+<root>/<run_id>/cancel.json        (a request to stop; the runner honours it before each attempt)
 <root>/<run_id>/report.html
 <root>/<run_id>/junit.xml
 <root>/<run_id>/rescore-<UTC time>/{result.json, report.html, junit.xml}   (opseval rescore)
@@ -20,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +141,23 @@ class FileStore:
         path = self.run_dir(record.run_id) / "records" / name
         _atomic_write(path, record.model_dump_json(indent=2))
         return path
+
+    def request_cancel(self, run_id: str, *, by: str) -> bool:
+        """Ask a running run to stop (ADR-0035). ``False`` if it was already asked.
+
+        A file rather than a signal, so it works across processes: a run the CLI started
+        can be cancelled from the console, and the reverse. The runner checks it before
+        each attempt; what it has not run is recorded as cancelled, never dropped.
+        """
+        path = self.run_dir(run_id) / "cancel.json"
+        if path.exists():
+            return False
+        body = {"requested_at": datetime.now(UTC).isoformat(), "by": by}
+        _atomic_write(path, json.dumps(body))
+        return True
+
+    def cancel_requested(self, run_id: str) -> bool:
+        return (self.run_dir(run_id) / "cancel.json").is_file()
 
     def save_progress(self, run_id: str, progress: RunProgress) -> Path:
         path = self.run_dir(run_id) / "progress.json"

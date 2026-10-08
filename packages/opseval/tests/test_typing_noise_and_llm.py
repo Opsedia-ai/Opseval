@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from opseval.errors import LLMInfraError, LLMRequestError
+from opseval.errors import LLMInfraError, LLMRateLimited, LLMRequestError, RateLimited
 from opseval.llm import ChatClient, UsageMeter
 from opseval.simulator.langpacks import resolve
 from opseval.simulator.typing_noise import add_typing_noise
@@ -116,9 +116,15 @@ class TestChatClient:
 
     async def test_exhausted_retries_is_infra(self) -> None:
         client, sleeps = _client(lambda req: httpx.Response(503), retries=2)
-        with pytest.raises(LLMInfraError, match="unavailable after 3 attempts"):
+        with pytest.raises(LLMInfraError, match="unavailable after 3 attempts") as caught:
             await client.complete([])
         assert len(sleeps) == 2
+        assert not isinstance(caught.value, RateLimited), "a 503 outage is not a rate limit"
+
+    async def test_an_exhausted_rate_limit_is_marked_as_one(self) -> None:
+        client, _ = _client(lambda req: httpx.Response(429), retries=1)
+        with pytest.raises(LLMRateLimited):
+            await client.complete([])
 
     async def test_connection_errors_are_retried(self) -> None:
         def boom(req: httpx.Request) -> httpx.Response:

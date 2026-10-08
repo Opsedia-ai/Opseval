@@ -94,6 +94,15 @@ def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> s
         lines += ["", "<details><summary>Why</summary>", ""]
         lines += [f"- `{_code(t.test_id, 60)}`: {_md(t.reason or '', 300)}" for t in details]
         lines += ["", "</details>"]
+    if result.stopped is not None:
+        not_run = sum(
+            1 for t in result.tests if t.skip_kind in ("fail_fast", "stopped", "cancelled")
+        )
+        lines += [
+            "",
+            f"⏹️ **Stopped early** · {_md(result.stopped.detail, 300)}. {not_run} scenario(s) "
+            "were not run (or not finished) and are listed above as skipped, not passed.",
+        ]
     degraded = result.degraded_scorers
     if degraded:
         listed = ", ".join(f"`{_code(s, 60)}`" for s in degraded)

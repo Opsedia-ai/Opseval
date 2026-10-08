@@ -171,6 +171,30 @@ strict one. Some things are not up to the policy:
 
 See [ADR-0032](docs/adr/0032-gate-policy.md).
 
+### Stop a run early, or cancel it
+
+A suite can say when a run should stop rather than finish:
+
+```yaml
+stop:
+  fail_fast: false                 # stop after the first failure the gate blocks on
+  max_consecutive_failures: 3      # only a pass resets the count
+  stop_on_critical_failure: true   # a critical or blocker scenario failed
+  stop_on_rate_limit: true         # a rate limit outlasted its retries (agent or LLM)
+  max_wall_clock_seconds: 1800     # start no scenario after this long
+```
+
+Each has an `opseval run` flag (`--fail-fast`, `--max-consecutive-failures N`,
+`--stop-on-critical-failure`, `--stop-on-rate-limit`, `--max-wall-clock SECONDS`, and `--no-…`
+forms) that replaces that one field for one run. `opseval cancel reports/<run_id>` asks a running
+run to stop, from any process; it stops before its next attempt.
+
+Policies are checked between scenarios, a cancel before every attempt. Whatever is not run is
+reported as skipped with the reason, never dropped and never passed, so a stopped run is never
+"safe to release". A scenario a cancel cut short is not folded from its finished attempts; their
+records are kept. A failure that already happened still fails the run. See
+[ADR-0035](docs/adr/0035-run-control.md).
+
 ### Gate releases in CI
 
 **GitHub Actions**: the step fails exactly when Opseval says the release is blocked, and the gate summary is posted on the pull request:

@@ -26,7 +26,7 @@ from typing import Any
 import httpx
 
 from opseval.auth import BearerAuth, TokenSource, as_token_source
-from opseval.errors import TransportError, TransportTimeout
+from opseval.errors import TransportError, TransportRateLimited, TransportTimeout
 from opseval.models.profile import SutProfile
 from opseval.transport.base import NOT_SENT_TIMEOUTS, SYNTHETIC_KIND, Session, Transport
 
@@ -125,7 +125,7 @@ class OpenAIChatSession(Session):
             if attempt == RATE_LIMIT_RETRIES:
                 break
             await self._sleep(_retry_after(resp) or BACKOFF[min(attempt, len(BACKOFF) - 1)])
-        raise TransportError(
+        raise TransportRateLimited(
             f"the endpoint kept answering HTTP 429 after {RATE_LIMIT_RETRIES} retries; "
             "lower the concurrency or raise its rate limit"
         )

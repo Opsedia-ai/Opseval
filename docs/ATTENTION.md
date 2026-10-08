@@ -5,7 +5,7 @@ It is the one place these are tracked, and it is kept current with every pull re
 [`STATUS.md`](STATUS.md), which tracks what is built. Confidential detail (legal, IP, business
 terms) stays in `docs-internal/` and is only referred to here.
 
-**As of 2026-10-08.**
+**As of 2026-10-09.**
 
 Severity: **Critical** blocks a milestone, or could cause harm if left. **High** should be
 settled within the next few pull requests. An item leaves this page in the pull request that
@@ -32,7 +32,7 @@ settles it.
 | # | Sev | Issue | Effect | Plan |
 |---|---|---|---|---|
 | I6 | High | The judges' handling of agent text can be strengthened (security) | A misbehaving agent could influence the judges that grade it. | Next, with I8 (needs a scorer version bump) |
-| I8 | High | Run control: four of five stop policies are missing, and runs cannot be cancelled | A long or failing run cannot be stopped from the console. | Next |
+| I8 | High | Run control from the console: the core has all five stop policies and cancellation (ADR-0035), but the console has no Cancel button or stop-policy controls | A run started from the console can be stopped only with `opseval cancel` in a terminal. | Next PR |
 | I9 | High | No concurrency: attempts run one at a time | Partner suites with repeats will be slow (the requirement is ≥ 20 concurrent attempts). | With D6 (lanes) |
 
 ## For your information

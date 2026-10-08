@@ -1,3 +1,11 @@
 name: full
 description: Everything, including LLM-persona scenarios (configure OPSEVAL_SIMULATOR_* and OPSEVAL_JUDGE_*).
 include: ["scenarios/**/*.yaml"]
+# When to stop early (ADR-0035). Anything a stop leaves out is reported as skipped, never
+# passed. Each `opseval run` flag (--fail-fast, --max-consecutive-failures, ...) replaces
+# its field for one run.
+# stop:
+#   max_consecutive_failures: 3
+#   stop_on_critical_failure: true
+#   stop_on_rate_limit: true
+#   max_wall_clock_seconds: 1800

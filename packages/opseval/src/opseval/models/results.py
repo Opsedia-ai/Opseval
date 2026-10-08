@@ -17,6 +17,7 @@ from opseval.models.gate import ResolvedGatePolicy
 from opseval.models.preflight import PreflightReport
 from opseval.models.record import TerminalState
 from opseval.models.scenario import Criticality
+from opseval.models.stop import StopPolicy
 
 
 class ScoreStatus(StrEnum):
@@ -85,7 +86,32 @@ class VerdictStatus(StrEnum):
     BLOCKED = "blocked"
 
 
-SkipKind = Literal["dependency", "simulator", "commit_guard", "quarantine", "fail_fast"]
+SkipKind = Literal[
+    "dependency", "simulator", "commit_guard", "quarantine", "fail_fast", "stopped", "cancelled"
+]
+"""``stopped`` is a stop policy other than fail-fast; ``cancelled`` is an operator's cancel
+request (ADR-0035)."""
+
+StopCause = Literal[
+    "fail_fast",
+    "max_consecutive_failures",
+    "stop_on_critical_failure",
+    "stop_on_rate_limit",
+    "max_wall_clock_seconds",
+    "cancelled",
+]
+
+
+class StoppedEarly(BaseModel):
+    """Why a run ended before every scenario ran. Each scenario it left out is a
+    ``skipped_precondition`` verdict naming it, so a stopped run is never "safe"."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    by: StopCause
+    after: str | None = None
+    """The last scenario that ran (None: none had finished)."""
+    detail: str
 
 
 class TestVerdict(BaseModel):
@@ -248,6 +274,10 @@ class SuiteResult(BaseModel):
     """What the dependency checks found before the run (ADR-0020)."""
     sinks: list[SinkOutcome] = Field(default_factory=list)
     """Where this run was published, and anything that failed (ADR-0027)."""
+    stop: StopPolicy | None = None
+    """The stop policy in force, when one was (ADR-0035)."""
+    stopped: StoppedEarly | None = None
+    """Set when a stop policy or a cancel request ended the run early."""
 
     @property
     def failed_sinks(self) -> list[str]:

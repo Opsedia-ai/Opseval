@@ -627,6 +627,94 @@
       "title": "SinkOutcome",
       "type": "object"
     },
+    "StopPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "fail_fast": {
+          "default": false,
+          "title": "Fail Fast",
+          "type": "boolean"
+        },
+        "max_consecutive_failures": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Consecutive Failures"
+        },
+        "max_wall_clock_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Wall Clock Seconds"
+        },
+        "stop_on_critical_failure": {
+          "default": false,
+          "title": "Stop On Critical Failure",
+          "type": "boolean"
+        },
+        "stop_on_rate_limit": {
+          "default": false,
+          "title": "Stop On Rate Limit",
+          "type": "boolean"
+        }
+      },
+      "title": "StopPolicy",
+      "type": "object"
+    },
+    "StoppedEarly": {
+      "additionalProperties": false,
+      "description": "Why a run ended before every scenario ran. Each scenario it left out is a\n``skipped_precondition`` verdict naming it, so a stopped run is never \"safe\".",
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After"
+        },
+        "by": {
+          "enum": [
+            "fail_fast",
+            "max_consecutive_failures",
+            "stop_on_critical_failure",
+            "stop_on_rate_limit",
+            "max_wall_clock_seconds",
+            "cancelled"
+          ],
+          "title": "By",
+          "type": "string"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "by",
+        "detail"
+      ],
+      "title": "StoppedEarly",
+      "type": "object"
+    },
     "TerminalState": {
       "enum": [
         "outcome_committed",
@@ -707,7 +795,9 @@
                 "simulator",
                 "commit_guard",
                 "quarantine",
-                "fail_fast"
+                "fail_fast",
+                "stopped",
+                "cancelled"
               ],
               "type": "string"
             },
@@ -855,6 +945,28 @@
       "format": "date-time",
       "title": "Started At",
       "type": "string"
+    },
+    "stop": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StopPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "stopped": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StoppedEarly"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "suite": {
       "title": "Suite",

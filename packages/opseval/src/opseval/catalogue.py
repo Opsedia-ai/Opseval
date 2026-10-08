@@ -17,6 +17,7 @@ from opseval.errors import ConfigError
 from opseval.models.gate import GatePolicy
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import RESERVED_STOP_AT, PolicyAction, Scenario, Suite
+from opseval.models.stop import StopPolicy
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class Catalogue:
     problems: list[LoadProblem] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)  # scenario id -> file
     gate: GatePolicy | None = None  # the suite's gate policy, when a suite was loaded
+    stop: StopPolicy | None = None  # the suite's stop policy, when a suite was loaded
 
 
 def _read_yaml(path: Path) -> Any:
@@ -260,6 +262,7 @@ def load_catalogue(
     overrides: dict[str, Any] = {}
     all_filters = list(filters or [])
     suite_gate: GatePolicy | None = None
+    suite_stop: StopPolicy | None = None
     files: list[Path]
 
     raw = _read_yaml(path) if path.is_file() else None
@@ -272,6 +275,7 @@ def load_catalogue(
         suite_name = suite.name
         defaults, overrides = suite.defaults, suite.overrides
         suite_gate = suite.gate
+        suite_stop = suite.stop
         all_filters += suite.filters
         root = path.parent.parent if path.parent.name == "suites" else path.parent
         root = root.resolve()
@@ -290,7 +294,7 @@ def load_catalogue(
     else:
         files = [path]
 
-    cat = Catalogue(gate=suite_gate)
+    cat = Catalogue(gate=suite_gate, stop=suite_stop)
     seen: dict[str, str] = {}
     for f in files:
         scenario, problems = _load_scenario(f, defaults, overrides)
