@@ -14,9 +14,10 @@ import os
 import re
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import ValidationError
@@ -62,7 +63,6 @@ class ServerContext:
     allow_commit: bool = False
     """Started with ``--allow-commit``: the operator's half of the ADR-0008 double opt-in.
     A request body can never supply it."""
-    threads: set[threading.Thread] = field(default_factory=set)
 
     def need_catalogue(self) -> tuple[Path, SutProfile]:
         if self.catalogue is None or self.profile is None:
@@ -220,24 +220,46 @@ def start_run(ctx: ServerContext, body: s.LaunchIn) -> s.LaunchOut:
             log.exception("run %s could not be carried out", run_id)
             record_failure(ctx.store, run_id, exc)
 
-    thread = threading.Thread(target=work, name=f"opseval-run-{run_id}", daemon=True)
-    ctx.threads.add(thread)
-    thread.start()
+    threading.Thread(target=work, name=f"opseval-run-{run_id}", daemon=True).start()
     return s.LaunchOut(
         accepted=True, run_id=run_id, message=f"run {run_id} started against {target}"
     )
 
 
-def _suite_doc(body: s.SuiteIn) -> dict[str, object]:
-    doc: dict[str, object] = {
-        "name": body.display_name,
-        "description": body.description,
-        "include": body.include,
-    }
-    if body.repeats:
-        doc["overrides"] = {"execution": {"repeats": body.repeats}}
-    if body.stop_at:
-        doc["defaults"] = {"conversation": {"stop_at": body.stop_at}}
+def _set_nested(doc: dict[str, Any], path: tuple[str, ...], value: object) -> None:
+    """Set ``doc[a][b][c] = value``, or remove it (and emptied parents) when value is None."""
+    *parents, leaf = path
+    chain: list[dict[str, Any]] = [doc]
+    for key in parents:
+        nxt = chain[-1].get(key)
+        if not isinstance(nxt, dict):
+            if value is None:
+                return
+            nxt = chain[-1][key] = {}
+        chain.append(nxt)
+    if value is None:
+        chain[-1].pop(leaf, None)
+        for parent, key in zip(reversed(chain[:-1]), reversed(parents), strict=True):
+            if parent.get(key) == {}:
+                parent.pop(key)
+    else:
+        chain[-1][leaf] = value
+
+
+def _suite_doc(body: s.SuiteIn, existing: dict[str, Any] | None) -> dict[str, Any]:
+    """The suite file to write. Replacing a suite keeps every key the form does not manage
+    (filters, exclude, other overrides): the console edits a suite, it does not rewrite it.
+
+    For ``repeats`` and ``stop_at``, a field left out of the request keeps the file's value
+    and an explicit ``null`` removes it.
+    """
+    doc: dict[str, Any] = dict(existing or {})
+    doc.update(name=body.display_name, description=body.description, include=body.include)
+    sent = body.model_fields_set
+    if "repeats" in sent or existing is None:
+        _set_nested(doc, ("overrides", "execution", "repeats"), body.repeats)
+    if "stop_at" in sent or existing is None:
+        _set_nested(doc, ("defaults", "conversation", "stop_at"), body.stop_at)
     return doc
 
 
@@ -246,17 +268,24 @@ def save_suite(ctx: ServerContext, body: s.SuiteIn) -> s.SuiteOut:
     root, profile = ctx.need_writable()
     if not SAFE_NAME.match(body.file):
         raise ApiError(422, "BAD_NAME", "file name may use letters, digits, '.', '_' and '-' only")
-    doc = _suite_doc(body)
+    folder = root / "suites"
+    path = folder / f"{body.file}.yaml"
+    existing: dict[str, Any] | None = None
+    if path.exists():
+        if not body.overwrite:
+            raise ApiError(
+                409, "SUITE_EXISTS", f"suite {body.file!r} exists; send overwrite to replace it"
+            )
+        try:
+            loaded = yaml.safe_load(path.read_text("utf-8"))
+        except yaml.YAMLError:
+            loaded = None  # an unreadable file is replaced whole, as the user asked
+        existing = loaded if isinstance(loaded, dict) else None
+    doc = _suite_doc(body, existing)
     try:
         Suite.model_validate(doc)
     except ValidationError as exc:
         raise ApiError(422, "INVALID_SUITE", str(exc)) from exc
-    folder = root / "suites"
-    path = folder / f"{body.file}.yaml"
-    if path.exists() and not body.overwrite:
-        raise ApiError(
-            409, "SUITE_EXISTS", f"suite {body.file!r} exists; send overwrite to replace it"
-        )
     folder.mkdir(parents=True, exist_ok=True)
     # A dot-file beside the real one, so includes resolve exactly as they will. It is never
     # listed (list_suites skips dot-files) and is removed whatever happens.
@@ -279,9 +308,18 @@ def save_suite(ctx: ServerContext, body: s.SuiteIn) -> s.SuiteOut:
         description=body.description,
         include=body.include,
         scenario_count=count,
-        repeats=body.repeats,
-        stop_at=body.stop_at,
+        repeats=_nested_get(doc, "overrides", "execution", "repeats"),
+        stop_at=_nested_get(doc, "defaults", "conversation", "stop_at"),
     )
+
+
+def _nested_get(doc: dict[str, Any], *path: str) -> Any:
+    cur: Any = doc
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return None
+        cur = cur[key]
+    return cur
 
 
 def _problem(path: str, fld: str, message: str) -> s.Problem:
@@ -293,7 +331,9 @@ def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
     root, profile = ctx.need_writable()
     if not SAFE_NAME.match(body.family):
         raise ApiError(422, "BAD_FAMILY", "family may use letters, digits, '.', '_' and '-' only")
-    scenarios = root / "scenarios"
+    # The same root the rest of the server reads, so a flat catalogue (scenarios at the
+    # top) is checked for clashes and its scenarios do not vanish behind a new folder.
+    scenarios = scenario_root(root)
     folder = scenarios / body.family
     existing_ids = {sc.id for sc in _load(scenarios, profile)} if scenarios.is_dir() else set()
     problems: list[s.Problem] = []

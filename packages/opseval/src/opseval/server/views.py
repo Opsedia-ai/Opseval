@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 from pathlib import Path
@@ -35,7 +34,12 @@ def gate_state(result: SuiteResult) -> s.GateState:
     if result.exit_code == EXIT_HARNESS:
         return "harness_error"
     if result.gate.status != "pass":
-        return "blocked" if result.exit_code == EXIT_FAIL else "not_judged"
+        # What blocked decides it: an agent failure (or a flaky scenario, when flaky
+        # blocks) is "blocked"; only inconclusive or nothing-judged blocks are "not_judged".
+        # The reasons are the strings verdicts.release_gate writes; the gate policy (next)
+        # makes them structured.
+        by_agent = any(": failed (" in b or b.endswith(": flaky") for b in result.gate.blocking)
+        return "blocked" if by_agent else "not_judged"
     return "safe" if result.safe_to_release else "gaps"
 
 
@@ -60,17 +64,9 @@ def summarise(result: SuiteResult) -> s.RunSummary:
     )
 
 
-def _manifest(folder: Path) -> dict[str, Any]:
-    try:
-        data = json.loads((folder / "manifest.json").read_text("utf-8"))
-    except (ValueError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
     """A run folder without result.json: still running, or it could not be carried out."""
-    m = _manifest(folder)
+    m = store.load_manifest(folder.name)
     error = store.load_error(folder.name)
     if not m and error is None:
         return None  # not a run folder
@@ -105,7 +101,8 @@ def _process_gone(manifest: dict[str, Any]) -> bool:
     guessing it dead could hide a run that is in fact still going.
     """
     pid, host = manifest.get("pid"), manifest.get("host")
-    if not isinstance(pid, int) or host != socket.gethostname():
+    if os.name == "nt" or not isinstance(pid, int) or host != socket.gethostname():
+        # On Windows os.kill(pid, 0) is TerminateProcess: the probe would kill the run.
         return False
     try:
         os.kill(pid, 0)
@@ -144,13 +141,18 @@ def list_runs(store: FileStore) -> list[s.RunSummary]:
     return _in_flight(store) + [summarise(r) for r in load_results(store)]
 
 
+class RunInProgress(Exception):
+    """The run exists but has not finished: there is no detail to show yet."""
+
+
 def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
     folder = store.run_dir(run_id)
-    error = store.load_error(run_id)
-    summary = _unfinished(store, folder) if error is not None else None
-    if error is None or summary is None:
-        return None
-    m = _manifest(folder)
+    summary = _unfinished(store, folder) if folder.is_dir() else None
+    if summary is None:
+        return None  # no such run
+    if summary.state == "running":
+        raise RunInProgress(run_id)
+    m = store.load_manifest(run_id)
     return s.RunDetail(
         summary=summary,
         target=str(m.get("target", "")),
@@ -171,7 +173,11 @@ def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
 
 
 def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
-    """A finished run, or one that could not be carried out; ``None`` while running."""
+    """A finished run, or one that could not be carried out; ``None`` if there is no such run.
+
+    Raises :class:`RunInProgress` while it is still running, so a caller can tell "wait"
+    from "not found" (a console that waits on a typo waits for ever).
+    """
     path = store.run_dir(run_id) / "result.json"
     if not path.is_file():
         return _error_detail(store, run_id)

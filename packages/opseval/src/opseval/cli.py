@@ -618,9 +618,14 @@ def serve(
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
-    token = api.state.token
     typer.echo(f"Opseval API on http://{host}:{port}/api/v1")
-    typer.echo(f"Console:  {console_url}/#token={token}")
+    if settings.serve_token is not None:
+        # A configured token is long-lived: never echo it into logs or scrollback.
+        typer.echo(f"Console:  {console_url}/#token=<OPSEVAL_SERVE_TOKEN>")
+    else:
+        typer.echo(f"Console:  {console_url}/#token={api.state.token}   (this start only)")
+    if port != 8000:
+        typer.echo(f"          for `npm run dev`, set OPSEVAL_API=http://127.0.0.1:{port}")
     if catalogue is None:
         typer.echo("Catalogue: the built-in demo (read-only). Use --catalogue to edit your own.")
     if allow_commit:

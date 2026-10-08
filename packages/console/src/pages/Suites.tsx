@@ -32,7 +32,9 @@ export default function Suites() {
   const save = async () => {
     try {
       // Saving over the suite that is open in the editor is an edit; any other existing name is refused.
-      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? undefined : repeats, overwrite: file === sel });
+      // An empty repeats box clears the override (null); stop_at and every key this form does
+      // not manage are left out, so the server keeps them as they are in the file.
+      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? null : repeats, overwrite: file === sel });
       setMsg({ ok: true, text: `Saved. Resolves to ${s.scenarioCount} scenario(s).` }); suites.reload();
     } catch (e) { setMsg({ ok: false, text: (e as ApiError).message }); }
   };

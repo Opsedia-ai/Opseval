@@ -31,6 +31,7 @@ Requirements: Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/). You need Nod
 - [ ] `make check` passes locally (ruff, import-linter, bandit, mypy strict, pytest).
 - [ ] **Harness faults map to `infra_error`.** Any new failure mode that comes from the tool itself, not the agent, must never produce `failed`.
 - [ ] Docs are updated for user-facing changes.
+- [ ] `docs/STATUS.md` is updated if the PR changes what Opseval can do (then run `uv run python scripts/project_status.py`).
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:` …).
 - [ ] Every commit is signed off (see DCO below).
 

@@ -213,6 +213,9 @@ async def launch(
         if missing:
             raise ConfigError(f"no valid scenario with id {', '.join(map(repr, missing))}")
         catalogue.scenarios = [sc for sc in catalogue.scenarios if sc.id in wanted]
+        # A broken file elsewhere in the folder is not part of this run. (A broken file
+        # that *was* chosen has no valid id, so it already failed as "no valid scenario".)
+        catalogue.problems = []
     # Built before the run: a destination that is not allowlisted is a configuration
     # error, and finding that out after a suite has something to publish is too late.
     sinks = build_sinks(settings)

@@ -77,8 +77,9 @@ function Caveats({ r }: { r: Detail }) {
 export default function RunDetail() {
   const { id = "" } = useParams();
   const res = useApi(() => api.run(id), [id]);
-  // A run in progress has no detail yet (404): wait for it rather than calling it missing.
-  const pending = res.error?.status === 404;
+  // A run in progress has no detail yet: wait for it. Any other error (an unknown id
+  // included) is shown, never waited on for ever.
+  const pending = res.error?.code === "RUN_IN_PROGRESS";
   useEffect(() => {
     if (!pending) return;
     const t = setTimeout(res.reload, 2500);

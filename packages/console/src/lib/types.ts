@@ -57,4 +57,4 @@ export interface Turn { who: "customer" | "agent"; text: string }
 export interface Rehearsal { turn: Turn; goalReached: boolean; model: string | null }
 export interface LaunchBody { suite?: string; scenarios?: string[]; target?: string; repeats?: number; allowCommit?: boolean; failFast?: boolean }
 export interface Launched { accepted: boolean; runId: string; message: string }
-export interface SuiteBody { file: string; displayName: string; description: string; include: string[]; repeats?: number; stopAt?: string; overwrite?: boolean }
+export interface SuiteBody { file: string; displayName: string; description: string; include: string[]; repeats?: number | null; stopAt?: string | null; overwrite?: boolean }

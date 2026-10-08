@@ -134,9 +134,14 @@ def create_app(
 
     @app.get(API + "/runs/{run_id}")
     def run(run_id: str) -> s.RunDetail:
-        detail = views.run_detail(ctx.store, _run_id(run_id))
+        try:
+            detail = views.run_detail(ctx.store, _run_id(run_id))
+        except views.RunInProgress as exc:
+            raise actions.ApiError(
+                409, "RUN_IN_PROGRESS", f"run {run_id!r} has not finished yet"
+            ) from exc
         if detail is None:
-            raise HTTPException(404, f"no finished run {run_id!r}")
+            raise actions.ApiError(404, "UNKNOWN_RUN", f"no run {run_id!r}")
         return detail
 
     @app.get(f"{API}/compare")

@@ -50,6 +50,7 @@ def _result(
     exit_code: int = 0,
     gate: str = "pass",
     attempts: list[AttemptVerdict] | None = None,
+    blocking: list[str] | None = None,
 ) -> SuiteResult:
     when = datetime(2026, 9, 1, 10, minute, tzinfo=UTC)
     return SuiteResult(
@@ -70,7 +71,7 @@ def _result(
             )
             for tid, st in statuses.items()
         ],
-        gate=Gate(status=gate, summary="ok"),
+        gate=Gate(status=gate, summary="ok", blocking=blocking or []),
         exit_code=exit_code,
         usage=[ModelUsage(role="simulator", model="m", input_tokens=5, output_tokens=5)],
     )
@@ -100,7 +101,11 @@ def client(tmp_path: Path) -> TestClient:
     store.save_result(
         _result("r3", 3, {"a": VerdictStatus.INCONCLUSIVE, "b": VerdictStatus.PASSED}, 2)
     )
-    store.save_result(_result("r4", 4, {"a": VerdictStatus.FAILED}, 1, gate="block"))
+    store.save_result(
+        _result(
+            "r4", 4, {"a": VerdictStatus.FAILED}, 1, gate="block", blocking=["a: failed (critical)"]
+        )
+    )
     store.save_result(_result("r5", 5, {"a": VerdictStatus.INCONCLUSIVE}, 3, gate="block"))
     cat = catalogue_dir()
     settings = Settings(reports_dir=str(tmp_path))
@@ -597,6 +602,25 @@ def test_a_run_whose_process_died_is_not_running_forever(tmp_path: Path) -> None
     assert runs["dead"]["state"] == "harness_error" and "INTERRUPTED" in runs["dead"]["error"]
     assert runs["live"]["state"] == "running" and runs["live"]["passed"] is None
     assert runs["elsewhere"]["state"] == "running"  # cannot tell: never guessed dead
+    # The detail agrees with the list: an interrupted run is shown, a live one is "wait",
+    # and an id that is not a run is "not found" (never waited on for ever).
+    dead = c.get("/api/v1/runs/dead")
+    assert dead.status_code == 200 and "INTERRUPTED" in dead.json()["gateSummary"]
+    live = c.get("/api/v1/runs/live")
+    assert live.status_code == 409 and live.json()["code"] == "RUN_IN_PROGRESS"
+    missing = c.get("/api/v1/runs/nope")
+    assert missing.status_code == 404 and missing.json()["code"] == "UNKNOWN_RUN"
+
+
+def test_no_pid_probe_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.kill(pid, 0) is TerminateProcess on Windows: probing would kill the run."""
+    from opseval.server import views
+
+    called: list[int] = []
+    monkeypatch.setattr(views.os, "name", "nt")
+    monkeypatch.setattr(views.os, "kill", lambda pid, sig: called.append(pid))
+    assert views._process_gone({"pid": 123, "host": socket.gethostname()}) is False
+    assert called == []
 
 
 def test_save_error_is_what_the_detail_reads(tmp_path: Path) -> None:
@@ -622,3 +646,116 @@ async def test_an_unknown_scenario_in_a_selection_is_a_config_error_not_dropped(
         )
         run = await _wait_for(http, started.json()["runId"], {"harness_error"})
         assert "CONFIG_ERROR" in run["error"] and "'nope'" in run["error"]
+
+
+# --- review fixes ---------------------------------------------------------------------------
+
+
+async def test_a_broken_file_outside_the_selection_does_not_mark_the_run(tmp_path: Path) -> None:
+    from opseval.demo.refund_agent import run_agent
+
+    settings = Settings(reports_dir=str(tmp_path / "r"), allowed_hosts="127.0.0.1")
+    app, cat = app_for(tmp_path, copy=True, settings=settings)
+    (cat / "scenarios" / "wip").mkdir()
+    (cat / "scenarios" / "wip" / "broken.yaml").write_text("id: [not, valid", "utf-8")
+    async with run_agent(bug=None) as url, _async_client(app) as http:
+        started = await http.post(
+            "/api/v1/runs", json={"scenarios": ["rf-001"], "repeats": 1, "target": url}
+        )
+        run_id = started.json()["runId"]
+        run = await _wait_for(http, run_id, {"finished"})
+        detail = (await http.get(f"/api/v1/runs/{run_id}")).json()
+    assert run["passed"] == 1 and detail["loadErrors"] == [] and detail["exitCode"] == 0
+
+
+def test_gate_state_follows_what_blocked_not_the_exit_code(tmp_path: Path) -> None:
+    from opseval.server.views import gate_state
+
+    def gated(blocking: list[str], exit_code: int) -> SuiteResult:
+        r = _result("x", 1, {"a": VerdictStatus.PASSED}, exit_code, gate="block")
+        return r.model_copy(update={"gate": Gate(status="block", blocking=blocking)})
+
+    # A normal failure (a warning) plus an inconclusive block: exit 1, but not an agent block.
+    assert gate_state(gated(["b: inconclusive"], 1)) == "not_judged"
+    # A flaky scenario blocking (fail_on_flaky) with exit 0: the agent was inconsistent.
+    assert gate_state(gated(["a: flaky"], 0)) == "blocked"
+    assert gate_state(gated(["a: failed (critical)"], 1)) == "blocked"
+    assert gate_state(gated(["no scenario was judged"], 2)) == "not_judged"
+
+
+def test_saving_the_open_suite_keeps_what_the_form_does_not_manage(tmp_path: Path) -> None:
+    import yaml
+
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    path = cat / "suites" / "kept.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "kept",
+                "include": ["scenarios/rf-001*.yaml"],
+                "exclude": ["scenarios/none*.yaml"],
+                "defaults": {"conversation": {"stop_at": "commit_gate"}},
+                "overrides": {"execution": {"repeats": 3, "consistency_threshold": 0.5}},
+            }
+        ),
+        "utf-8",
+    )
+    body = {
+        "file": "kept",
+        "displayName": "renamed",
+        "include": ["scenarios/rf-001*.yaml"],
+        "overwrite": True,
+    }
+    assert c.put("/api/v1/suites", json=body).status_code == 200
+    doc = yaml.safe_load(path.read_text("utf-8"))
+    assert doc["name"] == "renamed" and doc["exclude"] == ["scenarios/none*.yaml"]
+    assert doc["defaults"]["conversation"]["stop_at"] == "commit_gate"
+    assert doc["overrides"]["execution"] == {"repeats": 3, "consistency_threshold": 0.5}
+    # An explicit null clears the override and nothing else.
+    assert c.put("/api/v1/suites", json={**body, "repeats": None}).status_code == 200
+    doc = yaml.safe_load(path.read_text("utf-8"))
+    assert doc["overrides"]["execution"] == {"consistency_threshold": 0.5}
+
+
+def test_import_into_a_flat_catalogue_checks_clashes_and_keeps_scenarios(tmp_path: Path) -> None:
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    src = catalogue_dir()
+    shutil.copy(src / "profile.yaml", flat / "profile.yaml")
+    shutil.copy(src / "scenarios" / "rf-001-happy-path.yaml", flat / "rf-001.yaml")
+    app = create_app(
+        settings=Settings(reports_dir=str(tmp_path / "r")),
+        catalogue=flat,
+        profile=flat / "profile.yaml",
+        token=TOKEN,
+    )
+    c = connect(app)
+    text = (flat / "rf-001.yaml").read_text()
+    clash = c.post(
+        "/api/v1/scenarios/import",
+        json={"family": "f", "files": [{"name": "a.yaml", "text": text}]},
+    )
+    assert clash.status_code == 422 and "would replace existing scenario" in clash.text
+    new = text.replace("id: rf-001", "id: rf-950")
+    ok = c.post(
+        "/api/v1/scenarios/import", json={"family": "f", "files": [{"name": "a.yaml", "text": new}]}
+    )
+    assert ok.status_code == 200
+    ids = {s["id"] for s in c.get("/api/v1/scenarios").json()["scenarios"]}
+    assert {"rf-001", "rf-950"} <= ids and not (flat / "scenarios").exists()
+
+
+def test_serve_never_prints_a_configured_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    import uvicorn
+
+    from opseval.cli import app as cli
+
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setenv("OPSEVAL_SERVE_TOKEN", "long-lived-secret")
+    out = CliRunner().invoke(cli, ["serve", "--port", "8123"]).output
+    assert "long-lived-secret" not in out and "<OPSEVAL_SERVE_TOKEN>" in out
+    assert "OPSEVAL_API=http://127.0.0.1:8123" in out
+    monkeypatch.delenv("OPSEVAL_SERVE_TOKEN")
+    out = CliRunner().invoke(cli, ["serve"]).output
+    assert "#token=" in out and "this start only" in out
