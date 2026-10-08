@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test check audit demo schemas
+.PHONY: install lint typecheck test check audit demo schemas console console-check
 
 # Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
 ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
@@ -38,3 +38,10 @@ demo:
 # file the loader rejects.
 schemas:
 	uv run opseval schemas --check
+
+# The web console (needs Node 20+). `npm ci` once, then these.
+console-check:
+	cd packages/console && npm run build
+
+console:
+	cd packages/console && npm run dev
