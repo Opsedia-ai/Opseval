@@ -187,6 +187,48 @@ def _load_scenario(
         return None, _problems_from(path, exc)
 
 
+def reference_problems(
+    scenario: Scenario,
+    where: str,
+    profile: SutProfile,
+    known_scorers: Iterable[str],
+    known_invariants: set[str],
+) -> list[LoadProblem]:
+    """`check_references`, as problems with the field split from the message."""
+    out = []
+    for msg in check_references(scenario, profile, known_scorers, known_invariants):
+        fld, _, rest = msg.partition(": ")
+        out.append(LoadProblem(where, fld, rest))
+    return out
+
+
+def check_scenario_text(
+    text: str,
+    where: str,
+    profile: SutProfile,
+    *,
+    known_scorers: Iterable[str],
+    known_invariants: set[str],
+) -> tuple[Scenario | None, list[LoadProblem]]:
+    """One scenario file's text through exactly the checks `opseval validate` applies to
+    it: YAML (with the line), a mapping, the schema (each problem at its field path), and
+    its references against the profile. The one place the console's editor and import
+    validate, so they cannot drift from the loader."""
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        line = f"line {mark.line + 1}" if mark is not None else ""
+        return None, [LoadProblem(where, line, f"invalid YAML: {exc}")]
+    if not isinstance(raw, dict):
+        return None, [LoadProblem(where, "", "a scenario file must contain a mapping")]
+    try:
+        scenario = Scenario.model_validate(raw)
+    except ValidationError as exc:
+        return None, _problems_from(Path(where), exc)
+    return scenario, reference_problems(scenario, where, profile, known_scorers, known_invariants)
+
+
 def _match_filter(scenario: Scenario, flt: str) -> bool:
     key, _, value = flt.partition("=")
     if not value:
@@ -255,9 +297,7 @@ def load_catalogue(
         cat.problems.extend(problems)
         if scenario is None:
             continue
-        for msg in check_references(scenario, profile, known, known_invariants):
-            fld, _, rest = msg.partition(": ")
-            cat.problems.append(LoadProblem(str(f), fld, rest))
+        cat.problems.extend(reference_problems(scenario, str(f), profile, known, known_invariants))
         if scenario.id in seen:
             cat.problems.append(
                 LoadProblem(

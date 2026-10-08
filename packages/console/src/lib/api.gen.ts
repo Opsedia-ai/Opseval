@@ -161,6 +161,7 @@ export interface ScenarioOut {
   allowCommit: boolean;
   language: string;
   personaRole: string;
+  file: string;
 }
 
 export interface SuiteOut {
@@ -342,6 +343,34 @@ export interface ImportFile {
 export interface ImportIn {
   family?: string;
   files: ImportFile[];
+}
+
+/** One scenario file as it is on disk, for the editor: valid or not. */
+export interface ScenarioSourceOut {
+  file: string;
+  id: string | null;
+  text: string;
+  etag: string;
+}
+
+export interface ScenarioTextIn {
+  text: string;
+  file?: string | null;
+  family?: string | null;
+  fileName?: string | null;
+}
+
+export interface ScenarioSaveIn {
+  text: string;
+  etag: string;
+}
+
+/** What the loader would say about this text: the same checks as `opseval validate`. */
+export interface ScenarioCheckOut {
+  ok: boolean;
+  id: string | null;
+  title: string | null;
+  problems: Problem[];
 }
 
 export interface ImportOut {

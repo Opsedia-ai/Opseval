@@ -9,9 +9,11 @@ reason. Never a silent absence (ADR-0030, ADR-0031).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
+import shutil
 import threading
 import uuid
 from dataclasses import dataclass
@@ -22,7 +24,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from opseval.catalogue import check_references, load_catalogue
+from opseval.catalogue import check_scenario_text, load_catalogue
 from opseval.config import Settings
 from opseval.errors import ConfigError, OpsevalError
 from opseval.llm import UsageMeter, client_for_role
@@ -380,13 +382,17 @@ def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
         if (folder / f.name).exists():
             problems.append(_problem(f.name, "name", f"would replace {body.family}/{f.name}"))
             continue
-        try:
-            sc = Scenario.model_validate(yaml.safe_load(f.text))
-        except (yaml.YAMLError, ValidationError, TypeError) as exc:
-            problems.append(_problem(f.name, "", str(exc)[:500]))
+        found, found_problems = check_scenario_text(
+            f.text,
+            f.name,
+            profile,
+            known_scorers=REGISTRY.keys(),
+            known_invariants=set(INVARIANTS),
+        )
+        problems.extend(_problem(p.path, p.field, p.message) for p in found_problems)
+        if found is None:
             continue
-        for msg in check_references(sc, profile, REGISTRY, set(INVARIANTS)):
-            problems.append(_problem(f.name, "", msg))
+        sc = found
         if sc.id in existing_ids:
             problems.append(_problem(f.name, "id", f"would replace existing scenario {sc.id!r}"))
         elif sc.id in seen_ids:
@@ -408,3 +414,169 @@ def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
             path.unlink(missing_ok=True)
         raise ApiError(500, "WRITE_FAILED", f"nothing was imported: {exc}") from exc
     return s.ImportOut(imported=[sc.id for _, _, sc in parsed], problems=[])
+
+
+# --- the scenario editor ---------------------------------------------------------------
+
+_INDEX: dict[Path, tuple[tuple[tuple[str, int, int], ...], dict[str, Path]]] = {}
+_LOCKS: dict[Path, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _etag(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _id_index(ctx: ServerContext) -> dict[str, Path]:
+    """Valid scenario id -> file, parsed again only when a scenario file changed (the
+    editor validates as you type: reparsing the catalogue on every pause is too slow)."""
+    root, profile = ctx.need_catalogue()
+    folder = scenario_root(root)
+    files = sorted(folder.rglob("*.y*ml")) if folder.is_dir() else []
+    signature = tuple(
+        (str(f), f.stat().st_mtime_ns, f.stat().st_size)
+        for f in files
+        if not f.name.startswith(".")
+    )
+    cached = _INDEX.get(folder)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    cat, _ = load_catalogue(
+        folder, profile, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+    )
+    index = {sid: Path(src).resolve() for sid, src in cat.sources.items()}
+    _INDEX[folder] = (signature, index)
+    return index
+
+
+def _rel(root: Path, path: Path) -> str:
+    """A path for display: relative to the catalogue when it is inside it."""
+    resolved, base = path.resolve(), root.resolve()
+    return resolved.relative_to(base).as_posix() if resolved.is_relative_to(base) else str(path)
+
+
+def _scenario_file(ctx: ServerContext, rel: str) -> tuple[Path, Path]:
+    """(catalogue root, file) for a catalogue-relative scenario file, valid or not: the
+    files that fail validation are the ones that most need the editor."""
+    root, _ = ctx.need_catalogue()
+    path = (root / rel).resolve()
+    inside = path.is_relative_to(scenario_root(root).resolve())
+    if not inside or path.suffix not in (".yaml", ".yml") or not path.is_file():
+        raise ApiError(404, "UNKNOWN_SCENARIO_FILE", f"no scenario file {rel!r}")
+    return root, path
+
+
+def _source(root: Path, path: Path, data: bytes, sid: str | None) -> s.ScenarioSourceOut:
+    return s.ScenarioSourceOut(
+        file=_rel(root, path), id=sid, text=data.decode("utf-8"), etag=_etag(data)
+    )
+
+
+def scenario_source(ctx: ServerContext, rel: str) -> s.ScenarioSourceOut:
+    root, path = _scenario_file(ctx, rel)
+    sid = next((k for k, v in _id_index(ctx).items() if v == path), None)
+    return _source(root, path, path.read_bytes(), sid)
+
+
+def scenario_source_by_id(ctx: ServerContext, sid: str) -> s.ScenarioSourceOut:
+    root, _ = ctx.need_catalogue()
+    path = _id_index(ctx).get(sid)
+    if path is None:
+        raise ApiError(404, "UNKNOWN_SCENARIO", f"no valid scenario {sid!r}")
+    return _source(root, path, path.read_bytes(), sid)
+
+
+def _suites_selecting(root: Path, sid: str) -> list[str]:
+    """Suites that pick this id by filter, which a rename would leave selecting nothing."""
+    out = []
+    for f in sorted((root / "suites").glob("[!.]*.yaml")):
+        try:
+            raw = yaml.safe_load(f.read_text("utf-8")) or {}
+        except (yaml.YAMLError, OSError):
+            continue
+        filters = raw.get("filters", []) if isinstance(raw, dict) else []
+        if isinstance(filters, list) and f"id={sid}" in filters:
+            out.append(f.stem)
+    return out
+
+
+def check_scenario(ctx: ServerContext, body: s.ScenarioTextIn) -> s.ScenarioCheckOut:
+    """The loader's verdict on one scenario's text (catalogue.check_scenario_text), plus
+    what only the catalogue can say: an id used by another file, a rename that would
+    empty a suite, and, for a new file, whether its folder and name can be written."""
+    root, profile = ctx.need_catalogue()
+    where = body.file or (f"{body.family}/{body.file_name}" if body.file_name else "(new)")
+    sc, problems = check_scenario_text(
+        body.text, where, profile, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+    )
+    out = [_problem(p.path, p.field, p.message) for p in problems]
+    editing = _scenario_file(ctx, body.file)[1] if body.file else None
+    if body.file is None and body.file_name is not None:
+        family = body.family or "uncategorised"
+        if not SAFE_NAME.match(family):
+            out.append(_problem(where, "family", "letters, digits, '.', '_' and '-' only"))
+        elif not SAFE_FILE.match(body.file_name):
+            out.append(_problem(where, "file", "a .yaml file name: letters, digits, '.', '_', '-'"))
+        elif (scenario_root(root) / family / body.file_name).exists():
+            out.append(_problem(where, "file", f"{family}/{body.file_name} already exists"))
+    if sc is not None:
+        index = _id_index(ctx)
+        other = index.get(sc.id)
+        if other is not None and other != editing:
+            out.append(
+                _problem(where, "id", f"id {sc.id!r} is already used by {_rel(root, other)}")
+            )
+        before = next((k for k, v in index.items() if v == editing), None) if editing else None
+        if before is not None and before != sc.id:
+            for suite in _suites_selecting(root, before):
+                out.append(
+                    _problem(
+                        where, "id", f"suite {suite!r} selects id={before}: renaming empties it"
+                    )
+                )
+    return s.ScenarioCheckOut(
+        ok=sc is not None and not out,
+        id=sc.id if sc else None,
+        title=sc.name if sc else None,
+        problems=out,
+    )
+
+
+def _lock(path: Path) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(path, threading.Lock())
+
+
+def save_scenario_source(
+    ctx: ServerContext, rel: str, body: s.ScenarioSaveIn
+) -> s.ScenarioSourceOut:
+    """Replace one scenario file with valid text, never over a newer version of it.
+
+    The check of the version and the write happen under one lock per file, so of two
+    saves of the same version the second is refused rather than silently replacing the
+    first; validating (slow) happens before the lock. Line endings and permissions are
+    kept, so a save shows in git as the lines that changed, not the whole file.
+    """
+    ctx.need_writable()
+    root, path = _scenario_file(ctx, rel)
+    check = check_scenario(ctx, s.ScenarioTextIn(text=body.text, file=rel))
+    if not check.ok:
+        raise ApiError(422, "INVALID_SCENARIO", "; ".join(p.message for p in check.problems))
+    with _lock(path):
+        current = path.read_bytes()
+        if _etag(current) != body.etag:
+            raise ApiError(
+                409, "SCENARIO_CHANGED", "the file changed on disk since you opened it; reload it"
+            )
+        text = body.text.replace("\r\n", "\n")
+        if b"\r\n" in current:
+            text = text.replace("\n", "\r\n")
+        data = text.encode("utf-8")
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}")
+        try:
+            temp.write_bytes(data)
+            shutil.copymode(path, temp)
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+    return _source(root, path, data, check.id)
