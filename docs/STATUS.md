@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-08** (`main` with the console's own test suite in CI).
+**As of 2026-10-08** (`main` with the egress, secrets and release-pipeline fixes).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 78% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 80% of 69.
+**Overall: 79% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 82% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 42 / 14 / 3 | 83% |
+| v0.1 | 59 | 44 / 12 / 3 | 85% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
 | v0.5 | 12 | 5 / 3 / 4 | 54% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 59 / 19 / 10 | **78%** |
+| **All** | 88 | 61 / 17 / 10 | **79%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -104,8 +104,8 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-RPT-05 | Flow map | S | v0.2 | Done | ADR-0023 |
 | FR-RPT-06 | Compare and trend | M | v0.5 | Partial | compare and per-run trend in the console; no per-scenario trend |
 | FR-RPT-07 | JUnit XML | S | v0.2 | Done | `reporting/junit.py` |
-| FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Partial | targets, Langfuse, sinks, telemetry; a keyless LLM base URL skips the check |
-| FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Partial | `SECRET_FIELDS`, `config_digest`; the webhook URL is not yet treated as a secret (ATTENTION I3) |
+| FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not, preflight probes included), Langfuse, sinks, telemetry (`check_url_allowed`) |
+| FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes name only the host |
 | FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Missing | not started (see FR-RUN-08) |
 | FR-SAF-04 | Committed-outcome guard | M | v0.1 | Partial | CLI and console (`serve --allow-commit`, ADR-0031); a profile without a `commit_gate` is not yet refused (ATTENTION I7) |
 | FR-SAF-05 | Artifact cleanup planning | S | v0.5 | Missing | not started |
@@ -134,7 +134,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | Reliability | Done | fault-injection suite across transports, scorers and trace sources |
 | Code quality | Done | `mypy --strict`, ruff, coverage ≥ 85% (≈ 95%), scorer contract kit; console API types generated from the server models with a drift check; console tests (Vitest) in CI; no transport contract kit |
 | Determinism | Done | seeds, prompt and rubric hashes, `opseval rescore` |
-| Security | Partial | bandit, pip-audit, SECURITY.md, console API token auth; no threat model, SBOM or signed images |
+| Security | Partial | bandit, pip-audit, SECURITY.md, console API token auth, actions pinned to SHAs with Dependabot, releases gated on `make check` and the demo exit codes; no threat model, SBOM or signed images |
 | Privacy | Partial | content-free telemetry; credential values redacted (ADR-0033); console loads nothing from another origin (fonts bundled) |
 | Scalability | Missing | attempts run one after another (≥ 20 concurrent is the target) |
 | Performance | Missing | no overhead benchmark |

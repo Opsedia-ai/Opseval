@@ -63,7 +63,7 @@ uv run opseval run my-evals/suites/smoke.yaml --profile my-evals/profile.yaml \
 
 For WebSocket or custom HTTP agents, write a SUT profile that maps their frames (`opseval init --template refund-demo` is a worked example with approval checkpoints) and use `--transport websocket` or `--transport http-json`.
 
-LLM personas and judges use any OpenAI-compatible endpoint: set `OPSEVAL_SIMULATOR_BASE_URL`, `OPSEVAL_SIMULATOR_MODEL`, `OPSEVAL_SIMULATOR_API_KEY`, and likewise `OPSEVAL_JUDGE_*`. Scripted scenarios need no LLM at all.
+LLM personas and judges use any OpenAI-compatible endpoint: set `OPSEVAL_SIMULATOR_BASE_URL`, `OPSEVAL_SIMULATOR_MODEL`, `OPSEVAL_SIMULATOR_API_KEY`, and likewise `OPSEVAL_JUDGE_*`. Scripted scenarios need no LLM at all. The endpoint's host must be in `OPSEVAL_ALLOWED_HOSTS` even without an API key, because it receives every conversation; a local model (for example Ollama) needs `127.0.0.1` there, and plain HTTP is allowed only on loopback.
 
 ### WebSocket agents: dropped connections and short-lived tokens
 
@@ -496,7 +496,11 @@ never measured is pushed as a *category* — never as 0, which on a dashboard is
 from the agent failing.
 
 Third parties can add a sink over the `opseval.sinks` entry point with
-`async def publish(self, result) -> str`. See [ADR-0027](docs/adr/0027-sinks.md).
+`async def publish(self, result) -> str`. Installing one publishes nothing until you name it:
+`OPSEVAL_SINKS=acme` (comma-separated; a name no installed plugin provides is an error). The
+webhook URL is treated as a secret (chat webhook URLs carry their channel's token): it is redacted
+in every output, and results say only which host they were posted to. See
+[ADR-0027](docs/adr/0027-sinks.md).
 
 ## Telemetry
 

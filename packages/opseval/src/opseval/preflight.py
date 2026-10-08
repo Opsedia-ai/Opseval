@@ -26,7 +26,8 @@ import websockets
 from websockets.exceptions import InvalidStatus, WebSocketException
 
 from opseval.auth import HS256Tokens
-from opseval.config import Settings
+from opseval.config import Settings, check_url_allowed
+from opseval.errors import ConfigError
 from opseval.models.preflight import CheckStatus, HealthCheck, PreflightReport
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario
@@ -160,6 +161,13 @@ async def check_llm(
             status=CheckStatus.NOT_CONFIGURED,
             detail=f"set OPSEVAL_{role.upper()}_BASE_URL and OPSEVAL_{role.upper()}_MODEL",
             needed_by=needed_by,
+        )
+    try:
+        # Not even a health probe goes to a host the operator did not allowlist.
+        check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
+    except ConfigError as exc:
+        return HealthCheck(
+            name=role, status=CheckStatus.UNAVAILABLE, detail=str(exc), needed_by=needed_by
         )
     ok, detail = await _probe_http(base)
     if not ok:

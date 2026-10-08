@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -31,6 +32,8 @@ class WebhookSink(Sink):
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         self._url = url
+        # The URL is a credential (it carries the channel's token): only its host is shown.
+        self._shown = urlsplit(url).hostname or "the webhook"
         self._timeout = timeout
         self._headers = headers or {}
         self._client_factory = client_factory
@@ -47,8 +50,8 @@ class WebhookSink(Sink):
         finally:
             await client.aclose()
         if response.status_code >= 400:
-            raise RuntimeError(f"{self._url} answered HTTP {response.status_code}")
-        return f"posted run {result.run_id} to {self._url} (HTTP {response.status_code})"
+            raise RuntimeError(f"{self._shown} answered HTTP {response.status_code}")
+        return f"posted run {result.run_id} to {self._shown} (HTTP {response.status_code})"
 
 
 __all__ = ["WebhookSink"]

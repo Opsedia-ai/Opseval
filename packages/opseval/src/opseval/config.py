@@ -69,7 +69,11 @@ class Settings(BaseSettings):
 
     # Sinks: where a finished run is published (ADR-0027). Each host is allowlisted
     # like every other host that receives data.
-    webhook_url: str | None = None
+    webhook_url: SecretStr | None = None
+    """Slack, Teams and Discord incoming-webhook URLs are credentials: redacted everywhere."""
+    sinks: str = ""
+    """Plugin sinks to enable, by name (comma-separated). Installing a package never starts
+    publishing on its own: a plugin sink runs only when named here."""
     langfuse_push_scores: bool = False
     langfuse_score_name: str = "opseval"
 
@@ -96,6 +100,7 @@ SECRET_FIELDS = (
     "judge_api_key",
     "langfuse_secret_key",
     "serve_token",
+    "webhook_url",
 )
 
 

@@ -90,3 +90,12 @@ run — the guard doing its job a day after it was built.
   `repeats` that is a lot of small requests, with no batching.
 - Nothing retries. A sink that fails is reported and that is all, because a retry loop after the
   result is written would delay the exit code for a side effect.
+
+## Amendment (2026-10-08)
+
+- **Plugin sinks are opt-in.** An installed `opseval.sinks` plugin publishes only when named in
+  `OPSEVAL_SINKS`; naming one that is not installed is a `ConfigError`. Installing a package
+  must never start sending results anywhere on its own.
+- **The webhook URL is a secret.** Slack, Teams and Discord incoming-webhook URLs carry their
+  channel's token, so `OPSEVAL_WEBHOOK_URL` is a `SecretStr` in `SECRET_FIELDS` (redacted in the
+  config digest, `/config` and reports), and a sink outcome names only the host.

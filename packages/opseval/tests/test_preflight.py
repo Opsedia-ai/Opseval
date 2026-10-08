@@ -200,7 +200,11 @@ class TestLlm:
         monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
         check = await check_llm(
             "judge",
-            Settings(judge_base_url="https://api.example.com/v1", judge_model="m"),
+            Settings(
+                judge_base_url="https://api.example.com/v1",
+                judge_model="m",
+                allowed_hosts="api.example.com",
+            ),
             2,
         )
         assert check.status is CheckStatus.UNVERIFIED
@@ -214,9 +218,32 @@ class TestLlm:
 
         monkeypatch.setattr(httpx.AsyncClient, "get", boom)
         check = await check_llm(
-            "judge", Settings(judge_base_url="https://api.example.com/v1", judge_model="m"), 1
+            "judge",
+            Settings(
+                judge_base_url="https://api.example.com/v1",
+                judge_model="m",
+                allowed_hosts="api.example.com",
+            ),
+            1,
         )
         assert check.status is CheckStatus.UNAVAILABLE
+
+    async def test_a_host_that_is_not_allowlisted_is_never_probed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The allowlist covers every endpoint, keyed or not, and even a health probe."""
+        probed: list[str] = []
+
+        async def spy(self: Any, url: str) -> httpx.Response:
+            probed.append(url)
+            return httpx.Response(200)
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", spy)
+        check = await check_llm(
+            "judge", Settings(judge_base_url="http://gpu-box.lan:11434/v1", judge_model="m"), 1
+        )
+        assert check.status is CheckStatus.UNAVAILABLE and "OPSEVAL_ALLOWED_HOSTS" in check.detail
+        assert probed == []
 
 
 class TestTraces:
