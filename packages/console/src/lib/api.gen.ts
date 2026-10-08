@@ -59,7 +59,7 @@ export interface TestOut {
 /** One thing that happened in a conversation, in order. */
 export interface TranscriptEntry {
   seq: number;
-  kind: "message" | "checkpoint" | "decision" | "result" | "error" | "notification";
+  kind: "message" | "checkpoint" | "decision" | "result" | "error" | "notification" | "unknown";
   who: "customer" | "agent" | null;
   text: string | null;
   phase: string | null;
@@ -89,6 +89,7 @@ export interface AttemptRecordOut {
   toolCalls: ToolCallOut[];
   infraErrors: string[];
   connection: string[];
+  probes: string[];
   plantedInjections: string[];
   redactionChecked: boolean;
   redactedKinds: string[];

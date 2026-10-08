@@ -18,7 +18,7 @@ function Entry({ e }: { e: TranscriptEntry }) {
       </div>
     );
   }
-  const label = { checkpoint: "⏸ checkpoint raised", decision: "▶ customer decision", result: "result", error: "error from the agent", notification: "notification" }[e.kind];
+  const label = { checkpoint: "⏸ checkpoint raised", decision: "▶ customer decision", result: "result", error: "error from the agent", notification: "notification", unknown: "unclassified frame" }[e.kind];
   return (
     <div className={cx("rounded-xl border border-dashed px-3 py-1.5 text-sm", e.kind === "error" ? "border-deep-coral text-deep-coral" : "border-line text-muted-ink")}>
       {label}{e.detail && <>: <Mono>{e.detail}</Mono></>}
@@ -36,7 +36,7 @@ export default function Transcript({ run, test, index }: { run: string; test: st
           <span>{r.userTurns} customer turn(s)</span>
           {r.language && <Pill>{r.language}{r.dialect ? ` / ${r.dialect}` : ""}</Pill>}
           <Pill tone={r.traceCoverage === "full" ? "pass" : "mute"} dashed={r.traceCoverage !== "full"}>{r.traceCoverage === "full" ? "trace-backed" : "frames only"}</Pill>
-          {r.stopReason && <span>ended: <Mono>{r.terminalState}</Mono> ({r.stopReason})</span>}
+          <span>ended: <Mono>{r.terminalState}</Mono>{r.stopReason && ` (${r.stopReason})`}</span>
         </div>
         {!r.redactionChecked
           ? <Callout><b>Credential redaction was not checked on this record</b>: it was written before Opseval removed credential values. It may contain one.</Callout>
@@ -51,6 +51,7 @@ export default function Transcript({ run, test, index }: { run: string; test: st
               <li key={i} className="flex flex-wrap items-center gap-2"><Mono>{c.name}</Mono><Pill tone={c.ok ? "pass" : "fail"}>{c.ok ? "ok" : "error"}</Pill>
                 {c.arguments && <code className="basis-full overflow-x-auto rounded-lg bg-soft px-2 py-1 text-xs">{c.arguments}</code>}</li>))}</ul></div>)}
         {r.infraErrors.length > 0 && <Callout><b>Harness errors (not the agent):</b><ul className="list-disc pl-5">{r.infraErrors.map((e) => <li key={e}>{e}</li>)}</ul></Callout>}
+        {r.probes.length > 0 && <p className="text-sm"><b>Protocol probes:</b> {r.probes.join("; ")}</p>}
         {r.connection.length > 0 && <p className="text-sm"><b>Connection:</b> {r.connection.join(" → ")}</p>}
       </div>)}</Data>
   );

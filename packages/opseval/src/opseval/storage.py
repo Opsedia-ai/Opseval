@@ -117,7 +117,8 @@ class FileStore:
         return path
 
     def load_record(self, run_id: str, test_id: str, attempt: int) -> RunRecord | None:
-        """One attempt's record, or ``None`` if it was not (or not yet) written."""
+        """One attempt's record, or ``None`` if it was not (or not yet) written. A record that
+        exists but cannot be read raises (``ValueError``/``OSError``): that is not absence."""
         name = f"{SAFE.sub('_', test_id)}__attempt{attempt}.json"
         path = self.run_dir(run_id) / "records" / name
         try:

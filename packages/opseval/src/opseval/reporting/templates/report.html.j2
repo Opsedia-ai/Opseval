@@ -112,13 +112,14 @@ forbidden, no matching call, no rule to apply. The passes are honest and they ar
 </table>
 {% if rec %}
 <details {% if a.passed is sameas false %}open{% endif %}><summary>Conversation ({{ rec.user_turns }} customer turns, persona {{ rec.persona.language }}{{ '/' ~ rec.persona.dialect if rec.persona.dialect else '' }})</summary>
-{% for f in rec.frames %}
-  {% if f.text %}<div class="bubble {{ 'customer' if f.direction == 'sent' else 'agent' }}"><div class="who">{{ 'customer' if f.direction == 'sent' else 'agent' }}{% if f.phase %} · {{ f.phase }}{% endif %}{% if f.latency_ms %} · {{ '%.0f' % f.latency_ms }} ms{% endif %}</div><div dir="auto">{{ f.text }}</div></div>{% endif %}
-  {% if f.kind.value == 'needs_human' %}<div class="decision">⏸ checkpoint raised: <code>{{ f.payload.get('checkpoint', '') }}</code></div>{% endif %}
-  {% if f.kind.value == 'resume' %}<div class="decision">▶ customer decision: <code>{{ f.payload.get('action', '') }}</code></div>{% endif %}
+{% for e in talks[(t.test_id, a.attempt_index)] %}
+  {% if e.kind == 'message' %}<div class="bubble {{ e.who }}"><div class="who">{{ e.who }}{% if e.phase %} · {{ e.phase }}{% endif %}{% if e.latency_ms %} · {{ '%.0f' % e.latency_ms }} ms{% endif %}</div><div dir="auto">{{ e.text }}</div></div>
+  {% elif e.kind == 'checkpoint' %}<div class="decision">⏸ checkpoint raised: <code>{{ e.detail or '' }}</code></div>
+  {% elif e.kind == 'decision' %}<div class="decision">▶ customer decision: <code>{{ e.detail or '' }}</code></div>
+  {% else %}<div class="decision{{ ' failed' if e.kind == 'error' else '' }}">{{ {'error': 'error from the agent', 'result': 'result', 'notification': 'notification', 'unknown': 'unclassified frame'}[e.kind] }}: <code>{{ e.detail or '' }}</code></div>{% endif %}
 {% endfor %}
 {% if rec.infra_errors %}<pre>{{ rec.infra_errors | join('\n') }}</pre>{% endif %}
-{% if rec.transport_events %}<p><strong>Connection:</strong> {% for e in rec.transport_events %}{{ e.kind }}{% if e.close_code %} (code {{ e.close_code }}){% endif %}{% if e.attempt %} #{{ e.attempt }}{% endif %}{% if not loop.last %} → {% endif %}{% endfor %}</p>{% endif %}
+{% set link = links[(t.test_id, a.attempt_index)] %}{% if link %}<p><strong>Connection:</strong> {{ link | join(' → ') }}</p>{% endif %}
 </details>
 {% set flow = flows.get((t.test_id, a.attempt_index)) %}
 {% if flow %}

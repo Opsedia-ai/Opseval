@@ -94,7 +94,7 @@ class TranscriptEntry(Api):
     """One thing that happened in a conversation, in order."""
 
     seq: int
-    kind: Literal["message", "checkpoint", "decision", "result", "error", "notification"]
+    kind: Literal["message", "checkpoint", "decision", "result", "error", "notification", "unknown"]
     who: Literal["customer", "agent"] | None  # only for a message
     text: str | None
     phase: str | None
@@ -125,6 +125,7 @@ class AttemptRecordOut(Api):
     tool_calls: list[ToolCallOut]
     infra_errors: list[str]
     connection: list[str]  # transport events: dropped, resumed, token refreshed
+    probes: list[str]  # protocol probes: "name: passed" or "name: failed (why)"
     planted_injections: list[str]
     redaction_checked: bool  # False: written before value redaction; never checked
     redacted_kinds: list[str]  # the credential kinds taken out; never the values

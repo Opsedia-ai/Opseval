@@ -219,6 +219,11 @@ class Driver:
         except Exception as exc:  # noqa: BLE001 - any other bug is ours, never the agent's
             state, reason = TerminalState.HARNESS_FAILURE, f"{type(exc).__name__}: {exc}"
             self._infra.append(f"harness: unexpected {type(exc).__name__}: {exc}")
+        # Exception text can carry a credential (a URL with ?token=…): it is part of the
+        # record, so it goes through the same value redaction as the conversation.
+        reason = self._scrub(reason) if reason else reason
+        infra = tuple(self._scrub(e) for e in self._infra)
+        notes = tuple(self._scrub(n) for n in self._notes)
         return RunRecord(
             run_id=self.run_id,
             test_id=self.s.id,
@@ -235,12 +240,17 @@ class Driver:
             interrupts=tuple(self._interrupts),
             user_turns=self._user_turns,
             persona=self.s.persona.model_dump(mode="json"),
-            infra_errors=tuple(self._infra),
-            notes=tuple(self._notes),
+            infra_errors=infra,
+            notes=notes,
             planted_injections=tuple(self._injections),
             transport_events=session.transport_events() if session else (),
             redaction=RedactionInfo(applied=True, found=tuple(sorted(self._redacted))),
         )
+
+    def _scrub(self, text: str) -> str:
+        clean, kinds = redact_text(text)
+        self._redacted.update(kinds)
+        return clean
 
     async def _probe(self, session: Session) -> None:
         """Send each declared probe and record what came back.

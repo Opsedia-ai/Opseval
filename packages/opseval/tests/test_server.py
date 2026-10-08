@@ -1019,8 +1019,18 @@ def test_an_attempt_that_does_not_exist_is_a_404(client: TestClient) -> None:
         "nope/attempts/a/0",
     ):
         r = client.get(f"/api/v1/runs/{path}")
-        assert r.status_code in (404, 422), path
-        assert "id=root" not in r.text
+        assert r.status_code == 404, path
+        assert r.json()["code"] in ("UNKNOWN_ATTEMPT", "NOT_FOUND"), path  # a code, always
+
+
+def test_an_unreadable_record_is_a_harness_error_not_absent(tmp_path: Path) -> None:
+    folder = tmp_path / "bad" / "records"
+    folder.mkdir(parents=True)
+    (folder / "t__attempt0.json").write_text('{"truncated": ', "utf-8")
+    r = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN)).get(
+        "/api/v1/runs/bad/attempts/t/0"
+    )
+    assert r.status_code == 500 and r.json()["code"] == "UNREADABLE_RECORD"
 
 
 def test_a_record_from_before_redaction_says_it_was_never_checked(tmp_path: Path) -> None:

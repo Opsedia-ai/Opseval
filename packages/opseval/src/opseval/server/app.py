@@ -223,6 +223,19 @@ def create_app(
     def _api_error(_: Request, exc: actions.ApiError) -> JSONResponse:
         return _deny(exc.status, exc.code, exc.message)
 
+    @app.exception_handler(StarletteHTTPException)
+    def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # Every API error carries a machine code the console can act on, including the
+        # router's own 404s. `detail` is kept for the import route's list of problems.
+        code = {404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED"}.get(exc.status_code)
+        message = exc.detail if isinstance(exc.detail, str) else "request failed"
+        body: dict[str, object] = {
+            "code": code or f"HTTP_{exc.status_code}",
+            "message": message,
+            "detail": exc.detail,
+        }
+        return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
+
     @app.get(f"{API}/health")
     def health() -> s.Health:
         return s.Health(
@@ -255,7 +268,10 @@ def create_app(
     def attempt(run_id: str, test_id: str, index: int) -> s.AttemptRecordOut:
         if index < 0 or not RUN_ID.match(test_id):
             raise actions.ApiError(404, "UNKNOWN_ATTEMPT", "no such attempt")
-        out = views.attempt_record(ctx.store, _run_id(run_id), test_id, index)
+        try:
+            out = views.attempt_record(ctx.store, _run_id(run_id), test_id, index)
+        except views.RecordUnreadable as exc:
+            raise actions.ApiError(500, "UNREADABLE_RECORD", f"cannot read {exc}") from exc
         if out is None:
             raise actions.ApiError(
                 404, "UNKNOWN_ATTEMPT", f"no record of {test_id} attempt {index} in {run_id}"
