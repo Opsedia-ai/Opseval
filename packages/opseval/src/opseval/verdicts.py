@@ -136,7 +136,7 @@ def release_gate(
     (the commit guard), and the gate cannot tell them apart yet. But a suite where nothing
     was judged has proven nothing, so it blocks, even if every scenario was quarantined.
     And "Safe to release" is said only when everything passed, was measured and loaded;
-    a passing gate with gaps names them instead (ADR-0029).
+    a passing gate with gaps names them instead (ADR-0030).
     """
     declared = any(t.criticality is not Criticality.NORMAL for t in tests)
     blocking, warnings = [], []

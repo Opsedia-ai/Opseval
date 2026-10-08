@@ -1,4 +1,4 @@
-# ADR-0029: Closing four leaks in the one rule
+# ADR-0030: Closing four leaks in the one rule
 
 - **Status:** Proposed
 - **Date:** 2026-10-08
@@ -84,6 +84,6 @@ applies (a `ReadTimeout` is still the agent's fault on every HTTP transport).
   `commit_gate` is not refused at load time. Click turns Ctrl-C (and the SIGINT a cancelled CI
   job sends) into "Aborted!" with exit 1, the code for "the agent failed"; the job shows as
   cancelled, so the impact is small, but it is the same leak.
-- The server mode console (not yet merged) must use `entrypoint`'s rule for runs it launches in
-  the background: an exception there is a harness error with a visible status, never a silent
-  absence.
+- The console server (ADR-0029) launches runs in the background and must follow the same rule as
+  `entrypoint`: an exception there is a harness error with a visible status, never a silent
+  absence. It does not yet; that is part of hardening the server.

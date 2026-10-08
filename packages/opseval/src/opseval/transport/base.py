@@ -27,7 +27,7 @@ NOT_SENT_TIMEOUTS: tuple[type[httpx.TimeoutException], ...] = (
 """httpx timeouts raised before the agent had the request: the connection never opened,
 or Opseval's own connection pool was exhausted. They are subclasses of
 ``httpx.TimeoutException``, so a transport must catch them *first* and treat them like a
-refused connection (a harness error), never as the agent failing to answer (ADR-0029)."""
+refused connection (a harness error), never as the agent failing to answer (ADR-0030)."""
 
 
 def decode_frame(data: str | bytes) -> Any:

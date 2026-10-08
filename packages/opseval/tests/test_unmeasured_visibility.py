@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A scorer that could not run is named wherever the verdict is (ADR-0029).
+"""A scorer that could not run is named wherever the verdict is (ADR-0030).
 
 An ``infra_error`` is never the agent's fault, so ``attempt_verdict`` leaves it out of the
 attempt and the attempt can pass on the scorers that did run. Without a name attached, a

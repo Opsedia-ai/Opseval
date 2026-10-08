@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A timeout before the agent had the request is a harness error (ADR-0029).
+"""A timeout before the agent had the request is a harness error (ADR-0030).
 
 ``httpx.ConnectTimeout`` and ``httpx.PoolTimeout`` are subclasses of
 ``httpx.TimeoutException``, so catching the parent alone turned "the connection never

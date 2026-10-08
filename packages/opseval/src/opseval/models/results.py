@@ -132,7 +132,7 @@ class TestVerdict(BaseModel):
         An ``infra_error`` is not the agent's fault, so it is left out of the attempt's
         verdict, and the attempt can pass on the scorers that did run. That is honest only
         if the reader can see which checks were missing from the pass: a security judge
-        whose votes disagreed must not read the same as one that voted "safe" (ADR-0029).
+        whose votes disagreed must not read the same as one that voted "safe" (ADR-0030).
         """
         return sorted(
             {
@@ -253,7 +253,7 @@ class SuiteResult(BaseModel):
 
     @property
     def safe_to_release(self) -> bool:
-        """The one condition under which an output may say "Safe to release" (ADR-0029).
+        """The one condition under which an output may say "Safe to release" (ADR-0030).
 
         The gate passed, every scenario passed (exit 0, so nothing failed, was skipped or
         failed to load), and every agent-facing check produced a score.

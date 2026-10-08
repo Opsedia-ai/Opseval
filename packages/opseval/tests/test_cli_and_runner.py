@@ -23,7 +23,7 @@ def test_version() -> None:
 
 
 class TestEntrypoint:
-    """The console script turns an unexpected crash into exit 3, never exit 1 (ADR-0029)."""
+    """The console script turns an unexpected crash into exit 3, never exit 1 (ADR-0030)."""
 
     def run_cli(self, monkeypatch: pytest.MonkeyPatch, *argv: str) -> int:
         from opseval.cli import entrypoint

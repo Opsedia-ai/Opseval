@@ -48,7 +48,7 @@ def _request_timeout(turn: float) -> httpx.Timeout:
     pool limits were the same length, that outer deadline would fire first on a host that
     never accepts the connection, and the resulting ``TimeoutError`` would blame the agent.
     Keeping them shorter lets ``ConnectTimeout``/``PoolTimeout`` surface as what they are:
-    a request that was never sent (ADR-0029).
+    a request that was never sent (ADR-0030).
     """
     setup = min(10.0, turn / 2)
     return httpx.Timeout(turn, connect=setup, pool=setup)
