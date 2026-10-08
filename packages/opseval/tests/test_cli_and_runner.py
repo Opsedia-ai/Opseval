@@ -22,6 +22,48 @@ def test_version() -> None:
     assert res.exit_code == 0 and "opseval" in res.stdout
 
 
+class TestEntrypoint:
+    """The console script turns an unexpected crash into exit 3, never exit 1 (ADR-0029)."""
+
+    def run_cli(self, monkeypatch: pytest.MonkeyPatch, *argv: str) -> int:
+        from opseval.cli import entrypoint
+
+        monkeypatch.setattr("sys.argv", ["opseval", *argv])
+        with pytest.raises(SystemExit) as info:
+            entrypoint()
+        return int(info.value.code or 0)
+
+    def test_a_crash_inside_a_run_is_a_harness_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        cat_dir: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        async def disk_full(*args: object, **kwargs: object) -> SuiteResult:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("opseval.cli.launch", disk_full)
+        code = self.run_cli(
+            monkeypatch,
+            "run",
+            str(cat_dir / "suites" / "smoke.yaml"),
+            "--profile",
+            str(cat_dir / "profile.yaml"),
+            "--target",
+            "ws://127.0.0.1:1",
+            "--reports-dir",
+            str(tmp_path),
+        )
+        assert code == 3
+        err = capsys.readouterr().err
+        assert "No space left on device" in err  # the traceback is kept for the bug report
+        assert "not an agent failure" in err
+
+    def test_normal_exit_codes_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self.run_cli(monkeypatch, "--version") == 0
+
+
 def test_list_scorers() -> None:
     res = runner.invoke(app, ["list-scorers"])
     assert res.exit_code == 0

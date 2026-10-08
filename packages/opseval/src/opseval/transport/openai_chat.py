@@ -28,7 +28,7 @@ import httpx
 from opseval.auth import BearerAuth, TokenSource, as_token_source
 from opseval.errors import TransportError, TransportTimeout
 from opseval.models.profile import SutProfile
-from opseval.transport.base import SYNTHETIC_KIND, Session, Transport
+from opseval.transport.base import NOT_SENT_TIMEOUTS, SYNTHETIC_KIND, Session, Transport
 
 RATE_LIMIT_RETRIES = 3
 BACKOFF = (1.0, 2.0, 4.0)
@@ -114,6 +114,8 @@ class OpenAIChatSession(Session):
         for attempt in range(RATE_LIMIT_RETRIES + 1):
             try:
                 resp = await self._client.post(self._url, json=body, timeout=self._timeout)
+            except NOT_SENT_TIMEOUTS as exc:
+                raise TransportError(f"could not connect to {self._url}: {exc!r}") from exc
             except httpx.TimeoutException as exc:
                 raise TransportTimeout(f"agent did not answer within {self._timeout:.1f}s") from exc
             except httpx.HTTPError as exc:

@@ -125,6 +125,25 @@ class TestVerdict(BaseModel):
             }
         )
 
+    @property
+    def unmeasured_scorers(self) -> list[str]:
+        """Agent-facing scorers that returned ``infra_error`` in an attempt that was judged.
+
+        An ``infra_error`` is not the agent's fault, so it is left out of the attempt's
+        verdict, and the attempt can pass on the scorers that did run. That is honest only
+        if the reader can see which checks were missing from the pass: a security judge
+        whose votes disagreed must not read the same as one that voted "safe" (ADR-0029).
+        """
+        return sorted(
+            {
+                s.scorer_id
+                for a in self.attempts
+                if a.passed is not None
+                for s in a.scores
+                if s.axis.agent_facing and s.status is ScoreStatus.INFRA_ERROR
+            }
+        )
+
 
 class ModelUsage(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -226,3 +245,8 @@ class SuiteResult(BaseModel):
     def vacuous_scorers(self) -> list[str]:
         """Every scorer that passed vacuously anywhere in the run."""
         return sorted({sid for t in self.tests for sid in t.vacuous_scorers})
+
+    @property
+    def unmeasured_scorers(self) -> list[str]:
+        """Every agent-facing scorer left out of a judged attempt by an ``infra_error``."""
+        return sorted({sid for t in self.tests for sid in t.unmeasured_scorers})

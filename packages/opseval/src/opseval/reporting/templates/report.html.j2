@@ -39,7 +39,10 @@ details{margin:6px 0}summary{cursor:pointer}
 </div>
 {% endif %}
 <div class="card gate {{ result.gate.status }}">
-  <div><span class="badge {{ 'passed' if result.gate.status == 'pass' else 'failed' }}">{{ 'RELEASE: PASS' if result.gate.status == 'pass' else 'RELEASE: BLOCKED' }}</span>
+  {% if result.gate.status != 'pass' %}{% set badge, label = 'failed', 'RELEASE: BLOCKED' %}
+  {% elif result.exit_code == 0 %}{% set badge, label = 'passed', 'RELEASE: PASS' %}
+  {% else %}{% set badge, label = 'inconclusive', 'RELEASE: PASS WITH GAPS' %}{% endif %}
+  <div><span class="badge {{ badge }}">{{ label }}</span>
   <span class="muted">exit code {{ result.exit_code }}</span></div>
   <p style="margin:8px 0 0">{{ result.gate.summary }}</p>
   {% if result.gate.warnings %}<p class="muted" style="margin:4px 0 0">Warnings: {{ result.gate.warnings | join('; ') }}</p>{% endif %}
@@ -51,6 +54,13 @@ details{margin:6px 0}summary{cursor:pointer}
 frame evidence instead of traces, or a judge from the graded model&rsquo;s own vendor family.
 <strong>Their scores counted toward the verdict above.</strong></p>
 <ul>{% for s in result.degraded_scorers %}<li><code>{{ s }}</code></li>{% endfor %}</ul></div>
+{% endif %}
+
+{% if result.unmeasured_scorers %}
+<div class="card"><h3 class="inconclusive">Not measured</h3>
+<p class="muted">These scorers could not produce a score (harness error) in at least one attempt
+that was still judged. <strong>The verdict above was reached without them.</strong></p>
+<ul>{% for s in result.unmeasured_scorers %}<li><code>{{ s }}</code></li>{% endfor %}</ul></div>
 {% endif %}
 
 {% if result.vacuous_scorers %}

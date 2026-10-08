@@ -30,7 +30,13 @@ import httpx
 from opseval.auth import BearerAuth, TokenSource, as_token_source
 from opseval.errors import TransportClosed, TransportError, TransportTimeout
 from opseval.models.profile import SutProfile
-from opseval.transport.base import SYNTHETIC_KIND, Session, Transport, decode_frame
+from opseval.transport.base import (
+    NOT_SENT_TIMEOUTS,
+    SYNTHETIC_KIND,
+    Session,
+    Transport,
+    decode_frame,
+)
 
 SSE_MEDIA_TYPE = "text/event-stream"
 
@@ -191,6 +197,9 @@ class SseSession(Session):
                         " check the URL and that it is an event-stream endpoint"
                     )
                 lines = await self._read_stream(response)
+        except NOT_SENT_TIMEOUTS as exc:
+            # The stream never opened, so the agent was never asked: same as a refusal.
+            raise TransportClosed(f"could not connect to {self._url}: {exc!r}") from exc
         except (httpx.TimeoutException, TimeoutError) as exc:
             # The agent held the stream open without finishing its turn.
             raise TransportTimeout(

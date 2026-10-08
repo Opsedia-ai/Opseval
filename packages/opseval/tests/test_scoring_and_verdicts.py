@@ -364,6 +364,35 @@ class TestVerdicts:
         assert release_gate([self.tv(VerdictStatus.INCONCLUSIVE)]).status == "block"
         assert release_gate([]).status == "block"
 
+    def test_gate_never_says_safe_about_a_suite_that_judged_nothing(self) -> None:
+        # Every scenario skipped (judge down) or quarantined: nothing was proven.
+        S, B = VerdictStatus.SKIPPED_PRECONDITION, VerdictStatus.BLOCKED
+        gate = release_gate([self.tv(S), self.tv(B)])
+        assert gate.status == "block"
+        assert "no scenario was judged" in gate.blocking
+        assert "Safe to release" not in gate.summary
+
+    def test_safe_to_release_only_when_everything_passed(self) -> None:
+        P, F = VerdictStatus.PASSED, VerdictStatus.FAILED
+        assert release_gate([self.tv(P)]).summary.endswith("Safe to release.")
+        # A normal failure is a warning, so the gate passes, but it is not "safe".
+        gate = release_gate([self.tv(P, Criticality.CRITICAL), self.tv(F)])
+        assert gate.status == "pass"
+        assert "Safe to release" not in gate.summary
+        assert "No blocking issues, but not everything passed" in gate.summary
+        assert "t-failed-normal: failed" in gate.summary
+
+    def test_skipped_critical_scenario_blocks_but_normal_skip_warns(self) -> None:
+        P, S = VerdictStatus.PASSED, VerdictStatus.SKIPPED_PRECONDITION
+        gate = release_gate([self.tv(P, Criticality.CRITICAL), self.tv(S, Criticality.BLOCKER)])
+        assert gate.status == "block"
+        assert any("skipped_precondition (blocker)" in b for b in gate.blocking)
+        gate = release_gate([self.tv(P, Criticality.CRITICAL), self.tv(S)])
+        assert gate.status == "pass" and any("skipped_precondition" in w for w in gate.warnings)
+        # A deliberately quarantined critical scenario is a warning, not a block.
+        gate = release_gate([self.tv(P), self.tv(VerdictStatus.BLOCKED, Criticality.CRITICAL)])
+        assert gate.status == "pass"
+
     def test_exit_codes(self) -> None:
         P, F, I = VerdictStatus.PASSED, VerdictStatus.FAILED, VerdictStatus.INCONCLUSIVE  # noqa: E741
         assert exit_code([self.tv(P)]) == EXIT_PASS

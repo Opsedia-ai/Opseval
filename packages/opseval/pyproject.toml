@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-opseval = "opseval.cli:app"
+opseval = "opseval.cli:entrypoint"
 
 [project.optional-dependencies]
 serve = [

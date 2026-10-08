@@ -85,6 +85,22 @@ def test_pass_and_load_errors() -> None:
     assert "✅ passed · flaky" in md and "1 scenario file(s) could not be loaded" in md
 
 
+def test_a_passing_gate_with_gaps_is_not_green() -> None:
+    """Gate passed (only a normal scenario was skipped) but exit 2: never "Safe to release"."""
+    from opseval.reporting import render_html
+
+    res = result(
+        verdict("a", VerdictStatus.PASSED, pass_rate=1.0),
+        verdict("b", VerdictStatus.SKIPPED_PRECONDITION),
+        exit_code=2,
+    )
+    md = markdown_summary(res)
+    assert "🟡 **No blocking issues, not everything passed** · exit code 2" in md
+    assert "Safe to release" not in md.split("\n")[3]
+    html = render_html(res, [])
+    assert "RELEASE: PASS WITH GAPS" in html and "RELEASE: PASS<" not in html
+
+
 def test_summary_command(cat_dir: Path, tmp_path: Path) -> None:
     settings = Settings(allowed_hosts="127.0.0.1", reports_dir=str(tmp_path / "r"))
 

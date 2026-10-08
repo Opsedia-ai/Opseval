@@ -128,29 +128,49 @@ def skipped(scenario: Scenario, status: VerdictStatus, reason: str) -> TestVerdi
 
 
 def release_gate(tests: list[TestVerdict], *, fail_on_flaky: bool = False) -> Gate:
+    """Pass only if something was judged and nothing that gates the release failed.
+
+    A skip is a warning for a normal scenario. A skipped critical scenario is an
+    unmeasured critical scenario, and a suite where nothing was judged has proven nothing:
+    both block, or the gate would say "Safe to release" about coverage it does not have
+    (ADR-0029). A ``blocked`` scenario was quarantined on purpose and stays a warning.
+    """
     declared = any(t.criticality is not Criticality.NORMAL for t in tests)
     blocking, warnings = [], []
     for t in tests:
+        gating = t.criticality in (Criticality.BLOCKER, Criticality.CRITICAL) or not declared
         if t.status is VerdictStatus.INCONCLUSIVE:
             blocking.append(f"{t.test_id}: inconclusive")
         elif t.status is VerdictStatus.FAILED:
-            if t.criticality in (Criticality.BLOCKER, Criticality.CRITICAL) or not declared:
+            if gating:
                 blocking.append(f"{t.test_id}: failed ({t.criticality.value})")
             else:
                 warnings.append(f"{t.test_id}: failed (normal)")
+        elif t.status is VerdictStatus.SKIPPED_PRECONDITION and gating:
+            blocking.append(f"{t.test_id}: skipped_precondition ({t.criticality.value})")
         elif t.status in (VerdictStatus.SKIPPED_PRECONDITION, VerdictStatus.BLOCKED):
             warnings.append(f"{t.test_id}: {t.status.value}")
         if t.flaky and fail_on_flaky:
             blocking.append(f"{t.test_id}: flaky")
         elif t.flaky:
             warnings.append(f"{t.test_id}: flaky")
+    judged = [t for t in tests if t.status in (VerdictStatus.PASSED, VerdictStatus.FAILED)]
     if not tests:
         blocking.append("no scenarios were run")
+    elif not judged:
+        blocking.append("no scenario was judged")
     status = "block" if blocking else "pass"
     passed = sum(1 for t in tests if t.status is VerdictStatus.PASSED)
-    summary = f"{passed}/{len(tests)} scenarios passed. " + (
-        "Release is BLOCKED by: " + "; ".join(blocking) + "." if blocking else "Safe to release."
-    )
+    # "Safe to release" only when everything passed: a passing gate with a normal failure or
+    # a skip is honest, but it is not the same sentence (ADR-0029).
+    gaps = [f"{t.test_id}: {t.status.value}" for t in tests if t.status is not VerdictStatus.PASSED]
+    if blocking:
+        verdict = "Release is BLOCKED by: " + "; ".join(blocking) + "."
+    elif gaps:
+        verdict = "No blocking issues, but not everything passed: " + "; ".join(gaps) + "."
+    else:
+        verdict = "Safe to release."
+    summary = f"{passed}/{len(tests)} scenarios passed. {verdict}"
     return Gate(status=status, blocking=blocking, warnings=warnings, summary=summary)
 
 

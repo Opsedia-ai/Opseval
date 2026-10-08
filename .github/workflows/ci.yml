@@ -38,6 +38,11 @@ jobs:
           set +e
           uv run opseval demo --repeats 1 --bug skip-approval
           test $? -eq 1
+      - name: Demo catches a forgotten refund method (exit 1)
+        run: |
+          set +e
+          uv run opseval demo --repeats 1 --bug forget-method
+          test $? -eq 1
       - name: Demo reports a harness failure, not an agent failure (exit 3)
         run: |
           set +e
