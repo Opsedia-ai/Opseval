@@ -46,6 +46,9 @@ details{margin:6px 0}summary{cursor:pointer}
   <span class="muted">exit code {{ result.exit_code }}</span></div>
   <p style="margin:8px 0 0">{{ result.gate.summary }}</p>
   {% if result.gate.warnings %}<p class="muted" style="margin:4px 0 0">Warnings: {{ result.gate.warnings | join('; ') }}</p>{% endif %}
+  {% if result.gate.policy %}<p class="muted" style="margin:4px 0 0">Gate policy: <code>{{ describe_policy(result.gate.policy) }}</code></p>
+  {% set looser = looser_than_standard(result.gate.policy) %}{% if looser %}<p class="inconclusive" style="margin:4px 0 0"><strong>Looser than standard:</strong> {{ looser | join(', ') }}</p>{% endif %}
+  {% if result.gate.ignored %}<p class="muted" style="margin:4px 0 0">Ignored by the policy: {{ result.gate.ignored | join('; ') }}</p>{% endif %}{% endif %}
 </div>
 
 {% if result.degraded_scorers %}

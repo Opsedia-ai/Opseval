@@ -132,6 +132,35 @@ opseval rescore reports/<run_id> --catalogue opseval/suites/full.yaml --profile 
 
 The original run is never modified. The new result goes to `reports/<run_id>/rescore-<time>/`, listing which scorer versions and judge prompts changed and which verdicts moved. The exit code follows the new result. Without a judge configured, judge scores are reused only if their prompt is unchanged ([ADR-0013](docs/adr/0013-offline-rescore.md)).
 
+### Choose what blocks the release
+
+Opseval decides what *happened*: a check passed, failed or could not be measured, and a
+timeout was the agent's or the harness's. Those facts are fixed. Your suite decides what each
+one *does* to the release:
+
+```yaml
+# suites/release.yaml
+name: release
+include: ["scenarios/**/*.yaml"]
+gate:
+  preset: strict            # strict | standard (default) | lenient
+  commit_guard: warn        # warn | ignore (never block: see ADR-0008)
+  unmeasured: block         # a security judge that could not vote must not pass
+```
+
+| Preset | What blocks |
+|---|---|
+| `standard` | blocker and critical failures, inconclusive scenarios |
+| `strict` | every failure, skip, flaky or unmeasured check, and load errors |
+| `lenient` | blocker and critical failures only; the exit code follows the gate |
+
+`opseval run --gate strict` overrides the suite for one run, and `opseval rescore <run> --gate
+lenient` asks what another policy would have said about a saved run. Every report names the
+policy, and flags any setting looser than `standard`, so a lenient green never passes for a
+strict one. Two things are not up to the policy: a suite that judged nothing always blocks, and
+a run where every attempt was a harness failure always exits 3
+([ADR-0032](docs/adr/0032-gate-policy.md)).
+
 ### Gate releases in CI
 
 **GitHub Actions**: the step fails exactly when Opseval says the release is blocked, and the gate summary is posted on the pull request:

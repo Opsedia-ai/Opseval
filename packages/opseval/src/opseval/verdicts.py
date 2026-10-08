@@ -11,12 +11,14 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
+from opseval.models.gate import PRESETS, ByCriticality, ResolvedGatePolicy, resolve
 from opseval.models.record import RunRecord
 from opseval.models.results import (
     AttemptVerdict,
     Gate,
     ScoreResult,
     ScoreStatus,
+    SkipKind,
     TestVerdict,
     VerdictStatus,
 )
@@ -117,73 +119,159 @@ def _unstable_scorers(valid: list[AttemptVerdict]) -> list[str]:
     return sorted(k for k, v in outcomes.items() if len(v) > 1)
 
 
-def skipped(scenario: Scenario, status: VerdictStatus, reason: str) -> TestVerdict:
+def skipped(
+    scenario: Scenario, status: VerdictStatus, reason: str, kind: SkipKind | None = None
+) -> TestVerdict:
     return TestVerdict(
         test_id=scenario.id,
         name=scenario.name,
         criticality=scenario.criticality,
         status=status,
         reason=reason,
+        skip_kind=kind,
     )
 
 
-def release_gate(
-    tests: list[TestVerdict], *, fail_on_flaky: bool = False, load_errors: int = 0
-) -> Gate:
-    """Pass only if something was judged and nothing that gates the release failed.
+class _Decision:
+    """Collects what a policy does with each finding: block, warn or ignore."""
 
-    Skips stay warnings: a skip can be a dependency outage or the operator's own choice
-    (the commit guard), and the gate cannot tell them apart yet. But a suite where nothing
-    was judged has proven nothing, so it blocks, even if every scenario was quarantined.
-    And "Safe to release" is said only when everything passed, was measured and loaded;
-    a passing gate with gaps names them instead (ADR-0030).
+    def __init__(self) -> None:
+        self.blocking: list[str] = []
+        self.warnings: list[str] = []
+        self.ignored: list[str] = []
+        self.ignored_beyond_standard: list[str] = []
+        self.agent_blocked = False
+
+    def apply(self, action: str, standard: str, finding: str, *, agent: bool = False) -> None:
+        """``standard`` is what the standard preset does with the same finding, so the
+        summary can name what *this* policy chose to ignore, without repeating what every
+        run ignores (degraded and vacuous scores have banners of their own)."""
+        if action == "block":
+            self.blocking.append(finding)
+            self.agent_blocked |= agent
+        elif action == "warn":
+            self.warnings.append(finding)
+        else:
+            self.ignored.append(finding)
+            if standard != "ignore":
+                self.ignored_beyond_standard.append(finding)
+
+
+def _at(group: ByCriticality, level: str) -> str:
+    return str(getattr(group, level))
+
+
+def release_gate(
+    tests: list[TestVerdict],
+    *,
+    policy: ResolvedGatePolicy | None = None,
+    fail_on_flaky: bool = False,
+    load_errors: int = 0,
+) -> Gate:
+    """Decide the release under a gate policy (ADR-0032; ``standard`` by default).
+
+    What each outcome *is* is fixed; the policy decides whether it blocks, warns or is
+    ignored. Two things are not up to the policy: a suite where nothing was judged always
+    blocks, and "Safe to release" is said only when nothing blocks or warns and, unless the
+    policy lets the gate decide the exit code, every scenario passed and loaded.
     """
+    policy = policy or resolve(fail_on_flaky=fail_on_flaky)
+    std = PRESETS["standard"]
     declared = any(t.criticality is not Criticality.NORMAL for t in tests)
-    blocking, warnings = [], []
+    d = _Decision()
     for t in tests:
+        if declared or policy.undeclared_criticality == "normal":
+            level, label = t.criticality.value, t.criticality.value
+        else:
+            level, label = "critical", "no criticality declared"
+        tid = t.test_id
         if t.status is VerdictStatus.INCONCLUSIVE:
-            blocking.append(f"{t.test_id}: inconclusive")
+            d.apply(policy.inconclusive, std.inconclusive, f"{tid}: inconclusive")
         elif t.status is VerdictStatus.FAILED:
-            if not declared:
-                blocking.append(f"{t.test_id}: failed (no criticality declared)")
-            elif t.criticality in (Criticality.BLOCKER, Criticality.CRITICAL):
-                blocking.append(f"{t.test_id}: failed ({t.criticality.value})")
+            d.apply(
+                _at(policy.failed, level),
+                _at(std.failed, level),
+                f"{tid}: failed ({label})",
+                agent=True,
+            )
+        elif t.status is VerdictStatus.BLOCKED:
+            d.apply(policy.quarantined, std.quarantined, f"{tid}: blocked")
+        elif t.status is VerdictStatus.SKIPPED_PRECONDITION:
+            action: str
+            standard: str
+            if t.skip_kind == "commit_guard":
+                action, standard = policy.commit_guard, std.commit_guard
             else:
-                warnings.append(f"{t.test_id}: failed (normal)")
-        elif t.status in (VerdictStatus.SKIPPED_PRECONDITION, VerdictStatus.BLOCKED):
-            warnings.append(f"{t.test_id}: {t.status.value}")
-        if t.flaky and fail_on_flaky:
-            blocking.append(f"{t.test_id}: flaky")
-        elif t.flaky:
-            warnings.append(f"{t.test_id}: flaky")
+                action, standard = _at(policy.skipped, level), _at(std.skipped, level)
+            d.apply(action, standard, f"{tid}: skipped_precondition")
+        if t.flaky:
+            d.apply(policy.flaky, std.flaky, f"{tid}: flaky", agent=True)
+        for kind, ids, action, standard in (
+            ("not measured", t.unmeasured_scorers, policy.unmeasured, std.unmeasured),
+            ("degraded evidence", t.degraded_scorers, policy.degraded, std.degraded),
+            ("passed vacuously", t.vacuous_scorers, policy.vacuous, std.vacuous),
+        ):
+            if ids:
+                d.apply(action, standard, f"{tid}: {kind}: {', '.join(ids)}")
+    if load_errors:
+        d.apply(
+            policy.load_errors,
+            std.load_errors,
+            f"{load_errors} scenario file(s) could not be loaded",
+        )
     judged = [t for t in tests if t.status in (VerdictStatus.PASSED, VerdictStatus.FAILED)]
     if not tests:
-        blocking.append("no scenarios were run")
+        d.blocking.append("no scenarios were run")  # not a policy choice
     elif not judged:
-        blocking.append("no scenario was judged")
-    status = "block" if blocking else "pass"
+        d.blocking.append("no scenario was judged")  # not a policy choice
+    everything_passed = (
+        bool(tests) and not load_errors and all(t.status is VerdictStatus.PASSED for t in tests)
+    )
+    safe = not d.blocking and not d.warnings and (policy.exit_code == "gate" or everything_passed)
     passed = sum(1 for t in tests if t.status is VerdictStatus.PASSED)
-    gaps = [f"{t.test_id}: {t.status.value}" for t in tests if t.status is not VerdictStatus.PASSED]
-    unmeasured = sorted({sid for t in tests for sid in t.unmeasured_scorers})
-    if unmeasured:
-        gaps.append("not measured: " + ", ".join(unmeasured))
-    if load_errors:
-        gaps.append(f"{load_errors} scenario file(s) could not be loaded")
-    if blocking:
-        verdict = "Release is BLOCKED by: " + "; ".join(blocking) + "."
-    elif gaps:
-        verdict = "No blocking issues, but not everything passed: " + "; ".join(gaps) + "."
-    else:
+    if d.blocking:
+        verdict = "Release is BLOCKED by: " + "; ".join(d.blocking) + "."
+    elif safe:
         verdict = "Safe to release."
+    else:
+        gaps = d.warnings or [
+            f"{t.test_id}: {t.status.value}" for t in tests if t.status is not VerdictStatus.PASSED
+        ]
+        if load_errors and not d.warnings:
+            gaps.append(f"{load_errors} scenario file(s) could not be loaded")
+        verdict = "No blocking issues, but not everything passed: " + "; ".join(gaps) + "."
     summary = f"{passed}/{len(tests)} scenarios passed. {verdict}"
-    return Gate(status=status, blocking=blocking, warnings=warnings, summary=summary)
+    if d.ignored_beyond_standard:
+        summary += " Ignored by the gate policy: " + "; ".join(d.ignored_beyond_standard) + "."
+    return Gate(
+        status="block" if d.blocking else "pass",
+        blocking=d.blocking,
+        warnings=d.warnings,
+        ignored=d.ignored,
+        agent_blocked=d.agent_blocked,
+        safe=safe,
+        summary=summary,
+        policy=policy,
+    )
 
 
-def exit_code(tests: list[TestVerdict], *, load_errors: int = 0) -> int:
+def exit_code(tests: list[TestVerdict], *, load_errors: int = 0, gate: Gate | None = None) -> int:
+    """0 pass · 1 fail · 2 not judged · 3 harness. Exit 3 is a fact under every policy.
+
+    Under ``exit_code: gate`` the other codes follow the gate's decision; otherwise they
+    say what happened, whatever the policy chose to block.
+    """
+    attempts = [a for t in tests for a in t.attempts]
+    all_infra = bool(attempts) and all(a.terminal_state.is_infra for a in attempts)
+    if gate is not None and gate.policy is not None and gate.policy.exit_code == "gate":
+        if all_infra:
+            return EXIT_HARNESS
+        if gate.status != "pass":
+            return EXIT_FAIL if gate.agent_blocked else EXIT_NOT_JUDGED
+        return EXIT_PASS
     if any(t.status is VerdictStatus.FAILED for t in tests):
         return EXIT_FAIL
-    attempts = [a for t in tests for a in t.attempts]
-    if attempts and all(a.terminal_state.is_infra for a in attempts):
+    if all_infra:
         return EXIT_HARNESS
     if not tests or load_errors or any(t.status is not VerdictStatus.PASSED for t in tests):
         return EXIT_NOT_JUDGED

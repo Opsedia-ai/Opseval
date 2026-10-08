@@ -12,6 +12,7 @@ from __future__ import annotations
 # Only builds XML; never parses untrusted input.
 from xml.etree import ElementTree as ET  # nosec B405
 
+from opseval.models.gate import describe
 from opseval.models.results import ScoreStatus, SuiteResult, TestVerdict, VerdictStatus
 
 
@@ -48,6 +49,7 @@ def render_junit(result: SuiteResult) -> str:
         ("target", result.target),
         ("profile", result.profile),
         ("gate", result.gate.status),
+        ("gate_policy", describe(result.gate.policy) if result.gate.policy else "standard"),
         ("exit_code", str(result.exit_code)),
     ):
         ET.SubElement(props, "property", name=key, value=value)

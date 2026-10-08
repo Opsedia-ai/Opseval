@@ -33,5 +33,6 @@
 | [0029](0029-console-api.md) | The console API: the browser computes nothing, and no UI ships without an endpoint | Proposed |
 | [0030](0030-closing-core-rule-leaks.md) | Four core-rule leaks closed: unjudged gates block, unmeasured scorers are named, connect timeouts and crashes are harness errors | Proposed |
 | [0031](0031-securing-the-console-api.md) | Securing the console API: token, host and origin checks, the commit guard as a server flag, runs that always end visibly | Proposed |
+| [0032](0032-gate-policy.md) | Gate policy per suite: presets and block/warn/ignore per outcome; facts stay fixed, policy is recorded | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

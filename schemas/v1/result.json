@@ -78,6 +78,45 @@
       "title": "Axis",
       "type": "string"
     },
+    "ByCriticality": {
+      "additionalProperties": false,
+      "properties": {
+        "blocker": {
+          "enum": [
+            "block",
+            "warn",
+            "ignore"
+          ],
+          "title": "Blocker",
+          "type": "string"
+        },
+        "critical": {
+          "enum": [
+            "block",
+            "warn",
+            "ignore"
+          ],
+          "title": "Critical",
+          "type": "string"
+        },
+        "normal": {
+          "enum": [
+            "block",
+            "warn",
+            "ignore"
+          ],
+          "title": "Normal",
+          "type": "string"
+        }
+      },
+      "required": [
+        "blocker",
+        "critical",
+        "normal"
+      ],
+      "title": "ByCriticality",
+      "type": "object"
+    },
     "CheckStatus": {
       "enum": [
         "ok",
@@ -101,12 +140,47 @@
     "Gate": {
       "additionalProperties": false,
       "properties": {
+        "agent_blocked": {
+          "default": false,
+          "title": "Agent Blocked",
+          "type": "boolean"
+        },
         "blocking": {
           "items": {
             "type": "string"
           },
           "title": "Blocking",
           "type": "array"
+        },
+        "ignored": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ignored",
+          "type": "array"
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedGatePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "safe": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Safe"
         },
         "status": {
           "title": "Status",
@@ -268,6 +342,129 @@
         "scenario_source"
       ],
       "title": "RescoreInfo",
+      "type": "object"
+    },
+    "ResolvedGatePolicy": {
+      "additionalProperties": false,
+      "description": "Every setting concrete: what a run was actually gated with.",
+      "properties": {
+        "commit_guard": {
+          "enum": [
+            "warn",
+            "ignore"
+          ],
+          "title": "Commit Guard",
+          "type": "string"
+        },
+        "degraded": {
+          "enum": [
+            "block",
+            "warn",
+            "ignore"
+          ],
+          "title": "Degraded",
+          "type": "string"
+        },
+        "exit_code": {
+          "enum": [
+            "strict",
+            "gate"
+          ],
+          "title": "Exit Code",
+          "type": "string"
+        },
+        "failed": {
+          "$ref": "#/$defs/ByCriticality"
+        },
+        "flaky": {
+          "enum": [
+            "block",
+            "warn",
+            "ignore"
+          ],
+          "title": "Flaky",
+          "type": "string"
+        },
+        "inconclusive": {
+          "enum": [
+            "block",
+            "warn"
+          ],
+          "title": "Inconclusive",
+          "type": "string"
+        },
+        "load_errors": {
+          "enum": [
+            "block",
+            "warn"
+          ],
+          "title": "Load Errors",
+          "type": "string"
+        },
+        "preset": {
+          "enum": [
+            "strict",
+            "standard",
+            "lenient"
+          ],
+          "title": "Preset",
+          "type": "string"
+        },
+        "quarantined": {
+          "enum": [
+            "block",
+            "warn",
+            "ignore"
+          ],
+          "title": "Quarantined",
+          "type": "string"
+        },
+        "skipped": {
+          "$ref": "#/$defs/ByCriticality"
+        },
+        "undeclared_criticality": {
+          "enum": [
+            "critical",
+            "normal"
+          ],
+          "title": "Undeclared Criticality",
+          "type": "string"
+        },
+        "unmeasured": {
+          "enum": [
+            "block",
+            "warn",
+            "ignore"
+          ],
+          "title": "Unmeasured",
+          "type": "string"
+        },
+        "vacuous": {
+          "enum": [
+            "block",
+            "warn",
+            "ignore"
+          ],
+          "title": "Vacuous",
+          "type": "string"
+        }
+      },
+      "required": [
+        "preset",
+        "failed",
+        "skipped",
+        "commit_guard",
+        "quarantined",
+        "inconclusive",
+        "flaky",
+        "unmeasured",
+        "degraded",
+        "vacuous",
+        "load_errors",
+        "undeclared_criticality",
+        "exit_code"
+      ],
+      "title": "ResolvedGatePolicy",
       "type": "object"
     },
     "ScoreResult": {
@@ -497,6 +694,24 @@
           ],
           "default": null,
           "title": "Reason"
+        },
+        "skip_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "dependency",
+                "simulator",
+                "commit_guard",
+                "quarantine"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Skip Kind"
         },
         "status": {
           "$ref": "#/$defs/VerdictStatus"

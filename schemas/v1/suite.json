@@ -1,4 +1,269 @@
 {
+  "$defs": {
+    "ByCriticalityIn": {
+      "additionalProperties": false,
+      "properties": {
+        "blocker": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blocker"
+        },
+        "critical": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Critical"
+        },
+        "normal": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Normal"
+        }
+      },
+      "title": "ByCriticalityIn",
+      "type": "object"
+    },
+    "GatePolicy": {
+      "additionalProperties": false,
+      "description": "The ``gate:`` block of a suite: a preset, and any settings that differ from it.",
+      "properties": {
+        "commit_guard": {
+          "anyOf": [
+            {
+              "enum": [
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit Guard"
+        },
+        "degraded": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Degraded"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "enum": [
+                "strict",
+                "gate"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "failed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ByCriticalityIn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "flaky": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flaky"
+        },
+        "inconclusive": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inconclusive"
+        },
+        "load_errors": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Load Errors"
+        },
+        "preset": {
+          "default": "standard",
+          "enum": [
+            "strict",
+            "standard",
+            "lenient"
+          ],
+          "title": "Preset",
+          "type": "string"
+        },
+        "quarantined": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quarantined"
+        },
+        "skipped": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ByCriticalityIn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "undeclared_criticality": {
+          "anyOf": [
+            {
+              "enum": [
+                "critical",
+                "normal"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Undeclared Criticality"
+        },
+        "unmeasured": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unmeasured"
+        },
+        "vacuous": {
+          "anyOf": [
+            {
+              "enum": [
+                "block",
+                "warn",
+                "ignore"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vacuous"
+        }
+      },
+      "title": "GatePolicy",
+      "type": "object"
+    }
+  },
   "$id": "https://opsedia.ai/schemas/v1/suite.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
@@ -27,6 +292,17 @@
       },
       "title": "Filters",
       "type": "array"
+    },
+    "gate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GatePolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "include": {
       "items": {

@@ -14,6 +14,7 @@ import yaml
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, config_digest
 from opseval.errors import ConfigError
+from opseval.models.gate import describe, looser_than_standard
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.scoring import INVARIANTS, REGISTRY
@@ -35,10 +36,11 @@ def gate_state(result: SuiteResult) -> s.GateState:
         return "harness_error"
     if result.gate.status != "pass":
         # What blocked decides it: an agent failure (or a flaky scenario, when flaky
-        # blocks) is "blocked"; only inconclusive or nothing-judged blocks are "not_judged".
-        # The reasons are the strings verdicts.release_gate writes; the gate policy (next)
-        # makes them structured.
-        by_agent = any(": failed (" in b or b.endswith(": flaky") for b in result.gate.blocking)
+        # blocks) is "blocked"; only what could not be judged is "not_judged".
+        if result.gate.policy is not None:
+            by_agent = result.gate.agent_blocked
+        else:  # a result from before gate policies (ADR-0032): read its reasons
+            by_agent = any(": failed (" in b or b.endswith(": flaky") for b in result.gate.blocking)
         return "blocked" if by_agent else "not_judged"
     return "safe" if result.safe_to_release else "gaps"
 
@@ -227,6 +229,9 @@ def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
         warnings=r.gate.warnings,
         exit_code=r.exit_code,
         safe_to_release=r.safe_to_release,
+        gate_policy=describe(r.gate.policy) if r.gate.policy else None,
+        looser_than_standard=looser_than_standard(r.gate.policy) if r.gate.policy else [],
+        ignored=r.gate.ignored,
         tests=tests,
         usage=[
             s.UsageOut(

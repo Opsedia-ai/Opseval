@@ -24,6 +24,8 @@ from opseval.catalogue import load_catalogue, load_profile
 from opseval.config import Settings, config_digest
 from opseval.errors import ConfigError
 from opseval.llm import UsageMeter, client_for_role
+from opseval.models.gate import Preset
+from opseval.models.gate import resolve as resolve_gate
 from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import (
@@ -165,9 +167,14 @@ async def rescore_run(
     *,
     catalogue: str | Path | None = None,
     profile: str | Path | None = None,
+    gate: Preset | None = None,
     log: Callable[[str], None] = lambda _msg: None,
 ) -> RescoreOutcome:
-    """Re-score ``run_dir`` offline and write the result next to it (never over it)."""
+    """Re-score ``run_dir`` offline and write the result next to it (never over it).
+
+    The new result is gated with the run's own policy (ADR-0032), or with ``gate``, a
+    preset, to see what a stricter or looser gate would have said about the same run.
+    """
     settings = settings or Settings()
     folder = Path(run_dir)
     if not (folder / "result.json").is_file():
@@ -252,6 +259,13 @@ async def rescore_run(
         verdict_changes=verdict_changes,
         reused_judge_scores=rescorer.reused,
     )
+    if gate is not None:
+        policy = resolve_gate(preset=gate)
+    elif original.gate.policy is not None:
+        policy = original.gate.policy
+    else:  # a run from before gate policies was gated by the standard rules
+        policy = resolve_gate(fail_on_flaky=settings.gate_fail_on_flaky)
+    new_gate = release_gate(tests, policy=policy, load_errors=len(original.load_errors))
     result = SuiteResult(
         opseval_version=__version__,
         run_id=f"{original.run_id}.rescore-{now:%Y%m%dT%H%M%SZ}",
@@ -261,12 +275,8 @@ async def rescore_run(
         started_at=now,
         ended_at=datetime.now(UTC),
         tests=tests,
-        gate=release_gate(
-            tests,
-            fail_on_flaky=settings.gate_fail_on_flaky,
-            load_errors=len(original.load_errors),
-        ),
-        exit_code=exit_code(tests, load_errors=len(original.load_errors)),
+        gate=new_gate,
+        exit_code=exit_code(tests, load_errors=len(original.load_errors), gate=new_gate),
         usage=meter.snapshot(),
         config_digest=config_digest(settings),
         load_errors=original.load_errors,

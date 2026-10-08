@@ -93,6 +93,8 @@ export default function RunDetail() {
         {pending ? <Callout>This run is still in progress, or has not started yet. This page refreshes on its own.</Callout> : (
         <Data res={res}>{(r) => (<>
           <Callout tone={r.summary.gate === "safe" ? "info" : "warn"}><b>{r.summary.gate ? HEADLINE[r.summary.gate] : "In progress."}</b> {r.gateSummary}</Callout>
+          {r.gatePolicy && <p className="text-sm">Gate policy: <Mono>{r.gatePolicy}</Mono>{r.ignored.length > 0 && <> · ignored by the policy: {r.ignored.join("; ")}</>}</p>}
+          {r.looserThanStandard.length > 0 && <Callout tone="warn"><b>This run was gated with a policy looser than standard:</b> <Mono>{r.looserThanStandard.join(", ")}</Mono>. Its result is not comparable with a standard or strict run.</Callout>}
           <Caveats r={r} />
           {r.loadErrors.length > 0 && <Callout><b>Load errors (harness, not the agent):</b><ul className="list-disc pl-5">{r.loadErrors.map((e) => <li key={e}>{e}</li>)}</ul></Callout>}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
