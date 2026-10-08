@@ -261,7 +261,11 @@ async def rescore_run(
         started_at=now,
         ended_at=datetime.now(UTC),
         tests=tests,
-        gate=release_gate(tests, fail_on_flaky=settings.gate_fail_on_flaky),
+        gate=release_gate(
+            tests,
+            fail_on_flaky=settings.gate_fail_on_flaky,
+            load_errors=len(original.load_errors),
+        ),
         exit_code=exit_code(tests, load_errors=len(original.load_errors)),
         usage=meter.snapshot(),
         config_digest=config_digest(settings),

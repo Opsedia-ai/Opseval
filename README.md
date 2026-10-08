@@ -36,6 +36,10 @@ It tests your **deployed** agent the way your customers meet it:
 - Every scenario verdict is `passed`, `failed`, `inconclusive`, `skipped_precondition` or `blocked`.
 - An unmeasured value is shown as *not measured*, never as zero.
 - An inconclusive run is never green in CI. Exit codes: `0` pass · `1` fail · `2` not judged · `3` harness error.
+- "Safe to release" means every scenario passed, every check was measured and every file loaded. A gate that passes with a normal failure, a skip or a missing check says *no blocking issues, not everything passed* and names them. A suite where nothing was judged blocks.
+- Until any scenario is marked `critical` or `blocker`, every failure blocks the gate. Once one is, failures of `normal` scenarios become warnings.
+- A check that could not run in an attempt that still passed is named **not measured** in every output, so a missing security verdict cannot pass as a green one.
+- A connection that never opened is a harness error: the attempt is not judged, never failed. A crash inside Opseval itself exits `3`, never `1` ([ADR-0030](docs/adr/0030-closing-core-rule-leaks.md)).
 
 ## Quickstart (from source, pre-release)
 

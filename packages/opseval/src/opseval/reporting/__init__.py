@@ -66,6 +66,8 @@ def console_summary(result: SuiteResult) -> str:
             lines.append(f"  {'':<13} ↳ degraded: {', '.join(t.degraded_scorers)}")
         if t.vacuous_scorers:
             lines.append(f"  {'':<13} ↳ vacuous: {', '.join(t.vacuous_scorers)}")
+        if t.unmeasured_scorers:
+            lines.append(f"  {'':<13} ↳ not measured: {', '.join(t.unmeasured_scorers)}")
     for err in result.load_errors:
         lines.append(f"  LOAD ERROR    {err}")
     for outcome in result.sinks:

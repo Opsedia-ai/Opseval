@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import traceback
 import webbrowser
 from pathlib import Path
 from typing import Annotated, Optional
@@ -591,5 +592,27 @@ def serve(
     uvicorn.run(api, host=host, port=port, log_level="info")
 
 
+def entrypoint() -> None:
+    """The ``opseval`` console script: ``app`` with a harness-error boundary.
+
+    An exception nothing else handled (a full disk, a template bug, a bug in Opseval) would
+    otherwise reach the interpreter and exit **1**, which CI reads as "the agent failed".
+    It is a harness problem, so it exits 3 and keeps the traceback for the bug report
+    (ADR-0030). ``SystemExit`` is not an ``Exception`` and passes through unchanged. Note that
+    Click already turns Ctrl-C into "Aborted!" and exit 1 before it gets here.
+    """
+    try:
+        app()
+    except Exception as exc:  # the CLI boundary: the one place a catch-all belongs
+        traceback.print_exc()
+        typer.secho(
+            f"internal error ({type(exc).__name__}): this is a harness problem, not an agent "
+            "failure. Please report it with the traceback above.",
+            fg="red",
+            err=True,
+        )
+        raise SystemExit(EXIT_HARNESS) from exc
+
+
 if __name__ == "__main__":  # pragma: no cover
-    app()
+    entrypoint()

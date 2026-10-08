@@ -17,7 +17,7 @@ import httpx
 from opseval.auth import BearerAuth, TokenSource, as_token_source
 from opseval.errors import TransportError, TransportTimeout
 from opseval.models.profile import SutProfile
-from opseval.transport.base import SYNTHETIC_KIND, Session, Transport
+from opseval.transport.base import NOT_SENT_TIMEOUTS, SYNTHETIC_KIND, Session, Transport
 
 Reply = dict[str, Any] | list[dict[str, Any]] | None
 AgentCallable = Callable[[dict[str, Any]], Reply | Awaitable[Reply]]
@@ -69,6 +69,8 @@ class HttpJsonSession(_QueuedSession):
             resp = await self._client.post(
                 self._url, json=self._stamp(frame), timeout=self._timeout
             )
+        except NOT_SENT_TIMEOUTS as exc:
+            raise TransportError(f"could not connect to {self._url}: {exc!r}") from exc
         except httpx.TimeoutException as exc:
             raise TransportTimeout(f"agent did not answer within {self._timeout:.1f}s") from exc
         except httpx.HTTPError as exc:

@@ -13,10 +13,21 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any
 
+import httpx
+
 from opseval.models.record import TransportEvent
 
 SYNTHETIC_KIND = "_opseval_kind"
 """Key used for frames synthesised by a transport (e.g. an HTTP 500 from the agent)."""
+
+NOT_SENT_TIMEOUTS: tuple[type[httpx.TimeoutException], ...] = (
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+"""httpx timeouts raised before the agent had the request: the connection never opened,
+or Opseval's own connection pool was exhausted. They are subclasses of
+``httpx.TimeoutException``, so a transport must catch them *first* and treat them like a
+refused connection (a harness error), never as the agent failing to answer (ADR-0030)."""
 
 
 def decode_frame(data: str | bytes) -> Any:

@@ -65,6 +65,13 @@ def render_junit(result: SuiteResult) -> str:
             name="vacuous_scorers",
             value=",".join(result.vacuous_scorers),
         )
+    if result.unmeasured_scorers:
+        ET.SubElement(
+            props,
+            "property",
+            name="unmeasured_scorers",
+            value=",".join(result.unmeasured_scorers),
+        )
 
     for t in result.tests:
         case = ET.SubElement(
@@ -82,6 +89,13 @@ def render_junit(result: SuiteResult) -> str:
                 "property",
                 name="degraded_scorers",
                 value=",".join(t.degraded_scorers),
+            )
+        if t.unmeasured_scorers:
+            ET.SubElement(
+                case_props,
+                "property",
+                name="unmeasured_scorers",
+                value=",".join(t.unmeasured_scorers),
             )
         if t.status is VerdictStatus.FAILED:
             counts["failures"] += 1

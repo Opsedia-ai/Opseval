@@ -30,9 +30,28 @@ import httpx
 from opseval.auth import BearerAuth, TokenSource, as_token_source
 from opseval.errors import TransportClosed, TransportError, TransportTimeout
 from opseval.models.profile import SutProfile
-from opseval.transport.base import SYNTHETIC_KIND, Session, Transport, decode_frame
+from opseval.transport.base import (
+    NOT_SENT_TIMEOUTS,
+    SYNTHETIC_KIND,
+    Session,
+    Transport,
+    decode_frame,
+)
 
 SSE_MEDIA_TYPE = "text/event-stream"
+
+
+def _request_timeout(turn: float) -> httpx.Timeout:
+    """httpx limits for one turn, with connecting held to a share of the turn budget.
+
+    ``send`` bounds the whole turn with ``asyncio.timeout(turn)``. If httpx's connect and
+    pool limits were the same length, that outer deadline would fire first on a host that
+    never accepts the connection, and the resulting ``TimeoutError`` would blame the agent.
+    Keeping them shorter lets ``ConnectTimeout``/``PoolTimeout`` surface as what they are:
+    a request that was never sent (ADR-0030).
+    """
+    setup = min(10.0, turn / 2)
+    return httpx.Timeout(turn, connect=setup, pool=setup)
 
 
 class SseEvent:
@@ -154,7 +173,7 @@ class SseSession(Session):
                     "POST",
                     self._url,
                     json=payload,
-                    timeout=self._timeout,
+                    timeout=_request_timeout(self._timeout),
                     headers={"Accept": SSE_MEDIA_TYPE},
                 ) as response,
             ):
@@ -191,6 +210,9 @@ class SseSession(Session):
                         " check the URL and that it is an event-stream endpoint"
                     )
                 lines = await self._read_stream(response)
+        except NOT_SENT_TIMEOUTS as exc:
+            # The stream never opened, so the agent was never asked: same as a refusal.
+            raise TransportClosed(f"could not connect to {self._url}: {exc!r}") from exc
         except (httpx.TimeoutException, TimeoutError) as exc:
             # The agent held the stream open without finishing its turn.
             raise TransportTimeout(

@@ -46,8 +46,13 @@ def _rate(value: float | None) -> str:
 
 
 def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> str:
-    blocked = result.gate.status != "pass"
-    head = "🔴 **Release blocked**" if blocked else "🟢 **Safe to release**"
+    if result.gate.status != "pass":
+        head = "🔴 **Release blocked**"
+    elif result.safe_to_release:
+        head = "🟢 **Safe to release**"
+    else:
+        # The gate passed, but something failed, was skipped, unmeasured or not loaded.
+        head = "🟡 **No blocking issues, not everything passed**"
     exit_note = EXIT_MEANING.get(result.exit_code, "unknown")
     lines = [
         MARKER,
@@ -79,6 +84,14 @@ def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> s
             f"⚠️ **Degraded evidence** · {listed} scored on weaker evidence than they ask for "
             "(frame evidence instead of traces, or a judge from the graded model's own vendor "
             "family). These scores counted toward the verdict above.",
+        ]
+    unmeasured = result.unmeasured_scorers
+    if unmeasured:
+        listed = ", ".join(f"`{_code(s, 60)}`" for s in unmeasured)
+        lines += [
+            "",
+            f"⚠️ **Not measured** · {listed} could not produce a score in at least one judged "
+            "attempt (harness error). The verdict above was reached without them.",
         ]
     vacuous = result.vacuous_scorers
     if vacuous:
