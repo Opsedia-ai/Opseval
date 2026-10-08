@@ -427,14 +427,17 @@ claims independence it has not verified. See
 
 ```bash
 pip install 'opseval[serve]'                        # or: uv sync
+cd packages/console && npm ci && npm run build && cd -   # once, from a source checkout
 opseval serve --catalogue ./my-catalogue --target ws://127.0.0.1:8765
 #   Opseval API on http://127.0.0.1:8000/api/v1
-#   Console:  http://localhost:5173/#token=…          <- open this link
-cd packages/console && npm ci && npm run dev        # console on http://localhost:5173
+#   Console:  http://127.0.0.1:8000/#token=…          <- open this link
 ```
 
-Without `--catalogue` it serves the built-in demo, read-only. Open the console from the printed
-link: it carries the token every API request needs.
+`opseval serve` serves the built console on the same port as the API
+([ADR-0034](docs/adr/0034-serve-the-console.md)). Without a build it serves only the API, and
+`npm run dev` runs the console on :5173 with hot reload. Without `--catalogue` it serves the
+built-in demo, read-only. Open the console from the printed link: it carries the token every
+API request needs.
 
 It reads the run folders you already have. You can browse runs and their per-check scores,
 compare two runs, watch the trend, see token usage, edit suites and their **release gate**

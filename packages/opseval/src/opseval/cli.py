@@ -593,8 +593,12 @@ def serve(
         ),
     ] = False,
     console_url: Annotated[
-        str, typer.Option(help="Where the console is served, for the printed link.")
-    ] = "http://localhost:5173",
+        Optional[str],  # noqa: UP045
+        typer.Option(
+            help="Where the console is, for the printed link. Default: served here when "
+            "built, otherwise the Vite dev server (http://localhost:5173)."
+        ),
+    ] = None,
 ) -> None:
     """Serve the HTTP API the web console talks to (loopback only, token required)."""
     try:
@@ -631,13 +635,23 @@ def serve(
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
-    typer.echo(f"Opseval API on http://{host}:{port}/api/v1")
+    here = f"http://{'[::1]' if host_name(host) == '::1' else host}:{port}"
+    typer.echo(f"Opseval API on {here}/api/v1")
+    if console_url is None:
+        if api.state.console is not None:
+            console_url = here
+        else:
+            console_url = "http://localhost:5173"
+            typer.echo(
+                "No built console found: run `cd packages/console && npm ci && npm run build` "
+                "(or set OPSEVAL_CONSOLE_DIR) to have it served here; meanwhile use `npm run dev`."
+            )
     if settings.serve_token is not None:
         # A configured token is long-lived: never echo it into logs or scrollback.
         typer.echo(f"Console:  {console_url}/#token=<OPSEVAL_SERVE_TOKEN>")
     else:
         typer.echo(f"Console:  {console_url}/#token={api.state.token}   (this start only)")
-    if port != 8000:
+    if port != 8000 and console_url != here:  # the Vite proxy points at :8000 by default
         typer.echo(f"          for `npm run dev`, set OPSEVAL_API=http://127.0.0.1:{port}")
     if catalogue is None:
         typer.echo("Catalogue: the built-in demo (read-only). Use --catalogue to edit your own.")

@@ -5,7 +5,7 @@ CLAUDE.md, "Definition of done"). The summary below is **computed** from the tab
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-08** (`main` with the console's release-gate editor).
+**As of 2026-10-08** (`main` with the console served by `opseval serve`).
 
 ## Completion
 
@@ -131,7 +131,7 @@ These are not in the percentage, and today they gate more than code does.
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
 | FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Partial | rescore (with `--gate` re-gating), calibrate and preflight done; only `fail_fast` of five stop policies; no cancel |
 | FR-AUT | Authoring workbench | M | v0.5 | Partial | bulk import, suite editor with the release-gate editor (ADR-0032), persona playground; no live scenario YAML editor |
-| FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API and console with token auth (ADR-0029, ADR-0031); no Postgres, workers, accounts, OIDC or live events |
+| FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API, serving the built console same-origin (ADR-0034), token auth (ADR-0029, ADR-0031); no Postgres, workers, accounts, OIDC or live events; console not yet in the wheel |
 
 ## Non-functional requirements
 

@@ -10,6 +10,9 @@ open:
 - **Bearer token** on every ``/api`` request, minted per start unless configured.
 - **Origin check** on writes: a browser always sends ``Origin`` on a cross-site POST.
 - **No CORS.** The console is served same-origin, or through the Vite dev proxy.
+
+When a built console is found, it is served from ``/`` on the same origin as the API
+(ADR-0034): one link, one port, and no Node needed to use it.
 """
 
 from __future__ import annotations
@@ -21,11 +24,14 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from opseval import __version__
 from opseval.catalogue import load_profile
 from opseval.config import Settings
+from opseval.errors import ConfigError
 from opseval.plugins import load_scorers
 from opseval.server import actions, views
 from opseval.server import schemas as s
@@ -55,6 +61,79 @@ def _run_id(run_id: str) -> str:
     return run_id
 
 
+CONSOLE_HEADERS = {
+    # The console can start runs and edit suites: it must never be framed by another site
+    # (clickjacking), and it loads nothing but its own files and its fonts.
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def find_console(settings: Settings) -> Path | None:
+    """The built console to serve: ``OPSEVAL_CONSOLE_DIR``, or a source checkout's build
+    (``<repo>/packages/console/dist``), or ``None`` (only the API is served).
+
+    A configured folder without ``index.html`` is a configuration error, never silently
+    ignored: the operator asked for a console and must hear why there is none.
+    """
+    if settings.console_dir:
+        configured = Path(settings.console_dir).resolve()
+        if not (configured / "index.html").is_file():
+            raise ConfigError(
+                f"OPSEVAL_CONSOLE_DIR={settings.console_dir}: no index.html there; point it at "
+                "the console build (packages/console/dist after `npm run build`)"
+            )
+        return configured
+    parents = Path(__file__).resolve().parents
+    # <repo>/packages/opseval/src/opseval/server/app.py: only a source checkout has this.
+    if len(parents) > 4 and parents[4].name == "packages":
+        candidate = parents[4] / "console" / "dist"
+        if (candidate / "index.html").is_file():
+            return candidate.resolve()
+    return None
+
+
+def _is_api(path: str) -> bool:
+    return path == "/api" or path.startswith("/api/")
+
+
+class _Console:
+    """Serves the built console for requests the API did not answer (ADR-0034).
+
+    It is consulted only after routing found nothing, for GET and HEAD outside /api, so
+    the API keeps its own behaviour exactly (slash redirects, 405s, 404s). Files come
+    from Starlette's ``StaticFiles`` (traversal, NUL bytes, HEAD and ranges handled
+    there); any other path gets index.html, because the console routes in the browser.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self.files = StaticFiles(directory=self.root)
+        self.index = self.root / "index.html"
+
+    async def respond(self, request: Request) -> Response:
+        path = request.url.path.lstrip("/")
+        if path and path != "index.html":
+            try:
+                response = await self.files.get_response(path, request.scope)
+            except (HTTPException, StarletteHTTPException):
+                response = None
+            if response is not None and response.status_code == 200:
+                if path.startswith("assets/"):  # content-hashed by the build
+                    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                return response
+        page = FileResponse(self.index)
+        page.headers["Cache-Control"] = "no-store"
+        return page
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -65,6 +144,7 @@ def create_app(
     read_only: bool = False,
     allow_commit: bool = False,
     allowed_hosts: frozenset[str] = LOOPBACK_NAMES,
+    console_dir: Path | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     # A suite may name a plugin's scorer; without this the console would reject it as
@@ -83,7 +163,17 @@ def create_app(
         read_only=read_only,
         allow_commit=allow_commit,
     )
-    app = FastAPI(title="Opseval API", version=__version__)
+    # No unauthenticated /docs or /openapi.json: the schema lives under /api, behind the token.
+    app = FastAPI(
+        title="Opseval API",
+        version=__version__,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=f"{API}/openapi.json",
+    )
+    console_root = console_dir.resolve() if console_dir is not None else find_console(settings)
+    console = _Console(console_root) if console_root is not None else None
+    app.state.console = console_root
     app.state.token = token
     app.state.ctx = ctx
     expected = f"Bearer {token}".encode()
@@ -110,7 +200,24 @@ def create_app(
                     "open the console from the link `opseval serve` printed (it carries the "
                     "token), or send Authorization: Bearer <token>",
                 )
-        return await call_next(request)
+        response = await call_next(request)
+        if _is_api(request.url.path):
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            return response
+        if (
+            console is not None
+            and response.status_code == 404
+            and request.method
+            in (
+                "GET",
+                "HEAD",
+            )
+        ):
+            response = await console.respond(request)
+        # Every non-API response, not only index.html: any page on this origin can read the
+        # token the console keeps, so none of them may be framed or run foreign scripts.
+        response.headers.update(CONSOLE_HEADERS)
+        return response
 
     @app.exception_handler(actions.ApiError)
     def _api_error(_: Request, exc: actions.ApiError) -> JSONResponse:

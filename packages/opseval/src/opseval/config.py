@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # `opseval serve` (ADR-0031). Every API request must carry this bearer token; when it
     # is unset, the server makes a random one per start and prints the console link.
     serve_token: SecretStr | None = None
+    console_dir: str | None = None
+    """The built web console (``packages/console/dist``) for ``opseval serve`` to serve.
+    When unset, a source checkout's build is found on its own (ADR-0034)."""
 
     def allowlist(self) -> set[str]:
         return {h.strip().lower() for h in self.allowed_hosts.split(",") if h.strip()}
