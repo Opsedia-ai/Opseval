@@ -67,12 +67,16 @@ def build_sinks(settings: Settings) -> list[Sink]:
     from opseval.sinks.webhook import WebhookSink
 
     built: list[Sink] = []
-    # Discovered first, so a broken plugin is reported before any built-in publishes.
-    for cls in load_sinks().values():
-        built.append(cls())
+    # Discovered first, so a broken plugin is reported before any built-in publishes. A
+    # plugin publishes only when the operator names it: installing a package must never
+    # start sending results anywhere on its own.
+    wanted = [name.strip() for name in settings.sinks.split(",") if name.strip()]
+    if wanted:
+        built.extend(cls() for cls in load_sinks(wanted).values())
     if settings.webhook_url:
-        check_url_allowed(settings.webhook_url, settings.allowlist(), secure_schemes=("https",))
-        built.append(WebhookSink(settings.webhook_url))
+        url = settings.webhook_url.get_secret_value()
+        check_url_allowed(url, settings.allowlist(), secure_schemes=("https",))
+        built.append(WebhookSink(url))
     if settings.langfuse_push_scores:
         host = settings.langfuse_host
         public, secret = settings.langfuse_public_key, settings.langfuse_secret_key

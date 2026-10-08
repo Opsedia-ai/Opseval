@@ -27,7 +27,7 @@ from opseval.models.results import SkipKind, SuiteResult, TestVerdict, VerdictSt
 from opseval.models.scenario import Criticality, Scenario
 from opseval.models.telemetry import TelemetryEvent
 from opseval.plugins import load_scorers
-from opseval.preflight import preflight
+from opseval.preflight import llm_roles_needed, preflight
 from opseval.progress import ProgressLog
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
@@ -230,8 +230,9 @@ async def launch(
     make_transport = build_transport_factory(options, settings)
     trace_source = build_trace_source(options, settings, profile)
     meter = UsageMeter()
-    sim_client = client_for_role(settings, "simulator", meter)
-    judge_client = client_for_role(settings, "judge", meter)
+    roles = llm_roles_needed(catalogue.scenarios)
+    sim_client = client_for_role(settings, "simulator", meter) if "simulator" in roles else None
+    judge_client = client_for_role(settings, "judge", meter) if "judge" in roles else None
     check_judge_independence(
         catalogue.scenarios,
         profile,

@@ -196,8 +196,9 @@ def client_for_role(settings: Settings, role: str, meter: UsageMeter) -> ChatCli
     key = getattr(settings, f"{role}_api_key")
     if not base or not model:
         return None
-    if key is not None:
-        check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
+    # Whoever receives the conversation must be allowlisted, key or no key (loopback is
+    # always allowed): a keyless local proxy on another host still gets every transcript.
+    check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
     return ChatClient(
         base_url=base,
         model=model,

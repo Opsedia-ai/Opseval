@@ -69,7 +69,11 @@ class Settings(BaseSettings):
 
     # Sinks: where a finished run is published (ADR-0027). Each host is allowlisted
     # like every other host that receives data.
-    webhook_url: str | None = None
+    webhook_url: SecretStr | None = None
+    """Slack, Teams and Discord incoming-webhook URLs are credentials: redacted everywhere."""
+    sinks: str = ""
+    """Plugin sinks to enable, by name (comma-separated). Installing a package never starts
+    publishing on its own: a plugin sink runs only when named here."""
     langfuse_push_scores: bool = False
     langfuse_score_name: str = "opseval"
 
@@ -96,6 +100,7 @@ SECRET_FIELDS = (
     "judge_api_key",
     "langfuse_secret_key",
     "serve_token",
+    "webhook_url",
 )
 
 
@@ -127,14 +132,18 @@ def check_url_allowed(url: str, allowlist: set[str], *, secure_schemes: tuple[st
     """
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
+    # Only the scheme and host are ever repeated: a webhook URL's path is its secret, and a
+    # URL can carry credentials in its user-info or query string.
     if not host:
-        raise AllowedHostError(f"URL has no host: {url!r}")
+        raise AllowedHostError(
+            f"URL has no host (scheme {parsed.scheme or 'missing'!r}); expected https://host/..."
+        )
     if host not in allowlist:
         raise AllowedHostError(
             f"host {host!r} is not in OPSEVAL_ALLOWED_HOSTS; add it explicitly to allow it"
         )
     if parsed.scheme not in secure_schemes and not _is_local(host):
         raise AllowedHostError(
-            f"{url!r} must use one of {secure_schemes} (plain schemes are allowed only on "
-            "localhost)"
+            f"{parsed.scheme}://{host} must use one of {secure_schemes} "
+            "(plain schemes are allowed only on localhost)"
         )

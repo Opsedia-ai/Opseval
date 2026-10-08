@@ -11,7 +11,8 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [{ name = "Opsedia" }]
 classifiers = ["Framework :: Pytest"]
-dependencies = ["opseval", "pytest>=8.0"]
+# Released together; scripts/check_release.py refuses a tag this range excludes.
+dependencies = ["opseval>=0.1.0.dev0,<0.2", "pytest>=8.0"]
 
 [project.entry-points.pytest11]
 opseval = "pytest_opseval.plugin"

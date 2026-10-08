@@ -32,10 +32,6 @@ settles it.
 | # | Sev | Issue | Effect | Plan |
 |---|---|---|---|---|
 | I1 | High | Time spent waiting on the simulator counts against the agent's attempt deadline | A harness slowdown can end an attempt as the agent's timeout (the core rule). | Next: core-rule fixes |
-| I2 | Critical | The host allowlist is not applied to every LLM endpoint (security) | Conversations could go to a host the operator did not approve. | Next: security batch |
-| I3 | High | One credential-bearing setting is not treated as a secret (security) | It can appear in outputs that are meant to hold no secrets. | Next: security batch |
-| I4 | High | The release pipeline is not hardened (security) | A release could publish something that was never checked. | Next: security batch |
-| I5 | Critical | Result publishing can be enabled without explicit configuration (security) | Results could be sent somewhere nobody configured. | Next: security batch |
 | I6 | High | The judges' handling of agent text can be strengthened (security) | A misbehaving agent could influence the judges that grade it. | After the security batch (needs a scorer version bump) |
 | I7 | High | The commit guard does not cover every profile shape | A scenario could reach the irreversible outcome without the double opt-in (ADR-0008). | Next: core-rule fixes |
 | I8 | High | Run control: four of five stop policies are missing, and runs cannot be cancelled | A long or failing run cannot be stopped from the console. | After the fixes above |
@@ -45,5 +41,8 @@ settles it.
 
 - **Behaviour you may notice:** a flaky pass, a skip or an unmeasured check reads "No blocking
   issues, but …" (yellow), never "Safe to release" (ADR-0030, ADR-0032).
+- **Behaviour you may notice:** every host Opseval contacts must be in `OPSEVAL_ALLOWED_HOSTS`,
+  `127.0.0.1` included, and `opseval preflight` now exits 3 (not 2) when one is missing. A plugin
+  sink publishes only when named in `OPSEVAL_SINKS`.
 - **The console is not in the Python package yet**; that is a release-pipeline step for after
   Gate 0 (ADR-0034). It needs the Node versions in `packages/console/package.json` `engines`.

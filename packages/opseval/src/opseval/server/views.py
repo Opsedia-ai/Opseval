@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 
 from opseval.catalogue import load_catalogue
-from opseval.config import Settings, config_digest
+from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.errors import ConfigError
 from opseval.models.gate import (
     PRESETS,
@@ -523,6 +523,19 @@ def _nested(raw: dict[str, Any], *path: str) -> Any:
     return cur
 
 
+def _endpoint(
+    item: str, label: str, settings: Settings, url: str | None, ready: str, unset: str
+) -> s.ReadinessItem:
+    """Ready only when configured *and* allowed: a run would refuse the host otherwise."""
+    if not url:
+        return s.ReadinessItem(id=item, label=label, ready=False, detail=unset)
+    try:
+        check_url_allowed(url, settings.allowlist(), secure_schemes=("https",))
+    except ConfigError as exc:
+        return s.ReadinessItem(id=item, label=label, ready=False, detail=f"refused: {exc}")
+    return s.ReadinessItem(id=item, label=label, ready=True, detail=ready)
+
+
 def readiness(
     settings: Settings, catalogue: Path | None, profile: SutProfile | None
 ) -> list[s.ReadinessItem]:
@@ -539,37 +552,37 @@ def readiness(
                 else f"{len(found.problems)} file(s) failed validation, or no scenarios found"
             ),
         ),
-        s.ReadinessItem(
-            id="simulator",
-            label="Simulator model",
-            ready=bool(settings.simulator_base_url and settings.simulator_model),
-            detail="LLM personas can run"
-            if settings.simulator_base_url and settings.simulator_model
-            else "scripted scenarios only: set OPSEVAL_SIMULATOR_BASE_URL and _MODEL",
+        _endpoint(
+            "simulator",
+            "Simulator model",
+            settings,
+            settings.simulator_base_url if settings.simulator_model else None,
+            "LLM personas can run",
+            "scripted scenarios only: set OPSEVAL_SIMULATOR_BASE_URL and _MODEL",
         ),
-        s.ReadinessItem(
-            id="judge",
-            label="Judge model",
-            ready=bool(settings.judge_base_url and settings.judge_model),
-            detail="LLM judges can run"
-            if settings.judge_base_url and settings.judge_model
-            else "LLM judges are not measured: set OPSEVAL_JUDGE_BASE_URL and _MODEL",
+        _endpoint(
+            "judge",
+            "Judge model",
+            settings,
+            settings.judge_base_url if settings.judge_model else None,
+            "LLM judges can run",
+            "LLM judges are not measured: set OPSEVAL_JUDGE_BASE_URL and _MODEL",
         ),
         s.ReadinessItem(
             id="allowlist",
             label="Host allowlist",
             ready=bool(settings.allowlist()),
-            detail="remote hosts allowed"
+            detail="hosts allowed: " + ", ".join(sorted(settings.allowlist()))
             if settings.allowlist()
-            else "loopback targets only: set OPSEVAL_ALLOWED_HOSTS",
+            else "no host may be contacted, loopback included: set OPSEVAL_ALLOWED_HOSTS",
         ),
-        s.ReadinessItem(
-            id="tracing",
-            label="Tool-call tracing",
-            ready=bool(settings.langfuse_host and settings.langfuse_secret_key),
-            detail="trace-backed Tools checks can run"
-            if settings.langfuse_host and settings.langfuse_secret_key
-            else "Tools checks fall back to frame evidence (degraded) or are not measured",
+        _endpoint(
+            "tracing",
+            "Tool-call tracing",
+            settings,
+            settings.langfuse_host if settings.langfuse_secret_key else None,
+            "trace-backed Tools checks can run",
+            "Tools checks fall back to frame evidence (degraded) or are not measured",
         ),
     ]
 

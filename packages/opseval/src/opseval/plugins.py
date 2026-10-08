@@ -20,7 +20,7 @@ silently gone. A broken plugin must stop the run, not quietly narrow it.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from importlib.metadata import EntryPoint, entry_points
 from typing import Any
 
@@ -34,6 +34,9 @@ VALID_REQUIRES = ("frames", "trace", "llm")
 
 _loaded: set[str] = set()
 """Entry-point names already processed, so discovery is idempotent."""
+
+_sinks: dict[str, type[Any]] = {}
+"""Sink classes already loaded, by entry-point name."""
 
 THIRD_PARTY: dict[str, str] = {}
 """Scorer id -> the distribution that provides it, for ``opseval list-scorers``."""
@@ -131,34 +134,48 @@ def check_sink_contract(obj: Any, *, source: str) -> type[Any]:
     return obj
 
 
-def load_sinks(*, group: str = SINK_GROUP) -> dict[str, type[Any]]:
-    """Discover sink plugins (ADR-0027). Fails closed, like scorers.
+def load_sinks(
+    names: Iterable[str] | None = None, *, group: str = SINK_GROUP
+) -> dict[str, type[Any]]:
+    """Load sink plugins (ADR-0027), keyed by entry-point name. Fails closed, like scorers.
 
-    A sink that cannot be imported is refused rather than skipped: an operator who
-    installed a publisher and got silence would reasonably assume it had published.
+    ``names`` are the entry points the operator enabled (``OPSEVAL_SINKS``); only those are
+    imported, so a plugin nobody asked for never runs code. ``None`` loads every one.
+
+    A name no installed plugin provides, and a sink that cannot be imported, are refused
+    rather than skipped: an operator who enabled a publisher and got silence would
+    reasonably assume it had published. Loaded classes are cached, so every run in one
+    process (the console server, the pytest plugin) gets the same answer.
     """
+    entries = {entry.name: entry for entry in _iter_entry_points(group)}
+    wanted = list(dict.fromkeys(names)) if names is not None else sorted(entries)
+    missing = [name for name in wanted if name not in entries and name not in _sinks]
+    if missing:
+        raise ConfigError(
+            f"OPSEVAL_SINKS names {', '.join(missing)}, which no installed plugin provides "
+            f"(installed: {', '.join(sorted(entries)) or 'none'})"
+        )
     found: dict[str, type[Any]] = {}
-    for entry in sorted(_iter_entry_points(group), key=lambda e: e.name):
-        key = f"{group}:{entry.name}"
-        if key in _loaded:
-            continue
-        source = f"sink plugin {entry.name!r} ({entry.value})"
-        try:
-            obj = entry.load()
-        except Exception as exc:
-            raise ConfigError(
-                f"{source} could not be imported: {type(exc).__name__}: {exc}. "
-                "Fix or uninstall it; Opseval will not run with a broken sink plugin."
-            ) from exc
-        cls = check_sink_contract(obj, source=source)
-        found[cls.name] = cls
-        _loaded.add(key)
+    for name in wanted:
+        if name not in _sinks:
+            entry = entries[name]
+            source = f"sink plugin {name!r} ({entry.value})"
+            try:
+                obj = entry.load()
+            except Exception as exc:
+                raise ConfigError(
+                    f"{source} could not be imported: {type(exc).__name__}: {exc}. "
+                    "Fix or uninstall it; Opseval will not run with a broken sink plugin."
+                ) from exc
+            _sinks[name] = check_sink_contract(obj, source=source)
+        found[name] = _sinks[name]
     return found
 
 
 def reset_for_tests() -> None:
     """Forget what discovery has seen (tests only)."""
     _loaded.clear()
+    _sinks.clear()
     THIRD_PARTY.clear()
 
 
