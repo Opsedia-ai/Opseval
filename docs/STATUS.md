@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control in the core and the console).
+**As of 2026-10-09** (`main` with run control and the fenced judge transcript).
 
 ## Completion
 
@@ -80,7 +80,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SCR-02 | Axes | M | v0.1 | Done | `Axis` |
 | FR-SCR-03 | Deterministic scorers | M | v0.1 | Partial | `output.required_fields` is `output.payload_equals` |
 | FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Partial | expected/forbidden/ordering/call_success/args_valid; no separate `approval_gated` or `flow.checkpoint_gating` |
-| FR-SCR-05 | LLM judges with quoted ballots | M | v0.1 | Done | `scoring/judges.py` |
+| FR-SCR-05 | LLM judges with quoted ballots | M | v0.1 | Done | `scoring/judges.py`; the conversation is fenced JSON-lines data with harness facts outside (ADR-0036) |
 | FR-SCR-06 | Quality and security judges | M | v0.2 | Done | ADR-0014, ADR-0016 |
 | FR-SCR-07 | Judge audit trail | M | v0.1 | Done | prompt hash, quotes, model; rubric digests (ADR-0017) |
 | FR-SCR-08 | Vendor-family guard | S | v0.2 | Done | refused at launch by default (ADR-0016) |
