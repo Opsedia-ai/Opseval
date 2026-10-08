@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     gate_fail_on_flaky: bool = False
 
     reports_dir: str = "reports"
+    retention_days: int = Field(default=90, ge=1)
+    """``opseval prune`` deletes finished runs older than this many days (FR-SAF-06)."""
 
     # `opseval serve` (ADR-0031). Every API request must carry this bearer token; when it
     # is unset, the server makes a random one per start and prints the console link.

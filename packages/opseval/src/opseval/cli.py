@@ -260,6 +260,55 @@ def _stop_flags(**flags: object) -> StopPolicy | None:
 
 
 @app.command()
+def prune(
+    older_than: Annotated[
+        Optional[int],  # noqa: UP045
+        typer.Option("--older-than", min=1, help="Days. Default: OPSEVAL_RETENTION_DAYS (90)."),
+    ] = None,
+    reports_dir: Annotated[Optional[Path], typer.Option(help="The reports folder.")] = None,  # noqa: UP045
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Delete. Without it, only show what would go.")
+    ] = False,
+) -> None:
+    """Delete finished runs older than N days (a dry run unless you pass --yes).
+
+    A run that may still be going is never deleted: only one with a result, an error, or a
+    process on this host that is gone. Nothing but run folders is touched. Exit 3 if any
+    run could not be fully deleted (the others still are, and both are listed).
+    """
+    from opseval.retention import apply
+    from opseval.retention import plan as plan_prune
+
+    settings = Settings()
+    root = reports_dir or Path(settings.reports_dir)
+    days = older_than or settings.retention_days
+    store = FileStore(root)
+    items = plan_prune(store, older_than_days=days)
+    doomed = [i for i in items if i.action == "delete"]
+    for item in items:
+        mark = "delete" if item.action == "delete" else "keep  "
+        when = item.started_at.date().isoformat() if item.started_at else "unknown date"
+        typer.echo(f"  {mark}  {item.run_id}  ({when}: {item.reason})")
+    if not doomed:
+        typer.echo(f"Nothing to prune in {root}: no finished run is older than {days} days.")
+        return
+    if not yes:
+        typer.echo(f"{len(doomed)} run(s) would be deleted. Re-run with --yes to delete them.")
+        return
+    outcome = apply(store, items)
+    typer.echo(f"Deleted {len(outcome.deleted)} run(s) from {root}.")
+    for run_id, why in outcome.failed:
+        typer.secho(f"  could not delete {run_id}: {why}", fg="red", err=True)
+    if outcome.failed:
+        typer.secho(
+            f"{len(outcome.failed)} run(s) could not be fully deleted; remove them by hand.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(EXIT_HARNESS)
+
+
+@app.command()
 def cancel(
     run_dir: Annotated[Path, typer.Argument(help="A running run's folder, e.g. reports/<run_id>.")],
 ) -> None:

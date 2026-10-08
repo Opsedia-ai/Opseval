@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import os
-import socket
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -32,7 +30,7 @@ from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import FileStore
+from opseval.storage import FileStore, process_gone
 from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
 
@@ -95,7 +93,7 @@ def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
         "unjudged": None,
         "flaky": None,
     }
-    if error is None and _process_gone(m):
+    if error is None and process_gone(m):
         error = {
             "code": "INTERRUPTED",
             "message": f"the process running it (pid {m.get('pid')}) exited before it finished",
@@ -130,25 +128,6 @@ def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
         scenarios=rows,
         cancel_requested=store.cancel_requested(run_id),
     )
-
-
-def _process_gone(manifest: dict[str, Any]) -> bool:
-    """True only when we can tell: same host, and that process no longer exists.
-
-    A run from another machine, or an older manifest without a pid, stays "running":
-    guessing it dead could hide a run that is in fact still going.
-    """
-    pid, host = manifest.get("pid"), manifest.get("host")
-    if os.name == "nt" or not isinstance(pid, int) or host != socket.gethostname():
-        # On Windows os.kill(pid, 0) is TerminateProcess: the probe would kill the run.
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:  # exists but not ours (EPERM): alive
-        return False
-    return False
 
 
 def load_results(store: FileStore) -> list[SuiteResult]:

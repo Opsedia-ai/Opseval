@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control and the fenced judge transcript).
+**As of 2026-10-09** (`main` with run control, the fenced judge transcript and retention).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 81% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 84% of 69.
+**Overall: 82% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 86% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
 | v0.1 | 59 | 47 / 9 / 3 | 87% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
-| v0.5 | 12 | 5 / 3 / 4 | 54% |
+| v0.5 | 12 | 6 / 3 / 3 | 62% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 64 / 14 / 10 | **81%** |
+| **All** | 88 | 65 / 14 / 9 | **82%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -109,7 +109,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Missing | not started (see FR-RUN-08) |
 | FR-SAF-04 | Committed-outcome guard | M | v0.1 | Done | CLI and console (`serve --allow-commit`, ADR-0031); a `committed_outcome` without a `commit_gate` is a load error (ADR-0008 amendment) |
 | FR-SAF-05 | Artifact cleanup planning | S | v0.5 | Missing | not started |
-| FR-SAF-06 | Retention | M | v0.5 | Missing | not started |
+| FR-SAF-06 | Retention | M | v0.5 | Done | `opseval prune` (dry run unless `--yes`, `OPSEVAL_RETENTION_DAYS` default 90; never a run that may still be going; ADR-0037) |
 | FR-SAF-07 | Content-free telemetry | M | v0.1 | Done | implemented, ships dark (ADR-0021) |
 | FR-INT-01 | OpenAI-compatible LLMs, no vendor SDKs | M | v0.1 | Done | `llm.py` (ADR-0003) |
 | FR-INT-02 | Langfuse traces | M | v0.2 | Done | verified on self-hosted 4.44; not yet on Langfuse Cloud |
