@@ -4,12 +4,14 @@ import { ChevronDown } from "lucide-react";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import type { Gate, RunDetail as Detail, TestResult } from "../lib/types";
+import Transcript from "../components/Transcript";
 import { AreaPill, Callout, Card, Data, GatePill, Mono, NotMeasured, Page, PageHeader, Pill, ResultBar, Stat, cx } from "../components/ui";
 
 const tone = (s: TestResult["status"]) => (s === "passed" ? "pass" : s === "failed" ? "fail" : "mute");
 
-function Scenario({ t }: { t: TestResult }) {
+function Scenario({ run, t }: { run: string; t: TestResult }) {
   const [open, setOpen] = useState(t.status === "failed");
+  const [talk, setTalk] = useState<number | null>(null); // the attempt whose conversation is open
   return (
     <Card className="p-0 [&>div]:p-0">
       <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-4 p-5 text-left">
@@ -34,6 +36,9 @@ function Scenario({ t }: { t: TestResult }) {
                 <Pill tone={a.passed === true ? "pass" : a.passed === false ? "fail" : "mute"} dashed={a.passed === null}>{a.passed === null ? "not judged" : a.passed ? "passed" : "failed"}</Pill>
                 <span className="font-mono text-xs font-normal">{a.terminalState}</span></div>
               {a.invalidReason && <p className="text-sm">{a.invalidReason}</p>}
+              <button type="button" className="mb-2 text-sm font-semibold underline" onClick={() => setTalk(talk === a.index ? null : a.index)}>
+                {talk === a.index ? "Hide the conversation" : "Show the conversation"}</button>
+              {talk === a.index && <Transcript run={run} test={t.id} index={a.index} />}
               <ul className="divide-y divide-line rounded-2xl border border-line bg-white">
                 {a.scores.map((s) => (
                   <li key={s.scorerId} className="flex flex-wrap items-center gap-3 px-4 py-2 text-sm">
@@ -104,7 +109,7 @@ export default function RunDetail() {
             <Stat tone="ink" label="Target" value={<span className="text-lg">{r.target || "—"}</span>} note={`profile ${r.profile || "—"}`} />
           </div>
           <ResultBar passed={r.summary.passed} failed={r.summary.failed} unjudged={r.summary.unjudged} />
-          <div className="space-y-3">{r.tests.map((t) => <Scenario key={t.id} t={t} />)}</div>
+          <div className="space-y-3">{r.tests.map((t) => <Scenario key={t.id} run={r.summary.id} t={t} />)}</div>
           {r.usage.length > 0 && <Card title="Model usage"><ul className="text-sm">{r.usage.map((u) => <li key={u.role} className="flex justify-between py-1"><span>{u.role} · <Mono>{u.model}</Mono></span><span><Mono>{(u.inputTokens + u.outputTokens).toLocaleString()}</Mono> tokens · {u.costUsd === null ? <NotMeasured /> : <Mono>${u.costUsd.toFixed(3)}</Mono>}</span></li>)}</ul></Card>}
         </>)}</Data>)}
       </Page>

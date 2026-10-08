@@ -28,9 +28,11 @@ from opseval.models.gate import (
 )
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
+from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
 from opseval.storage import FileStore
+from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
 
 JUDGED_STATUSES = {VerdictStatus.PASSED, VerdictStatus.FAILED}
@@ -535,3 +537,66 @@ def readiness(
             else "Tools checks fall back to frame evidence (degraded) or are not measured",
         ),
     ]
+
+
+class RecordUnreadable(Exception):
+    """A record exists but cannot be read: a harness problem, never "no such attempt"."""
+
+
+def _redacted(text: str | None) -> str | None:
+    # Records written before the driver redacted exception text carry it raw.
+    return None if text is None else redact_text(text)[0]
+
+
+def attempt_record(
+    store: FileStore, run_id: str, test_id: str, index: int
+) -> s.AttemptRecordOut | None:
+    """One attempt's conversation; ``None`` if that attempt has no record (yet)."""
+    try:
+        record = store.load_record(run_id, test_id, index)
+    except (OSError, ValueError) as exc:
+        raise RecordUnreadable(f"{test_id} attempt {index}: {type(exc).__name__}") from exc
+    if record is None:
+        return None
+    persona = record.persona or {}
+    return s.AttemptRecordOut(
+        test_id=record.test_id,
+        index=record.attempt_index,
+        terminal_state=record.terminal_state.value,
+        stop_reason=_redacted(record.stop_reason),
+        started_at=record.started_at.isoformat(),
+        ended_at=record.ended_at.isoformat(),
+        language=persona.get("language"),
+        dialect=persona.get("dialect"),
+        user_turns=record.user_turns,
+        trace_coverage=record.trace_coverage,
+        entries=[
+            s.TranscriptEntry(
+                seq=e.seq,
+                kind=e.kind,
+                who=e.who,
+                text=e.text,
+                phase=e.phase,
+                latency_ms=e.latency_ms,
+                detail=e.detail,
+            )
+            for e in transcript(record)
+        ],
+        tool_calls=[
+            s.ToolCallOut(
+                name=c.name,
+                ok=c.ok,
+                arguments=None if c.arguments is None else short(c.arguments, 2000),
+            )
+            for c in record.tool_calls
+        ],
+        infra_errors=[_redacted(e) or "" for e in record.infra_errors],
+        connection=connection(record),
+        probes=[
+            f"{p.name}: passed" if p.passed else f"{p.name}: failed ({p.reason or 'no reason'})"
+            for p in record.probes
+        ],
+        planted_injections=list(record.planted_injections),
+        redaction_checked=record.redaction.applied,
+        redacted_kinds=list(record.redaction.found),
+    )

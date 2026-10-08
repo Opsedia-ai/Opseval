@@ -12,6 +12,7 @@ from opseval.models.gate import describe, looser_than_standard
 from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
+from opseval.transcript import connection, transcript
 
 _TEMPLATES = Path(__file__).parent / "templates"
 _env = Environment(
@@ -41,7 +42,12 @@ def render_html(
     """
     by_key = {(r.test_id, r.attempt_index): r for r in records}
     flows = flow_maps(records, profile) if profile is not None else {}
-    return _env.get_template("report.html.j2").render(result=result, records=by_key, flows=flows)
+    # The same conversation mapping as the console (opseval.transcript), so they never differ.
+    talks = {key: transcript(r) for key, r in by_key.items()}
+    links = {key: connection(r) for key, r in by_key.items()}
+    return _env.get_template("report.html.j2").render(
+        result=result, records=by_key, flows=flows, talks=talks, links=links
+    )
 
 
 STATUS_ICON = {

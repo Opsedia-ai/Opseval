@@ -458,4 +458,6 @@ class TestRunnerWithResume:
         assert result.tests[0].status is VerdictStatus.PASSED, result.tests[0]
         assert result.exit_code == 0
         html = (Path(settings.reports_dir) / result.run_id / "report.html").read_text("utf-8")
-        assert "dropped (code 1011) → resumed #1" in html
+        # The shared transcript mapping (opseval.transcript) also shows each event's detail.
+        line = html.split("<strong>Connection:</strong>", 1)[1].split("</p>", 1)[0]
+        assert line.index("dropped (code 1011)") < line.index("→") < line.index("resumed #1")

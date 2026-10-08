@@ -90,6 +90,47 @@ class TestOut(Api):
     unmeasured_scorers: list[str] = []
 
 
+class TranscriptEntry(Api):
+    """One thing that happened in a conversation, in order."""
+
+    seq: int
+    kind: Literal["message", "checkpoint", "decision", "result", "error", "notification", "unknown"]
+    who: Literal["customer", "agent"] | None  # only for a message
+    text: str | None
+    phase: str | None
+    latency_ms: float | None
+    detail: str | None  # the checkpoint, the decision, or an error or result in short
+
+
+class ToolCallOut(Api):
+    name: str
+    ok: bool
+    arguments: str | None  # JSON, as the trace recorded it (credential values redacted)
+
+
+class AttemptRecordOut(Api):
+    """The record behind one attempt: what was said and done, not how it was scored."""
+
+    test_id: str
+    index: int
+    terminal_state: str
+    stop_reason: str | None
+    started_at: str
+    ended_at: str
+    language: str | None
+    dialect: str | None
+    user_turns: int
+    trace_coverage: Literal["full", "frames_only"]
+    entries: list[TranscriptEntry]
+    tool_calls: list[ToolCallOut]
+    infra_errors: list[str]
+    connection: list[str]  # transport events: dropped, resumed, token refreshed
+    probes: list[str]  # protocol probes: "name: passed" or "name: failed (why)"
+    planted_injections: list[str]
+    redaction_checked: bool  # False: written before value redaction; never checked
+    redacted_kinds: list[str]  # the credential kinds taken out; never the values
+
+
 class UsageOut(Api):
     role: str
     model: str

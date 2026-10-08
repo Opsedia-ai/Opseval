@@ -979,3 +979,92 @@ def test_serve_prints_the_served_console_link(
     out = CliRunner().invoke(cli, ["serve", "--port", "8123"]).output
     assert "Console:  http://127.0.0.1:8123/#token=" in out
     assert "OPSEVAL_API" not in out and "npm run build" not in out
+
+
+# --- transcripts (run detail) -------------------------------------------------------------------
+
+
+async def test_an_attempt_shows_its_conversation(tmp_path: Path) -> None:
+    from opseval.demo.refund_agent import run_agent
+    from opseval.runner import RunOptions, launch
+
+    cat = catalogue_dir()
+    settings = Settings(reports_dir=str(tmp_path), allowed_hosts="127.0.0.1")
+    async with run_agent() as url:
+        result = await launch(
+            cat / "suites" / "smoke.yaml",
+            RunOptions(target=url, profile=cat / "profile.yaml", repeats=1),
+            settings,
+        )
+    c = connect(create_app(settings=settings, token=TOKEN))
+    rec = c.get(f"/api/v1/runs/{result.run_id}/attempts/rf-001/0").json()
+    kinds = [e["kind"] for e in rec["entries"]]
+    who = {e["who"] for e in rec["entries"] if e["kind"] == "message"}
+    assert who == {"customer", "agent"} and "checkpoint" in kinds and "decision" in kinds
+    assert rec["userTurns"] >= 1 and rec["redactionChecked"] is True
+    # The Egyptian Arabic persona's turns arrive as they were said.
+    ar = c.get(f"/api/v1/runs/{result.run_id}/attempts/rf-003/0").json()
+    assert ar["language"] == "ar" and ar["dialect"] == "egyptian"
+    assert any(
+        e["who"] == "customer" and any("؀" <= ch <= "ۿ" for ch in e["text"] or "")
+        for e in ar["entries"]
+    )
+
+
+def test_an_attempt_that_does_not_exist_is_a_404(client: TestClient) -> None:
+    for path in (
+        "r1/attempts/a/0",
+        "r1/attempts/a/-1",
+        "r1/attempts/..%2Fx/0",
+        "nope/attempts/a/0",
+    ):
+        r = client.get(f"/api/v1/runs/{path}")
+        assert r.status_code == 404, path
+        assert r.json()["code"] in ("UNKNOWN_ATTEMPT", "NOT_FOUND"), path  # a code, always
+
+
+def test_an_unreadable_record_is_a_harness_error_not_absent(tmp_path: Path) -> None:
+    folder = tmp_path / "bad" / "records"
+    folder.mkdir(parents=True)
+    (folder / "t__attempt0.json").write_text('{"truncated": ', "utf-8")
+    r = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN)).get(
+        "/api/v1/runs/bad/attempts/t/0"
+    )
+    assert r.status_code == 500 and r.json()["code"] == "UNREADABLE_RECORD"
+
+
+def test_a_record_from_before_redaction_says_it_was_never_checked(tmp_path: Path) -> None:
+    from opseval.models.record import FrameRecord, RunRecord
+
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+    record = RunRecord(
+        run_id="old",
+        test_id="t",
+        attempt_index=0,
+        seed=1,
+        target="ws://x",
+        started_at=now,
+        ended_at=now,
+        terminal_state=TerminalState.GOAL_REACHED,
+        frames=(
+            FrameRecord(seq=0, at=now, direction="received", kind="error", payload={"why": "boom"}),
+        ),
+    )
+    FileStore(tmp_path).save_record(record)
+    rec = (
+        connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+        .get("/api/v1/runs/old/attempts/t/0")
+        .json()
+    )
+    assert rec["redactionChecked"] is False  # never checked, not "nothing found"
+    assert rec["entries"] == [
+        {
+            "seq": 0,
+            "kind": "error",
+            "who": None,
+            "text": None,
+            "phase": None,
+            "latencyMs": None,
+            "detail": '{"why": "boom"}',
+        }
+    ]

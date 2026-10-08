@@ -116,6 +116,16 @@ class FileStore:
         _atomic_write(path, record.model_dump_json(indent=2))
         return path
 
+    def load_record(self, run_id: str, test_id: str, attempt: int) -> RunRecord | None:
+        """One attempt's record, or ``None`` if it was not (or not yet) written. A record that
+        exists but cannot be read raises (``ValueError``/``OSError``): that is not absence."""
+        name = f"{SAFE.sub('_', test_id)}__attempt{attempt}.json"
+        path = self.run_dir(run_id) / "records" / name
+        try:
+            return RunRecord.model_validate_json(path.read_text("utf-8"))
+        except FileNotFoundError:
+            return None
+
     def load_records(self, run_id: str) -> list[RunRecord]:
         folder = self.run_dir(run_id) / "records"
         records = [
