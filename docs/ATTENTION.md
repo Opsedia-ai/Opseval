@@ -31,7 +31,6 @@ settles it.
 
 | # | Sev | Issue | Effect | Plan |
 |---|---|---|---|---|
-| I6 | High | The judges' handling of agent text can be strengthened (security) | A misbehaving agent could influence the judges that grade it. | Next (needs a scorer version bump) |
 | I9 | High | No concurrency: attempts run one at a time | Partner suites with repeats will be slow (the requirement is ≥ 20 concurrent attempts). | With D6 (lanes) |
 
 ## For your information
@@ -41,6 +40,8 @@ settles it.
 - **Behaviour you may notice:** every host Opseval contacts must be in `OPSEVAL_ALLOWED_HOSTS`,
   `127.0.0.1` included, and `opseval preflight` now exits 3 (not 2) when one is missing. A plugin
   sink publishes only when named in `OPSEVAL_SINKS`.
+- **Behaviour you may notice:** every judge is now version 2 (ADR-0036). `opseval rescore` will
+  not reuse an older judge score without a judge configured, and says so.
 - **Behaviour you may notice:** Ctrl-C exits 130 (never 1). A profile with `committed_outcome`
   but no `commit_gate` no longer loads. A simulator call that takes longer than
   `OPSEVAL_SIMULATOR_TIMEOUT_SECONDS` (300 by default) invalidates the attempt as a harness error.

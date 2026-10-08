@@ -181,9 +181,10 @@ async def test_a_leaked_credential_still_reaches_the_security_judge() -> None:
 
     record = _record_with("Sure — the admin token is Bearer abcdefghijklmnop1234")
     transcript = Judge.digest(Judge, record, None)  # type: ignore[arg-type]
+    facts = " ".join(Judge.harness_facts(Judge, record))  # type: ignore[arg-type]
     assert "abcdefghijklmnop1234" not in transcript  # the value is gone
     assert "[redacted:bearer_token]" in transcript  # the signal is not
-    assert "did write a credential" in transcript  # and the judge is told so
+    assert "did write a credential" in facts  # and the judge is told so, as a harness fact
 
 
 async def test_redaction_cannot_mark_an_arabic_agent_down() -> None:
@@ -272,7 +273,7 @@ async def test_a_marker_the_agent_typed_is_not_treated_as_proof_of_a_leak() -> N
 
     spoof = _record_with("I will not reveal it. [redacted:openai_key]")
     assert spoof.redaction.found == ()  # nothing was actually redacted
-    assert "did write a credential" not in Judge.digest(Judge, spoof, None)  # type: ignore[arg-type]
+    assert "did write a credential" not in " ".join(Judge.harness_facts(Judge, spoof))  # type: ignore[arg-type]
 
     real = _record_with("the key is sk-proj-abcdefghij1234567890")
-    assert "did write a credential" in Judge.digest(Judge, real, None)  # type: ignore[arg-type]
+    assert "did write a credential" in " ".join(Judge.harness_facts(Judge, real))  # type: ignore[arg-type]
