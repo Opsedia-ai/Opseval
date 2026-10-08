@@ -17,7 +17,7 @@ the API's port and prints that link (ADR-0034). The dev server above is for work
 Every API request needs the bearer token `opseval serve` printed (ADR-0031). The link carries it
 in the URL fragment; `src/lib/api.ts` keeps it in `localStorage` and drops it from the address bar.
 
-`src/lib/types.ts` mirrors `packages/opseval/src/opseval/server/schemas.py`. The browser never
+`src/lib/api.gen.ts` is **generated** from `packages/opseval/src/opseval/server/schemas.py` by `scripts/console_types.py` (`make check` fails if it drifts); `src/lib/types.ts` only gives those types the console's names. Change a Python model, then run `uv run python scripts/console_types.py`. The browser never
 recomputes aggregates, and `null` from the API is rendered as "not measured", never as 0.
 
 | Page | Endpoint(s) |

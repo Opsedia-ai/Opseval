@@ -1,67 +1,46 @@
-// Mirrors packages/opseval/src/opseval/server/schemas.py (camelCase on the wire).
-// The browser never recomputes aggregates (ADR-0004). null means "not measured", never 0.
-export type Area = "output" | "flow" | "tools" | "security" | "harness";
-/** What a run means for the release; decided by the server (views.gate_state), never here. */
-export type Gate = "safe" | "gaps" | "blocked" | "not_judged" | "harness_error";
-export type RunState = "running" | "finished" | "harness_error";
+// The console's names for the API's types. The types themselves are GENERATED from
+// packages/opseval/src/opseval/server/schemas.py into ./api.gen.ts (scripts/console_types.py);
+// the test suite fails if they drift. Add a name here; never a field.
+// The browser never recomputes aggregates (ADR-0029). null means "not measured", never 0.
+import type * as G from "./api.gen";
 
-export interface RunSummary {
-  id: string; suite: string; startedAt: string | null; state: RunState; gate: Gate | null;
-  passed: number | null; failed: number | null; unjudged: number | null; flaky: number | null;
-  error?: string | null;
-}
-export interface Score {
-  scorerId: string; axis: Area; status: "passed" | "failed" | "infra_error";
-  score: number | null; threshold: number; reason: string | null; degraded: boolean; vacuous: boolean;
-}
-export interface Attempt {
-  index: number; passed: boolean | null; terminalState: string; invalidReason: string | null; scores: Score[];
-}
-export interface TestResult {
-  id: string; name: string; criticality: string;
-  status: "passed" | "failed" | "inconclusive" | "skipped_precondition" | "blocked";
-  reason: string | null; passRate: number | null; flaky: boolean; attempts: Attempt[]; unmeasuredScorers: string[];
-}
-export interface Usage {
-  role: string; model: string; calls: number; inputTokens: number; outputTokens: number; costUsd: number | null;
-}
-export interface Sink { sink: string; published: boolean; detail: string }
-export interface RunDetail {
-  summary: RunSummary; target: string; profile: string; gateStatus: string; gateSummary: string;
-  blocking: string[]; warnings: string[]; exitCode: number | null; safeToRelease: boolean;
-  gatePolicy: string | null; looserThanStandard: string[]; ignored: string[];
-  tests: TestResult[]; usage: Usage[]; loadErrors: string[];
-  degradedScorers: string[]; vacuousScorers: string[]; unmeasuredScorers: string[]; sinks: Sink[];
-}
-export interface Scenario {
-  id: string; title: string; difficulty: "low" | "medium" | "high"; criticality: string; stopAt: string;
-  repeats: number; tags: string[]; allowCommit: boolean; language: string; personaRole: string;
-}
-export interface Problem { path: string; field: string; message: string }
-export interface Catalogue { scenarios: Scenario[]; problems: Problem[] }
-export type GatePreset = "strict" | "standard" | "lenient";
-export interface GateSetting { key: string; label: string; help: string; choices: string[] }
-export interface GateCatalog { settings: GateSetting[]; presets: Record<GatePreset, Record<string, string>> }
+export type Area = G.Axis;
+/** What a run means for the release; decided by the server (views.gate_state), never here. */
+export type Gate = NonNullable<G.RunSummary["gate"]>;
+export type RunState = G.RunSummary["state"];
+
+export type RunSummary = G.RunSummary;
+export type Score = G.ScoreOut;
+export type Attempt = G.AttemptOut;
+export type TestResult = G.TestOut;
+export type Usage = G.UsageOut;
+export type Sink = G.SinkOut;
+export type RunDetail = G.RunDetail;
+export type Scenario = G.ScenarioOut;
+export type Problem = G.Problem;
+export type Catalogue = G.CatalogueOut;
+
+export type GatePreset = G.GateOut["preset"];
+export type GateSetting = G.GateSettingOut;
+export type GateCatalog = G.GateCatalogOut;
 /** A suite's gate, as the server resolved it (ADR-0032). */
-export interface GateView { preset: GatePreset; overrides: Record<string, string>; effective: Record<string, string>; describe: string; looserThanStandard: string[]; yaml: string }
-export interface GateBody { preset: GatePreset; overrides: Record<string, string> }
-export interface Suite { file: string; displayName: string; description: string; include: string[]; scenarioCount: number; repeats: number | null; stopAt: string | null; problem: string | null; gate: GateView | null }
-export interface Readiness { id: string; label: string; ready: boolean; detail: string }
-export interface Check { id: string; question: string; area: Area; kind: "deterministic" | "judge"; reads: "chat" | "trace" | "frames" }
-export interface RunUsage { run: string; simulatorTokens: number | null; judgeTokens: number | null; costUsd: number | null }
-export interface TrendPoint { run: string; label: string; passRate: number | null }
-export interface SettingRow { key: string; value: string | null; redacted: boolean }
-export interface Health { status: string; version: string; reportsDir: string; catalogue: string | null; profile: string | null; readOnly: boolean; allowCommit: boolean }
-export interface Change { testId: string; name: string; before: string; after: string }
-export interface AreaDelta { area: Area; before: number | null; after: number | null }
-export interface Comparison { baseline: string; candidate: string; regressed: Change[]; improved: Change[]; unjudged: Change[]; areas: AreaDelta[] }
-export interface Persona {
-  scenarioId: string; role: string; goal: string; flow: string; language: string; dialect: string | null;
-  timezone: string | null; typingNoise: number; scripted: boolean; opening: string | null;
-  simulatorModel: string | null; judgeModel: string | null;
-}
-export interface Turn { who: "customer" | "agent"; text: string }
-export interface Rehearsal { turn: Turn; goalReached: boolean; model: string | null }
-export interface LaunchBody { suite?: string; scenarios?: string[]; target?: string; repeats?: number; allowCommit?: boolean; failFast?: boolean }
-export interface Launched { accepted: boolean; runId: string; message: string }
-export interface SuiteBody { file: string; displayName: string; description: string; include: string[]; repeats?: number | null; stopAt?: string | null; gate?: GateBody | null; overwrite?: boolean }
+export type GateView = G.GateOut;
+/** The editor always holds both fields, though the API lets a request leave them out. */
+export type GateBody = Required<G.GateIn>;
+
+export type Suite = G.SuiteOut;
+export type Readiness = G.ReadinessItem;
+export type Check = G.CheckOut;
+export type RunUsage = G.RunUsage;
+export type TrendPoint = G.TrendPoint;
+export type SettingRow = G.SettingRow;
+export type Health = G.Health;
+export type Change = G.Change;
+export type AreaDelta = G.AreaDelta;
+export type Comparison = G.Comparison;
+export type Persona = G.PersonaOut;
+export type Turn = G.Turn;
+export type Rehearsal = G.RehearseOut;
+export type LaunchBody = G.LaunchIn;
+export type Launched = G.LaunchOut;
+export type SuiteBody = G.SuiteIn;

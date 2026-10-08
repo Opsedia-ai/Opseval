@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""API response shapes. camelCase on the wire; the console mirrors these in types.ts.
+"""API request and response shapes. camelCase on the wire.
+
+These models are the one source of the wire format: the console's TypeScript types are
+generated from them (scripts/console_types.py, checked by the test suite). Enum fields use
+the core enums themselves, so a new member reaches the console instead of breaking it.
 
 An unmeasured number is ``None`` (JSON null), never 0.
 """
@@ -12,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from opseval.models.gate import Preset
+from opseval.models.results import Axis, ScoreStatus, VerdictStatus
+from opseval.models.scenario import Criticality, Difficulty
 
 
 class Api(BaseModel):
@@ -54,8 +60,8 @@ class RunSummary(Api):
 
 class ScoreOut(Api):
     scorer_id: str
-    axis: str
-    status: str
+    axis: Axis
+    status: ScoreStatus
     score: float | None
     threshold: float
     reason: str | None
@@ -75,8 +81,8 @@ class TestOut(Api):
     __test__ = False
     id: str
     name: str
-    criticality: str
-    status: str
+    criticality: Criticality
+    status: VerdictStatus
     reason: str | None
     pass_rate: float | None
     flaky: bool
@@ -103,7 +109,7 @@ class RunDetail(Api):
     summary: RunSummary
     target: str
     profile: str
-    gate_status: str
+    gate_status: Literal["pass", "block"]
     gate_summary: str
     blocking: list[str]
     warnings: list[str]
@@ -124,8 +130,8 @@ class RunDetail(Api):
 class ScenarioOut(Api):
     id: str
     title: str
-    difficulty: str
-    criticality: str
+    difficulty: Difficulty
+    criticality: Criticality
     stop_at: str
     repeats: int
     tags: list[str]
@@ -155,13 +161,13 @@ class GateSettingOut(Api):
 
 class GateCatalogOut(Api):
     settings: list[GateSettingOut]
-    presets: dict[str, dict[str, str]]  # preset -> every setting's value
+    presets: dict[Preset, dict[str, str]]  # preset -> every setting's value
 
 
 class GateOut(Api):
     """A suite's gate: what its YAML says, and what that resolves to."""
 
-    preset: str
+    preset: Preset
     overrides: dict[str, str]  # only the settings the suite changes from its preset
     effective: dict[str, str]  # every setting, as a run would use it
     describe: str  # "strict + flaky=warn"
@@ -177,9 +183,9 @@ class GateIn(ApiIn):
 class CheckOut(Api):
     id: str
     question: str
-    area: str
-    kind: str  # deterministic | judge
-    reads: str
+    area: Axis
+    kind: Literal["deterministic", "judge"]
+    reads: Literal["chat", "trace", "frames"]
 
 
 class RunUsage(Api):
@@ -202,7 +208,7 @@ class SettingRow(Api):
 
 
 class Health(Api):
-    status: str
+    status: Literal["ok"]
     version: str
     reports_dir: str
     catalogue: str | None
@@ -214,12 +220,12 @@ class Health(Api):
 class Change(Api):
     test_id: str
     name: str
-    before: str
-    after: str
+    before: VerdictStatus
+    after: VerdictStatus
 
 
 class AreaDelta(Api):
-    area: str
+    area: Axis
     before: float | None
     after: float | None
 
@@ -248,7 +254,7 @@ JsonDict = dict[str, Any]
 
 
 class Turn(Api):
-    who: str  # customer | agent
+    who: Literal["customer", "agent"]
     text: str
 
 

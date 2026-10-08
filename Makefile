@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test check audit demo schemas status console console-check
+.PHONY: install lint typecheck test check audit demo schemas status console-types console console-check
 
 # Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
 ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
@@ -42,6 +42,11 @@ schemas:
 # docs/STATUS.md: the completion percentages are computed from its table, never typed.
 status:
 	uv run python scripts/project_status.py --check
+
+# Regenerate packages/console/src/lib/api.gen.ts from the server's models. Drift is caught by
+# the test suite (tests/test_console_types.py), so there is one check, not three.
+console-types:
+	uv run python scripts/console_types.py
 
 # The web console (needs Node 20+). `npm ci` once, then these.
 console-check:
