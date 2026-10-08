@@ -24,7 +24,7 @@ from opseval.models.record import RunRecord, TerminalState
 from opseval.models.results import ScoreStatus
 from opseval.models.scenario import Scenario
 from opseval.scoring import ScoringEngine
-from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator
+from opseval.simulator import LLMSimulator, ScriptedSimulator, SimTurn, Simulator
 from opseval.transport import HttpJsonTransport, PythonTransport, WebSocketTransport
 from opseval.verdicts import attempt_verdict
 
@@ -45,6 +45,22 @@ async def drive(
         **kw,
     )
     return await driver.run()
+
+
+class SlowSimulator(ScriptedSimulator):
+    """A scripted customer behind a slow (rate-limited, retrying) simulator LLM."""
+
+    def __init__(self, scenario: Scenario, delay: float) -> None:
+        super().__init__(scenario, 1)
+        self.delay = delay
+
+    async def opening(self) -> SimTurn:
+        await asyncio.sleep(self.delay)
+        return await super().opening()
+
+    async def next_turn(self, transcript: list[tuple[str, str]]) -> SimTurn:
+        await asyncio.sleep(self.delay)
+        return await super().next_turn(transcript)
 
 
 async def judged(record: RunRecord, scenario: Scenario, profile: SutProfile) -> bool | None:
@@ -276,6 +292,58 @@ class TestFaultInjection:
             seed=1,
         ).run()
         await self._assert_not_blamed(rec, s, profile)
+
+
+class TestSimulatorTimeIsNotTheAgents:
+    """I1: the attempt deadline measures the agent, not the harness's simulator."""
+
+    async def test_a_slow_simulator_does_not_use_up_the_agents_deadline(
+        self, profile: SutProfile
+    ) -> None:
+        """One simulator call alone takes longer than the whole attempt deadline."""
+        s = make_scenario(execution={"attempt_timeout_seconds": 1.0})
+        async with run_agent() as url:
+            rec = await drive(s, profile, url, sim=SlowSimulator(s, 1.3))
+        assert rec.terminal_state is TerminalState.STOPPED_AT_CHECKPOINT, rec.stop_reason
+        assert await judged(rec, s, profile) is True
+
+    async def test_a_simulator_that_never_answers_is_a_harness_failure(
+        self, profile: SutProfile
+    ) -> None:
+        s = make_scenario()
+        async with run_agent() as url:
+            rec = await drive(
+                s, profile, url, sim=SlowSimulator(s, 30), simulator_timeout_seconds=0.2
+            )
+        assert rec.terminal_state is TerminalState.HARNESS_FAILURE
+        assert "OPSEVAL_SIMULATOR_TIMEOUT_SECONDS" in (rec.stop_reason or "")
+        assert rec.infra_errors
+        assert await judged(rec, s, profile) is None  # invalidated, not failed
+
+    async def test_the_agents_own_time_still_counts_after_a_slow_simulator(
+        self, profile: SutProfile
+    ) -> None:
+        """The deadline is paused for the simulator, not removed: a silent agent still
+        runs out of time, and that is the agent's TIMEOUT."""
+
+        async def mute(conn: ServerConnection) -> None:
+            await conn.send(json.dumps({"type": "session_created", "session_id": "s-1"}))
+            async for _ in conn:
+                pass
+
+        server = await serve(mute, "127.0.0.1", 0)
+        port = next(iter(server.sockets)).getsockname()[1]
+        s = make_scenario(execution={"attempt_timeout_seconds": 0.8, "turn_timeout_seconds": 30})
+        try:
+            started = asyncio.get_running_loop().time()
+            rec = await drive(s, profile, f"ws://127.0.0.1:{port}", sim=SlowSimulator(s, 0.5))
+            took = asyncio.get_running_loop().time() - started
+        finally:
+            server.close()
+        assert rec.terminal_state is TerminalState.TIMEOUT
+        assert rec.stop_reason == "attempt deadline exceeded"
+        assert took >= 1.2, "the simulator's 0.5s was added back to the deadline"
+        assert await judged(rec, s, profile) is False
 
 
 class TestAgentFaultsCountAgainstTheAgent:

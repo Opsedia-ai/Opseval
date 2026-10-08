@@ -112,6 +112,11 @@ class TestProfile:
         with pytest.raises(ValidationError, match="commit_gate"):
             SutProfile(name="p", commit_gate="nope")
 
+    def test_a_committed_outcome_needs_a_commit_gate(self) -> None:
+        """Without a gate the commit guard has nowhere to stop (ADR-0008): a load error."""
+        with pytest.raises(ValidationError, match="needs a commit_gate"):
+            SutProfile(name="p", committed_outcome="refund_issued")
+
 
 class TestCatalogue:
     def test_demo_catalogue_is_clean(self, cat_dir: Path, profile: SutProfile) -> None:

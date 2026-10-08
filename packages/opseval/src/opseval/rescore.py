@@ -59,8 +59,10 @@ def _scenarios(
     catalogue: str | Path | None,
     profile_path: str | Path | None,
 ) -> tuple[SutProfile, dict[str, Scenario], str]:
-    snapshot = store.load_snapshot(run_id)
     if catalogue is None and profile_path is None:
+        # Read only when used: a snapshot that no longer loads must not block the
+        # --catalogue/--profile route, which is the way around it.
+        snapshot = store.load_snapshot(run_id)
         if snapshot is None:
             raise ConfigError(
                 "this run has no saved scenarios (it predates re-scoring support); pass "

@@ -184,6 +184,15 @@ class SutProfile(BaseModel):
     def _check(self) -> SutProfile:
         if self.commit_gate is not None and self.commit_gate not in self.checkpoints:
             raise ValueError(f"commit_gate {self.commit_gate!r} is not a declared checkpoint")
+        if self.committed_outcome is not None and self.commit_gate is None:
+            # The commit guard (ADR-0008) stops at the gate *before* the outcome. Without a
+            # gate there is nothing to stop at, and a run would reach the irreversible
+            # outcome with no double opt-in at all.
+            raise ValueError(
+                f"committed_outcome {self.committed_outcome!r} needs a commit_gate: the "
+                "checkpoint whose approval leads to it, where Opseval stops unless the scenario "
+                "has allow_commit: true and the run has --allow-commit"
+            )
         if (
             self.reconnect is not None
             and self.reconnect.resume_session_frame is not None

@@ -60,6 +60,28 @@ class TestEntrypoint:
         assert "No space left on device" in err  # the traceback is kept for the bug report
         assert "not an agent failure" in err
 
+    def test_ctrl_c_is_never_exit_1(
+        self, monkeypatch: pytest.MonkeyPatch, cat_dir: Path, tmp_path: Path
+    ) -> None:
+        """An interrupted run judged nothing; exit 1 would read as "the agent failed"."""
+
+        async def interrupted(*args: object, **kwargs: object) -> SuiteResult:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("opseval.cli.launch", interrupted)
+        code = self.run_cli(
+            monkeypatch,
+            "run",
+            str(cat_dir / "suites" / "smoke.yaml"),
+            "--profile",
+            str(cat_dir / "profile.yaml"),
+            "--target",
+            "ws://127.0.0.1:1",
+            "--reports-dir",
+            str(tmp_path),
+        )
+        assert code == 130
+
     def test_normal_exit_codes_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         assert self.run_cli(monkeypatch, "--version") == 0
 

@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     judge_base_url: str | None = None
     judge_api_key: SecretStr | None = None
     judge_model: str | None = None
+    simulator_timeout_seconds: float = Field(default=300.0, gt=0)
+    """The most one simulator call (an opening, a reply, a checkpoint decision) may take.
+    Simulator time is off the agent's clock; overrunning this is a harness error."""
     judge_concurrency: int = 4
     judge_independence: Literal["error", "warn", "off"] = "error"
     """What to do when a judge and the model it grades share a vendor family (ADR-0016).

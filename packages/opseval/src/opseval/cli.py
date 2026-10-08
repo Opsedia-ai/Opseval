@@ -666,8 +666,9 @@ def entrypoint() -> None:
     An exception nothing else handled (a full disk, a template bug, a bug in Opseval) would
     otherwise reach the interpreter and exit **1**, which CI reads as "the agent failed".
     It is a harness problem, so it exits 3 and keeps the traceback for the bug report
-    (ADR-0030). ``SystemExit`` is not an ``Exception`` and passes through unchanged. Note that
-    Click already turns Ctrl-C into "Aborted!" and exit 1 before it gets here.
+    (ADR-0030). ``SystemExit`` is not an ``Exception`` and passes through unchanged. Ctrl-C
+    (and the SIGINT a cancelled CI job sends) never gets here: Typer turns it into exit 130,
+    which is why ``typer>=0.15`` is required (older Typer exits 1, "the agent failed").
     """
     try:
         app()

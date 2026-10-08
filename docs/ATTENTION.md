@@ -31,10 +31,8 @@ settles it.
 
 | # | Sev | Issue | Effect | Plan |
 |---|---|---|---|---|
-| I1 | High | Time spent waiting on the simulator counts against the agent's attempt deadline | A harness slowdown can end an attempt as the agent's timeout (the core rule). | Next: core-rule fixes |
-| I6 | High | The judges' handling of agent text can be strengthened (security) | A misbehaving agent could influence the judges that grade it. | After the security batch (needs a scorer version bump) |
-| I7 | High | The commit guard does not cover every profile shape | A scenario could reach the irreversible outcome without the double opt-in (ADR-0008). | Next: core-rule fixes |
-| I8 | High | Run control: four of five stop policies are missing, and runs cannot be cancelled | A long or failing run cannot be stopped from the console. | After the fixes above |
+| I6 | High | The judges' handling of agent text can be strengthened (security) | A misbehaving agent could influence the judges that grade it. | Next, with I8 (needs a scorer version bump) |
+| I8 | High | Run control: four of five stop policies are missing, and runs cannot be cancelled | A long or failing run cannot be stopped from the console. | Next |
 | I9 | High | No concurrency: attempts run one at a time | Partner suites with repeats will be slow (the requirement is ≥ 20 concurrent attempts). | With D6 (lanes) |
 
 ## For your information
@@ -44,5 +42,8 @@ settles it.
 - **Behaviour you may notice:** every host Opseval contacts must be in `OPSEVAL_ALLOWED_HOSTS`,
   `127.0.0.1` included, and `opseval preflight` now exits 3 (not 2) when one is missing. A plugin
   sink publishes only when named in `OPSEVAL_SINKS`.
+- **Behaviour you may notice:** Ctrl-C exits 130 (never 1). A profile with `committed_outcome`
+  but no `commit_gate` no longer loads. A simulator call that takes longer than
+  `OPSEVAL_SIMULATOR_TIMEOUT_SECONDS` (300 by default) invalidates the attempt as a harness error.
 - **The console is not in the Python package yet**; that is a release-pipeline step for after
   Gate 0 (ADR-0034). It needs the Node versions in `packages/console/package.json` `engines`.

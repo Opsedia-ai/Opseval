@@ -1135,7 +1135,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.2" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "typer", specifier = ">=0.12" },
+    { name = "typer", specifier = ">=0.15" },
     { name = "uvicorn", marker = "extra == 'serve'", specifier = ">=0.30" },
     { name = "websockets", specifier = ">=13" },
 ]

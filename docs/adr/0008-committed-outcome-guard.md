@@ -18,3 +18,9 @@ The default `stop_at` is `commit_gate`: stop at the profile's commit-gate checkp
 
 - Scenarios that need the full outcome must opt in twice, deliberately.
 - Documentation stresses using dedicated test tenants.
+
+## Amendment (2026-10-08)
+
+A profile that declares `committed_outcome` must also declare `commit_gate`, or it fails to load.
+The guard works by stopping at the gate *before* the outcome; with no gate there is nothing to stop
+at, and a run would reach the irreversible outcome without either opt-in.

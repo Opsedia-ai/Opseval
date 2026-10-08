@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-08** (`main` with the egress, secrets and release-pipeline fixes).
+**As of 2026-10-08** (`main` with the simulator-deadline and commit-guard fixes).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 79% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 82% of 69.
+**Overall: 80% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 83% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 44 / 12 / 3 | 85% |
+| v0.1 | 59 | 46 / 10 / 3 | 86% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
 | v0.5 | 12 | 5 / 3 / 4 | 54% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 61 / 17 / 10 | **79%** |
+| **All** | 88 | 63 / 15 / 10 | **80%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -62,7 +62,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-RUN-03 | Credentials | M | v0.1 | Partial | static and HS256 with refresh (ADR-0012); no custom provider plugin |
 | FR-RUN-04 | Driver state machine | M | v0.1 | Done | `driver.py`, PROBES state (ADR-0025) |
 | FR-RUN-05 | Terminal states | M | v0.1 | Done | `TerminalState` |
-| FR-RUN-06 | Timeouts count against the agent | M | v0.1 | Partial | connect/pool timeouts are harness errors (ADR-0030); time spent waiting on the simulator still counts against the agent's deadline (ATTENTION I1) |
+| FR-RUN-06 | Timeouts count against the agent | M | v0.1 | Done | connect/pool timeouts are harness errors; simulator time is off the agent's clock, with its own limit (ADR-0030 update); fault-injection tests for both halves |
 | FR-RUN-07 | Protocol probes | S | v0.2 | Done | `profile.probes` (ADR-0025) |
 | FR-RUN-08 | Tenant pool and locks | M | v0.1 | Missing | runner is sequential; a `feat/tenant-pool` branch exists, unmerged |
 | FR-RUN-09 | Isolated attempts | M | v0.1 | Done | new driver, transport and simulator per attempt |
@@ -107,7 +107,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not; only the ones a suite uses are built), every preflight probe (exit 3 when refused), Langfuse, sinks, telemetry (`check_url_allowed`; errors show only scheme and host) |
 | FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes and allowlist errors name only the host |
 | FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Missing | not started (see FR-RUN-08) |
-| FR-SAF-04 | Committed-outcome guard | M | v0.1 | Partial | CLI and console (`serve --allow-commit`, ADR-0031); a profile without a `commit_gate` is not yet refused (ATTENTION I7) |
+| FR-SAF-04 | Committed-outcome guard | M | v0.1 | Done | CLI and console (`serve --allow-commit`, ADR-0031); a `committed_outcome` without a `commit_gate` is a load error (ADR-0008 amendment) |
 | FR-SAF-05 | Artifact cleanup planning | S | v0.5 | Missing | not started |
 | FR-SAF-06 | Retention | M | v0.5 | Missing | not started |
 | FR-SAF-07 | Content-free telemetry | M | v0.1 | Done | implemented, ships dark (ADR-0021) |
