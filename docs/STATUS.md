@@ -1,7 +1,8 @@
 # Project status
 
 Updated with every pull request that changes what Opseval can do (see CONTRIBUTING and
-CLAUDE.md, "Definition of done"). The summary below is **computed** from the table by
+CLAUDE.md, "Definition of done"). Decisions waiting on the maintainers, and critical or high
+issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed** from the table by
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
