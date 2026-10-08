@@ -20,7 +20,7 @@ export function Entry({ e }: { e: TranscriptEntry }) {
   }
   const label = { checkpoint: "⏸ checkpoint raised", decision: "▶ customer decision", result: "result", error: "error from the agent", notification: "notification", unknown: "unclassified frame" }[e.kind];
   return (
-    <div className={cx("rounded-xl border border-dashed px-3 py-1.5 text-sm", e.kind === "error" ? "border-deep-coral text-deep-coral" : "border-line text-muted-ink")}>
+    <div data-kind={e.kind} data-tone={e.kind === "error" ? "fail" : "mute"} className={cx("rounded-xl border border-dashed px-3 py-1.5 text-sm", e.kind === "error" ? "border-deep-coral text-deep-coral" : "border-line text-muted-ink")}>
       {label}{e.detail && <>: <Mono>{e.detail}</Mono></>}
     </div>
   );

@@ -48,7 +48,7 @@ status:
 console-types:
 	uv run python scripts/console_types.py
 
-# The web console (needs Node 22+). `npm ci` once, then these.
+# The web console (needs Node 22.22+ or 24.15+, as package.json `engines` says). `npm ci` once, then these.
 console-check:
 	cd packages/console && npm test && npm run build
 

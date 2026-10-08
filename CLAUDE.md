@@ -69,7 +69,7 @@ uv run opseval demo --bug skip-approval   # â†’ exit 1   (also: forget-method â†
 uv run opseval init /tmp/x && uv run opseval validate /tmp/x/suites/full.yaml --profile /tmp/x/profile.yaml
 
 uv run opseval serve --target ws://127.0.0.1:8765   # API on :8000 (loopback only, no auth yet)
-make console                 # the web console on :5173, proxying /api to :8000 (needs Node 20+)
+make console                 # the web console on :5173, proxying /api to :8000 (needs Node 22.22+ or 24.15+)
 make console-check           # typecheck + build the console (runs in CI)
 ```
 

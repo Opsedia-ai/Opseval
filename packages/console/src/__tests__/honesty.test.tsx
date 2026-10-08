@@ -1,46 +1,54 @@
 // The console's share of the one rule: a harness problem never looks like an agent failure,
 // an agent failure never looks like a pass, and what was not measured is never drawn as 0.
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+// The components state what a colour means (data-tone), and these tests assert exactly that:
+// a restyle may change classes, never meanings.
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
 import { Count, GatePill, ResultBar } from "../components/ui";
 import { Entry } from "../components/Transcript";
 import { ProgressLine } from "../components/Progress";
-import type { RunProgress } from "../lib/types";
+import type { Gate, RunProgress, TranscriptEntry } from "../lib/types";
 
-afterEach(cleanup);
+const tone = (el: Element | null) => el?.getAttribute("data-tone");
 
 describe("the gate pill", () => {
-  // The outermost pill element of one render, read from that render's own container.
-  const pill = (gate: Parameters<typeof GatePill>[0]["gate"]) =>
-    render(<GatePill gate={gate} />).container.querySelector("span") as HTMLElement;
+  const pill = (gate: Gate | null) => render(<GatePill gate={gate} />).container.querySelector("span");
 
-  it("draws only 'safe' green", () => {
-    expect(pill("safe").textContent).toBe("safe to release");
-    expect(pill("safe").className).toMatch(/bg-teal-tint/);
-  });
-
-  it("never draws a gap, an unjudged run or a harness error green", () => {
-    for (const gate of ["gaps", "not_judged", "harness_error", null] as const) {
+  it("means exactly one thing per gate state", () => {
+    const expected: [Gate | null, string, string][] = [
+      ["safe", "pass", "safe to release"],
+      ["gaps", "warn", "passed with gaps"],
+      ["blocked", "fail", "blocked"],
+      ["not_judged", "mute", "not judged · blocks"],
+      ["harness_error", "mute", "harness error"],
+      [null, "mute", "in progress"],
+    ];
+    for (const [gate, meaning, text] of expected) {
       const el = pill(gate);
-      expect(el.className, String(gate)).not.toMatch(/bg-teal-tint/);
-      cleanup();
+      expect([gate, tone(el), el?.textContent]).toEqual([gate, meaning, text]);
     }
   });
 
-  it("draws a harness error unlike an agent failure", () => {
-    const harness = pill("harness_error");
-    expect(harness.textContent).toBe("harness error");
-    expect(harness.className).not.toMatch(/deep-coral/); // the colour of an agent failure
-    cleanup();
-    expect(pill("blocked").className).toMatch(/deep-coral/);
+  it("only a safe run is drawn as a pass", () => {
+    const passes = (["safe", "gaps", "blocked", "not_judged", "harness_error", null] as const).filter(
+      (g) => tone(pill(g)) === "pass",
+    );
+    expect(passes).toEqual(["safe"]);
+  });
+
+  it("a harness error is never drawn as, or like, an agent failure", () => {
+    expect(tone(pill("harness_error"))).not.toBe("fail");
+    expect(tone(pill("harness_error"))).not.toBe("warn"); // warn shares the failure's fill
   });
 });
 
 describe("unmeasured values", () => {
   it("are never drawn as 0", () => {
-    render(<Count n={null} />);
-    expect(screen.queryByText("0")).toBeNull();
-    expect(screen.getByText("—")).toBeTruthy();
+    for (const n of [null, undefined]) {
+      const { container } = render(<Count n={n} />);
+      expect(container.textContent).toBe("—");
+      expect(tone(container.querySelector("span"))).toBe("mute");
+    }
   });
 
   it("a real 0 is still 0", () => {
@@ -48,22 +56,31 @@ describe("unmeasured values", () => {
     expect(screen.getByText("0")).toBeTruthy();
   });
 
-  it("a run with no counts gets no result bar", () => {
-    render(<ResultBar passed={null} failed={null} unjudged={null} />);
-    expect(screen.getByText("no results")).toBeTruthy();
+  it("a run with any count unmeasured gets no result bar, never a guessed one", () => {
+    for (const [p, f, u] of [[null, null, null], [5, null, 0], [5, 0, null], [null, 2, 0]] as const) {
+      const { container } = render(<ResultBar passed={p} failed={f} unjudged={u} />);
+      expect(container.textContent).toBe("no results");
+    }
   });
 });
 
 describe("the transcript", () => {
+  const entry = (kind: TranscriptEntry["kind"]): TranscriptEntry => ({
+    seq: 3, kind, who: null, text: null, phase: null, latencyMs: null, detail: '{"code": 500}',
+  });
+
   it("never shows an agent error as an ordinary turn", () => {
-    render(<Entry e={{ seq: 3, kind: "error", who: null, text: null, phase: null, latencyMs: null, detail: '{"code": 500}' }} />);
-    expect(screen.getByText(/error from the agent/)).toBeTruthy();
+    const err = render(<Entry e={entry("error")} />).container.firstElementChild;
+    const note = render(<Entry e={entry("notification")} />).container.firstElementChild;
+    expect(err?.getAttribute("data-kind")).toBe("error");
+    expect(tone(err)).toBe("fail");
+    expect(tone(note)).toBe("mute"); // drawn differently from the error
+    expect(err?.textContent).toMatch(/error from the agent/);
   });
 
   it("keeps an Arabic turn right to left", () => {
-    render(<Entry e={{ seq: 1, kind: "message", who: "customer", text: "عايز أرجع الفلوس", phase: null, latencyMs: null, detail: null }} />);
+    render(<Entry e={{ ...entry("message"), who: "customer", text: "عايز أرجع الفلوس", detail: null }} />);
     expect(screen.getByText("عايز أرجع الفلوس").getAttribute("dir")).toBe("auto");
-    expect(screen.getByText(/customer/)).toBeTruthy();
   });
 });
 
@@ -74,10 +91,11 @@ describe("progress", () => {
   };
 
   it("says how far a run has got, and nothing about how it did", () => {
-    render(<ProgressLine p={p} />);
-    expect(screen.getByText(/2\/3 scenarios · 7 attempt/)).toBeTruthy();
-    expect(screen.getByText("rf-003")).toBeTruthy();
-    expect(screen.queryByText(/pass|fail|safe/i)).toBeNull();
+    const { container } = render(<ProgressLine p={p} />);
+    expect(container.textContent).toMatch(/2\/3 scenarios · 7 attempt/);
+    expect(container.textContent).toMatch(/rf-003/);
+    expect(container.textContent).not.toMatch(/pass|fail|safe/i);
+    expect(container.querySelector("[data-tone]")).toBeNull(); // no verdict-coloured pill
   });
 
   it("names the finishing stage", () => {

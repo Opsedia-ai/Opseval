@@ -21,7 +21,21 @@ describe("the API token", () => {
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer abc123");
   });
 
-  it("survives a reload without the fragment", async () => {
+  it("is kept across a reload: adopted from the link once, then sent without it", async () => {
+    window.history.replaceState(null, "", "/#token=from-the-link");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
+    await import("../lib/api"); // the first page load adopts it
+    vi.resetModules();
+    window.history.replaceState(null, "", "/runs"); // a reload, with no fragment
+    const fetchMock = vi.fn(async () => new Response("[]", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api } = await import("../lib/api");
+    await api.runs();
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer from-the-link");
+  });
+
+  it("uses a stored token when there is no fragment", async () => {
     localStorage.setItem("opseval.token", "kept");
     window.history.replaceState(null, "", "/");
     const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
