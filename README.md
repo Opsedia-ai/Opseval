@@ -384,6 +384,36 @@ Leaving `sut_model` unset means *unknown*, not *independent*: the check stays in
 claims independence it has not verified. See
 [ADR-0016](docs/adr/0016-judge-independence-and-quality-judges.md).
 
+## The web console
+
+```bash
+pip install 'opseval[serve]'                        # or: uv sync
+opseval serve --target ws://127.0.0.1:8765          # API on http://127.0.0.1:8000
+cd packages/console && npm ci && npm run dev        # console on http://127.0.0.1:5173
+```
+
+It reads the run folders you already have — browse runs and their per-check scores, compare two
+runs, watch the trend, see token usage, edit suites, bulk-import scenarios, and start a run.
+
+The screen worth knowing about is **Simulator**. The simulator is the LLM that plays your
+customer; if it drifts out of character, every score downstream measured the wrong conversation.
+That page lets you play the agent and rehearse a persona turn by turn — it contacts no agent and
+uses no test account — so you find the drift before spending an hour of real runs on it.
+
+Two rules shape what is in there:
+
+- **A `null` is "not measured", never 0.** An unjudged run is a gap in the trend. Compare lists
+  regressions and not-judged separately, because a scenario that went `passed → inconclusive` is
+  an outage, and calling it a regression sends you hunting a bug that was really a dead credential.
+- **No control without a backend.** Anything the server cannot actually do is absent rather than
+  stubbed, and the browser computes no aggregate of its own.
+
+> **The API has no authentication yet.** It binds to loopback, and it can start runs against your
+> configured agent. Do not expose it. Accounts and API keys are v0.5.
+
+Not built yet: conversation transcripts in run detail, live per-scenario progress, and a scenario
+editor (bulk import is there). See [ADR-0029](docs/adr/0029-console-api.md).
+
 ## Publish a finished run
 
 ```bash

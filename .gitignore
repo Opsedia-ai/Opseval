@@ -30,3 +30,7 @@ docs-internal/
 .idea/
 .vscode/
 .DS_Store
+packages/console/dist/
+*.tsbuildinfo
+# Brand assets stay in Drive, not under Apache-2.0 (doc 06).
+docs/Design system.pdf

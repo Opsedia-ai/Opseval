@@ -32,8 +32,8 @@ Legend: 🟢 in progress · ⚪ planned · 💡 exploring
 
 ## v0.5: "Teams can share it" ⚪
 
-- ⚪ `opseval serve`: REST API, live run streaming, Postgres + S3-compatible storage, workers
-- ⚪ Web console: runs, live view, compare, trends, usage & cost, scenario editor, persona playground
+- 🟢 `opseval serve`: REST API over the run folders and the catalogue, loopback-only (ADR-0029) · ⚪ live run streaming, Postgres + S3-compatible storage, workers, accounts
+- 🟢 Web console: runs, run detail, compare, trends, usage & cost, suites, bulk import, persona playground (ADR-0029) · ⚪ live view, transcripts, scenario editor
 - ⚪ Local accounts, API keys, OIDC login; organisations and projects
 - ⚪ Docker Compose and Helm chart
 - 🟢 Langfuse score push and webhooks, over a `opseval.sinks` plugin group (ADR-0027) · 🟢 OpenTelemetry trace source (ADR-0028)

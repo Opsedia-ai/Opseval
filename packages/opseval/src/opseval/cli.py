@@ -550,5 +550,46 @@ def demo(
     raise typer.Exit(asyncio.run(_go()))
 
 
+@app.command()
+def serve(
+    catalogue: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option(
+            help="Catalogue folder (scenarios/, suites/, profile.yaml). Default: the demo."
+        ),
+    ] = None,
+    profile: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(help="SUT profile file or builtin:<name>. Default: <catalogue>/profile.yaml."),
+    ] = None,
+    target: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(help="Default agent target for runs started from the console."),
+    ] = None,
+    host: Annotated[
+        str, typer.Option(help="Bind address. Loopback unless you add auth.")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
+) -> None:
+    """Serve the HTTP API the web console talks to."""
+    try:
+        import uvicorn
+
+        from opseval.server import create_app
+    except ImportError as exc:  # pragma: no cover - depends on the extra
+        typer.secho("the API needs the extra: pip install 'opseval[serve]'", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+    from opseval.demo import catalogue_dir
+
+    root = catalogue or catalogue_dir()
+    prof = profile or str(root / "profile.yaml")
+    try:
+        api = create_app(settings=Settings(), catalogue=root, profile=prof, target=target)
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+    uvicorn.run(api, host=host, port=port, log_level="info")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()

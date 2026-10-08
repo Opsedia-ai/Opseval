@@ -1,6 +1,7 @@
 # ADR-0004: React + TypeScript web console
 
-- **Status:** Proposed
+- **Status:** Proposed — revised by [ADR-0029](0029-console-api.md), which keeps the contract below
+  and settles the library choices differently once a server existed to build against
 - **Date:** 2026-09-22
 - **Deciders:** Opseval maintainers
 

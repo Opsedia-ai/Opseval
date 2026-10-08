@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+/* Opseval "Coral Field" design system. See docs/Design system.pdf.
+   Contrast rule: never white text on coral or teal. Ink on them; white only on ink. */
+@theme {
+  --color-coral: #f27655;
+  --color-ink: #10393a;
+  --color-teal: #2da3a1;
+  --color-deep-coral: #b8472a;
+  --color-muted-ink: #3d5556;
+  --color-blush: #fde8e0;
+  --color-soft: #fff6f1;
+  --color-coral-tint: #f79478;
+  --color-line: #f3d5ca;
+  --color-ink-text: #bfd6d5; /* body text on ink blocks */
+  --color-teal-tint: #dcf1f0; /* derived: pass / ready surfaces */
+  --color-ink-deep: #0b1f21;
+
+  --font-display: "Bricolage Grotesque", "Alexandria", system-ui, sans-serif;
+  --font-sans: "Figtree", "IBM Plex Sans Arabic", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --radius-card: 28px;
+  --radius-panel: 36px;
+}
+
+@layer base {
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: #fff;
+  color: var(--color-muted-ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+}
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  color: var(--color-ink);
+  letter-spacing: -0.03em;
+  margin: 0;
+}
+a {
+  color: var(--color-deep-coral);
+}
+[dir="rtl"],
+.rtl {
+  font-family: "IBM Plex Sans Arabic", var(--font-sans);
+  line-height: 1.8;
+}
+:focus-visible {
+  outline: 2px solid var(--color-ink);
+  outline-offset: 2px;
+}
+}
