@@ -667,6 +667,20 @@ Two limits, deliberately:
 this shipped report `false`, which means *unchecked*, not *clean*. See
 [ADR-0033](docs/adr/0033-redacting-credential-values.md).
 
+
+### Keeping runs for a limited time
+
+```bash
+opseval prune                 # show which runs are older than 90 days (deletes nothing)
+opseval prune --yes           # delete them
+opseval prune --older-than 30 --yes
+```
+
+A run folder keeps whole conversations, so keep only as many as you need.
+`OPSEVAL_RETENTION_DAYS` sets the default age (90). Only runs that have ended are deleted: a
+result, an error, or a process on this machine that is gone. A run that may still be going, a
+run from another machine, and anything that is not a run folder are left alone. See
+[ADR-0037](docs/adr/0037-retention.md).
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Files under [`ee/`](ee/) are covered by a separate commercial licence.

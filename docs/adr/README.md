@@ -38,5 +38,6 @@
 | [0034](0034-serve-the-console.md) | `opseval serve` serves the built console same-origin, with CSP and no framing | Proposed |
 | [0035](0035-run-control.md) | Stop policies and cancellation: what is not run is reported as skipped, never dropped | Proposed |
 | [0036](0036-judge-transcript-fence.md) | The judge's transcript is fenced data: JSON lines in a nonce-named fence, harness facts outside | Proposed |
+| [0037](0037-retention.md) | `opseval prune`: delete runs older than N days, dry run unless `--yes`, never a run that may still be going | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

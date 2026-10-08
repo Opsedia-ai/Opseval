@@ -643,12 +643,12 @@ def test_a_run_whose_process_died_is_not_running_forever(tmp_path: Path) -> None
 
 def test_no_pid_probe_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     """os.kill(pid, 0) is TerminateProcess on Windows: probing would kill the run."""
-    from opseval.server import views
+    from opseval import storage
 
     called: list[int] = []
-    monkeypatch.setattr(views.os, "name", "nt")
-    monkeypatch.setattr(views.os, "kill", lambda pid, sig: called.append(pid))
-    assert views._process_gone({"pid": 123, "host": socket.gethostname()}) is False
+    monkeypatch.setattr(storage.os, "name", "nt")
+    monkeypatch.setattr(storage.os, "kill", lambda pid, sig: called.append(pid))
+    assert storage.process_gone({"pid": 123, "host": socket.gethostname()}) is False
     assert called == []
 
 

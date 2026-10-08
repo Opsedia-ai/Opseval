@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,25 @@ def _first_error(exc: Exception) -> str:
         first = exc.errors()[0]
         return str(first.get("msg", exc))
     return f"{type(exc).__name__}: {exc}"
+
+
+def process_gone(manifest: dict[str, Any]) -> bool:
+    """True only when we can tell: same host, and that process no longer exists.
+
+    A run from another machine, or an older manifest without a pid, stays "running":
+    guessing it dead could hide a run that is in fact still going.
+    """
+    pid, host = manifest.get("pid"), manifest.get("host")
+    if os.name == "nt" or not isinstance(pid, int) or host != socket.gethostname():
+        # On Windows os.kill(pid, 0) is TerminateProcess: the probe would kill the run.
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:  # exists but not ours (EPERM): alive
+        return False
+    return False
 
 
 class FileStore:
