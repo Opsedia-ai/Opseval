@@ -5,7 +5,7 @@ CLAUDE.md, "Definition of done"). The summary below is **computed** from the tab
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-08** (`main` with the gate policy, ADR-0032).
+**As of 2026-10-08** (`main` with the gate policy and its review fixes, ADR-0032).
 
 ## Completion
 

@@ -232,7 +232,9 @@ class TestExitCode:
         lenient = PRESETS["lenient"]
         tests = [tv("a", P, CRIT), tv("b", F)]
         gate = release_gate(tests, policy=lenient)
-        assert gate.safe and exit_code(tests, gate=gate) == EXIT_PASS
+        # The gate passes and CI exits 0, but a failed scenario is never "Safe to release".
+        assert gate.status == "pass" and not gate.safe
+        assert exit_code(tests, gate=gate) == EXIT_PASS
         tests = [tv("a", F, CRIT)]
         assert exit_code(tests, gate=release_gate(tests, policy=lenient)) == EXIT_FAIL
         tests = [tv("a", P, CRIT), tv("b", INC)]
@@ -314,7 +316,10 @@ def test_a_lenient_green_is_never_mistaken_for_a_strict_one() -> None:
     """The point of recording the policy: the same run reads differently, and says why."""
     lenient = _result(PRESETS["lenient"])
     strict = _result(PRESETS["strict"])
-    assert lenient.safe_to_release and not strict.safe_to_release
+    assert lenient.gate.status == "pass" and strict.gate.status == "block"
+    assert lenient.exit_code == EXIT_PASS and strict.exit_code == EXIT_FAIL
+    # Neither is "safe": what a policy ignores can let the gate pass, never make it clean.
+    assert not lenient.safe_to_release and not strict.safe_to_release
     assert lenient.gate.policy is not None and strict.gate.policy is not None
     assert looser_than_standard(lenient.gate.policy) and not looser_than_standard(
         strict.gate.policy
@@ -348,7 +353,8 @@ async def test_the_runner_gates_with_the_suite_policy_or_the_override(tmp_path: 
     assert any("rf-101: skipped_precondition" in b for b in strict.gate.blocking)
     assert {t.test_id: t.skip_kind for t in strict.tests}["rf-101"] == "simulator"
     assert lenient.gate.status == "pass" and lenient.exit_code == EXIT_PASS
-    assert lenient.safe_to_release and looser_than_standard(lenient.gate.policy)  # type: ignore[arg-type]
+    assert not lenient.safe_to_release  # rf-101 did not run: passing is not "safe"
+    assert lenient.gate.policy is not None and looser_than_standard(lenient.gate.policy)
 
     # Re-gate the strict run offline: its own policy by default, a preset on request.
     folder = tmp_path / "r" / strict.run_id
@@ -356,3 +362,93 @@ async def test_the_runner_gates_with_the_suite_policy_or_the_override(tmp_path: 
     assert again.result.gate.policy == strict.gate.policy and again.result.gate.status == "block"
     eased = await rescore_run(folder, settings, gate="lenient")
     assert eased.result.gate.status == "pass" and eased.result.exit_code == EXIT_PASS
+
+
+# --- review fixes (#30) ----------------------------------------------------------------------
+
+
+def test_a_blocking_gate_never_exits_0_under_strict_exit_codes() -> None:
+    """Every scenario passed, but the policy blocks on flakiness: CI must not go green."""
+    tests = [tv("a", P, CRIT, flaky=True)]
+    gate = release_gate(tests, policy=PRESETS["strict"])
+    assert gate.status == "block" and gate.agent_blocked
+    assert exit_code(tests, gate=gate) == EXIT_FAIL
+    tests = [tv("a", P, CRIT, scores=[unmeasured()])]
+    gate = release_gate(tests, policy=gate_with(unmeasured="block"))
+    assert gate.status == "block" and exit_code(tests, gate=gate) == EXIT_NOT_JUDGED
+
+
+def test_warnings_on_an_all_passing_run_are_worded_as_warnings() -> None:
+    gate = release_gate([tv("a", P, CRIT, flaky=True)])
+    assert "No blocking issues, but: a: flaky." in gate.summary
+    assert "not everything passed" not in gate.summary
+
+
+def test_an_old_commit_guard_skip_never_blocks_when_re_gated() -> None:
+    """Results from before skip kinds: the reason the runner wrote still identifies it."""
+    old = TestVerdict(
+        test_id="g",
+        name="g",
+        criticality=CRIT,
+        status=S,
+        reason="commit guard: this scenario performs the irreversible outcome; re-run with ...",
+    )
+    gate = release_gate([tv("a", P, CRIT), old], policy=PRESETS["strict"])
+    assert gate.status == "pass" and gate.warnings == ["g: skipped_precondition"]
+
+
+def test_rescore_with_a_preset_honours_the_flaky_switch_like_run() -> None:
+    assert resolve(preset="lenient", fail_on_flaky=True).flaky == "block"
+
+
+async def test_fail_fast_stops_only_on_a_blocking_failure_and_names_what_did_not_run(
+    tmp_path: Path,
+) -> None:
+    from opseval.config import Settings
+    from opseval.demo.refund_agent import run_agent
+    from opseval.runner import RunOptions, launch
+
+    path = _suite(tmp_path, {"preset": "standard"})
+    profile = path.parent.parent / "profile.yaml"
+    settings = Settings(reports_dir=str(tmp_path / "r"), allowed_hosts="127.0.0.1")
+    async with run_agent(bug="skip-approval") as url:
+        # rf-001 is critical and fails first: the standard gate blocks, so the run stops,
+        # and the scenarios it did not reach are recorded rather than dropped.
+        stopped = await launch(
+            path, RunOptions(target=url, profile=profile, repeats=1, fail_fast=True), settings
+        )
+    kinds = {t.test_id: (t.status, t.skip_kind) for t in stopped.tests}
+    assert kinds["rf-001"][0] is F
+    assert kinds["rf-002"] == (S, "fail_fast") and kinds["rf-003"] == (S, "fail_fast")
+    assert stopped.gate.status == "block" and stopped.exit_code == EXIT_FAIL
+
+    async with run_agent(bug="skip-approval") as url:
+        # Lenient ignores nothing critical either, so it stops in the same place...
+        lenient = await launch(
+            path,
+            RunOptions(target=url, profile=profile, repeats=1, fail_fast=True, gate="lenient"),
+            settings,
+        )
+    assert {t.test_id for t in lenient.tests} == {"rf-001", "rf-002", "rf-003"}
+    assert lenient.gate.status == "block" and not lenient.safe_to_release
+
+
+def test_a_simulator_outage_is_tagged_simulator_not_dependency() -> None:
+    from opseval.models.preflight import HealthCheck, PreflightReport
+    from opseval.runner import _unmet
+
+    scenario = next(
+        sc
+        for sc in load_catalogue(
+            catalogue_dir() / "scenarios",
+            load_profile(catalogue_dir() / "profile.yaml"),
+            known_scorers=REGISTRY.keys(),
+            known_invariants=set(INVARIANTS),
+        )[0].scenarios
+        if sc.id == "rf-101"
+    )
+    health = PreflightReport(
+        checks=[HealthCheck(name="simulator", status="unavailable", detail="down")]
+    )
+    found = _unmet(scenario, health, no_simulator=False)
+    assert found is not None and found[1] == "simulator"

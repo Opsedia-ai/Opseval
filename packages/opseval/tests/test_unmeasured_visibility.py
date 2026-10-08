@@ -132,7 +132,7 @@ class TestEveryOutputNamesThem:
     def test_markdown_summary(self) -> None:
         md = markdown_summary(PASSING_WITHOUT_SECURITY)
         # Exit 0 and a passing gate, but a check is missing: the headline is not green.
-        assert "🟡 **No blocking issues, not everything passed**" in md
+        assert "🟡 **No blocking issues, with warnings**" in md
         assert "🟢" not in md
         assert "Not measured" in md and SECURITY in md
         clean = markdown_summary(CLEAN)

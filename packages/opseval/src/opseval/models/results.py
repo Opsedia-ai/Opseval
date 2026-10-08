@@ -85,7 +85,7 @@ class VerdictStatus(StrEnum):
     BLOCKED = "blocked"
 
 
-SkipKind = Literal["dependency", "simulator", "commit_guard", "quarantine"]
+SkipKind = Literal["dependency", "simulator", "commit_guard", "quarantine", "fail_fast"]
 
 
 class TestVerdict(BaseModel):
