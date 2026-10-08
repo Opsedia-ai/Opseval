@@ -66,6 +66,20 @@ For WebSocket or custom HTTP agents, write a SUT profile that maps their frames 
 
 LLM personas and judges use any OpenAI-compatible endpoint: set `OPSEVAL_SIMULATOR_BASE_URL`, `OPSEVAL_SIMULATOR_MODEL`, `OPSEVAL_SIMULATOR_API_KEY`, and likewise `OPSEVAL_JUDGE_*`. Scripted scenarios need no LLM at all. The endpoint's host must be in `OPSEVAL_ALLOWED_HOSTS` even without an API key, because it receives every conversation; a local model (for example Ollama) needs `127.0.0.1` there, and plain HTTP is allowed only on loopback.
 
+### Run it from a container
+
+```bash
+docker build -t opseval .                      # from a checkout (no published image before the first release)
+docker run --rm opseval demo                   # exit 0
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
+  -e OPSEVAL_ALLOWED_HOSTS=agent.example.com \
+  opseval run suites/smoke.yaml --profile profile.yaml --target wss://agent.example.com/ws
+```
+
+The image is the CLI only, built from `uv.lock` with every dependency's hash checked, and it does
+not run as root. The web console is not in it: `opseval serve` listens on loopback only, so run
+the console on your own machine ([ADR-0038](docs/adr/0038-container-image.md)).
+
 ### WebSocket agents: dropped connections and short-lived tokens
 
 If your agent can resume a session on a new connection, declare it in the SUT profile. Opseval then reconnects after a drop, resumes the same session and keeps going. Every drop is kept in the run record either way:

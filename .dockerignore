@@ -1,0 +1,15 @@
+# An allowlist: only what the image build reads is sent to Docker. Everything else stays out,
+# including docs-internal/ (confidential), .env files, reports and virtualenvs.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!NOTICE
+!packages/opseval/
+!packages/pytest-opseval/pyproject.toml
+!packages/pytest-opseval/README.md
+!packages/pytest-opseval/src/
+packages/opseval/tests/
+**/__pycache__
+**/*.pyc

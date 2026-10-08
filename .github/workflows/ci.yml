@@ -73,6 +73,25 @@ jobs:
       - run: npm run build
         working-directory: packages/console
 
+  # The container image (ADR-0038): it builds from the lock, and the one rule holds inside it.
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t opseval:ci .
+      - name: Demo exit codes inside the image are 0 / 1 / 1 / 3
+        run: |
+          set +e
+          docker run --rm opseval:ci demo --repeats 1; test $? -eq 0 || exit 1
+          docker run --rm opseval:ci demo --repeats 1 --bug skip-approval; test $? -eq 1 || exit 1
+          docker run --rm opseval:ci demo --repeats 1 --bug forget-method; test $? -eq 1 || exit 1
+          docker run --rm opseval:ci demo --repeats 1 --bug crash; test $? -eq 3 || exit 1
+      - name: It does not run as root
+        run: test "$(docker run --rm --entrypoint id opseval:ci -u)" != "0"
+
   audit:
     runs-on: ubuntu-latest
     steps:

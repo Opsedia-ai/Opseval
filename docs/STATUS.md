@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control, the fenced judge transcript and retention).
+**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention and the container image).
 
 ## Completion
 
@@ -118,7 +118,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-INT-05 | Issue publisher | C | v0.5 | Missing | not started |
 | FR-INT-06 | PyRIT adapter | S | v0.8 | Missing | not started (not due) |
 | FR-INT-07 | Webhooks | S | v0.5 | Done | sinks (ADR-0027) |
-| FR-DX-01 | `pip install` and a container image | M | v0.1 | Partial | name reserved (0.0.1 placeholder); no release yet (Gate 0); no image |
+| FR-DX-01 | `pip install` and a container image | M | v0.1 | Partial | CLI image from the lock (`Dockerfile`, digest-pinned, hash-checked, non-root; built and demo-checked in CI; ADR-0038); nothing published yet: PyPI name reserved, image and wheel wait for Gate 0 |
 | FR-DX-02 | Interactive `init` | M | v0.1 | Partial | template-based, not interactive |
 | FR-DX-03 | Demo | M | v0.1 | Done | `opseval demo`, exit codes 0/1/1/3 |
 | FR-DX-04 | Docs site | M | v0.1 | Missing | README and ADRs only |
