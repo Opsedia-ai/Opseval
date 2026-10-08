@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from opseval.errors import TraceUnavailable
 from opseval.models.profile import SutProfile, TraceConfig
 from opseval.models.record import RunRecord, ToolCall
+from opseval.redaction import redact_value
 
 
 class TraceSource(ABC):
@@ -89,7 +90,23 @@ async def enrich(
         return record.model_copy(
             update={"notes": (*record.notes, f"trace_unavailable: {source.name}: {exc}")}
         )
-    return record.model_copy(update={"trace_coverage": "full", "tool_calls": tuple(calls)})
+    # Tool calls arrive from the trace backend *after* the driver finished redacting, so
+    # they have to be cleaned here or an argument carrying a credential would be stored
+    # and printed in report.html while `redaction.applied` claimed the record was checked
+    # (FR-REC-03). The record's `found` grows to match, so it stays an honest account.
+    clean: list[ToolCall] = []
+    found: set[str] = set(record.redaction.found)
+    for call in calls:
+        arguments, kinds = redact_value(call.arguments)
+        found.update(kinds)
+        clean.append(call.model_copy(update={"arguments": arguments}) if kinds else call)
+    return record.model_copy(
+        update={
+            "trace_coverage": "full",
+            "tool_calls": tuple(clean),
+            "redaction": record.redaction.model_copy(update={"found": tuple(sorted(found))}),
+        }
+    )
 
 
 __all__ = ["TraceSource", "enrich", "trace_session_id"]

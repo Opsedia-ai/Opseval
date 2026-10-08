@@ -89,6 +89,23 @@ class TransportEvent(Frozen):
     detail: str | None = None
 
 
+class RedactionInfo(Frozen):
+    """What credential values were taken out of this record (FR-REC-03).
+
+    ``applied`` exists so that an empty ``found`` cannot be misread. On a record written
+    before value redaction shipped it is ``False``, which means *this was never checked*
+    — not "nothing was there". That is the same distinction the scores make between
+    ``failed`` and ``not measured``, applied to the record itself.
+    """
+
+    applied: bool = False
+    found: tuple[str, ...] = ()
+    """The distinct kinds found, sorted. Values are never kept.
+
+    Distinct rather than counted: ``text`` is extracted from a frame's payload, so a
+    single leaked key appears on both and a tally would say two."""
+
+
 class RunRecord(Frozen):
     run_id: str
     test_id: str
@@ -113,6 +130,7 @@ class RunRecord(Frozen):
     notes: tuple[str, ...] = ()
     planted_injections: tuple[str, ...] = ()
     transport_events: tuple[TransportEvent, ...] = ()
+    redaction: RedactionInfo = Field(default_factory=RedactionInfo)
 
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]

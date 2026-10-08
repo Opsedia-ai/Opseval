@@ -21,6 +21,7 @@ from opseval.models.record import (
     FrameRecord,
     InterruptRecord,
     ProbeResult,
+    RedactionInfo,
     RunRecord,
     TerminalState,
 )
@@ -32,6 +33,7 @@ from opseval.models.scenario import (
     PolicyAction,
     Scenario,
 )
+from opseval.redaction import redact_text, redact_value
 from opseval.simulator import Simulator
 from opseval.transport.base import Session, Transport
 
@@ -132,6 +134,7 @@ class Driver:
         self._rejections: Counter[str] = Counter()
         self._last_sent_at: float | None = None
         self._used = False
+        self._redacted: set[str] = set()
 
     # --- recording ------------------------------------------------------------------
     def _record(self, direction: str, payload: Any, kind: FrameKind, text: str | None) -> int:
@@ -143,16 +146,21 @@ class Driver:
             raw = payload.get(self.p.phase_field)
             phase = raw if isinstance(raw, str) else None
         seq = len(self._frames)
+        # `redact` removes credential-shaped *keys*; `redact_value` removes credential
+        # *values*, which is the only thing that can help a free-text turn (FR-REC-03).
+        payload_clean, payload_kinds = redact_value(redact(payload))
+        text_clean, text_kinds = (None, []) if text is None else redact_text(text)
+        self._redacted.update(payload_kinds + text_kinds)
         self._frames.append(
             FrameRecord(
                 seq=seq,
                 at=datetime.now(UTC),
                 direction="sent" if direction == "sent" else "received",
                 kind=kind,
-                payload=redact(payload),
+                payload=payload_clean,
                 latency_ms=latency,
                 phase=phase,
-                text=text,
+                text=text_clean,
             )
         )
         return seq
@@ -231,6 +239,7 @@ class Driver:
             notes=tuple(self._notes),
             planted_injections=tuple(self._injections),
             transport_events=session.transport_events() if session else (),
+            redaction=RedactionInfo(applied=True, found=tuple(sorted(self._redacted))),
         )
 
     async def _probe(self, session: Session) -> None:
@@ -358,7 +367,7 @@ class Driver:
                     seq=seq,
                     checkpoint=name,
                     occurrence=occurrence,
-                    payload=redact(body),
+                    payload=redact_value(redact(body))[0],
                     action=decision.action.value if decision else None,
                     feedback=decision.feedback if decision else None,
                     via=policy.via.value if decision else None,

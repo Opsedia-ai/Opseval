@@ -10,6 +10,7 @@ from opseval.models.profile import FrameKind
 from opseval.models.record import RunRecord, TerminalState
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import RESERVED_STOP_AT, ScorerSpec
+from opseval.redaction import strip_markers
 from opseval.scoring.base import Scorer, ScoringContext, register
 
 
@@ -218,7 +219,15 @@ class LanguageScript(Scorer):
         minimum = spec.params.get("min_fraction", spec.threshold)
         if script not in ("arabic", "latin") or not isinstance(minimum, int | float):
             return self.infra(spec, "BAD_PARAMS: script must be arabic|latin")
-        texts = [f.text for f in record.received() if f.text]
+        # Markers are the harness's own edit (FR-REC-03), and they are Latin script. Left
+        # in, a redaction inside an Arabic reply could push it under the threshold and
+        # mark the agent down for something the harness did to the evidence.
+        # Markers are stripped because they are the harness's own edit and they are Latin
+        # script (FR-REC-03). Messages that become empty are *kept*: a reply that was
+        # nothing but a credential is a real failure to answer in the expected script, and
+        # dropping it would report that as "not measured" and excuse genuinely blank
+        # replies into the bargain.
+        texts = [strip_markers(f.text) for f in record.received() if f.text]
         if not texts:
             return self.infra(spec, "NOT_MEASURABLE: the agent sent no text")
         want, other = (ARABIC, LATIN) if script == "arabic" else (LATIN, ARABIC)
