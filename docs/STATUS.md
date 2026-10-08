@@ -79,7 +79,7 @@ These are not in the percentage, and today they gate more than code does.
 | FR-CHK-05 | `stop_at` | M | v0.1 | Done | commit guard tests |
 | FR-REC-01 | Run record | M | v0.1 | Partial | no "created artifacts" field |
 | FR-REC-02 | Persist as you go | M | v0.1 | Done | `FileStore`, `result.json` last, `error.json` on failure (ADR-0031) |
-| FR-REC-03 | Redaction | M | v0.1 | Partial | key names only; values in text and trace arguments are not redacted |
+| FR-REC-03 | Redaction | M | v0.1 | Partial | key names, plus credential *values* in text and payloads (ADR-0033); PII is deliberately kept, and unrecognised token formats pass through |
 | FR-REC-04 | Trace enrichment | M | v0.2 | Partial | Langfuse and OTLP tool calls; no SUT scores or release tag |
 | FR-REC-05 | Layout contract | M | v0.1 | Partial | documented in `storage.py`; no layout version; no `Storage` protocol (ADR-0005 is stale) |
 | FR-SCR-01 | Three-state scores | M | v0.1 | Done | `ScoreResult` validator |

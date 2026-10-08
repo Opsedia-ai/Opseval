@@ -587,6 +587,28 @@ We'd love your help, especially with **language packs** (Levantine, Maghrebi, Tu
 
 Please report vulnerabilities privately. See [SECURITY.md](SECURITY.md).
 
+### What a run record keeps
+
+Run records are written to `reports/`, embedded in `report.html`, and posted in full to any
+webhook sink — so what they contain is worth knowing.
+
+Credential **values** are removed from conversation text and from payloads before the record is
+written: JWTs, bearer and basic auth, vendor API keys, PEM private keys, and inline `api_key=…`
+assignments. The value is replaced by a marker naming the kind, so a leak stays gradeable — an
+agent that pasted a token still fails the security judge, without the token being stored.
+
+Two limits, deliberately:
+
+- **It is a filter, not a guarantee.** A token format it does not recognise passes through. Adding
+  one is a pattern plus a test in `redaction.py`.
+- **Personal data is kept on purpose.** An email, a phone number or an order id is the subject
+  matter of a support conversation, and removing it would leave the judges unable to grade what
+  the agent did with it. **Run against test accounts with test data.**
+
+`record.redaction.applied` tells you whether a record was checked at all; records written before
+this shipped report `false`, which means *unchecked*, not *clean*. See
+[ADR-0033](docs/adr/0033-redacting-credential-values.md).
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Files under [`ee/`](ee/) are covered by a separate commercial licence.

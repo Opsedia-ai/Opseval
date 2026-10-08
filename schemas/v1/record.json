@@ -237,6 +237,27 @@
       "title": "ProbeResult",
       "type": "object"
     },
+    "RedactionInfo": {
+      "additionalProperties": false,
+      "description": "What credential values were taken out of this record (FR-REC-03).\n\n``applied`` exists so that an empty ``found`` cannot be misread. On a record written\nbefore value redaction shipped it is ``False``, which means *this was never checked*\n— not \"nothing was there\". That is the same distinction the scores make between\n``failed`` and ``not measured``, applied to the record itself.",
+      "properties": {
+        "applied": {
+          "default": false,
+          "title": "Applied",
+          "type": "boolean"
+        },
+        "found": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Found",
+          "type": "array"
+        }
+      },
+      "title": "RedactionInfo",
+      "type": "object"
+    },
     "TerminalState": {
       "enum": [
         "outcome_committed",
@@ -436,6 +457,9 @@
       },
       "title": "Probes",
       "type": "array"
+    },
+    "redaction": {
+      "$ref": "#/$defs/RedactionInfo"
     },
     "run_id": {
       "title": "Run Id",
