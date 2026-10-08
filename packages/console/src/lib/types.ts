@@ -1,10 +1,10 @@
 // The console's names for the API's types. The types themselves are GENERATED from
 // packages/opseval/src/opseval/server/schemas.py into ./api.gen.ts (scripts/console_types.py);
-// `make check` fails if they drift. Add a name here; never a field.
+// the test suite fails if they drift. Add a name here; never a field.
 // The browser never recomputes aggregates (ADR-0029). null means "not measured", never 0.
 import type * as G from "./api.gen";
 
-export type Area = G.ScoreOut["axis"];
+export type Area = G.Axis;
 /** What a run means for the release; decided by the server (views.gate_state), never here. */
 export type Gate = NonNullable<G.RunSummary["gate"]>;
 export type RunState = G.RunSummary["state"];

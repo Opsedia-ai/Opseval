@@ -18,7 +18,7 @@ typecheck:
 test:
 	uv run pytest --cov=opseval --cov=pytest_opseval --cov-report=term-missing --cov-fail-under=85
 
-check: lint typecheck test schemas status console-types
+check: lint typecheck test schemas status
 
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
@@ -43,9 +43,10 @@ schemas:
 status:
 	uv run python scripts/project_status.py --check
 
-# packages/console/src/lib/api.gen.ts is generated from the server's models.
+# Regenerate packages/console/src/lib/api.gen.ts from the server's models. Drift is caught by
+# the test suite (tests/test_console_types.py), so there is one check, not three.
 console-types:
-	uv run python scripts/console_types.py --check
+	uv run python scripts/console_types.py
 
 # The web console (needs Node 20+). `npm ci` once, then these.
 console-check:

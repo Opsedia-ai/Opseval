@@ -165,7 +165,7 @@ class ModelUsage(BaseModel):
 
 class Gate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    status: str  # "pass" | "block"
+    status: Literal["pass", "block"]
     blocking: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     summary: str = ""

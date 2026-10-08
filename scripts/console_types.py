@@ -39,8 +39,20 @@ def models() -> list[type[BaseModel]]:
     ]
 
 
-def ts(node: dict[str, Any]) -> str:
+# Schema keywords this generator understands. Anything else fails the build rather than
+# becoming `unknown`: a type the console stops checking is the drift this tool exists to stop.
+HANDLED = {
+    "$ref", "const", "enum", "anyOf", "type", "items", "additionalProperties", "propertyNames",
+    "title", "description", "default", "maxLength", "minLength", "maxItems", "minItems",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "pattern", "format",
+}  # fmt: skip
+
+
+def ts(node: dict[str, Any], where: str) -> str:
     """The TypeScript type for one JSON Schema node."""
+    unknown = set(node) - HANDLED
+    if unknown:
+        raise ValueError(f"{where}: no TypeScript for schema keywords {sorted(unknown)}")
     if "$ref" in node:
         return str(node["$ref"]).rsplit("/", 1)[-1]
     if "const" in node:
@@ -48,8 +60,7 @@ def ts(node: dict[str, Any]) -> str:
     if "enum" in node:
         return " | ".join(json.dumps(v) for v in node["enum"])
     if "anyOf" in node:
-        parts = list(dict.fromkeys(ts(n) for n in node["anyOf"]))
-        return " | ".join(parts)
+        return " | ".join(dict.fromkeys(ts(n, where) for n in node["anyOf"]))
     kind = node.get("type")
     if kind == "string":
         return "string"
@@ -60,34 +71,72 @@ def ts(node: dict[str, Any]) -> str:
     if kind == "null":
         return "null"
     if kind == "array":
-        inner = ts(node.get("items", {}))
+        inner = ts(node.get("items", {}), where)
         return f"({inner})[]" if " | " in inner else f"{inner}[]"
     if kind == "object":
         extra = node.get("additionalProperties")
-        value = ts(extra) if isinstance(extra, dict) else "unknown"
-        return f"Record<string, {value}>"
-    return "unknown"
+        value = ts(extra, where) if isinstance(extra, dict) else "unknown"
+        keys = ts(node["propertyNames"], where) if "propertyNames" in node else "string"
+        return f"Record<{keys}, {value}>"
+    if not node:
+        return "unknown"  # an untyped (Any) field, declared as such
+    raise ValueError(f"{where}: no TypeScript for schema {node}")
 
 
-def interface(model: type[BaseModel]) -> str:
+def _doc(text: str | None) -> list[str]:
+    """The docstring's first paragraph as JSDoc, with nothing that could end the comment."""
+    paragraph = " ".join((text or "").strip().split("\n\n")[0].split())
+    safe = paragraph.replace("*/", "*" + "\\" + "/")
+    return [f"/** {safe} */"] if paragraph else []
+
+
+def _refs(node: Any) -> set[str]:
+    if isinstance(node, dict):
+        found = {str(node["$ref"]).rsplit("/", 1)[-1]} if "$ref" in node else set()
+        return found.union(*(_refs(v) for v in node.values()))
+    if isinstance(node, list):
+        return set().union(*(_refs(v) for v in node))
+    return set()
+
+
+def interface(model: type[BaseModel], kinds: dict[str, bool]) -> tuple[str, dict[str, Any]]:
+    """One model as an interface, and the enum definitions it refers to."""
     request = issubclass(model, schemas.ApiIn)
     schema = model.model_json_schema(
         by_alias=True, mode="validation" if request else "serialization"
     )
+    defs: dict[str, Any] = schema.get("$defs", {})
+    # Optionality is decided per model (a request may omit a default; a response carries every
+    # field), so a request nesting a response model, or the reverse, would be typed wrongly.
+    for ref in _refs(schema.get("properties", {})):
+        if ref in kinds and kinds[ref] != request:
+            raise ValueError(f"{model.__name__} nests {ref}: keep requests and responses apart")
     required = set(schema.get("required", []))
-    doc = (model.__doc__ or "").strip().splitlines()
-    lines = [f"/** {doc[0]} */"] if doc and doc[0] else []
+    lines = _doc(model.__doc__)
     lines.append(f"export interface {model.__name__} {{")
     for name, prop in schema.get("properties", {}).items():
-        # A response always carries every field; a request may leave out what has a default.
         optional = request and name not in required
-        lines.append(f"  {name}{'?' if optional else ''}: {ts(prop)};")
+        lines.append(f"  {name}{'?' if optional else ''}: {ts(prop, f'{model.__name__}.{name}')};")
     lines.append("}")
-    return "\n".join(lines)
+    enums = {k: v for k, v in defs.items() if k not in kinds}
+    return "\n".join(lines), enums
 
 
 def render() -> str:
-    return HEADER + "\n" + "\n\n".join(interface(m) for m in models()) + "\n"
+    all_models = models()
+    kinds = {m.__name__: issubclass(m, schemas.ApiIn) for m in all_models}
+    blocks: list[str] = []
+    enums: dict[str, Any] = {}
+    for model in all_models:
+        block, found = interface(model, kinds)
+        blocks.append(block)
+        enums.update(found)
+    # The core's enums, generated too: a new member reaches the console instead of breaking it.
+    aliases = [
+        "\n".join([*_doc(d.get("description")), f"export type {name} = {ts(d, name)};"])
+        for name, d in sorted(enums.items())
+    ]
+    return HEADER + "\n" + "\n\n".join([*aliases, *blocks]) + "\n"
 
 
 def main(argv: list[str]) -> int:

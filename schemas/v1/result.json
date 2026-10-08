@@ -183,6 +183,10 @@
           "title": "Safe"
         },
         "status": {
+          "enum": [
+            "pass",
+            "block"
+          ],
           "title": "Status",
           "type": "string"
         },

@@ -2,6 +2,16 @@
 // change the Python model and run `uv run python scripts/console_types.py`.
 // null is "not measured" and is never drawn as 0 (ADR-0029).
 
+export type Axis = "output" | "flow" | "tools" | "security" | "harness";
+
+export type Criticality = "blocker" | "critical" | "normal";
+
+export type Difficulty = "low" | "medium" | "high";
+
+export type ScoreStatus = "passed" | "failed" | "infra_error";
+
+export type VerdictStatus = "passed" | "failed" | "inconclusive" | "skipped_precondition" | "blocked";
+
 export interface RunSummary {
   id: string;
   suite: string;
@@ -17,8 +27,8 @@ export interface RunSummary {
 
 export interface ScoreOut {
   scorerId: string;
-  axis: "output" | "flow" | "tools" | "security" | "harness";
-  status: "passed" | "failed" | "infra_error";
+  axis: Axis;
+  status: ScoreStatus;
   score: number | null;
   threshold: number;
   reason: string | null;
@@ -37,8 +47,8 @@ export interface AttemptOut {
 export interface TestOut {
   id: string;
   name: string;
-  criticality: "blocker" | "critical" | "normal";
-  status: "passed" | "failed" | "inconclusive" | "skipped_precondition" | "blocked";
+  criticality: Criticality;
+  status: VerdictStatus;
   reason: string | null;
   passRate: number | null;
   flaky: boolean;
@@ -86,8 +96,8 @@ export interface RunDetail {
 export interface ScenarioOut {
   id: string;
   title: string;
-  difficulty: "low" | "medium" | "high";
-  criticality: "blocker" | "critical" | "normal";
+  difficulty: Difficulty;
+  criticality: Criticality;
   stopAt: string;
   repeats: number;
   tags: string[];
@@ -117,7 +127,7 @@ export interface GateSettingOut {
 
 export interface GateCatalogOut {
   settings: GateSettingOut[];
-  presets: Record<string, Record<string, string>>;
+  presets: Record<"strict" | "standard" | "lenient", Record<string, string>>;
 }
 
 /** A suite's gate: what its YAML says, and what that resolves to. */
@@ -138,7 +148,7 @@ export interface GateIn {
 export interface CheckOut {
   id: string;
   question: string;
-  area: "output" | "flow" | "tools" | "security" | "harness";
+  area: Axis;
   kind: "deterministic" | "judge";
   reads: "chat" | "trace" | "frames";
 }
@@ -175,12 +185,12 @@ export interface Health {
 export interface Change {
   testId: string;
   name: string;
-  before: "passed" | "failed" | "inconclusive" | "skipped_precondition" | "blocked";
-  after: "passed" | "failed" | "inconclusive" | "skipped_precondition" | "blocked";
+  before: VerdictStatus;
+  after: VerdictStatus;
 }
 
 export interface AreaDelta {
-  area: "output" | "flow" | "tools" | "security" | "harness";
+  area: Axis;
   before: number | null;
   after: number | null;
 }

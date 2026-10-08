@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""API response shapes. camelCase on the wire; the console mirrors these in types.ts.
+"""API request and response shapes. camelCase on the wire.
+
+These models are the one source of the wire format: the console's TypeScript types are
+generated from them (scripts/console_types.py, checked by the test suite). Enum fields use
+the core enums themselves, so a new member reaches the console instead of breaking it.
 
 An unmeasured number is ``None`` (JSON null), never 0.
 """
@@ -12,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from opseval.models.gate import Preset
+from opseval.models.results import Axis, ScoreStatus, VerdictStatus
+from opseval.models.scenario import Criticality, Difficulty
 
 
 class Api(BaseModel):
@@ -27,10 +33,6 @@ class ApiIn(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
 
-Area = Literal["output", "flow", "tools", "security", "harness"]
-ScoreState = Literal["passed", "failed", "infra_error"]
-VerdictState = Literal["passed", "failed", "inconclusive", "skipped_precondition", "blocked"]
-CriticalityName = Literal["blocker", "critical", "normal"]
 RunState = Literal["running", "finished", "harness_error"]
 GateState = Literal["safe", "gaps", "blocked", "not_judged", "harness_error"]
 """What a run means for the release, decided here once (ADR-0029/0030):
@@ -58,8 +60,8 @@ class RunSummary(Api):
 
 class ScoreOut(Api):
     scorer_id: str
-    axis: Area
-    status: ScoreState
+    axis: Axis
+    status: ScoreStatus
     score: float | None
     threshold: float
     reason: str | None
@@ -79,8 +81,8 @@ class TestOut(Api):
     __test__ = False
     id: str
     name: str
-    criticality: CriticalityName
-    status: VerdictState
+    criticality: Criticality
+    status: VerdictStatus
     reason: str | None
     pass_rate: float | None
     flaky: bool
@@ -128,8 +130,8 @@ class RunDetail(Api):
 class ScenarioOut(Api):
     id: str
     title: str
-    difficulty: Literal["low", "medium", "high"]
-    criticality: CriticalityName
+    difficulty: Difficulty
+    criticality: Criticality
     stop_at: str
     repeats: int
     tags: list[str]
@@ -159,7 +161,7 @@ class GateSettingOut(Api):
 
 class GateCatalogOut(Api):
     settings: list[GateSettingOut]
-    presets: dict[str, dict[str, str]]  # preset -> every setting's value
+    presets: dict[Preset, dict[str, str]]  # preset -> every setting's value
 
 
 class GateOut(Api):
@@ -181,7 +183,7 @@ class GateIn(ApiIn):
 class CheckOut(Api):
     id: str
     question: str
-    area: Area
+    area: Axis
     kind: Literal["deterministic", "judge"]
     reads: Literal["chat", "trace", "frames"]
 
@@ -218,12 +220,12 @@ class Health(Api):
 class Change(Api):
     test_id: str
     name: str
-    before: VerdictState
-    after: VerdictState
+    before: VerdictStatus
+    after: VerdictStatus
 
 
 class AreaDelta(Api):
-    area: Area
+    area: Axis
     before: float | None
     after: float | None
 
