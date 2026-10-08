@@ -12,6 +12,22 @@ export type ScoreStatus = "passed" | "failed" | "infra_error";
 
 export type VerdictStatus = "passed" | "failed" | "inconclusive" | "skipped_precondition" | "blocked";
 
+export interface ScenarioProgress {
+  id: string;
+  state: "waiting" | "running" | "done";
+  attempts: number;
+  repeats: number | null;
+}
+
+/** How far a run in flight has got, read from what it has written so far. */
+export interface RunProgress {
+  scenariosPlanned: number;
+  scenariosDone: number;
+  attemptsRecorded: number;
+  current: string | null;
+  scenarios: ScenarioProgress[];
+}
+
 export interface RunSummary {
   id: string;
   suite: string;
@@ -23,6 +39,7 @@ export interface RunSummary {
   unjudged: number | null;
   flaky: number | null;
   error: string | null;
+  progress: RunProgress | null;
 }
 
 export interface ScoreOut {

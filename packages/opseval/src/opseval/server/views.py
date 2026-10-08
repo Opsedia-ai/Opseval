@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 from pathlib import Path
@@ -31,7 +32,7 @@ from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import FileStore
+from opseval.storage import SAFE, FileStore
 from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
 
@@ -106,7 +107,50 @@ def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
             gate="harness_error",
             error=f"{error.get('code', 'HARNESS_ERROR')}: {error.get('message', '')}",
         )
-    return s.RunSummary(**common, state="running", gate=None)
+    return s.RunSummary(
+        **common, state="running", gate=None, progress=progress(store, folder.name, m)
+    )
+
+
+def progress(store: FileStore, run_id: str, manifest: dict[str, Any]) -> s.RunProgress:
+    """Progress from what the runner has written: a scenario's snapshot when it starts,
+    a record per finished attempt. The runner goes one scenario at a time, so once a
+    later scenario has started, every earlier one is done (one that recorded no attempt
+    was skipped); the last one started is running until all its attempts are in."""
+    folder = store.run_dir(run_id)
+    planned = [str(x) for x in manifest.get("planned", [])]
+    repeats: dict[str, int] = {}
+    for path in sorted((folder / "scenarios").glob("*.json")):
+        try:
+            data = json.loads(path.read_text("utf-8"))
+            repeats[path.stem] = int(data.get("execution", {}).get("repeats", 1))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue  # a snapshot being written; it will read on the next poll
+    recorded: dict[str, int] = {}
+    for path in (folder / "records").glob("*__attempt*.json"):
+        key = path.name.rsplit("__attempt", 1)[0]
+        recorded[key] = recorded.get(key, 0) + 1
+    safe = [SAFE.sub("_", sid) for sid in planned]
+    started = [i for i, key in enumerate(safe) if key in repeats]
+    last = started[-1] if started else -1
+    rows: list[s.ScenarioProgress] = []
+    for i, (sid, key) in enumerate(zip(planned, safe, strict=True)):
+        count, want = recorded.get(key, 0), repeats.get(key)
+        if want is None:
+            state = "waiting"
+        elif i < last or count >= want:
+            state = "done"
+        else:
+            state = "running"
+        rows.append(s.ScenarioProgress(id=sid, state=state, attempts=count, repeats=want))
+    current = next((r.id for r in rows if r.state == "running"), None)
+    return s.RunProgress(
+        scenarios_planned=len(rows),
+        scenarios_done=sum(r.state == "done" for r in rows),
+        attempts_recorded=sum(recorded.values()),
+        current=current,
+        scenarios=rows,
+    )
 
 
 def _process_gone(manifest: dict[str, Any]) -> bool:

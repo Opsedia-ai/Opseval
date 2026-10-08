@@ -1068,3 +1068,59 @@ def test_a_record_from_before_redaction_says_it_was_never_checked(tmp_path: Path
             "detail": '{"why": "boom"}',
         }
     ]
+
+
+# --- live progress ------------------------------------------------------------------------------
+
+
+def _in_flight(
+    tmp_path: Path, planned: list[str], snapshots: dict[str, int], records: dict[str, int]
+) -> None:
+    store = FileStore(tmp_path)
+    store.write_manifest(
+        "live",
+        {
+            "run_id": "live",
+            "suite": "s",
+            "planned": planned,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+        },
+    )
+    folder = tmp_path / "live"
+    (folder / "scenarios").mkdir(exist_ok=True)
+    (folder / "records").mkdir(exist_ok=True)
+    for sid, repeats in snapshots.items():
+        (folder / "scenarios" / f"{sid}.json").write_text(
+            json.dumps({"execution": {"repeats": repeats}})
+        )
+    for sid, n in records.items():
+        for i in range(n):
+            (folder / "records" / f"{sid}__attempt{i}.json").write_text("{}")
+
+
+def test_a_running_run_reports_its_progress(tmp_path: Path) -> None:
+    _in_flight(tmp_path, ["a", "b", "c"], {"a": 2, "b": 2}, {"a": 2, "b": 1})
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    run = next(r for r in c.get("/api/v1/runs").json() if r["id"] == "live")
+    p = run["progress"]
+    assert run["state"] == "running" and run["passed"] is None  # progress, not a verdict
+    assert (p["scenariosPlanned"], p["scenariosDone"], p["attemptsRecorded"]) == (3, 1, 3)
+    assert p["current"] == "b"
+    assert [(x["id"], x["state"], x["attempts"], x["repeats"]) for x in p["scenarios"]] == [
+        ("a", "done", 2, 2),
+        ("b", "running", 1, 2),
+        ("c", "waiting", 0, None),
+    ]
+
+
+def test_a_skipped_scenario_is_done_once_the_next_has_started(tmp_path: Path) -> None:
+    """The runner is sequential: a started scenario with no attempts was skipped."""
+    _in_flight(tmp_path, ["a", "b"], {"a": 3, "b": 1}, {})
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    p = next(r for r in c.get("/api/v1/runs").json() if r["id"] == "live")["progress"]
+    assert [x["state"] for x in p["scenarios"]] == ["done", "running"] and p["current"] == "b"
+
+
+def test_a_finished_run_carries_no_progress(client: TestClient) -> None:
+    assert all(r["progress"] is None for r in client.get("/api/v1/runs").json())

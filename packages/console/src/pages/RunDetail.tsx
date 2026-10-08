@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import type { Gate, RunDetail as Detail, TestResult } from "../lib/types";
 import Transcript from "../components/Transcript";
+import { ProgressLine, ProgressTable } from "../components/Progress";
 import { AreaPill, Callout, Card, Data, GatePill, Mono, NotMeasured, Page, PageHeader, Pill, ResultBar, Stat, cx } from "../components/ui";
 
 const tone = (s: TestResult["status"]) => (s === "passed" ? "pass" : s === "failed" ? "fail" : "mute");
@@ -91,11 +92,17 @@ export default function RunDetail() {
     return () => clearTimeout(t);
   }, [pending, res.reload, res.error]);
   const gate = res.data?.summary.gate ?? null;
+  // While it runs, its progress comes from the runs list (no verdicts yet, by design).
+  const live = useApi(api.runs, [id, pending], (rs) => (pending && rs.some((r) => r.id === id && r.state === "running") ? 2500 : false));
+  const flight = pending ? live.data?.find((r) => r.id === id)?.progress : undefined;
   return (
     <>
       <PageHeader title="Run" sub={<Mono>{id}</Mono>} aside={res.data && <GatePill gate={gate} />} />
       <Page>
-        {pending ? <Callout>This run is still in progress, or has not started yet. This page refreshes on its own.</Callout> : (
+        {pending ? (<>
+          <Callout>This run is still in progress. Verdicts appear when it ends; this page refreshes on its own.</Callout>
+          {flight && <><ProgressLine p={flight} /><ProgressTable p={flight} /></>}
+        </>) : (
         <Data res={res}>{(r) => (<>
           <Callout tone={r.summary.gate === "safe" ? "info" : "warn"}><b>{r.summary.gate ? HEADLINE[r.summary.gate] : "In progress."}</b> {r.gateSummary}</Callout>
           {r.gatePolicy && <p className="text-sm">Gate policy: <Mono>{r.gatePolicy}</Mono>{r.ignored.length > 0 && <> · ignored by the policy: {r.ignored.join("; ")}</>}</p>}
