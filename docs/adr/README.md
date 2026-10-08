@@ -35,5 +35,6 @@
 | [0031](0031-securing-the-console-api.md) | Securing the console API: token, host and origin checks, the commit guard as a server flag, runs that always end visibly | Proposed |
 | [0032](0032-gate-policy.md) | Gate policy per suite: presets and block/warn/ignore per outcome; facts stay fixed, policy is recorded | Proposed |
 | [0033](0033-redacting-credential-values.md) | Credential values redacted from records; the marker keeps a leak gradeable | Proposed |
+| [0034](0034-serve-the-console.md) | `opseval serve` serves the built console same-origin, with CSP and no framing | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

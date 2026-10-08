@@ -746,12 +746,15 @@ def test_import_into_a_flat_catalogue_checks_clashes_and_keeps_scenarios(tmp_pat
     assert {"rf-001", "rf-950"} <= ids and not (flat / "scenarios").exists()
 
 
-def test_serve_never_prints_a_configured_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_serve_never_prints_a_configured_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     import uvicorn
 
     from opseval.cli import app as cli
 
     monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setenv("OPSEVAL_CONSOLE_DIR", str(tmp_path))  # no built console here
     monkeypatch.setenv("OPSEVAL_SERVE_TOKEN", "long-lived-secret")
     out = CliRunner().invoke(cli, ["serve", "--port", "8123"]).output
     assert "long-lived-secret" not in out and "<OPSEVAL_SERVE_TOKEN>" in out
@@ -866,3 +869,70 @@ def test_saving_the_standard_gate_writes_no_block(tmp_path: Path) -> None:
     out = c.put("/api/v1/suites", json=body).json()
     assert "gate" not in yaml.safe_load((cat / "suites" / "plain.yaml").read_text())
     assert out["gate"]["yaml"] == "" and out["gate"]["overrides"] == {}
+
+
+# --- the console, served by the API (ADR-0034) ------------------------------------------------
+
+
+@pytest.fixture
+def console_dir(tmp_path: Path) -> Path:
+    root = tmp_path / "dist"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text("<!doctype html><div id=root></div>", "utf-8")
+    (root / "assets" / "app.js").write_text("console.log('opseval')", "utf-8")
+    (tmp_path / "secret.txt").write_text("not for the browser", "utf-8")
+    return root
+
+
+def test_the_console_is_served_same_origin(tmp_path: Path, console_dir: Path) -> None:
+    app = create_app(
+        settings=Settings(reports_dir=str(tmp_path / "r")), token=TOKEN, console_dir=console_dir
+    )
+    anon = TestClient(app, base_url=BASE)  # the page itself needs no token: it holds no data
+    page = anon.get("/")
+    assert page.status_code == 200 and "id=root" in page.text
+    assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+    assert page.headers["x-frame-options"] == "DENY" and page.headers["cache-control"] == "no-store"
+    assert anon.get("/runs/20261008T000000Z-abc").text == page.text  # a console route
+    asset = anon.get("/assets/app.js")
+    assert asset.status_code == 200 and "opseval" in asset.text
+    # The API is unchanged: still behind the token, and an unknown route is not the page.
+    assert anon.get("/api/v1/runs").status_code == 401
+    missing = TestClient(app, base_url=BASE, headers=AUTH).get("/api/v1/nope")
+    assert missing.status_code == 404 and "id=root" not in missing.text
+
+
+def test_the_console_cannot_serve_files_outside_its_folder(
+    tmp_path: Path, console_dir: Path
+) -> None:
+    app = create_app(
+        settings=Settings(reports_dir=str(tmp_path / "r")), token=TOKEN, console_dir=console_dir
+    )
+    anon = TestClient(app, base_url=BASE)
+    for path in ("/%2e%2e/secret.txt", "/assets/%2e%2e/%2e%2e/secret.txt", "/..%2Fsecret.txt"):
+        r = anon.get(path)
+        assert "not for the browser" not in r.text, path
+    evil = TestClient(app, base_url="http://attacker.example:8000")
+    assert evil.get("/").status_code == 403  # DNS rebinding cannot load the page either
+
+
+def test_without_a_built_console_only_the_api_answers(tmp_path: Path) -> None:
+    settings = Settings(reports_dir=str(tmp_path / "r"), console_dir=str(tmp_path / "none"))
+    app = create_app(settings=settings, token=TOKEN)
+    assert app.state.console is None
+    assert TestClient(app, base_url=BASE).get("/").status_code == 404
+
+
+def test_serve_prints_the_served_console_link(
+    monkeypatch: pytest.MonkeyPatch, console_dir: Path
+) -> None:
+    import uvicorn
+
+    from opseval.cli import app as cli
+
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setenv("OPSEVAL_CONSOLE_DIR", str(console_dir))
+    monkeypatch.delenv("OPSEVAL_SERVE_TOKEN", raising=False)
+    out = CliRunner().invoke(cli, ["serve", "--port", "8123"]).output
+    assert "Console:  http://127.0.0.1:8123/#token=" in out
+    assert "OPSEVAL_API" not in out and "npm run build" not in out

@@ -11,6 +11,9 @@ uv run opseval serve --target ws://127.0.0.1:8765      # needs the `serve` extra
 cd packages/console && npm ci && npm run dev            # http://localhost:5173
 ```
 
+To *use* the console, `npm run build` once: `opseval serve` then serves `dist/` itself on
+the API's port and prints that link (ADR-0034). The dev server above is for working on it.
+
 Every API request needs the bearer token `opseval serve` printed (ADR-0031). The link carries it
 in the URL fragment; `src/lib/api.ts` keeps it in `localStorage` and drops it from the address bar.
 

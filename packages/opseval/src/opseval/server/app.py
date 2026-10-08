@@ -10,6 +10,9 @@ open:
 - **Bearer token** on every ``/api`` request, minted per start unless configured.
 - **Origin check** on writes: a browser always sends ``Origin`` on a cross-site POST.
 - **No CORS.** The console is served same-origin, or through the Vite dev proxy.
+
+When a built console is found, it is served from ``/`` on the same origin as the API
+(ADR-0034): one link, one port, and no Node needed to use it.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from opseval import __version__
 from opseval.catalogue import load_profile
@@ -55,6 +58,49 @@ def _run_id(run_id: str) -> str:
     return run_id
 
 
+CONSOLE_HEADERS = {
+    # The console can start runs and edit suites: it must never be framed by another site
+    # (clickjacking), and it loads nothing but its own files and its fonts.
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def find_console(settings: Settings) -> Path | None:
+    """The built console to serve: ``OPSEVAL_CONSOLE_DIR``, or a source checkout's build
+    (``packages/console/dist`` next to this package), or ``None``."""
+    if settings.console_dir:
+        candidate = Path(settings.console_dir)
+    else:
+        candidate = Path(__file__).resolve().parents[4] / "console" / "dist"
+    return candidate.resolve() if (candidate / "index.html").is_file() else None
+
+
+def _mount_console(app: FastAPI, root: Path) -> None:
+    """Serve the console's files, and index.html for every other non-API path (the console
+    routes in the browser, so /runs/<id> is a page, not a file)."""
+    index = root / "index.html"
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def console(path: str) -> Response:
+        if path.startswith("api/"):
+            raise HTTPException(404, "no such API route")
+        target = (root / path).resolve()
+        if path and target != index and target.is_file() and target.is_relative_to(root):
+            return FileResponse(target)  # a built asset: content-hashed, safe to cache
+        page = FileResponse(index)
+        page.headers.update(CONSOLE_HEADERS)
+        page.headers["Cache-Control"] = "no-store"
+        return page
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -65,6 +111,7 @@ def create_app(
     read_only: bool = False,
     allow_commit: bool = False,
     allowed_hosts: frozenset[str] = LOOPBACK_NAMES,
+    console_dir: Path | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     # A suite may name a plugin's scorer; without this the console would reject it as
@@ -209,5 +256,10 @@ def create_app(
         if out.problems:
             raise HTTPException(422, detail=[p.model_dump(by_alias=True) for p in out.problems])
         return out
+
+    console_root = console_dir if console_dir is not None else find_console(settings)
+    app.state.console = console_root
+    if console_root is not None:
+        _mount_console(app, console_root)  # last: every /api route above wins
 
     return app
