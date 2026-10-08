@@ -452,3 +452,26 @@ def test_a_simulator_outage_is_tagged_simulator_not_dependency() -> None:
     )
     found = _unmet(scenario, health, no_simulator=False)
     assert found is not None and found[1] == "simulator"
+
+
+# --- the flat form the console edits (#33) --------------------------------------------------
+
+
+def test_the_console_settings_are_exactly_the_model_fields() -> None:
+    """SETTINGS carries labels by hand; this keeps it from drifting from the model."""
+    from opseval.models.gate import SETTINGS, flatten
+
+    assert [key for key, _, _ in SETTINGS] == list(flatten(PRESETS["standard"]))
+
+
+def test_from_flat_is_canonical() -> None:
+    from opseval.models.gate import from_flat, overrides, to_yaml_block
+
+    # A setting equal to the preset is no change, so it is not stored.
+    p = from_flat("strict", {"flaky": "block", "degraded": "block"})
+    assert overrides(p) == {"degraded": "block"}
+    # The plain standard gate needs no block in the suite file.
+    assert to_yaml_block(from_flat("standard", {"failed.normal": "warn"})) is None
+    assert to_yaml_block(from_flat("lenient", {})) == {"preset": "lenient"}
+    with pytest.raises(ValueError, match="unknown gate setting"):
+        from_flat("standard", {"flakey": "warn"})

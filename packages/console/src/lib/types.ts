@@ -43,7 +43,7 @@ export type GatePreset = "strict" | "standard" | "lenient";
 export interface GateSetting { key: string; label: string; help: string; choices: string[] }
 export interface GateCatalog { settings: GateSetting[]; presets: Record<GatePreset, Record<string, string>> }
 /** A suite's gate, as the server resolved it (ADR-0032). */
-export interface GateView { preset: GatePreset; overrides: Record<string, string>; effective: Record<string, string>; describe: string; looserThanStandard: string[] }
+export interface GateView { preset: GatePreset; overrides: Record<string, string>; effective: Record<string, string>; describe: string; looserThanStandard: string[]; yaml: string }
 export interface GateBody { preset: GatePreset; overrides: Record<string, string> }
 export interface Suite { file: string; displayName: string; description: string; include: string[]; scenarioCount: number; repeats: number | null; stopAt: string | null; problem: string | null; gate: GateView | null }
 export interface Readiness { id: string; label: string; ready: boolean; detail: string }

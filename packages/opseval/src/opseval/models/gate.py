@@ -187,9 +187,11 @@ def resolve(
     return resolved
 
 
-def _flat(p: ResolvedGatePolicy) -> dict[str, str]:
+def _flatten(dump: dict[str, Any]) -> dict[str, str]:
+    """``{"failed": {"normal": "warn"}, "flaky": "block"}`` -> ``{"failed.normal": ..., ...}``
+    (the preset is not a setting)."""
     out: dict[str, str] = {}
-    for key, value in p.model_dump().items():
+    for key, value in dump.items():
         if key == "preset":
             continue
         if isinstance(value, dict):
@@ -197,6 +199,10 @@ def _flat(p: ResolvedGatePolicy) -> dict[str, str]:
         else:
             out[key] = value
     return out
+
+
+def _flat(p: ResolvedGatePolicy) -> dict[str, str]:
+    return _flatten(p.model_dump())
 
 
 def changes_from(p: ResolvedGatePolicy, base: Preset | None = None) -> list[str]:
@@ -269,28 +275,32 @@ def flatten(policy: ResolvedGatePolicy) -> dict[str, str]:
 
 def overrides(policy: GatePolicy) -> dict[str, str]:
     """The settings a suite's ``gate:`` block sets on top of its preset, flattened."""
-    out: dict[str, str] = {}
-    for key, value in policy.model_dump(exclude_none=True).items():
-        if key == "preset":
-            continue
-        if isinstance(value, dict):
-            out.update({f"{key}.{k}": v for k, v in value.items()})
-        else:
-            out[key] = value
-    return out
+    return _flatten(policy.model_dump(exclude_none=True))
 
 
 def from_flat(preset: Preset, settings: dict[str, str]) -> GatePolicy:
-    """The ``gate:`` block for a preset plus flat overrides. Unknown keys or values that a
-    setting does not accept raise ``ValueError`` (a pydantic ``ValidationError``)."""
+    """The ``gate:`` block for a preset plus flat overrides, in canonical form: a setting
+    equal to what the preset already does is dropped, so "changed" always means changed.
+    Unknown keys, or values a setting does not accept, raise ``ValueError``."""
     nested: dict[str, Any] = {"preset": preset}
-    known = {key for key, _, _ in SETTINGS}
+    base = _flat(PRESETS[preset])
     for key, value in settings.items():
-        if key not in known:
+        if key not in base:
             raise ValueError(f"unknown gate setting {key!r}")
+        if base[key] == value:
+            continue
         group, _, leaf = key.partition(".")
         if leaf:
             nested.setdefault(group, {})[leaf] = value
         else:
             nested[group] = value
     return GatePolicy.model_validate(nested)
+
+
+def to_yaml_block(policy: GatePolicy) -> dict[str, Any] | None:
+    """The ``gate:`` value a suite file gets, or ``None`` for the plain standard gate (no
+    block at all). The one serialiser: the server writes it and the console shows it."""
+    dump = policy.model_dump(exclude_none=True)
+    if dump == {"preset": "standard"}:
+        return None
+    return dump

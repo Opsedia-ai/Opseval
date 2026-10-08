@@ -781,6 +781,7 @@ def test_a_gate_edit_is_previewed_on_the_server(client: TestClient) -> None:
     ).json()
     assert out["describe"] == "lenient + failed.normal=block"
     assert out["effective"]["failed.normal"] == "block"
+    assert out["yaml"] == "gate:\n  preset: lenient\n  failed:\n    normal: block\n"
     assert "exit_code=gate" in out["looserThanStandard"]
     bad = client.post("/api/v1/gate/resolve", json={"overrides": {"commit_guard": "block"}})
     assert bad.status_code == 422 and bad.json()["code"] == "INVALID_GATE"
@@ -841,3 +842,27 @@ def test_run_detail_names_the_policy_it_was_gated_with(tmp_path: Path) -> None:
         .json()
     )
     assert d["gatePolicy"] == "lenient" and "exit_code=gate" in d["looserThanStandard"]
+
+
+def test_the_gate_preview_resolves_like_a_run(tmp_path: Path) -> None:
+    """OPSEVAL_GATE_FAIL_ON_FLAKY changes what a run does, so the editor must show it."""
+    app, _ = app_for(
+        tmp_path, settings=Settings(reports_dir=str(tmp_path / "r"), gate_fail_on_flaky=True)
+    )
+    c = connect(app)
+    out = c.post("/api/v1/gate/resolve", json={"preset": "standard"}).json()
+    assert out["effective"]["flaky"] == "block" and out["describe"] == "standard + flaky=block"
+    smoke = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "smoke")
+    assert smoke["gate"]["effective"]["flaky"] == "block"
+
+
+def test_saving_the_standard_gate_writes_no_block(tmp_path: Path) -> None:
+    import yaml
+
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    base = {"file": "plain", "displayName": "p", "include": ["scenarios/rf-001*.yaml"]}
+    body = {**base, "gate": {"preset": "standard", "overrides": {"failed.normal": "warn"}}}
+    out = c.put("/api/v1/suites", json=body).json()
+    assert "gate" not in yaml.safe_load((cat / "suites" / "plain.yaml").read_text())
+    assert out["gate"]["yaml"] == "" and out["gate"]["overrides"] == {}

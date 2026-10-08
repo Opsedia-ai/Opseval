@@ -165,7 +165,7 @@ def create_app(
 
     @app.get(f"{API}/suites")
     def suites() -> list[s.SuiteOut]:
-        return views.list_suites(catalogue, ctx.profile)
+        return views.list_suites(catalogue, ctx.profile, fail_on_flaky=settings.gate_fail_on_flaky)
 
     @app.get(f"{API}/gate")
     def gate() -> s.GateCatalogOut:
@@ -173,7 +173,7 @@ def create_app(
 
     @app.post(f"{API}/gate/resolve")
     def gate_resolve(body: s.GateIn) -> s.GateOut:
-        return actions.preview_gate(body)
+        return actions.preview_gate(ctx, body)
 
     @app.get(f"{API}/checks")
     def checks() -> list[s.CheckOut]:

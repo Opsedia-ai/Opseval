@@ -11,6 +11,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+from opseval.models.gate import Preset
+
 
 class Api(BaseModel):
     """A response shape."""
@@ -164,10 +166,11 @@ class GateOut(Api):
     effective: dict[str, str]  # every setting, as a run would use it
     describe: str  # "strict + flaky=warn"
     looser_than_standard: list[str]
+    yaml: str  # the exact `gate:` block the suite file gets ("" for the plain standard gate)
 
 
 class GateIn(ApiIn):
-    preset: Literal["strict", "standard", "lenient"] = "standard"
+    preset: Preset = "standard"
     overrides: dict[str, str] = {}
 
 
