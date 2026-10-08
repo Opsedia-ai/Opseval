@@ -16,24 +16,30 @@ intended the API to serve the built console itself.
 When a built console is available, `opseval serve` serves it from `/`, on the same origin as
 `/api/v1`:
 
-- **Where it comes from.** It uses `OPSEVAL_CONSOLE_DIR` when that is set. Otherwise it looks
-  for `packages/console/dist` next to the installed package, which is a source checkout after
-  `npm run build`. If neither has an `index.html`, only the API answers, and `serve` says how
-  to build the console.
-- **Routing.**
-  - A path that names a file inside the console folder gets that file.
-  - Any other non-`/api` path gets `index.html`, because the console routes in the browser.
-  - `/api/*` routes always win, and an unknown API route is a 404, never the page.
-  - A file outside the console folder is never served, however the path is encoded.
+- **Where it comes from.** It uses `OPSEVAL_CONSOLE_DIR`; a set folder without `index.html`
+  is a configuration error (exit 3), not something to ignore quietly. Otherwise it uses a
+  source checkout's `packages/console/dist`, found only when the package sits under
+  `<repo>/packages/`. If neither exists, only the API answers, and `serve` says how to build
+  the console.
+- **Routing.** There is no catch-all route, so the API routes exactly as before: slash
+  redirects, 405s and 404s are unchanged. The console is consulted only for a GET or HEAD
+  outside `/api` that the router answered with 404:
+  - a file inside the folder is served by Starlette's `StaticFiles`, which handles
+    traversal, NUL bytes, HEAD and ranges;
+  - anything else gets `index.html`, because the console routes in the browser;
+  - `/api` itself and anything under it is never the page.
 - **The page needs no token.** It holds no data; every API call it makes still carries one.
   The DNS-rebinding `Host` check of ADR-0031 applies to the page as well.
-- **Headers on the page.**
-  - A Content Security Policy allows only the page's own scripts and connections, plus its
-    fonts.
-  - `frame-ancestors 'none'` and `X-Frame-Options: DENY` stop clickjacking. The console can
-    start runs and edit suites, so it must never be framed by another site.
-  - `nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store` on
-    `index.html`. Assets are content-hashed and may be cached.
+- **No public API docs.** `/docs` and `/redoc` are off. The OpenAPI schema is at
+  `/api/v1/openapi.json`, behind the token like the rest of the API.
+- **Headers on every non-API response**, not only `index.html`. Any page on this origin could
+  read the token the console keeps, so none may be framed or run foreign code:
+  - a Content Security Policy allowing only the origin's own scripts and connections, plus
+    its fonts;
+  - `frame-ancestors 'none'` and `X-Frame-Options: DENY`;
+  - `nosniff` and `Referrer-Policy: no-referrer`.
+
+  `index.html` is `no-store`. The content-hashed `assets/` are `immutable`.
 - **The printed link** is `http://127.0.0.1:<port>/#token=…` when the console is served here,
   and the Vite dev URL otherwise.
 

@@ -651,7 +651,7 @@ def serve(
         typer.echo(f"Console:  {console_url}/#token=<OPSEVAL_SERVE_TOKEN>")
     else:
         typer.echo(f"Console:  {console_url}/#token={api.state.token}   (this start only)")
-    if port != 8000 and api.state.console is None:
+    if port != 8000 and console_url != here:  # the Vite proxy points at :8000 by default
         typer.echo(f"          for `npm run dev`, set OPSEVAL_API=http://127.0.0.1:{port}")
     if catalogue is None:
         typer.echo("Catalogue: the built-in demo (read-only). Use --catalogue to edit your own.")

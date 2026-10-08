@@ -754,7 +754,7 @@ def test_serve_never_prints_a_configured_token(
     from opseval.cli import app as cli
 
     monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
-    monkeypatch.setenv("OPSEVAL_CONSOLE_DIR", str(tmp_path))  # no built console here
+    monkeypatch.setattr("opseval.server.app.find_console", lambda _s: None)  # no build here
     monkeypatch.setenv("OPSEVAL_SERVE_TOKEN", "long-lived-secret")
     out = CliRunner().invoke(cli, ["serve", "--port", "8123"]).output
     assert "long-lived-secret" not in out and "<OPSEVAL_SERVE_TOKEN>" in out
@@ -916,11 +916,54 @@ def test_the_console_cannot_serve_files_outside_its_folder(
     assert evil.get("/").status_code == 403  # DNS rebinding cannot load the page either
 
 
-def test_without_a_built_console_only_the_api_answers(tmp_path: Path) -> None:
-    settings = Settings(reports_dir=str(tmp_path / "r"), console_dir=str(tmp_path / "none"))
-    app = create_app(settings=settings, token=TOKEN)
+def test_without_a_built_console_only_the_api_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("opseval.server.app.find_console", lambda _s: None)
+    app = create_app(settings=Settings(reports_dir=str(tmp_path / "r")), token=TOKEN)
     assert app.state.console is None
     assert TestClient(app, base_url=BASE).get("/").status_code == 404
+
+
+def test_a_configured_console_dir_without_a_build_is_a_config_error(tmp_path: Path) -> None:
+    from opseval.errors import ConfigError
+
+    settings = Settings(reports_dir=str(tmp_path / "r"), console_dir=str(tmp_path / "none"))
+    with pytest.raises(ConfigError, match="no index.html"):
+        create_app(settings=settings, token=TOKEN)
+
+
+def test_the_console_never_changes_how_the_api_routes(tmp_path: Path, console_dir: Path) -> None:
+    """Review of #34: a catch-all route had turned redirects into 404s and /api into the page."""
+    app = create_app(
+        settings=Settings(reports_dir=str(tmp_path / "r")), token=TOKEN, console_dir=console_dir
+    )
+    c = TestClient(app, base_url=BASE, headers=AUTH, follow_redirects=False)
+    assert c.get("/api/v1/runs/").status_code == 307  # Starlette's slash redirect, as before
+    assert c.get("/api").status_code == 404 and "id=root" not in c.get("/api").text
+    assert c.post("/api/v1/nope").status_code == 404
+    assert c.get("/%00").status_code in (200, 404)  # never a 500
+    assert c.head("/").status_code == 200
+    # No public API docs: the schema is under /api, behind the token.
+    assert "id=root" in TestClient(app, base_url=BASE).get("/docs").text  # just the page
+    assert TestClient(app, base_url=BASE).get("/api/v1/openapi.json").status_code == 401
+    assert c.get("/api/v1/openapi.json").status_code == 200
+
+
+def test_a_relative_console_dir_and_every_page_get_the_headers(
+    tmp_path: Path, console_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (console_dir / "extra.html").write_text("<p>public/ file</p>", "utf-8")
+    monkeypatch.chdir(console_dir.parent)
+    app = create_app(
+        settings=Settings(reports_dir=str(tmp_path / "r")), token=TOKEN, console_dir=Path("dist")
+    )
+    anon = TestClient(app, base_url=BASE)
+    js = anon.get("/assets/app.js")
+    assert "opseval" in js.text and "immutable" in js.headers["cache-control"]
+    extra = anon.get("/extra.html")
+    assert "public/ file" in extra.text and extra.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in js.headers["content-security-policy"]
 
 
 def test_serve_prints_the_served_console_link(
