@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-import uuid
+from importlib.resources import files
 from pathlib import Path
 
 import yaml
@@ -23,6 +23,7 @@ from opseval.models.scenario import Scenario, Suite
 from opseval.runner import RunOptions, launch
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
+from opseval.server.launches import LaunchBook
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -117,29 +118,38 @@ def start_run(
     profile_path: str | Path,
     default_target: str | None,
     body: s.LaunchIn,
+    *,
+    allow_commit: bool = False,
+    launches: LaunchBook,
 ) -> s.LaunchOut:
-    """Start a run in the background. The console polls /runs for its progress."""
+    """Start a run in the background. The console polls /runs for its progress.
+
+    ``allow_commit`` is the *server's*, from ``opseval serve --allow-commit``, never the
+    request body's. ADR-0008 makes the irreversible outcome need two keys — the
+    scenario's own flag and the operator's — and an HTTP caller holding one of them
+    would leave the guard with one.
+    """
     if catalogue is None or profile is None:
         raise ApiError(400, "NO_CATALOGUE", "the server was started without a catalogue")
     target = body.target or default_target
     if not target:
         raise ApiError(400, "NO_TARGET", "give a target (ws://…) or start the server with --target")
-    temp: Path | None = None
+    filters: list[str] = []
+    label: str | None = None
     if body.scenarios:
+        # An ad-hoc subset runs through a filter rather than a generated suite file.
+        # Writing one into the catalogue (the first version did) means a run mutates the
+        # thing it is measuring, and fails outright when the catalogue is read-only.
         root = catalogue / "scenarios" if (catalogue / "scenarios").is_dir() else catalogue
         cat, _ = load_catalogue(
             root, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
         )
-        files = [
-            Path(cat.sources[i]).resolve().relative_to(catalogue.resolve()).as_posix()
-            for i in body.scenarios
-            if i in cat.sources
-        ]
-        if len(files) != len(set(body.scenarios)):
-            raise ApiError(404, "UNKNOWN_SCENARIO", "one of the chosen scenarios does not exist")
-        temp = catalogue / "suites" / f".console-{uuid.uuid4().hex[:8]}.yaml"
-        temp.write_text(yaml.safe_dump({"name": "console-selection", "include": files}), "utf-8")
-        suite_path = temp
+        unknown = sorted(set(body.scenarios) - set(cat.sources))
+        if unknown:
+            raise ApiError(404, "UNKNOWN_SCENARIO", f"no valid scenario {', '.join(unknown)}")
+        suite_path = root
+        filters = [f"id={','.join(sorted(set(body.scenarios)))}"]
+        label = "selection"
     elif (
         body.suite
         and SAFE_NAME.match(body.suite)
@@ -148,7 +158,7 @@ def start_run(
         suite_path = catalogue / "suites" / f"{body.suite}.yaml"
     else:
         raise ApiError(404, "UNKNOWN_SUITE", "choose an existing suite or some scenarios")
-    token = uuid.uuid4().hex[:8]
+    record = launches.start(label or body.suite or "")
 
     async def _go() -> None:
         try:
@@ -156,25 +166,65 @@ def start_run(
                 target=target,
                 profile=profile_path,
                 repeats=body.repeats,
-                allow_commit=body.allow_commit,
+                allow_commit=allow_commit,
                 fail_fast=body.fail_fast,
+                filters=filters,
+                suite_label=label,
+                on_start=lambda run_id: launches.attach(record.token, run_id),
             )
             await launch(suite_path, opts, settings)
-        except (ConfigError, OpsevalError):
-            pass  # surfaces as a run with load_errors / a missing run; never as an agent failure
-        finally:
-            if temp is not None:
-                temp.unlink(missing_ok=True)
+            launches.finished(record.token)
+        except (ConfigError, OpsevalError) as exc:
+            # The 202 already went out, so this cannot be raised to anyone. Recording it
+            # is the whole point: a run that died must not keep reading as "running".
+            launches.failed(record.token, f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - an unexpected crash is still ours to report
+            launches.failed(record.token, f"{type(exc).__name__}: {exc}")
 
     task = asyncio.create_task(_go())
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
-    return s.LaunchOut(accepted=True, token=token, message=f"run started against {target}")
+    return s.LaunchOut(
+        accepted=True,
+        token=record.token,
+        message=f"run started against {target}",
+        allow_commit=allow_commit,
+    )
+
+
+def is_writable(catalogue: Path | None) -> bool:
+    """False for the demo catalogue inside site-packages.
+
+    ``opseval serve`` with no ``--catalogue`` serves the bundled demo so there is
+    something to look at. Writing to it would edit the installed package: the change
+    vanishes on reinstall, and on a shared machine it is not even the caller's to make.
+    """
+    if catalogue is None:
+        return False
+    package = Path(str(files("opseval"))).resolve()
+    try:
+        return not catalogue.resolve().is_relative_to(package)
+    except (OSError, ValueError):
+        return False
+
+
+def _require_writable(
+    catalogue: Path | None, profile: SutProfile | None
+) -> tuple[Path, SutProfile]:
+    if catalogue is None or profile is None:
+        raise ApiError(400, "NO_CATALOGUE", "the server was started without a catalogue")
+    if not is_writable(catalogue):
+        raise ApiError(
+            409,
+            "READ_ONLY_CATALOGUE",
+            "this is the bundled demo catalogue inside the installed package. Start the "
+            "server with --catalogue pointing at your own, or `opseval init` a new one",
+        )
+    return catalogue, profile
 
 
 def save_suite(catalogue: Path | None, profile: SutProfile | None, body: s.SuiteIn) -> s.SuiteOut:
-    if catalogue is None or profile is None:
-        raise ApiError(400, "NO_CATALOGUE", "the server was started without a catalogue")
+    root, profile = _require_writable(catalogue, profile)
     if not SAFE_NAME.match(body.file):
         raise ApiError(422, "BAD_NAME", "file name may use letters, digits, '.', '_' and '-' only")
     doc: dict[str, object] = {
@@ -190,21 +240,48 @@ def save_suite(catalogue: Path | None, profile: SutProfile | None, body: s.Suite
         Suite.model_validate(doc)
     except ValidationError as exc:
         raise ApiError(422, "INVALID_SUITE", str(exc)) from exc
-    path = catalogue / "suites" / f"{body.file}.yaml"
+    path = root / "suites" / f"{body.file}.yaml"
+    if path.exists() and not body.overwrite:
+        raise ApiError(
+            409,
+            "SUITE_EXISTS",
+            f"{body.file}.yaml already exists; pass overwrite to replace it. Renaming a "
+            "suite instead would stop its old runs lining up in Compare and Trend",
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), "utf-8")
+    # Resolve against the real catalogue *before* the file is in place, so a suite that
+    # matches nothing is rejected without having overwritten a working one.
+    scratch = path.with_name(f".{body.file}.checking.yaml")
+    text = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+    scratch.write_text(text, "utf-8")
     try:
         cat, _ = load_catalogue(
-            path, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+            scratch, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
         )
     except ConfigError as exc:
         raise ApiError(422, "INVALID_SUITE", str(exc)) from exc
+    finally:
+        scratch.unlink(missing_ok=True)
+    if not cat.scenarios:
+        # A suite matching nothing runs, passes, and reports a clean gate on having
+        # tested nothing — the failure ADR-0020 refuses for preflight, arriving by a
+        # different door. Saving it is where it can still be stopped.
+        raise ApiError(
+            422,
+            "SUITE_MATCHES_NOTHING",
+            "these patterns match no scenario, so the suite would report a clean gate "
+            "on having tested nothing. Patterns are relative to the catalogue root, "
+            "e.g. scenarios/*.yaml",
+        )
+    path.write_text(text, "utf-8")
     return s.SuiteOut(
         file=body.file,
         display_name=body.display_name,
         description=body.description,
         include=body.include,
         scenario_count=len(cat.scenarios),
+        repeats=body.repeats,
+        stop_at=body.stop_at,
     )
 
 
@@ -212,8 +289,7 @@ def import_scenarios(
     catalogue: Path | None, profile: SutProfile | None, body: s.ImportIn
 ) -> s.ImportOut:
     """All-or-nothing: validate every file first, write only if all are valid."""
-    if catalogue is None or profile is None:
-        raise ApiError(400, "NO_CATALOGUE", "the server was started without a catalogue")
+    catalogue, profile = _require_writable(catalogue, profile)
     if not SAFE_NAME.match(body.family):
         raise ApiError(422, "BAD_FAMILY", "family may use letters, digits, '.', '_' and '-' only")
     root = catalogue / "scenarios"
@@ -221,7 +297,7 @@ def import_scenarios(
     problems: list[s.Problem] = []
     parsed: list[tuple[str, str, Scenario]] = []
     for f in body.files:
-        name, text = f.get("name", ""), f.get("text", "")
+        name, text = f.name, f.text
         if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml$", name):
             problems.append(
                 s.Problem(path=name, field="name", message="not a safe .yaml file name")

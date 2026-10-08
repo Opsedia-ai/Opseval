@@ -9,6 +9,7 @@ const lab = "text-xs font-semibold uppercase tracking-[0.08em]";
 export default function Suites() {
   const suites = useApi(api.suites);
   const catalogue = useApi(api.scenarios);
+  const health = useApi(api.health);
   const [sel, setSel] = useState("");
   const [file, setFile] = useState("");
   const [name, setName] = useState("");
@@ -29,7 +30,8 @@ export default function Suites() {
   const yaml = useMemo(() => [`name: ${name}`, `description: ${desc}`, "include:", ...picked.map((f) => `  - ${f}`), ...(repeats === "" ? [] : ["overrides:", `  execution.repeats: ${repeats}`])].join("\n"), [name, desc, picked, repeats]);
   const save = async () => {
     try {
-      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? undefined : repeats });
+      const existing = suites.data?.some((x) => x.file === file) ?? false;
+      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? undefined : repeats, overwrite: existing });
       setMsg({ ok: true, text: `Saved. Resolves to ${s.scenarioCount} scenario(s).` }); suites.reload();
     } catch (e) { setMsg({ ok: false, text: (e as ApiError).message }); }
   };
@@ -42,8 +44,9 @@ export default function Suites() {
       <PageHeader title="Suites" sub="Named sets of scenarios plus the settings to run them with." aside={<>
         <select value={sel} onChange={(e) => setSel(e.target.value)} className="rounded-full border border-ink/25 bg-white px-4 py-2 text-sm text-ink">
           {suites.data?.map((s) => <option key={s.file} value={s.file}>{s.displayName} ({s.scenarioCount})</option>)}</select>
-        <CoralButton className="bg-ink text-white hover:bg-ink-deep" onClick={() => void save()}>Save suite</CoralButton></>} />
+        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={!health.data?.catalogueWritable} onClick={() => void save()}>Save suite</CoralButton></>} />
       <Page>
+        {health.data && !health.data.catalogueWritable && <Callout><b>This catalogue is read-only.</b> The server is serving the bundled demo from inside the installed package. Restart it with <Mono>--catalogue</Mono> pointing at your own to edit suites.</Callout>}
         <Explainer><b>A suite selects cases by pattern,</b> then applies settings. It is YAML today; here it is a form and the YAML is generated. Saving validates it against your catalogue first.</Explainer>
         <Data res={suites}>{() => (
           <div className="grid gap-5 lg:grid-cols-[3fr_2fr]">

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -17,13 +18,21 @@ from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
+from opseval.server.launches import LaunchBook
 from opseval.storage import FileStore
 
 JUDGED_STATUSES = {VerdictStatus.PASSED, VerdictStatus.FAILED}
 
 
 def _gate(result: SuiteResult) -> str:
-    return {0: "judged", 1: "judged", 2: "not_judged"}.get(result.exit_code, "blocked")
+    """The exit code, not a re-derivation of it.
+
+    The first version of this mapped exit 1 to "judged" and let the console paint it in
+    the pass colour, while exit 3 — a *harness* failure — got the same red as a failing
+    agent. That is the one thing this project refuses to do, in the one place a person
+    actually looks.
+    """
+    return {0: "passed", 1: "failed", 2: "not_judged"}.get(result.exit_code, "harness_error")
 
 
 def _counts(tests: list[TestVerdict]) -> tuple[int, int, int, int]:
@@ -32,18 +41,25 @@ def _counts(tests: list[TestVerdict]) -> tuple[int, int, int, int]:
     return passed, failed, len(tests) - passed - failed, sum(t.flaky for t in tests)
 
 
+JUDGED_GATES = {"passed", "failed"}
+
+
 def summarise(result: SuiteResult) -> s.RunSummary:
     passed, failed, unjudged, flaky = _counts(result.tests)
+    gate = _gate(result)
     return s.RunSummary(
         id=result.run_id,
         suite=result.suite,
         started_at=result.started_at.isoformat(),
         state="finished",
-        gate=_gate(result),
+        gate=gate,
         passed=passed,
         failed=failed,
         unjudged=unjudged,
         flaky=flaky,
+        # Only say *why* when the run was not judged; on a judged run the gate summary
+        # is a verdict about the agent and belongs on the detail page, not in a column.
+        reason=None if gate in JUDGED_GATES else (result.gate.summary or None),
     )
 
 
@@ -58,7 +74,13 @@ def load_results(store: FileStore) -> list[SuiteResult]:
     return sorted(out, key=lambda r: r.started_at, reverse=True)
 
 
-def _in_flight(store: FileStore) -> list[s.RunSummary]:
+def _in_flight(store: FileStore, failures: Mapping[str, str]) -> list[s.RunSummary]:
+    """Runs with a manifest but no result: still going, or dead.
+
+    ``failures`` maps run id to why its launch raised. Without it a crashed run sits at
+    "running" for ever, which reads as progress — a harness failure hidden as work in
+    hand, which is the failure mode this project exists to prevent.
+    """
     out = []
     for manifest in store.root.glob("*/manifest.json"):
         if (manifest.parent / "result.json").is_file():
@@ -67,24 +89,38 @@ def _in_flight(store: FileStore) -> list[s.RunSummary]:
             m = json.loads(manifest.read_text("utf-8"))
         except (ValueError, OSError):
             continue
+        run_id = str(m.get("run_id", manifest.parent.name))
+        died = failures.get(run_id)
         out.append(
             s.RunSummary(
-                id=str(m.get("run_id", manifest.parent.name)),
+                id=run_id,
                 suite=str(m.get("suite", "")),
                 started_at=m.get("started_at"),
-                state="running",
-                gate="not_judged",
+                state="error" if died else "running",
+                gate="harness_error" if died else "not_judged",
                 passed=0,
                 failed=0,
                 unjudged=len(m.get("planned", [])),
                 flaky=0,
+                reason=died,
             )
         )
     return out
 
 
-def list_runs(store: FileStore) -> list[s.RunSummary]:
-    return _in_flight(store) + [summarise(r) for r in load_results(store)]
+def list_runs(store: FileStore, launches: LaunchBook | None = None) -> list[s.RunSummary]:
+    """Three sources, one list, newest first.
+
+    Sorting matters: concatenating the sources left a failed launch pinned above every
+    run that finished after it, so the newest result was not the top row.
+    """
+    book = launches or LaunchBook()
+    rows = (
+        book.never_started()
+        + _in_flight(store, book.failures())
+        + [summarise(r) for r in load_results(store)]
+    )
+    return sorted(rows, key=lambda r: r.started_at or "", reverse=True)
 
 
 def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
@@ -185,7 +221,7 @@ def trend(store: FileStore) -> list[s.TrendPoint]:
             s.TrendPoint(
                 run=r.run_id,
                 label=r.started_at.strftime("%b %-d %H:%M"),
-                pass_rate=passed / judged if judged and _gate(r) == "judged" else None,
+                pass_rate=passed / judged if judged and _gate(r) in JUDGED_GATES else None,
             )
         )
     return points

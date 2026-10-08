@@ -3,7 +3,7 @@ import { AlertTriangle, Info } from "lucide-react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import type { ApiError } from "../lib/api";
 import type { Resource } from "../lib/useApi";
-import type { Area, Gate } from "../lib/types";
+import type { Area, Gate, RunState } from "../lib/types";
 
 export function cx(...p: (string | false | undefined)[]): string {
   return p.filter(Boolean).join(" ");
@@ -93,7 +93,7 @@ export function CoralButton({ className, children, to, ...rest }: BtnProps) {
 }
 
 export function Pill({ children, tone = "neutral", dashed }: {
-  children: ReactNode; tone?: "neutral" | "pass" | "fail" | "warn" | "mute"; dashed?: boolean;
+  children: ReactNode; tone?: "neutral" | "pass" | "fail" | "warn" | "mute" | "harness"; dashed?: boolean;
 }) {
   const tones = {
     neutral: "bg-soft text-ink border-line",
@@ -101,6 +101,8 @@ export function Pill({ children, tone = "neutral", dashed }: {
     fail: "bg-blush text-deep-coral border-deep-coral",
     warn: "bg-blush text-ink border-coral",
     mute: "bg-white text-muted-ink border-line",
+    // Deliberately not the failure red: a harness problem is not the agent's fault.
+    harness: "bg-white text-ink border-ink border-dashed",
   };
   return (
     <span className={cx("inline-flex items-center rounded-full border px-3 py-0.5 text-xs font-semibold uppercase tracking-[0.08em]", tones[tone], dashed && "border-dashed")}>
@@ -122,11 +124,20 @@ export const AreaPill = ({ area }: { area: Area }) => (
   <span className={cx("inline-flex rounded-full border px-3 py-0.5 text-xs font-semibold capitalize", areaStyle[area])}>{area}</span>
 );
 
-export const StatePill = ({ state }: { state: "running" | "finished" }) => (
-  <Pill tone={state === "running" ? "warn" : "neutral"}>{state}</Pill>
-);
-export const GatePill = ({ gate }: { gate: Gate }) =>
-  gate === "judged" ? <Pill tone="pass">judged</Pill> : gate === "blocked" ? <Pill tone="fail">blocked</Pill> : <NotMeasured text="not judged" />;
+export const StatePill = ({ state }: { state: RunState }) =>
+  state === "error" ? <Pill tone="harness">harness error</Pill> : <Pill tone={state === "running" ? "warn" : "neutral"}>{state}</Pill>;
+
+/** The gate, coloured by what it means.
+ *
+ *  `harness_error` must never wear the failure colour and `failed` must never wear the
+ *  pass colour. An earlier version did both, which is the one rule inverted in the one
+ *  place anybody looks. */
+export const GatePill = ({ gate }: { gate: Gate }) => {
+  if (gate === "passed") return <Pill tone="pass">passed</Pill>;
+  if (gate === "failed") return <Pill tone="fail">failed</Pill>;
+  if (gate === "harness_error") return <Pill tone="harness">harness error</Pill>;
+  return <NotMeasured text="not judged" />;
+};
 
 export function Table({ head, children }: { head: ReactNode[]; children: ReactNode }) {
   return (

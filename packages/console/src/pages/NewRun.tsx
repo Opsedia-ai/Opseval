@@ -13,17 +13,17 @@ export default function NewRun() {
   const suites = useApi(api.suites);
   const catalogue = useApi(api.scenarios);
   const readiness = useApi(api.readiness);
+  const health = useApi(api.health);
   const [suite, setSuite] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [target, setTarget] = useState("");
   const [repeats, setRepeats] = useState<number | "">("");
-  const [allowCommit, setAllowCommit] = useState(false);
   const [failFast, setFailFast] = useState(false);
   const [err, setErr] = useState<ApiError>();
   const [busy, setBusy] = useState(false);
 
   const chosenSuite = suite || suites.data?.[0]?.file || "";
-  const body = { ...(picked.length ? { scenarios: picked } : { suite: chosenSuite }), target: target || undefined, repeats: repeats === "" ? undefined : repeats, allowCommit, failFast };
+  const body = { ...(picked.length ? { scenarios: picked } : { suite: chosenSuite }), target: target || undefined, repeats: repeats === "" ? undefined : repeats, failFast };
   const start = async () => {
     setBusy(true); setErr(undefined);
     try { await api.startRun(body); nav("/"); } catch (e) { setErr(e as ApiError); }
@@ -56,8 +56,11 @@ export default function NewRun() {
                 <div><label className={lab}>Repeats (override)</label><input type="number" min={1} max={20} className={input} value={repeats} placeholder="as authored" onChange={(e) => setRepeats(e.target.value === "" ? "" : +e.target.value)} /></div>
               </div>
               <label className="mt-4 flex items-center gap-3 text-ink"><input type="checkbox" checked={failFast} onChange={(e) => setFailFast(e.target.checked)} className="h-4 w-4 accent-coral" />Stop at the first failure (<Mono>--fail-fast</Mono>)</label>
-              <div className="mt-4"><Callout><b>Stopping at the commit gate keeps this safe.</b> The irreversible outcome needs <Mono>allow_commit: true</Mono> in the scenario <b>and</b> this switch (ADR-0008).</Callout></div>
-              <label className="mt-4 flex items-center gap-3 text-ink"><input type="checkbox" checked={allowCommit} onChange={(e) => setAllowCommit(e.target.checked)} className="h-4 w-4 accent-coral" />Allow the committed outcome (<Mono>--allow-commit</Mono>) {allowCommit && <Pill tone="fail">irreversible</Pill>}</label>
+              <div className="mt-4"><Callout tone={health.data?.allowCommit ? "warn" : "info"}>
+                {health.data?.allowCommit
+                  ? <><b>This server permits the committed outcome.</b> Scenarios that declare <Mono>allow_commit: true</Mono> will reach the irreversible step. <Pill tone="fail">irreversible</Pill></>
+                  : <><b>Runs stop at the commit gate.</b> The irreversible outcome needs <Mono>allow_commit: true</Mono> in the scenario <b>and</b> <Mono>opseval serve --allow-commit</Mono>. It is the operator's to give, not this form's (ADR-0008).</>}
+              </Callout></div>
             </Card>
           </div>
           <div className="space-y-5">

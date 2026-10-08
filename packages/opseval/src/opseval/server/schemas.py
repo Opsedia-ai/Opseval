@@ -6,26 +6,39 @@ An unmeasured number is ``None`` (JSON null), never 0.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 
 class Api(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    """``extra="forbid"`` on the way in too: an ignored field in a request body is a
+    caller who thinks they asked for something they did not get."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+
+
+RunState = Literal["running", "finished", "error"]
+"""``error`` is the *harness* failing to produce a run. It is never an agent verdict."""
+
+Gate = Literal["passed", "failed", "not_judged", "harness_error"]
+"""Mirrors the exit codes (0/1/2/3). ``harness_error`` is deliberately distinct from
+``failed``: conflating them is the one thing this project refuses to do."""
 
 
 class RunSummary(Api):
     id: str
     suite: str
     started_at: str | None
-    state: str  # running | finished
-    gate: str  # judged | not_judged | blocked
+    state: RunState
+    gate: Gate
     passed: int
     failed: int
     unjudged: int
     flaky: int
+    reason: str | None = None
+    """Why a run is in ``error``, or could not be judged. Never a verdict about the agent."""
 
 
 class ScoreOut(Api):
@@ -137,6 +150,10 @@ class Health(Api):
     reports_dir: str
     catalogue: str | None
     profile: str | None
+    allow_commit: bool = False
+    """Whether this server was started with ``--allow-commit``."""
+    catalogue_writable: bool = False
+    """False when the catalogue is inside the installed package: reads work, writes refuse."""
 
 
 class Change(Api):
@@ -182,7 +199,7 @@ class Turn(Api):
 
 class RehearseIn(Api):
     scenario_id: str
-    transcript: list[Turn] = []
+    transcript: Annotated[list[Turn], Field(max_length=100)] = []
 
 
 class RehearseOut(Api):
@@ -207,11 +224,15 @@ class PersonaOut(Api):
 
 
 class LaunchIn(Api):
+    """No ``allow_commit``. Permission for the irreversible outcome is the operator's,
+    given once with ``opseval serve --allow-commit`` — a request body is not consent
+    (ADR-0008). ``repeats`` is bounded here because the runner's own ``le=20`` is on the
+    model and ``model_copy`` skips validation."""
+
     suite: str | None = None
-    scenarios: list[str] = []
+    scenarios: Annotated[list[str], Field(max_length=500)] = []
     target: str | None = None
-    repeats: int | None = None
-    allow_commit: bool = False
+    repeats: Annotated[int, Field(ge=1, le=20)] | None = None
     fail_fast: bool = False
 
 
@@ -219,20 +240,29 @@ class LaunchOut(Api):
     accepted: bool
     token: str
     message: str
+    allow_commit: bool
+    """What the *server* permits, so the console states the policy rather than asking."""
 
 
 class SuiteIn(Api):
     file: str
     display_name: str
     description: str = ""
-    include: list[str]
-    repeats: int | None = None
+    include: Annotated[list[str], Field(max_length=200)]
+    repeats: Annotated[int, Field(ge=1, le=20)] | None = None
     stop_at: str | None = None
+    overwrite: bool = False
+    """Replacing an existing suite has to be asked for; renaming one orphans its history."""
+
+
+class ImportFile(Api):
+    name: str
+    text: Annotated[str, Field(max_length=200_000)]
 
 
 class ImportIn(Api):
     family: str = "uncategorised"
-    files: list[dict[str, str]]  # {name, text}
+    files: Annotated[list[ImportFile], Field(max_length=200)]
 
 
 class ImportOut(Api):

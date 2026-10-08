@@ -405,11 +405,23 @@ Two rules shape what is in there:
 - **A `null` is "not measured", never 0.** An unjudged run is a gap in the trend. Compare lists
   regressions and not-judged separately, because a scenario that went `passed → inconclusive` is
   an outage, and calling it a regression sends you hunting a bug that was really a dead credential.
+  A run the harness failed to start shows as a harness error with the reason — not as a run that
+  is still going, and never in the colour a failing agent gets.
 - **No control without a backend.** Anything the server cannot actually do is absent rather than
   stubbed, and the browser computes no aggregate of its own.
 
-> **The API has no authentication yet.** It binds to loopback, and it can start runs against your
-> configured agent. Do not expose it. Accounts and API keys are v0.5.
+With no `--catalogue` the server shows the bundled demo, which lives inside the installed package
+and is therefore read-only: the editing controls are disabled and say so.
+
+On the irreversible outcome, the operator holds one of ADR-0008's two keys and the console holds
+neither: a run reaches it only when the scenario declares `allow_commit` **and** the server was
+started with `opseval serve --allow-commit`. No request body can ask for it.
+
+> **Security.** The API has no accounts yet. It answers only to a loopback `Host`, which is what
+> refuses DNS rebinding — a page you visit whose domain re-resolves to `127.0.0.1` is otherwise
+> same-origin with itself and CORS never runs. Binding `--host` to a real interface is **refused**
+> without `--token`, because this can start runs against your agent and spend your LLM credit.
+> Accounts and API keys are v0.5.
 
 Not built yet: conversation transcripts in run detail, live per-scenario progress, and a scenario
 editor (bulk import is there). See [ADR-0029](docs/adr/0029-console-api.md).

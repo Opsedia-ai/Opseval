@@ -67,6 +67,14 @@ class RunOptions:
     transport_factory: TransportFactory | None = None
     trace_source: TraceSource | None = None
     """Inject a trace source (tests); otherwise one is built from settings."""
+    suite_label: str | None = None
+    """Override the name derived from the target path. An ad-hoc subset of scenarios has
+    no suite file, and labelling it after the directory it came from would group it with
+    unrelated runs in Compare and Trend."""
+    on_start: Callable[[str], None] | None = None
+    """Called with the run id the moment the manifest exists, so a caller that is not
+    waiting on the return value (the API) can attribute a later crash to this run
+    rather than leaving a folder that looks like it is still running."""
     preflight: bool = True
     """Check dependencies before running, so an outage skips instead of failing."""
     verify_llm: bool = False
@@ -186,13 +194,14 @@ async def launch(
     if options.profile is None:
         raise ConfigError("no SUT profile: pass --profile path/to/profile.yaml")
     profile = load_profile(options.profile)
-    catalogue, suite_name = load_catalogue(
+    catalogue, derived_name = load_catalogue(
         catalogue_target,
         profile,
         known_scorers=REGISTRY.keys(),
         known_invariants=set(INVARIANTS),
         filters=options.filters,
     )
+    suite_name = options.suite_label or derived_name
     # Built before the run: a destination that is not allowlisted is a configuration
     # error, and finding that out after a suite has something to publish is too late.
     sinks = build_sinks(settings)
@@ -263,6 +272,8 @@ async def launch(
         },
     )
     store.save_profile(run_id, profile)
+    if options.on_start is not None:
+        options.on_start(run_id)
 
     verdicts: list[TestVerdict] = []
     for scenario in catalogue.scenarios:

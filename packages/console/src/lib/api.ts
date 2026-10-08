@@ -38,7 +38,7 @@ export const api = {
   readiness: () => call<T.Readiness[]>("/readiness"),
   config: () => call<T.SettingRow[]>("/config"),
   rehearse: (scenarioId: string, transcript: T.Turn[]) => post<T.Rehearsal>("/simulator/rehearse", { scenarioId, transcript }),
-  startRun: (body: T.LaunchBody) => post<{ accepted: boolean; message: string }>("/runs", body),
+  startRun: (body: T.LaunchBody) => post<{ accepted: boolean; message: string; allowCommit: boolean }>("/runs", body),
   saveSuite: (body: T.SuiteBody) => call<T.Suite>("/suites", { method: "PUT", body: JSON.stringify(body) }),
   importScenarios: (family: string, files: { name: string; text: string }[]) =>
     post<{ imported: string[] }>("/scenarios/import", { family, files }),

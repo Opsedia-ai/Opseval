@@ -23,11 +23,13 @@ export default function Runs() {
                 <Table head={["Run", "Suite", "State", "Ship gate", "Results", "Passed", "Failed", "Not judged", "Flaky"]}>
                   {rows.map((r) => (
                     <tr key={r.id}>
-                      <td><Link to={`/runs/${r.id}`} className="font-mono text-[13px] font-medium underline">{r.id}</Link>
+                      <td>{r.state === "error" ? <span className="font-mono text-[13px]">{r.id}</span>
+                        : <Link to={`/runs/${r.id}`} className="font-mono text-[13px] font-medium underline">{r.id}</Link>}
                         <div className="text-xs">{r.startedAt ? new Date(r.startedAt).toLocaleString() : ""}</div></td>
                       <td className="text-ink">{r.suite}</td>
                       <td><StatePill state={r.state} /></td>
-                      <td>{r.state === "running" ? <NotMeasured text="in progress" /> : <GatePill gate={r.gate} />}</td>
+                      <td>{r.state === "running" ? <NotMeasured text="in progress" /> : <GatePill gate={r.gate} />}
+                        {r.reason && <div className="mt-1 max-w-md text-xs text-muted-ink">{r.reason}</div>}</td>
                       <td><ResultBar passed={r.passed} failed={r.failed} unjudged={r.unjudged} /></td>
                       <td><Mono>{r.passed}</Mono></td><td><Mono>{r.failed}</Mono></td><td><Mono>{r.unjudged}</Mono></td><td><Mono>{r.flaky}</Mono></td>
                     </tr>))}

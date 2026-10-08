@@ -1,11 +1,15 @@
 // Mirrors packages/opseval/src/opseval/server/schemas.py (camelCase on the wire).
 // The browser never recomputes aggregates (ADR-0004). null means "not measured", never 0.
 export type Area = "output" | "flow" | "tools" | "security" | "harness";
-export type Gate = "judged" | "not_judged" | "blocked";
+/** Mirrors the exit codes. harness_error is never the agent's fault. */
+export type Gate = "passed" | "failed" | "not_judged" | "harness_error";
+export type RunState = "running" | "finished" | "error";
 
 export interface RunSummary {
-  id: string; suite: string; startedAt: string | null; state: "running" | "finished"; gate: Gate;
+  id: string; suite: string; startedAt: string | null; state: RunState; gate: Gate;
   passed: number; failed: number; unjudged: number; flaky: number;
+  /** Why a run is in error or unjudged. Never a verdict about the agent. */
+  reason: string | null;
 }
 export interface Score {
   scorerId: string; axis: Area; status: "passed" | "failed" | "infra_error";
@@ -33,12 +37,13 @@ export interface Scenario {
 export interface Problem { path: string; field: string; message: string }
 export interface Catalogue { scenarios: Scenario[]; problems: Problem[] }
 export interface Suite { file: string; displayName: string; description: string; include: string[]; scenarioCount: number; repeats: number | null; stopAt: string | null }
+export interface SuiteBodyOut { accepted: boolean }
 export interface Readiness { id: string; label: string; ready: boolean; detail: string }
 export interface Check { id: string; question: string; area: Area; kind: "deterministic" | "judge"; reads: "chat" | "trace" | "frames" }
 export interface RunUsage { run: string; simulatorTokens: number | null; judgeTokens: number | null; costUsd: number | null }
 export interface TrendPoint { run: string; label: string; passRate: number | null }
 export interface SettingRow { key: string; value: string | null; redacted: boolean }
-export interface Health { status: string; version: string; reportsDir: string; catalogue: string | null; profile: string | null }
+export interface Health { status: string; version: string; reportsDir: string; catalogue: string | null; profile: string | null; allowCommit: boolean; catalogueWritable: boolean }
 export interface Change { testId: string; name: string; before: string; after: string }
 export interface AreaDelta { area: Area; before: number | null; after: number | null }
 export interface Comparison { baseline: string; candidate: string; regressed: Change[]; improved: Change[]; unjudged: Change[]; areas: AreaDelta[] }
@@ -49,5 +54,6 @@ export interface Persona {
 }
 export interface Turn { who: "customer" | "agent"; text: string }
 export interface Rehearsal { turn: Turn; goalReached: boolean; model: string | null }
-export interface LaunchBody { suite?: string; scenarios?: string[]; target?: string; repeats?: number; allowCommit?: boolean; failFast?: boolean }
-export interface SuiteBody { file: string; displayName: string; description: string; include: string[]; repeats?: number; stopAt?: string }
+/** No allowCommit: that is the server's, from `opseval serve --allow-commit` (ADR-0008). */
+export interface LaunchBody { suite?: string; scenarios?: string[]; target?: string; repeats?: number; failFast?: boolean }
+export interface SuiteBody { file: string; displayName: string; description: string; include: string[]; repeats?: number; stopAt?: string; overwrite?: boolean }

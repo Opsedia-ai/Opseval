@@ -192,7 +192,10 @@ def _match_filter(scenario: Scenario, flt: str) -> bool:
     if key == "tag":
         return value in scenario.tags
     if key == "id":
-        return scenario.id == value
+        # Comma-separated means "any of these". Filters are AND-ed, so without this
+        # there is no way to ask for a specific subset at all. An id cannot contain a
+        # comma (see the Scenario.id pattern), so this cannot change an existing match.
+        return scenario.id in {v.strip() for v in value.split(",")}
     if key == "criticality":
         return scenario.criticality.value == value
     raise ConfigError(f"unknown filter key {key!r}; use tag, id or criticality")

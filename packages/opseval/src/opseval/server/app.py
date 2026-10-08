@@ -3,21 +3,36 @@
 
 from __future__ import annotations
 
+import secrets
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse, Response
 
 from opseval import __version__
 from opseval.catalogue import load_profile
 from opseval.config import Settings
 from opseval.models.profile import SutProfile
+from opseval.plugins import load_scorers
 from opseval.server import actions, views
 from opseval.server import schemas as s
+from opseval.server.launches import LaunchBook
 from opseval.storage import FileStore
 
 API = "/api/v1"
+
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+"""The only Host values a local server answers to.
+
+Binding to loopback is **not** by itself protection: with DNS rebinding, a page on
+``evil.com`` that re-resolves to 127.0.0.1 is *same-origin* with itself, so no CORS check
+ever runs and the request reaches this server carrying ``Host: evil.com``. Checking the
+Host header is what refuses it. Without this, any page the operator visits could start
+runs against their agent and spend their LLM credit.
+"""
 
 
 def create_app(
@@ -26,15 +41,40 @@ def create_app(
     catalogue: Path | None = None,
     profile: str | Path | None = None,
     target: str | None = None,
+    allow_commit: bool = False,
+    token: str | None = None,
+    extra_hosts: tuple[str, ...] = (),
     dev_origins: tuple[str, ...] = ("http://127.0.0.1:5173", "http://localhost:5173"),
 ) -> FastAPI:
     settings = settings or Settings()
     store = FileStore(settings.reports_dir)
+    # Before any catalogue is read: a suite may name a plugin's scorer, and without this
+    # the console would report it as an unknown scorer while the CLI accepts it.
+    load_scorers()
     loaded: SutProfile | None = load_profile(profile) if profile else None
+    launches = LaunchBook()
     app = FastAPI(title="Opseval API", version=__version__)
     app.add_middleware(
         CORSMiddleware, allow_origins=list(dev_origins), allow_methods=["*"], allow_headers=["*"]
     )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[*LOOPBACK_HOSTS, *extra_hosts])
+
+    @app.middleware("http")
+    async def _require_token(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if token is not None and request.url.path.startswith(API):
+            header = request.headers.get("authorization", "")
+            offered = header[7:] if header.lower().startswith("bearer ") else ""
+            if not secrets.compare_digest(offered, token):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "code": "UNAUTHORIZED",
+                        "message": "send Authorization: Bearer <token>",
+                    },
+                )
+        return await call_next(request)
 
     @app.exception_handler(actions.ApiError)
     def _api_error(_: Request, exc: actions.ApiError) -> JSONResponse:
@@ -50,11 +90,13 @@ def create_app(
             reports_dir=str(store.root),
             catalogue=str(catalogue) if catalogue else None,
             profile=loaded.name if loaded else None,
+            allow_commit=allow_commit,
+            catalogue_writable=actions.is_writable(catalogue),
         )
 
     @app.get(f"{API}/runs")
     def runs() -> list[s.RunSummary]:
-        return views.list_runs(store)
+        return views.list_runs(store, launches)
 
     @app.get(API + "/runs/{run_id}")
     def run(run_id: str) -> s.RunDetail:
@@ -108,7 +150,16 @@ def create_app(
 
     @app.post(f"{API}/runs", status_code=202)
     async def start(body: s.LaunchIn) -> s.LaunchOut:
-        return actions.start_run(settings, catalogue, loaded, profile or "", target, body)
+        return actions.start_run(
+            settings,
+            catalogue,
+            loaded,
+            profile or "",
+            target,
+            body,
+            allow_commit=allow_commit,
+            launches=launches,
+        )
 
     @app.put(f"{API}/suites")
     def save_suite(body: s.SuiteIn) -> s.SuiteOut:

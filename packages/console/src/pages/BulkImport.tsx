@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Upload } from "lucide-react";
 import { api, ApiError } from "../lib/api";
+import { useApi } from "../lib/useApi";
 import type { Problem } from "../lib/types";
 import { Callout, Card, CoralButton, Explainer, Mono, Page, PageHeader } from "../components/ui";
 
@@ -12,6 +13,7 @@ export default function BulkImport() {
   const [problems, setProblems] = useState<Problem[]>([]);
   const [done, setDone] = useState<string[]>();
   const [busy, setBusy] = useState(false);
+  const health = useApi(api.health);
   const [fatal, setFatal] = useState<string>();
 
   const go = async () => {
@@ -31,8 +33,9 @@ export default function BulkImport() {
     <>
       <PageHeader title="Bulk import" sub={<Link to="/scenarios" className="text-ink underline">← Test cases</Link>} aside={<>
         <input value={family} onChange={(e) => setFamily(e.target.value)} aria-label="Family folder" className="rounded-full border border-ink/25 bg-white px-4 py-2 text-sm text-ink" />
-        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={!files.length || busy} onClick={() => void go()}>Import {files.length} file(s)</CoralButton></>} />
+        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={!files.length || busy || !health.data?.catalogueWritable} onClick={() => void go()}>Import {files.length} file(s)</CoralButton></>} />
       <Page>
+        {health.data && !health.data.catalogueWritable && <Callout><b>This catalogue is read-only.</b> The server is serving the bundled demo from inside the installed package. Restart it with <Mono>--catalogue</Mono> pointing at your own.</Callout>}
         <Explainer><b>Drop as many scenario files as you like.</b> Every one is validated before anything is written. The import is all-or-nothing, and a file that would replace an existing scenario is refused, never silently overwritten.</Explainer>
         <div onClick={() => input.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); setFiles([...e.dataTransfer.files]); }}
           className="flex cursor-pointer flex-col items-center gap-2 rounded-[28px] border-2 border-dashed border-line bg-soft px-6 py-14 text-center">

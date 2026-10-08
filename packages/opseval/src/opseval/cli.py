@@ -566,8 +566,19 @@ def serve(
         Optional[str],  # noqa: UP045
         typer.Option(help="Default agent target for runs started from the console."),
     ] = None,
+    allow_commit: Annotated[
+        bool,
+        typer.Option(
+            help="Let runs started here reach the irreversible outcome. The scenario "
+            "must also declare allow_commit (ADR-0008)."
+        ),
+    ] = False,
+    token: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(help="Require 'Authorization: Bearer <token>'. Needed off loopback."),
+    ] = None,
     host: Annotated[
-        str, typer.Option(help="Bind address. Loopback unless you add auth.")
+        str, typer.Option(help="Bind address. Off loopback a --token is required.")
     ] = "127.0.0.1",
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
 ) -> None:
@@ -580,14 +591,46 @@ def serve(
         typer.secho("the API needs the extra: pip install 'opseval[serve]'", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
     from opseval.demo import catalogue_dir
+    from opseval.server.app import LOOPBACK_HOSTS
 
+    if host in LOOPBACK_HOSTS:
+        # Loopback: the Host-header check is the control, refusing the DNS-rebinding
+        # trick where a page's own domain re-resolves to 127.0.0.1.
+        extra_hosts: tuple[str, ...] = ()
+    elif token is None:
+        # This API can start runs against a configured agent and spend LLM credit. On a
+        # real interface it is reachable by anything on the network, so refuse rather
+        # than print a warning somebody scrolls past.
+        typer.secho(
+            f"refusing to bind {host!r} without --token: this API has no other "
+            "authentication and can start runs against your agent",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(EXIT_HARNESS)
+    else:
+        # Bound to a real interface. Which Host values are legitimate cannot be derived
+        # (a wildcard bind answers to every name the machine has), so the token is the
+        # control here and the Host check steps aside rather than guessing.
+        extra_hosts = ("*",)
     root = catalogue or catalogue_dir()
     prof = profile or str(root / "profile.yaml")
     try:
-        api = create_app(settings=Settings(), catalogue=root, profile=prof, target=target)
+        api = create_app(
+            settings=Settings(),
+            catalogue=root,
+            profile=prof,
+            target=target,
+            allow_commit=allow_commit,
+            token=token,
+            extra_hosts=extra_hosts,
+        )
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
+    if catalogue is None:
+        typer.echo("serving the bundled demo catalogue (read-only). Use --catalogue to edit yours.")
+    typer.echo(f"API on http://{host}:{port}{'  (token required)' if token else ''}")
     uvicorn.run(api, host=host, port=port, log_level="info")
 
 
