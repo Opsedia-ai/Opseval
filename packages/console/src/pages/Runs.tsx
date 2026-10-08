@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { GitCompareArrows, Play } from "lucide-react";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
-import { Button, Card, CoralButton, Data, Explainer, GatePill, Mono, NotMeasured, Page, PageHeader, ResultBar, StatePill, Table } from "../components/ui";
+import { Button, Card, CoralButton, Count, Data, Explainer, GatePill, Mono, Page, PageHeader, ResultBar, StatePill, Table } from "../components/ui";
 
 export default function Runs() {
   const runs = useApi(api.runs, [], (r) => (r.some((x) => x.state === "running") ? 2500 : false));
@@ -15,7 +15,7 @@ export default function Runs() {
       <Page>
         <Data res={runs}>{(rows) => {
           return (<>
-            <Explainer><b>A run is one execution of a set of scenarios.</b> It either clears the ship gate or it does not. Runs that could not be judged are shown as such, never as failures.</Explainer>
+            <Explainer><b>A run is one execution of a set of scenarios.</b> Only a run where everything passed and was measured is <b>safe to release</b>. A passing gate with something failed, skipped or unmeasured is <b>passed with gaps</b>. Runs Opseval could not carry out are harness errors, never failures.</Explainer>
             <Card className="p-0 [&>div]:p-0">
               {rows.length === 0 ? (
                 <div className="p-10 text-center">No runs yet. <Link to="/runs/new" className="font-semibold">Start one</Link> or run <Mono>opseval demo</Mono>.</div>
@@ -27,9 +27,9 @@ export default function Runs() {
                         <div className="text-xs">{r.startedAt ? new Date(r.startedAt).toLocaleString() : ""}</div></td>
                       <td className="text-ink">{r.suite}</td>
                       <td><StatePill state={r.state} /></td>
-                      <td>{r.state === "running" ? <NotMeasured text="in progress" /> : <GatePill gate={r.gate} />}</td>
+                      <td title={r.error ?? undefined}><GatePill gate={r.gate} />{r.error && <div className="mt-1 max-w-64 truncate text-xs">{r.error}</div>}</td>
                       <td><ResultBar passed={r.passed} failed={r.failed} unjudged={r.unjudged} /></td>
-                      <td><Mono>{r.passed}</Mono></td><td><Mono>{r.failed}</Mono></td><td><Mono>{r.unjudged}</Mono></td><td><Mono>{r.flaky}</Mono></td>
+                      <td><Count n={r.passed} /></td><td><Count n={r.failed} /></td><td><Count n={r.unjudged} /></td><td><Count n={r.flaky} /></td>
                     </tr>))}
                 </Table>)}
             </Card></>);

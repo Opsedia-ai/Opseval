@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test check audit demo schemas console console-check
+.PHONY: install lint typecheck test check audit demo schemas status console console-check
 
 # Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
 ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
@@ -18,7 +18,7 @@ typecheck:
 test:
 	uv run pytest --cov=opseval --cov=pytest_opseval --cov-report=term-missing --cov-fail-under=85
 
-check: lint typecheck test schemas
+check: lint typecheck test schemas status
 
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
@@ -38,6 +38,10 @@ demo:
 # file the loader rejects.
 schemas:
 	uv run opseval schemas --check
+
+# docs/STATUS.md: the completion percentages are computed from its table, never typed.
+status:
+	uv run python scripts/project_status.py --check
 
 # The web console (needs Node 20+). `npm ci` once, then these.
 console-check:

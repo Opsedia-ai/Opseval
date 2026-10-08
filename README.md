@@ -392,9 +392,14 @@ claims independence it has not verified. See
 
 ```bash
 pip install 'opseval[serve]'                        # or: uv sync
-opseval serve --target ws://127.0.0.1:8765          # API on http://127.0.0.1:8000
-cd packages/console && npm ci && npm run dev        # console on http://127.0.0.1:5173
+opseval serve --catalogue ./my-catalogue --target ws://127.0.0.1:8765
+#   Opseval API on http://127.0.0.1:8000/api/v1
+#   Console:  http://localhost:5173/#token=…          <- open this link
+cd packages/console && npm ci && npm run dev        # console on http://localhost:5173
 ```
+
+Without `--catalogue` it serves the built-in demo, read-only. Open the console from the printed
+link: it carries the token every API request needs.
 
 It reads the run folders you already have — browse runs and their per-check scores, compare two
 runs, watch the trend, see token usage, edit suites, bulk-import scenarios, and start a run.
@@ -412,8 +417,14 @@ Two rules shape what is in there:
 - **No control without a backend.** Anything the server cannot actually do is absent rather than
   stubbed, and the browser computes no aggregate of its own.
 
-> **The API has no authentication yet.** It binds to loopback, and it can start runs against your
-> configured agent. Do not expose it. Accounts and API keys are v0.5.
+> **The API is for you, on this machine.** It can start runs with your agent token and LLM keys, so
+> it binds to loopback only (anything else is refused), answers only loopback host names (a web
+> page cannot reach it by DNS rebinding), refuses cross-site writes, and requires a bearer token
+> on every request. The token is random per start unless you set `OPSEVAL_SERVE_TOKEN`. To use it
+> from another machine, use an SSH tunnel. Runs started from the console can perform the
+> irreversible outcome only if the server was started with `--allow-commit` **and** the scenario
+> says `allow_commit: true`. A run that cannot be carried out shows as a harness error with the
+> reason, never as a failure and never as silence ([ADR-0031](docs/adr/0031-securing-the-console-api.md)).
 
 Not built yet: conversation transcripts in run detail, live per-scenario progress, and a scenario
 editor (bulk import is there). See [ADR-0029](docs/adr/0029-console-api.md).

@@ -1,6 +1,6 @@
 # ADR-0029: The console API, and what the browser is not allowed to do
 
-- **Status:** Proposed
+- **Status:** Proposed — security and run outcomes revised by [ADR-0031](0031-securing-the-console-api.md)
 - **Date:** 2026-10-08
 - **Deciders:** Opseval maintainers
 - **Revises:** ADR-0004 (library choices and the dev-time origin; its contract still holds)

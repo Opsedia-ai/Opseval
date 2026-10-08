@@ -8,6 +8,8 @@ const lab = "text-xs font-semibold uppercase tracking-[0.08em]";
 
 export default function Suites() {
   const suites = useApi(api.suites);
+  const health = useApi(api.health);
+  const readOnly = health.data?.readOnly === true;
   const catalogue = useApi(api.scenarios);
   const [sel, setSel] = useState("");
   const [file, setFile] = useState("");
@@ -29,7 +31,10 @@ export default function Suites() {
   const yaml = useMemo(() => [`name: ${name}`, `description: ${desc}`, "include:", ...picked.map((f) => `  - ${f}`), ...(repeats === "" ? [] : ["overrides:", `  execution.repeats: ${repeats}`])].join("\n"), [name, desc, picked, repeats]);
   const save = async () => {
     try {
-      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? undefined : repeats });
+      // Saving over the suite that is open in the editor is an edit; any other existing name is refused.
+      // An empty repeats box clears the override (null); stop_at and every key this form does
+      // not manage are left out, so the server keeps them as they are in the file.
+      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? null : repeats, overwrite: file === sel });
       setMsg({ ok: true, text: `Saved. Resolves to ${s.scenarioCount} scenario(s).` }); suites.reload();
     } catch (e) { setMsg({ ok: false, text: (e as ApiError).message }); }
   };
@@ -42,9 +47,11 @@ export default function Suites() {
       <PageHeader title="Suites" sub="Named sets of scenarios plus the settings to run them with." aside={<>
         <select value={sel} onChange={(e) => setSel(e.target.value)} className="rounded-full border border-ink/25 bg-white px-4 py-2 text-sm text-ink">
           {suites.data?.map((s) => <option key={s.file} value={s.file}>{s.displayName} ({s.scenarioCount})</option>)}</select>
-        <CoralButton className="bg-ink text-white hover:bg-ink-deep" onClick={() => void save()}>Save suite</CoralButton></>} />
+        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={readOnly} onClick={() => void save()}>Save suite</CoralButton></>} />
       <Page>
         <Explainer><b>A suite selects cases by pattern,</b> then applies settings. It is YAML today; here it is a form and the YAML is generated. Saving validates it against your catalogue first.</Explainer>
+        {readOnly && <Callout><b>This is the built-in demo catalogue, which is read-only.</b> Create your own with <Mono>opseval init ./my-catalogue</Mono> and start <Mono>opseval serve --catalogue ./my-catalogue</Mono> to edit suites.</Callout>}
+        {suites.data?.filter((x) => x.problem).map((x) => <Callout key={x.file} tone="warn"><b>{x.file}.yaml could not be read:</b> {x.problem}</Callout>)}
         <Data res={suites}>{() => (
           <div className="grid gap-5 lg:grid-cols-[3fr_2fr]">
             <div className="space-y-5">
