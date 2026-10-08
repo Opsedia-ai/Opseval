@@ -95,13 +95,41 @@ def plan(store: FileStore, *, older_than_days: int, now: datetime | None = None)
     return sorted(items, key=lambda i: (i.started_at or epoch, i.run_id))
 
 
-def apply(store: FileStore, items: list[PruneItem]) -> list[str]:
-    """Delete the folders the plan marked ``delete``. Returns the run ids deleted.
+@dataclass(frozen=True)
+class PruneOutcome:
+    deleted: list[str]
+    failed: list[tuple[str, str]]
+    """Runs that could not be (fully) removed, with why."""
+
+
+def _remove_run(folder: Path) -> None:
+    """Delete one run folder in an order that is safe to stop at any point.
+
+    Everything else goes first, then the manifest, then the result or error file. If it
+    stops part-way, the folder still reads as a finished run, or no longer as a run at
+    all; never as one that is still going.
+    """
+    markers = ("manifest.json", "result.json", "error.json")
+    for child in folder.iterdir():
+        if child.name in markers:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    for name in markers:
+        (folder / name).unlink(missing_ok=True)
+    folder.rmdir()
+
+
+def apply(store: FileStore, items: list[PruneItem]) -> PruneOutcome:
+    """Delete the folders the plan marked ``delete``, carrying on past any that fail.
 
     Each folder is checked again just before it goes, so a plan cannot delete something
     that changed under it (a run that started writing, a folder replaced by a link).
     """
     deleted: list[str] = []
+    failed: list[tuple[str, str]] = []
     root = store.root.resolve()
     for item in items:
         if item.action != "delete":
@@ -111,9 +139,13 @@ def apply(store: FileStore, items: list[PruneItem]) -> list[str]:
             continue
         if _ended(store, folder) is None:
             continue
-        shutil.rmtree(folder)
+        try:
+            _remove_run(folder)
+        except OSError as exc:
+            failed.append((item.run_id, f"{type(exc).__name__}: {exc}"))
+            continue
         deleted.append(item.run_id)
-    return deleted
+    return PruneOutcome(deleted=deleted, failed=failed)
 
 
-__all__ = ["PruneItem", "apply", "plan"]
+__all__ = ["PruneItem", "PruneOutcome", "apply", "plan"]

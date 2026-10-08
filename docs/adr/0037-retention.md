@@ -31,6 +31,11 @@ runs that may be in flight, possibly started by another process or another host.
   listed and not touched.
 - **Each folder is checked again just before it is deleted**, so a plan cannot delete
   something that changed under it.
+- **A folder is deleted in an order that is safe to stop at.** Its contents go first, then
+  `manifest.json`, then the result or error file. If deletion stops part-way (a file owned by
+  another user, for example), the folder still reads as a run that ended, or no longer as a run
+  at all; never as one still going. Prune carries on with the other runs, lists what it could
+  not delete and why, and exits 3.
 
 ## Consequences
 

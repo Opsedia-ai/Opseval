@@ -273,7 +273,8 @@ def prune(
     """Delete finished runs older than N days (a dry run unless you pass --yes).
 
     A run that may still be going is never deleted: only one with a result, an error, or a
-    process on this host that is gone. Nothing but run folders is touched.
+    process on this host that is gone. Nothing but run folders is touched. Exit 3 if any
+    run could not be fully deleted (the others still are, and both are listed).
     """
     from opseval.retention import apply
     from opseval.retention import plan as plan_prune
@@ -294,8 +295,17 @@ def prune(
     if not yes:
         typer.echo(f"{len(doomed)} run(s) would be deleted. Re-run with --yes to delete them.")
         return
-    deleted = apply(store, items)
-    typer.echo(f"Deleted {len(deleted)} run(s) from {root}.")
+    outcome = apply(store, items)
+    typer.echo(f"Deleted {len(outcome.deleted)} run(s) from {root}.")
+    for run_id, why in outcome.failed:
+        typer.secho(f"  could not delete {run_id}: {why}", fg="red", err=True)
+    if outcome.failed:
+        typer.secho(
+            f"{len(outcome.failed)} run(s) could not be fully deleted; remove them by hand.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(EXIT_HARNESS)
 
 
 @app.command()

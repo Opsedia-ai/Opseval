@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -121,8 +122,9 @@ class TestThePlan:
 class TestDeleting:
     def test_it_deletes_exactly_what_the_plan_marked(self, reports: Path) -> None:
         store = FileStore(reports)
-        deleted = apply(store, plan(store, older_than_days=90, now=NOW))
-        assert sorted(deleted) == ["old-error", "old-finished", "old-interrupted"]
+        outcome = apply(store, plan(store, older_than_days=90, now=NOW))
+        assert sorted(outcome.deleted) == ["old-error", "old-finished", "old-interrupted"]
+        assert outcome.failed == []
         left = sorted(p.name for p in reports.iterdir())
         assert left == [
             "README.txt",
@@ -149,8 +151,31 @@ class TestDeleting:
         store = FileStore(reports)
         items = plan(store, older_than_days=90, now=NOW)
         (reports / "old-finished" / "result.json").unlink()  # say, a re-run started writing
-        deleted = apply(store, items)
-        assert "old-finished" not in deleted and (reports / "old-finished").is_dir()
+        outcome = apply(store, items)
+        assert "old-finished" not in outcome.deleted and (reports / "old-finished").is_dir()
+
+    def test_one_folder_that_cannot_go_does_not_stop_the_rest(
+        self, reports: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file another user wrote (a container running as root): report it, carry on,
+        and never leave the run looking as if it were still going."""
+        real = shutil.rmtree
+
+        def stubborn(path: object, *args: object, **kwargs: object) -> None:
+            if "old-error" in str(path):
+                raise PermissionError(13, "Permission denied", str(path))
+            real(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("opseval.retention.shutil.rmtree", stubborn)
+        store = FileStore(reports)
+        outcome = apply(store, plan(store, older_than_days=90, now=NOW))
+        assert sorted(outcome.deleted) == ["old-finished", "old-interrupted"]
+        assert [run for run, _ in outcome.failed] == ["old-error"]
+        assert "Permission denied" in outcome.failed[0][1]
+        left = reports / "old-error"
+        assert (left / "manifest.json").is_file() and (left / "error.json").is_file(), (
+            "stopped before its markers: it still reads as a run that ended"
+        )
 
 
 class TestCommand:
@@ -170,6 +195,19 @@ class TestCommand:
         assert "Deleted" in res.output
         assert not (reports / "old-finished").exists()
         assert (reports / "old-running-here").is_dir()
+
+    def test_a_failure_is_listed_and_exits_3(
+        self, reports: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def denied(path: object, *args: object, **kwargs: object) -> None:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr("opseval.retention.shutil.rmtree", denied)
+        res = self.runner.invoke(
+            app, ["prune", "--reports-dir", str(reports), "--older-than", "1", "--yes"]
+        )
+        assert res.exit_code == 3
+        assert "could not delete" in res.output and "remove them by hand" in res.output
 
     def test_nothing_old_enough_says_so(self, tmp_path: Path) -> None:
         root = tmp_path / "r"
