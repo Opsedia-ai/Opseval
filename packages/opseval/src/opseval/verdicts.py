@@ -127,27 +127,29 @@ def skipped(scenario: Scenario, status: VerdictStatus, reason: str) -> TestVerdi
     )
 
 
-def release_gate(tests: list[TestVerdict], *, fail_on_flaky: bool = False) -> Gate:
+def release_gate(
+    tests: list[TestVerdict], *, fail_on_flaky: bool = False, load_errors: int = 0
+) -> Gate:
     """Pass only if something was judged and nothing that gates the release failed.
 
-    A skip is a warning for a normal scenario. A skipped critical scenario is an
-    unmeasured critical scenario, and a suite where nothing was judged has proven nothing:
-    both block, or the gate would say "Safe to release" about coverage it does not have
-    (ADR-0029). A ``blocked`` scenario was quarantined on purpose and stays a warning.
+    Skips stay warnings: a skip can be a dependency outage or the operator's own choice
+    (the commit guard), and the gate cannot tell them apart yet. But a suite where nothing
+    was judged has proven nothing, so it blocks, even if every scenario was quarantined.
+    And "Safe to release" is said only when everything passed, was measured and loaded;
+    a passing gate with gaps names them instead (ADR-0029).
     """
     declared = any(t.criticality is not Criticality.NORMAL for t in tests)
     blocking, warnings = [], []
     for t in tests:
-        gating = t.criticality in (Criticality.BLOCKER, Criticality.CRITICAL) or not declared
         if t.status is VerdictStatus.INCONCLUSIVE:
             blocking.append(f"{t.test_id}: inconclusive")
         elif t.status is VerdictStatus.FAILED:
-            if gating:
+            if not declared:
+                blocking.append(f"{t.test_id}: failed (no criticality declared)")
+            elif t.criticality in (Criticality.BLOCKER, Criticality.CRITICAL):
                 blocking.append(f"{t.test_id}: failed ({t.criticality.value})")
             else:
                 warnings.append(f"{t.test_id}: failed (normal)")
-        elif t.status is VerdictStatus.SKIPPED_PRECONDITION and gating:
-            blocking.append(f"{t.test_id}: skipped_precondition ({t.criticality.value})")
         elif t.status in (VerdictStatus.SKIPPED_PRECONDITION, VerdictStatus.BLOCKED):
             warnings.append(f"{t.test_id}: {t.status.value}")
         if t.flaky and fail_on_flaky:
@@ -161,9 +163,12 @@ def release_gate(tests: list[TestVerdict], *, fail_on_flaky: bool = False) -> Ga
         blocking.append("no scenario was judged")
     status = "block" if blocking else "pass"
     passed = sum(1 for t in tests if t.status is VerdictStatus.PASSED)
-    # "Safe to release" only when everything passed: a passing gate with a normal failure or
-    # a skip is honest, but it is not the same sentence (ADR-0029).
     gaps = [f"{t.test_id}: {t.status.value}" for t in tests if t.status is not VerdictStatus.PASSED]
+    unmeasured = sorted({sid for t in tests for sid in t.unmeasured_scorers})
+    if unmeasured:
+        gaps.append("not measured: " + ", ".join(unmeasured))
+    if load_errors:
+        gaps.append(f"{load_errors} scenario file(s) could not be loaded")
     if blocking:
         verdict = "Release is BLOCKED by: " + "; ".join(blocking) + "."
     elif gaps:

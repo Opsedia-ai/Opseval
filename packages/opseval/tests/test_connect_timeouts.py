@@ -112,3 +112,27 @@ async def test_connect_timeout_invalidates_the_attempt(profile: SutProfile) -> N
     ).run()
     assert rec.terminal_state.is_infra, rec.terminal_state
     assert attempt_verdict(rec, [], "a0.json").passed is None
+
+
+async def test_sse_connect_limit_fires_before_the_turn_deadline() -> None:
+    """SSE wraps the turn in asyncio.timeout(turn). A mocked ConnectTimeout is raised at
+    once, so it cannot show which fires first on a real hang; the limits httpx is given
+    can. Connect and pool must be shorter than the turn, or the outer deadline wins and
+    a host that never accepts the connection is blamed on the agent."""
+    seen: dict[str, float] = {}
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen.update(request.extensions["timeout"])
+        raise httpx.ConnectTimeout("never accepted", request=request)
+
+    session = await SseTransport(
+        "https://agent.example.com/sse",
+        sse_profile(),
+        client_factory=client(capture),
+        request_timeout=30.0,
+    ).connect()
+    with pytest.raises(HarnessError):
+        await session.send(first_frame("sse"))
+    await session.close()
+    assert seen["connect"] < 30.0 and seen["pool"] < 30.0
+    assert seen["read"] == 30.0  # the agent still gets the full turn to answer

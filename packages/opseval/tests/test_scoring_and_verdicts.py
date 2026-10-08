@@ -382,16 +382,32 @@ class TestVerdicts:
         assert "No blocking issues, but not everything passed" in gate.summary
         assert "t-failed-normal: failed" in gate.summary
 
-    def test_skipped_critical_scenario_blocks_but_normal_skip_warns(self) -> None:
+    def test_a_skip_is_a_named_gap_not_a_block(self) -> None:
+        """A skip may be the operator's choice (the commit guard), not an outage, and the
+        gate cannot tell them apart yet: blocking would push teams to --allow-commit."""
         P, S = VerdictStatus.PASSED, VerdictStatus.SKIPPED_PRECONDITION
         gate = release_gate([self.tv(P, Criticality.CRITICAL), self.tv(S, Criticality.BLOCKER)])
-        assert gate.status == "block"
-        assert any("skipped_precondition (blocker)" in b for b in gate.blocking)
-        gate = release_gate([self.tv(P, Criticality.CRITICAL), self.tv(S)])
-        assert gate.status == "pass" and any("skipped_precondition" in w for w in gate.warnings)
-        # A deliberately quarantined critical scenario is a warning, not a block.
-        gate = release_gate([self.tv(P), self.tv(VerdictStatus.BLOCKED, Criticality.CRITICAL)])
         assert gate.status == "pass"
+        assert any("skipped_precondition" in w for w in gate.warnings)
+        assert "Safe to release" not in gate.summary
+        assert "t-skipped_precondition-blocker: skipped_precondition" in gate.summary
+
+    def test_unmeasured_checks_and_load_errors_are_gaps(self) -> None:
+        unmeasured = AttemptVerdict(
+            attempt_index=0,
+            passed=True,
+            terminal_state=TerminalState.GOAL_REACHED,
+            scores=[score("security.x", ScoreStatus.INFRA_ERROR, Axis.SECURITY)],
+            record_path="a0.json",
+        )
+        gate = release_gate([self.tv(VerdictStatus.PASSED, attempts=[unmeasured])])
+        assert gate.status == "pass" and "not measured: security.x" in gate.summary
+        gate = release_gate([self.tv(VerdictStatus.PASSED)], load_errors=2)
+        assert gate.status == "pass" and "2 scenario file(s) could not be loaded" in gate.summary
+
+    def test_undeclared_criticality_is_named_when_it_blocks(self) -> None:
+        gate = release_gate([self.tv(VerdictStatus.FAILED)])
+        assert gate.blocking == ["t-failed-normal: failed (no criticality declared)"]
 
     def test_exit_codes(self) -> None:
         P, F, I = VerdictStatus.PASSED, VerdictStatus.FAILED, VerdictStatus.INCONCLUSIVE  # noqa: E741

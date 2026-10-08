@@ -131,9 +131,16 @@ class TestAggregation:
 class TestEveryOutputNamesThem:
     def test_markdown_summary(self) -> None:
         md = markdown_summary(PASSING_WITHOUT_SECURITY)
-        assert "Safe to release" in md  # the case that matters: a green summary
+        # Exit 0 and a passing gate, but a check is missing: the headline is not green.
+        assert "🟡 **No blocking issues, not everything passed**" in md
+        assert "🟢" not in md
         assert "Not measured" in md and SECURITY in md
-        assert "Not measured" not in markdown_summary(CLEAN)
+        clean = markdown_summary(CLEAN)
+        assert "🟢 **Safe to release**" in clean and "Not measured" not in clean
+
+    def test_safe_to_release_requires_every_check_measured(self) -> None:
+        assert CLEAN.safe_to_release
+        assert not PASSING_WITHOUT_SECURITY.safe_to_release
 
     def test_junit(self) -> None:
         root = ET.fromstring(render_junit(PASSING_WITHOUT_SECURITY))  # nosec B314 - our output
@@ -154,4 +161,5 @@ class TestEveryOutputNamesThem:
         out = render_html(PASSING_WITHOUT_SECURITY, [])
         assert "Not measured" in out and SECURITY in out
         assert out.index("Not measured") < out.index("<h2>Scenarios</h2>")
+        assert "RELEASE: PASS WITH GAPS" in out and 'class="card gate gaps"' in out
         assert '<h3 class="inconclusive">Not measured' not in render_html(CLEAN, [])

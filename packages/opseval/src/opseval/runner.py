@@ -336,7 +336,9 @@ async def launch(
             log("fail-fast: stopping after the first failed scenario")
             break
 
-    gate = release_gate(verdicts, fail_on_flaky=settings.gate_fail_on_flaky)
+    gate = release_gate(
+        verdicts, fail_on_flaky=settings.gate_fail_on_flaky, load_errors=len(catalogue.problems)
+    )
     result = SuiteResult(
         opseval_version=__version__,
         run_id=run_id,

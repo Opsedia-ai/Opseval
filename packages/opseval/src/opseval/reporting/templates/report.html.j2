@@ -14,7 +14,7 @@ font:15px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans","Noto Sans Arabic",
 main{max-width:1080px;margin:0 auto;padding:24px 16px 64px}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:18px;margin:32px 0 8px}h3{font-size:15px;margin:16px 0 6px}
 .muted{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0}
-.gate{border-width:2px}.gate.pass{border-color:var(--pass)}.gate.block{border-color:var(--fail)}
+.gate{border-width:2px}.gate.pass{border-color:var(--pass)}.gate.block{border-color:var(--fail)}.gate.gaps{border-color:var(--warn)}
 .badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;background:var(--chip)}
 .passed{color:var(--pass)}.failed{color:var(--fail)}.inconclusive,.infra_error,.skipped_precondition,.blocked{color:var(--warn)}
 table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:start;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -38,10 +38,10 @@ details{margin:6px 0}summary{cursor:pointer}
 {% if result.rescore.reused_judge_scores %}<p class="muted" style="margin:4px 0 0">{{ result.rescore.reused_judge_scores }} judge score(s) reused from the original run (same prompt, no judge configured).</p>{% endif %}
 </div>
 {% endif %}
-<div class="card gate {{ result.gate.status }}">
-  {% if result.gate.status != 'pass' %}{% set badge, label = 'failed', 'RELEASE: BLOCKED' %}
-  {% elif result.exit_code == 0 %}{% set badge, label = 'passed', 'RELEASE: PASS' %}
-  {% else %}{% set badge, label = 'inconclusive', 'RELEASE: PASS WITH GAPS' %}{% endif %}
+{% if result.gate.status != 'pass' %}{% set card, badge, label = 'block', 'failed', 'RELEASE: BLOCKED' %}
+{% elif result.safe_to_release %}{% set card, badge, label = 'pass', 'passed', 'RELEASE: PASS' %}
+{% else %}{% set card, badge, label = 'gaps', 'inconclusive', 'RELEASE: PASS WITH GAPS' %}{% endif %}
+<div class="card gate {{ card }}">
   <div><span class="badge {{ badge }}">{{ label }}</span>
   <span class="muted">exit code {{ result.exit_code }}</span></div>
   <p style="margin:8px 0 0">{{ result.gate.summary }}</p>

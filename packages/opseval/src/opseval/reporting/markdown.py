@@ -48,10 +48,10 @@ def _rate(value: float | None) -> str:
 def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> str:
     if result.gate.status != "pass":
         head = "🔴 **Release blocked**"
-    elif result.exit_code == 0:
+    elif result.safe_to_release:
         head = "🟢 **Safe to release**"
     else:
-        # The gate passed but something was not judged or a normal scenario failed.
+        # The gate passed, but something failed, was skipped, unmeasured or not loaded.
         head = "🟡 **No blocking issues, not everything passed**"
     exit_note = EXIT_MEANING.get(result.exit_code, "unknown")
     lines = [

@@ -250,3 +250,12 @@ class SuiteResult(BaseModel):
     def unmeasured_scorers(self) -> list[str]:
         """Every agent-facing scorer left out of a judged attempt by an ``infra_error``."""
         return sorted({sid for t in self.tests for sid in t.unmeasured_scorers})
+
+    @property
+    def safe_to_release(self) -> bool:
+        """The one condition under which an output may say "Safe to release" (ADR-0029).
+
+        The gate passed, every scenario passed (exit 0, so nothing failed, was skipped or
+        failed to load), and every agent-facing check produced a score.
+        """
+        return self.gate.status == "pass" and self.exit_code == 0 and not self.unmeasured_scorers
