@@ -23,6 +23,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
+from opseval.errors import ConfigError
 from opseval.models.profile import SutProfile
 from opseval.models.progress import RunProgress
 from opseval.models.record import RunRecord
@@ -37,6 +40,13 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _first_error(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        first = exc.errors()[0]
+        return str(first.get("msg", exc))
+    return f"{type(exc).__name__}: {exc}"
 
 
 class FileStore:
@@ -95,16 +105,28 @@ class FileStore:
         return path
 
     def load_snapshot(self, run_id: str) -> tuple[SutProfile, dict[str, Scenario]] | None:
-        """The profile and scenarios exactly as run, or ``None`` for runs without one."""
+        """The profile and scenarios exactly as run, or ``None`` for runs without one.
+
+        Raises :class:`ConfigError` when the snapshot no longer loads: a rule added since the
+        run (say, a profile check) can reject what was valid then. That is not a crash, and
+        the run can still be scored against current files.
+        """
         folder = self.run_dir(run_id)
         profile_path = folder / "profile.json"
         if not profile_path.is_file():
             return None
-        profile = SutProfile.model_validate_json(profile_path.read_text("utf-8"))
-        scenarios = [
-            Scenario.model_validate_json(p.read_text("utf-8"))
-            for p in (folder / "scenarios").glob("*.json")
-        ]
+        current = profile_path
+        try:
+            profile = SutProfile.model_validate_json(profile_path.read_text("utf-8"))
+            scenarios = []
+            for current in sorted((folder / "scenarios").glob("*.json")):
+                scenarios.append(Scenario.model_validate_json(current.read_text("utf-8")))
+        except (OSError, ValidationError) as exc:
+            raise ConfigError(
+                f"the scenarios and profile saved with run {run_id!r} no longer load "
+                f"({current.name}: {_first_error(exc)}); pass --catalogue and --profile to "
+                "score it against the current files"
+            ) from exc
         return profile, {s.id: s for s in scenarios}
 
     def load_result(self, run_id: str) -> SuiteResult:

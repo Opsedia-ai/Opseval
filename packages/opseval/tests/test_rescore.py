@@ -138,6 +138,27 @@ class TestRescore:
         assert (VerdictStatus.PASSED, VerdictStatus.FAILED) in moved
         assert outcome.result.exit_code == 1
 
+    async def test_a_snapshot_a_newer_rule_rejects_is_not_a_crash(
+        self, cat_dir: Path, tmp_path: Path
+    ) -> None:
+        """A run saved before a rule was added (here: committed_outcome needs a commit_gate)
+        is a configuration error naming the way out, and that way out works."""
+        run = await demo_run(cat_dir, tmp_path)
+        saved = json.loads((run / "profile.json").read_text("utf-8"))
+        saved["commit_gate"] = None
+        (run / "profile.json").write_text(json.dumps(saved), encoding="utf-8")
+
+        with pytest.raises(ConfigError, match="no longer load.*--catalogue and --profile"):
+            await rescore_run(run, settings_for(tmp_path))
+        outcome = await rescore_run(
+            run,
+            settings_for(tmp_path),
+            catalogue=cat_dir / "suites" / "smoke.yaml",
+            profile=cat_dir / "profile.yaml",
+        )
+        assert outcome.info.scenario_source == "catalogue"
+        assert outcome.result.exit_code == 0
+
     async def test_bad_inputs_are_configuration_errors(self, cat_dir: Path, tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="not a finished run"):
             await rescore_run(tmp_path, settings_for(tmp_path))
