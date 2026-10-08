@@ -742,6 +742,18 @@
         "criticality": {
           "$ref": "#/$defs/Criticality"
         },
+        "cut_short_of": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cut Short Of"
+        },
         "flaky": {
           "default": false,
           "title": "Flaky",

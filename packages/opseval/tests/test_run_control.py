@@ -30,6 +30,7 @@ from opseval.models.stop import StopPolicy
 from opseval.reporting import console_summary
 from opseval.reporting.junit import render_junit
 from opseval.reporting.markdown import markdown_summary
+from opseval.rescore import rescore_run
 from opseval.runner import RunOptions, _RunControl, launch
 from opseval.storage import FileStore
 from opseval.verdicts import EXIT_FAIL, EXIT_NOT_JUDGED
@@ -280,6 +281,74 @@ class TestCancel:
         )
         assert kinds(result)["rf-001"] == (F, None)
         assert result.exit_code == EXIT_FAIL
+
+
+class TestCutShort:
+    """A scenario a cancel interrupts: never a pass from part of its repeats, and never a
+    certain failure hidden as "not run"."""
+
+    @pytest.fixture
+    def cancel_after_first_attempt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real = FileStore.save_record
+
+        def cancel(self: FileStore, record: Any) -> Path:
+            path = real(self, record)
+            self.request_cancel(record.run_id, by="test")
+            return path
+
+        monkeypatch.setattr(FileStore, "save_record", cancel)
+
+    def threshold(self, suite: Path, scenario_id: str, value: float) -> None:
+        for path in (suite.parent.parent / "scenarios").glob("*.yaml"):
+            data = yaml.safe_load(path.read_text("utf-8"))
+            if data["id"] == scenario_id:
+                data.setdefault("execution", {})["consistency_threshold"] = value
+                path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+    @pytest.mark.usefixtures("cancel_after_first_attempt")
+    async def test_a_failure_that_no_remaining_attempt_could_undo_is_reported(
+        self, tmp_path: Path, cat_dir: Path
+    ) -> None:
+        """Default threshold 1.0: one failed attempt fails the scenario whatever follows."""
+        suite = suite_with(tmp_path, cat_dir, None)
+        result = await run(tmp_path, suite, bug="skip-approval", repeats=3, run_id="r-cf")
+        first = result.tests[0]
+        assert first.status is F and first.cut_short_of == 3
+        assert first.reason is not None and "already failed" in first.reason
+        assert len(first.attempts) == 1
+        assert result.exit_code == EXIT_FAIL, "a cancel never turns a failure into exit 2"
+
+        rescored = await rescore_run(tmp_path / "reports" / "r-cf", settings_for(tmp_path))
+        again = rescored.result.tests[0]
+        assert (again.status, again.cut_short_of) == (F, 3)
+        assert rescored.result.stopped == result.stopped, "a re-score keeps why it stopped"
+
+    @pytest.mark.usefixtures("cancel_after_first_attempt")
+    async def test_a_failure_the_rest_could_have_outweighed_is_not_decided(
+        self, tmp_path: Path, cat_dir: Path
+    ) -> None:
+        """Threshold 0.5: 1 failure, 2 attempts not run, so a pass was still possible."""
+        suite = suite_with(tmp_path, cat_dir, None)
+        self.threshold(suite, "rf-001", 0.5)
+        result = await run(tmp_path, suite, bug="skip-approval", repeats=3, run_id="r-cs")
+        first = result.tests[0]
+        assert (first.status, first.skip_kind, first.cut_short_of) == (S, "cancelled", 3)
+        assert first.reason is not None and "1 failed: not enough to decide" in first.reason
+        assert len(first.attempts) == 1, "the attempt that ran stays on the verdict"
+        assert first.pass_rate is None
+
+        rescored = await rescore_run(tmp_path / "reports" / "r-cs", settings_for(tmp_path))
+        assert rescored.result.tests[0].status is S, "a re-score cannot pass it either"
+
+
+async def test_a_policy_that_fires_on_the_last_scenario_did_not_stop_the_run(
+    tmp_path: Path, cat_dir: Path
+) -> None:
+    suite = suite_with(tmp_path, cat_dir, {"stop_on_critical_failure": True})
+    result = await run(tmp_path, suite, bug="skip-approval", only_ids=["rf-001"])
+    assert kinds(result) == {"rf-001": (F, None)}
+    assert result.stopped is None, "nothing was left out"
+    assert "Stopped early" not in console_summary(result)
 
 
 class TestCancelCommand:

@@ -110,6 +110,42 @@ def fold_attempts(scenario: Scenario, attempts: list[AttemptVerdict]) -> TestVer
     )
 
 
+def fold_cut_short(scenario: Scenario, attempts: list[AttemptVerdict]) -> TestVerdict:
+    """The verdict for a scenario a cancel interrupted (ADR-0035).
+
+    A verdict from some of the repeats would claim a pass rate nobody measured, so the
+    scenario is skipped as cancelled. Unless it has already failed for certain: if it would
+    fail even had every attempt it did not run passed, that is a real agent failure, and it
+    is reported as one rather than hidden as "not run".
+    """
+    planned = scenario.execution.repeats
+    valid = [a for a in attempts if a.passed is not None]
+    passed = sum(1 for a in valid if a.passed)
+    remaining = planned - len(attempts)
+    best = (passed + remaining) / (len(valid) + remaining) if valid or remaining else 0.0
+    failed = len(valid) - passed
+    if failed and best < scenario.execution.consistency_threshold:
+        folded = fold_attempts(scenario, attempts)
+        checks = folded.reason if folded.status is VerdictStatus.FAILED else None
+        return folded.model_copy(
+            update={
+                "cut_short_of": planned,
+                "status": VerdictStatus.FAILED,
+                "reason": f"cancelled after {len(attempts)} of {planned} attempts, but already "
+                f"failed: {failed} failed attempt(s) cannot reach the "
+                f"{scenario.execution.consistency_threshold:g} pass threshold"
+                + (f" ({checks})" if checks else ""),
+            }
+        )
+    note = f", {failed} failed: not enough to decide" if failed else ""
+    return skipped(
+        scenario,
+        VerdictStatus.SKIPPED_PRECONDITION,
+        f"cancelled after {len(attempts)} of {planned} attempts{note} (their records are kept)",
+        "cancelled",
+    ).model_copy(update={"attempts": attempts, "cut_short_of": planned})
+
+
 def _unstable_scorers(valid: list[AttemptVerdict]) -> list[str]:
     outcomes: dict[str, set[ScoreStatus]] = defaultdict(set)
     for attempt in valid:

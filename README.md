@@ -191,8 +191,10 @@ run to stop, from any process; it stops before its next attempt.
 
 Policies are checked between scenarios, a cancel before every attempt. Whatever is not run is
 reported as skipped with the reason, never dropped and never passed, so a stopped run is never
-"safe to release". A scenario a cancel cut short is not folded from its finished attempts; their
-records are kept. A failure that already happened still fails the run. See
+"safe to release". A scenario a cancel cut short never passes on part of its repeats. It
+fails if it has already failed for certain (it would fail even if every remaining attempt
+passed); otherwise it is reported as cancelled. Its records are kept either way. A failure that
+already happened still fails the run. See
 [ADR-0035](docs/adr/0035-run-control.md).
 
 ### Gate releases in CI

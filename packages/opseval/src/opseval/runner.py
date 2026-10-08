@@ -61,6 +61,7 @@ from opseval.verdicts import (
     exit_code,
     failure_blocks,
     fold_attempts,
+    fold_cut_short,
     release_gate,
     skipped,
 )
@@ -203,6 +204,9 @@ def _unmet(
     if all_trace and (reason := health.reason("traces")) is not None:
         return f"every scorer needs traces, and {reason}", "dependency"
     return None
+
+
+STOP_KINDS: tuple[SkipKind, ...] = ("fail_fast", "stopped", "cancelled")
 
 
 class _RunControl:
@@ -515,17 +519,9 @@ async def launch(
                 coverage = " · traces" if record.trace_coverage == "full" else ""
                 log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
             if len(attempts) < scenario.execution.repeats:
-                # Cancelled part-way. Never folded: a verdict from some of the repeats would
-                # claim a pass rate nobody measured. The attempts' records stay on disk.
-                verdicts.append(
-                    skipped(
-                        scenario,
-                        VerdictStatus.SKIPPED_PRECONDITION,
-                        f"cancelled after {len(attempts)} of {scenario.execution.repeats} "
-                        "attempts (their records are kept)",
-                        "cancelled",
-                    )
-                )
+                # Cancelled part-way: never a pass from part of the repeats, never a
+                # failure hidden as "not run" (fold_cut_short). Records stay on disk.
+                verdicts.append(fold_cut_short(scenario, attempts))
                 continue
             verdicts.append(fold_attempts(scenario, attempts))
             control.after_scenario(scenario, verdicts[-1], rate_limited=rate_limited)
@@ -534,6 +530,10 @@ async def launch(
             # appended its verdict: record each one.
             for decided in verdicts[before:]:
                 tracker.ended(decided)
+    if control.stopped is not None and not any(t.skip_kind in STOP_KINDS for t in verdicts):
+        # The policy fired on the last scenario, or a cancel came after it: nothing was
+        # left out, so the run did not stop early.
+        control.stopped = None
     if control.stopped is not None:
         log(f"stopped early: {control.stopped.detail}")
 

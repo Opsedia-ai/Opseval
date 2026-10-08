@@ -54,11 +54,21 @@ effect within one attempt.
 
 - Each scenario not run gets a `skipped_precondition` verdict with `skip_kind` `fail_fast`,
   `stopped` (every other policy) or `cancelled`, and a reason naming the policy.
-- A scenario a cancel interrupts is **not folded** from its finished attempts. It is skipped as
-  `cancelled after k of n attempts`, and those attempts' records stay on disk.
+- A scenario a cancel interrupts is **not folded** into a pass from its finished attempts.
+  - It is skipped as `cancelled after k of n attempts`, and its records stay on disk.
+  - **Unless it has already failed for certain:** if it would fail even had every attempt it did
+    not run passed, it is `failed`, folded from the attempts that ran. A cancel must not hide a
+    real agent failure as "not run". With the default threshold of 1.0, one failed attempt is
+    enough.
+  - The verdict keeps those attempts and `cut_short_of` (the planned repeats). `opseval rescore`
+    then applies the same rule rather than re-folding over the attempts that ran, which could
+    pass.
 - `SuiteResult.stopped` (`by`, `after`, `detail`) says why the run ended early. The console
   summary, the Markdown gate summary, JUnit (`stopped_early`) and the HTML report all name it.
-- The result is written as usual, so a stopped run still has a gate, a report and sinks.
+- The result is written as usual, so a stopped run still has a gate, a report and sinks. A
+  re-score keeps `stop` and `stopped`.
+- A policy that fires on the last scenario, or a cancel after it, left nothing out. Such a run
+  did not stop early, and `stopped` stays unset.
 
 **Checked between scenarios, not inside one.** A policy firing mid-scenario would force the
 same choice as a cancel: throw away attempts, or fold a partial verdict. Only an explicit cancel

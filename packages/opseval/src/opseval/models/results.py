@@ -131,6 +131,10 @@ class TestVerdict(BaseModel):
     flaky: bool = False
     unstable_scorers: list[str] = Field(default_factory=list)
     attempts: list[AttemptVerdict] = Field(default_factory=list)
+    cut_short_of: int | None = None
+    """Set when a cancel interrupted this scenario: the repeats that were planned. Its
+    ``attempts`` are the ones that ran, and ``opseval rescore`` folds them by the same rule
+    (``verdicts.fold_cut_short``), so a re-score can never turn them into a pass (ADR-0035)."""
 
     @property
     def degraded_scorers(self) -> list[str]:
