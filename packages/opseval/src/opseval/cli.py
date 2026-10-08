@@ -556,7 +556,8 @@ def serve(
     catalogue: Annotated[
         Optional[Path],  # noqa: UP045
         typer.Option(
-            help="Catalogue folder (scenarios/, suites/, profile.yaml). Default: the demo."
+            help="Catalogue folder (scenarios/, suites/, profile.yaml). Default: the "
+            "built-in demo, read-only."
         ),
     ] = None,
     profile: Annotated[
@@ -568,27 +569,62 @@ def serve(
         typer.Option(help="Default agent target for runs started from the console."),
     ] = None,
     host: Annotated[
-        str, typer.Option(help="Bind address. Loopback unless you add auth.")
+        str, typer.Option(help="Bind address. Loopback only (127.0.0.1, ::1 or localhost).")
     ] = "127.0.0.1",
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
+    allow_commit: Annotated[
+        bool,
+        typer.Option(
+            help="Let runs started from the console perform the irreversible outcome, for "
+            "scenarios that also say allow_commit: true (ADR-0008)."
+        ),
+    ] = False,
+    console_url: Annotated[
+        str, typer.Option(help="Where the console is served, for the printed link.")
+    ] = "http://localhost:5173",
 ) -> None:
-    """Serve the HTTP API the web console talks to."""
+    """Serve the HTTP API the web console talks to (loopback only, token required)."""
     try:
         import uvicorn
 
         from opseval.server import create_app
+        from opseval.server.app import LOOPBACK_NAMES, host_name
     except ImportError as exc:  # pragma: no cover - depends on the extra
         typer.secho("the API needs the extra: pip install 'opseval[serve]'", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
     from opseval.demo import catalogue_dir
 
+    if host_name(host) not in LOOPBACK_NAMES:
+        typer.secho(
+            f"configuration error: opseval serve binds to loopback only, not {host!r}. It can "
+            "start runs with your agent token and LLM keys; to reach it from elsewhere, use "
+            "an SSH tunnel (ADR-0031).",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(EXIT_HARNESS)
     root = catalogue or catalogue_dir()
     prof = profile or str(root / "profile.yaml")
+    settings = Settings()
     try:
-        api = create_app(settings=Settings(), catalogue=root, profile=prof, target=target)
+        api = create_app(
+            settings=settings,
+            catalogue=root,
+            profile=prof,
+            target=target,
+            read_only=catalogue is None,
+            allow_commit=allow_commit,
+        )
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
+    token = api.state.token
+    typer.echo(f"Opseval API on http://{host}:{port}/api/v1")
+    typer.echo(f"Console:  {console_url}/#token={token}")
+    if catalogue is None:
+        typer.echo("Catalogue: the built-in demo (read-only). Use --catalogue to edit your own.")
+    if allow_commit:
+        typer.secho("Runs may perform the irreversible outcome (--allow-commit).", fg="yellow")
     uvicorn.run(api, host=host, port=port, log_level="info")
 
 

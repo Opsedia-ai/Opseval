@@ -6,26 +6,48 @@ An unmeasured number is ``None`` (JSON null), never 0.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 
 class Api(BaseModel):
+    """A response shape."""
+
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class ApiIn(BaseModel):
+    """A request body. Unknown fields are an error: a mistyped ``allowCommitt`` must not
+    be silently dropped (the project rule: authoring mistakes fail loudly)."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+
+
+RunState = Literal["running", "finished", "harness_error"]
+GateState = Literal["safe", "gaps", "blocked", "not_judged", "harness_error"]
+"""What a run means for the release, decided here once (ADR-0029/0030):
+
+- ``safe``: the gate passed and everything passed, was measured and loaded.
+- ``gaps``: the gate passed, but something failed (normal), was skipped or unmeasured.
+- ``blocked``: the gate blocked on an agent failure (exit 1).
+- ``not_judged``: the gate blocked because too little could be judged (exit 2).
+- ``harness_error``: Opseval could not do the job (exit 3, or the run never finished).
+"""
 
 
 class RunSummary(Api):
     id: str
     suite: str
     started_at: str | None
-    state: str  # running | finished
-    gate: str  # judged | not_judged | blocked
-    passed: int
-    failed: int
-    unjudged: int
-    flaky: int
+    state: RunState
+    gate: GateState | None  # None while running: nothing is decided yet
+    passed: int | None  # None = not measured (running, or the run could not be done)
+    failed: int | None
+    unjudged: int | None
+    flaky: int | None
+    error: str | None = None  # why a harness_error run could not be carried out
 
 
 class ScoreOut(Api):
@@ -36,6 +58,7 @@ class ScoreOut(Api):
     threshold: float
     reason: str | None
     degraded: bool
+    vacuous: bool = False
 
 
 class AttemptOut(Api):
@@ -56,6 +79,7 @@ class TestOut(Api):
     pass_rate: float | None
     flaky: bool
     attempts: list[AttemptOut]
+    unmeasured_scorers: list[str] = []
 
 
 class UsageOut(Api):
@@ -67,6 +91,12 @@ class UsageOut(Api):
     cost_usd: float | None
 
 
+class SinkOut(Api):
+    sink: str
+    published: bool
+    detail: str
+
+
 class RunDetail(Api):
     summary: RunSummary
     target: str
@@ -75,10 +105,15 @@ class RunDetail(Api):
     gate_summary: str
     blocking: list[str]
     warnings: list[str]
-    exit_code: int
+    exit_code: int | None  # None: the run never finished
+    safe_to_release: bool
     tests: list[TestOut]
     usage: list[UsageOut]
     load_errors: list[str]
+    degraded_scorers: list[str] = []
+    vacuous_scorers: list[str] = []
+    unmeasured_scorers: list[str] = []
+    sinks: list[SinkOut] = []
 
 
 class ScenarioOut(Api):
@@ -102,6 +137,7 @@ class SuiteOut(Api):
     scenario_count: int
     repeats: int | None = None  # the suite's override; None = scenarios decide
     stop_at: str | None = None
+    problem: str | None = None  # the file could not be read or validated
 
 
 class CheckOut(Api):
@@ -137,6 +173,8 @@ class Health(Api):
     reports_dir: str
     catalogue: str | None
     profile: str | None
+    read_only: bool = False  # the catalogue cannot be edited (the built-in demo)
+    allow_commit: bool = False  # started with `opseval serve --allow-commit`
 
 
 class Change(Api):
@@ -180,9 +218,14 @@ class Turn(Api):
     text: str
 
 
-class RehearseIn(Api):
+class TurnIn(ApiIn):
+    who: Literal["customer", "agent"]
+    text: Annotated[str, Field(max_length=20_000)]
+
+
+class RehearseIn(ApiIn):
     scenario_id: str
-    transcript: list[Turn] = []
+    transcript: Annotated[list[TurnIn], Field(max_length=200)] = []
 
 
 class RehearseOut(Api):
@@ -206,33 +249,42 @@ class PersonaOut(Api):
     judge_model: str | None
 
 
-class LaunchIn(Api):
+Repeats = Annotated[int, Field(ge=1, le=20)]  # the same bounds as a scenario's execution
+
+
+class LaunchIn(ApiIn):
     suite: str | None = None
-    scenarios: list[str] = []
+    scenarios: Annotated[list[str], Field(max_length=500)] = []
     target: str | None = None
-    repeats: int | None = None
+    repeats: Repeats | None = None
     allow_commit: bool = False
     fail_fast: bool = False
 
 
 class LaunchOut(Api):
     accepted: bool
-    token: str
+    run_id: str
     message: str
 
 
-class SuiteIn(Api):
+class SuiteIn(ApiIn):
     file: str
-    display_name: str
-    description: str = ""
-    include: list[str]
-    repeats: int | None = None
+    display_name: Annotated[str, Field(min_length=1, max_length=200)]
+    description: Annotated[str, Field(max_length=2000)] = ""
+    include: Annotated[list[str], Field(min_length=1, max_length=500)]
+    repeats: Repeats | None = None
     stop_at: str | None = None
+    overwrite: bool = False  # replacing an existing suite must be asked for
 
 
-class ImportIn(Api):
+class ImportFile(ApiIn):
+    name: str
+    text: Annotated[str, Field(max_length=200_000)]
+
+
+class ImportIn(ApiIn):
     family: str = "uncategorised"
-    files: list[dict[str, str]]  # {name, text}
+    files: Annotated[list[ImportFile], Field(min_length=1, max_length=200)]
 
 
 class ImportOut(Api):

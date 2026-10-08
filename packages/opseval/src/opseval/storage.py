@@ -6,6 +6,7 @@
 <root>/<run_id>/scenarios/<test_id>.json         (each scenario as run, suite merges applied)
 <root>/<run_id>/records/<test_id>__attempt<N>.json
 <root>/<run_id>/result.json        (written last: marks completion)
+<root>/<run_id>/error.json         (instead of result.json: the run could not be carried out)
 <root>/<run_id>/report.html
 <root>/<run_id>/junit.xml
 <root>/<run_id>/rescore-<UTC time>/{result.json, report.html, junit.xml}   (opseval rescore)
@@ -41,7 +42,29 @@ class FileStore:
         self.root = Path(root)
 
     def run_dir(self, run_id: str) -> Path:
-        return self.root / SAFE.sub("_", run_id)
+        name = SAFE.sub("_", run_id)
+        if name.strip(".") == "":
+            # "", "." and ".." would name the reports folder itself or its parent.
+            raise ValueError(f"not a run id: {run_id!r}")
+        return self.root / name
+
+    def save_error(self, run_id: str, error: dict[str, Any]) -> Path:
+        """Record that a run could not be carried out (a harness or configuration error).
+
+        It takes the place of ``result.json``, so a run that failed to start or crashed is
+        a visible harness error rather than a run that is "running" forever or never
+        appears at all.
+        """
+        path = self.run_dir(run_id) / "error.json"
+        _atomic_write(path, json.dumps(error, indent=2, ensure_ascii=False, default=str))
+        return path
+
+    def load_error(self, run_id: str) -> dict[str, Any] | None:
+        try:
+            data = json.loads((self.run_dir(run_id) / "error.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
 
     def write_manifest(self, run_id: str, manifest: dict[str, Any]) -> Path:
         path = self.run_dir(run_id) / "manifest.json"

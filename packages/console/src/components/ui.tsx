@@ -3,7 +3,7 @@ import { AlertTriangle, Info } from "lucide-react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import type { ApiError } from "../lib/api";
 import type { Resource } from "../lib/useApi";
-import type { Area, Gate } from "../lib/types";
+import type { Area, Gate, RunState } from "../lib/types";
 
 export function cx(...p: (string | false | undefined)[]): string {
   return p.filter(Boolean).join(" ");
@@ -122,11 +122,26 @@ export const AreaPill = ({ area }: { area: Area }) => (
   <span className={cx("inline-flex rounded-full border px-3 py-0.5 text-xs font-semibold capitalize", areaStyle[area])}>{area}</span>
 );
 
-export const StatePill = ({ state }: { state: "running" | "finished" }) => (
-  <Pill tone={state === "running" ? "warn" : "neutral"}>{state}</Pill>
-);
-export const GatePill = ({ gate }: { gate: Gate }) =>
-  gate === "judged" ? <Pill tone="pass">judged</Pill> : gate === "blocked" ? <Pill tone="fail">blocked</Pill> : <NotMeasured text="not judged" />;
+export const StatePill = ({ state }: { state: RunState }) =>
+  state === "harness_error" ? <NotMeasured text="could not run" /> : <Pill tone={state === "running" ? "warn" : "neutral"}>{state}</Pill>;
+
+/**
+ * The release meaning of a run, as the server decided it. Only "safe" is green, only an
+ * agent failure that blocks is red, and a harness error is never drawn like a failure.
+ */
+export const GatePill = ({ gate }: { gate: Gate | null }) => {
+  switch (gate) {
+    case "safe": return <Pill tone="pass">safe to release</Pill>;
+    case "gaps": return <Pill tone="warn">passed with gaps</Pill>;
+    case "blocked": return <Pill tone="fail">blocked</Pill>;
+    case "not_judged": return <NotMeasured text="not judged · blocks" />;
+    case "harness_error": return <NotMeasured text="harness error" />;
+    default: return <NotMeasured text="in progress" />;
+  }
+};
+
+/** A count, or "not measured" when there is none: never a 0 that was not counted. */
+export const Count = ({ n }: { n: number | null | undefined }) => (n === null || n === undefined ? <NotMeasured text="—" /> : <Mono>{n}</Mono>);
 
 export function Table({ head, children }: { head: ReactNode[]; children: ReactNode }) {
   return (
@@ -181,7 +196,8 @@ export function Stat({ label, value, note, tone = "plain" }: { label: string; va
 }
 
 /** Pass / fail / unjudged as one bar. Unjudged is hatched: it is not a failure. */
-export function ResultBar({ passed, failed, unjudged }: { passed: number; failed: number; unjudged: number }) {
+export function ResultBar({ passed, failed, unjudged }: { passed: number | null; failed: number | null; unjudged: number | null }) {
+  if (passed === null || failed === null || unjudged === null) return <NotMeasured text="no results" />;
   const total = passed + failed + unjudged || 1;
   const w = (n: number) => `${(n / total) * 100}%`;
   return (

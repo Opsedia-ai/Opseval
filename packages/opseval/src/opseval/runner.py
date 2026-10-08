@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import socket
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -53,6 +55,12 @@ from opseval.verdicts import (
 TransportFactory = Callable[[SutProfile], Transport]
 
 
+def new_run_id(started: datetime | None = None) -> str:
+    """A sortable, unique run id: UTC start time plus a random suffix."""
+    started = started or datetime.now(UTC)
+    return f"{started:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+
+
 @dataclass
 class RunOptions:
     target: str | None = None
@@ -71,6 +79,12 @@ class RunOptions:
     """Check dependencies before running, so an outage skips instead of failing."""
     verify_llm: bool = False
     """Spend one token per LLM role proving the credentials actually work."""
+    run_id: str | None = None
+    """Use this run id instead of minting one, so a caller (the console server) can point
+    at the run before it starts and record a failure against it."""
+    only_ids: list[str] | None = None
+    """Run only these scenario ids (any of them, unlike ``filters``, which must all hold).
+    An id that is not in the catalogue is a configuration error, never silently dropped."""
 
 
 def build_transport_factory(options: RunOptions, settings: Settings) -> TransportFactory:
@@ -193,6 +207,12 @@ async def launch(
         known_invariants=set(INVARIANTS),
         filters=options.filters,
     )
+    if options.only_ids is not None:
+        wanted = set(options.only_ids)
+        missing = sorted(wanted - {sc.id for sc in catalogue.scenarios})
+        if missing:
+            raise ConfigError(f"no valid scenario with id {', '.join(map(repr, missing))}")
+        catalogue.scenarios = [sc for sc in catalogue.scenarios if sc.id in wanted]
     # Built before the run: a destination that is not allowlisted is a configuration
     # error, and finding that out after a suite has something to publish is too late.
     sinks = build_sinks(settings)
@@ -243,7 +263,7 @@ async def launch(
             log(f"preflight: {check.name} unavailable — {check.detail}")
 
     started = datetime.now(UTC)
-    run_id = f"{started:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+    run_id = options.run_id or new_run_id(started)
     target_label = make_transport(profile).target
     store.write_manifest(
         run_id,
@@ -256,6 +276,10 @@ async def launch(
             "load_errors": [str(p) for p in catalogue.problems],
             "started_at": started.isoformat(),
             "opseval_version": __version__,
+            # Who is running it, so a reader can tell "still running" from "its process
+            # died before it finished" instead of showing it as running forever.
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
             "traces": trace_source.name if trace_source else None,
             "simulator_model": sim_client.model if sim_client else None,
             "judge_model": judge_client.model if judge_client else None,

@@ -1,30 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The console API reads real run folders and never invents numbers."""
+"""The console API reads real run folders, never invents numbers, and only answers the
+operator (ADR-0029, ADR-0031)."""
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import shutil
+import socket
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
 from opseval.config import Settings
 from opseval.demo import catalogue_dir
+from opseval.models.record import TerminalState
 from opseval.models.results import (
+    AttemptVerdict,
+    Axis,
     Gate,
     ModelUsage,
+    ScoreResult,
+    ScoreStatus,
     SuiteResult,
     TestVerdict,
     VerdictStatus,
 )
 from opseval.models.scenario import Criticality
 from opseval.server import create_app
+from opseval.server.app import host_name
 from opseval.storage import FileStore
+
+TOKEN = "test-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+BASE = "http://127.0.0.1:8000"
 
 
 def _result(
-    run_id: str, minute: int, statuses: dict[str, VerdictStatus], exit_code: int = 0
+    run_id: str,
+    minute: int,
+    statuses: dict[str, VerdictStatus],
+    exit_code: int = 0,
+    gate: str = "pass",
+    attempts: list[AttemptVerdict] | None = None,
 ) -> SuiteResult:
     when = datetime(2026, 9, 1, 10, minute, tzinfo=UTC)
     return SuiteResult(
@@ -36,13 +61,35 @@ def _result(
         started_at=when,
         ended_at=when,
         tests=[
-            TestVerdict(test_id=tid, name=tid, criticality=Criticality.NORMAL, status=st)
+            TestVerdict(
+                test_id=tid,
+                name=tid,
+                criticality=Criticality.NORMAL,
+                status=st,
+                attempts=attempts or [],
+            )
             for tid, st in statuses.items()
         ],
-        gate=Gate(status="pass", summary="ok"),
+        gate=Gate(status=gate, summary="ok"),
         exit_code=exit_code,
         usage=[ModelUsage(role="simulator", model="m", input_tokens=5, output_tokens=5)],
     )
+
+
+def connect(app: FastAPI) -> TestClient:
+    return TestClient(app, base_url=BASE, headers=AUTH)
+
+
+def app_for(tmp_path: Path, *, copy: bool = False, **kw: Any) -> tuple[FastAPI, Path]:
+    cat = catalogue_dir()
+    if copy:
+        cat = tmp_path / "cat"
+        shutil.copytree(catalogue_dir(), cat)
+    settings = kw.pop("settings", None) or Settings(reports_dir=str(tmp_path / "r"))
+    app = create_app(
+        settings=settings, catalogue=cat, profile=cat / "profile.yaml", token=TOKEN, **kw
+    )
+    return app, cat
 
 
 @pytest.fixture
@@ -53,26 +100,101 @@ def client(tmp_path: Path) -> TestClient:
     store.save_result(
         _result("r3", 3, {"a": VerdictStatus.INCONCLUSIVE, "b": VerdictStatus.PASSED}, 2)
     )
+    store.save_result(_result("r4", 4, {"a": VerdictStatus.FAILED}, 1, gate="block"))
+    store.save_result(_result("r5", 5, {"a": VerdictStatus.INCONCLUSIVE}, 3, gate="block"))
     cat = catalogue_dir()
     settings = Settings(reports_dir=str(tmp_path))
-    return TestClient(create_app(settings=settings, catalogue=cat, profile=cat / "profile.yaml"))
+    return connect(
+        create_app(settings=settings, catalogue=cat, profile=cat / "profile.yaml", token=TOKEN)
+    )
+
+
+# --- reading ---------------------------------------------------------------------------
 
 
 def test_health(client: TestClient) -> None:
     body = client.get("/api/v1/health").json()
     assert body["status"] == "ok" and body["profile"] == "refund-agent"
+    assert body["readOnly"] is False and body["allowCommit"] is False
 
 
-def test_runs_newest_first_with_gate_states(client: TestClient) -> None:
+def test_runs_newest_first(client: TestClient) -> None:
     runs = client.get("/api/v1/runs").json()
-    assert [r["id"] for r in runs] == ["r3", "r2", "r1"]
-    assert runs[0]["gate"] == "not_judged" and runs[0]["unjudged"] == 1
-    assert runs[1]["failed"] == 1
+    assert [r["id"] for r in runs] == ["r5", "r4", "r3", "r2", "r1"]
+    assert runs[2]["unjudged"] == 1 and runs[3]["failed"] == 1
+
+
+def test_gate_state_never_draws_a_failure_green_or_a_harness_error_as_a_failure(
+    client: TestClient,
+) -> None:
+    gates = {r["id"]: r["gate"] for r in client.get("/api/v1/runs").json()}
+    assert gates == {
+        "r1": "safe",  # everything passed
+        "r2": "gaps",  # a normal failure under a passing gate: not green
+        "r3": "gaps",  # something not judged under a passing gate
+        "r4": "blocked",  # the gate blocked on an agent failure
+        "r5": "harness_error",  # exit 3: Opseval could not do the job
+    }
 
 
 def test_run_detail_and_404(client: TestClient) -> None:
-    assert client.get("/api/v1/runs/r2").json()["summary"]["id"] == "r2"
+    detail = client.get("/api/v1/runs/r2").json()
+    assert detail["summary"]["id"] == "r2" and detail["safeToRelease"] is False
+    assert client.get("/api/v1/runs/r1").json()["safeToRelease"] is True
     assert client.get("/api/v1/runs/nope").status_code == 404
+
+
+def test_run_ids_cannot_climb_out_of_the_reports_folder(client: TestClient) -> None:
+    from fastapi import HTTPException
+
+    from opseval.server.app import _run_id
+
+    # Bare dot segments are normalised away by any HTTP client; the validator still holds.
+    for bad in ("..", ".", "../x", "a..b", ""):
+        with pytest.raises(HTTPException):
+            _run_id(bad)
+    for bad in ("..%2F..", "a..b"):
+        assert client.get(f"/api/v1/runs/{bad}").status_code == 404
+    r = client.get("/api/v1/compare", params={"baseline": "..", "candidate": "r1"})
+    assert r.status_code == 404
+
+
+def test_detail_names_unmeasured_vacuous_and_degraded(tmp_path: Path) -> None:
+    unmeasured = ScoreResult(
+        scorer_id="security.x",
+        axis=Axis.SECURITY,
+        status=ScoreStatus.INFRA_ERROR,
+        score=None,
+        threshold=1.0,
+        reason="JUDGE_DISAGREEMENT: split",
+    )
+    vacuous = ScoreResult(
+        scorer_id="tools.forbidden_not_called",
+        axis=Axis.TOOLS,
+        status=ScoreStatus.PASSED,
+        score=1.0,
+        threshold=1.0,
+        degraded=True,
+        details={"vacuous": True},
+    )
+    attempt = AttemptVerdict(
+        attempt_index=0,
+        passed=True,
+        terminal_state=TerminalState.GOAL_REACHED,
+        scores=[unmeasured, vacuous],
+        record_path="a0.json",
+    )
+    FileStore(tmp_path).save_result(
+        _result("r1", 1, {"a": VerdictStatus.PASSED}, attempts=[attempt])
+    )
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    d = c.get("/api/v1/runs/r1").json()
+    assert d["unmeasuredScorers"] == ["security.x"]
+    assert d["vacuousScorers"] == ["tools.forbidden_not_called"]
+    assert d["degradedScorers"] == ["tools.forbidden_not_called"]
+    assert d["safeToRelease"] is False and d["summary"]["gate"] == "gaps"
+    assert d["tests"][0]["unmeasuredScorers"] == ["security.x"]
+    assert d["tests"][0]["attempts"][0]["scores"][1]["vacuous"] is True
 
 
 def test_compare_separates_regressions_from_outages(client: TestClient) -> None:
@@ -89,6 +211,7 @@ def test_compare_separates_regressions_from_outages(client: TestClient) -> None:
 def test_unjudged_run_is_a_gap_in_the_trend_not_zero(client: TestClient) -> None:
     points = {p["run"]: p["passRate"] for p in client.get("/api/v1/trend").json()}
     assert points["r3"] is None and points["r1"] == 1.0 and points["r2"] == 0.5
+    assert points["r5"] is None  # a harness error measured nothing
 
 
 def test_usage_unmeasured_is_null(client: TestClient) -> None:
@@ -111,16 +234,31 @@ def test_catalogue_endpoints(client: TestClient) -> None:
 def test_config_never_leaks_a_secret(tmp_path: Path) -> None:
     from pydantic import SecretStr
 
-    settings = Settings(reports_dir=str(tmp_path), judge_api_key=SecretStr("sk-very-secret"))
-    rows = TestClient(create_app(settings=settings)).get("/api/v1/config")
-    assert "sk-very-secret" not in rows.text
+    settings = Settings(
+        reports_dir=str(tmp_path),
+        judge_api_key=SecretStr("sk-very-secret"),
+        serve_token=SecretStr(TOKEN),
+    )
+    rows = connect(create_app(settings=settings)).get("/api/v1/config")
+    assert "sk-very-secret" not in rows.text and TOKEN not in rows.text
     assert any(r["key"] == "opseval_judge_api_key" and r["redacted"] for r in rows.json())
 
 
 def test_no_catalogue_is_empty_not_an_error(tmp_path: Path) -> None:
-    c = TestClient(create_app(settings=Settings(reports_dir=str(tmp_path))))
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
     assert c.get("/api/v1/scenarios").json() == {"scenarios": [], "problems": []}
     assert c.get("/api/v1/suites").json() == []
+
+
+def test_one_broken_suite_file_is_a_row_not_a_500(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    (cat / "suites" / "broken.yaml").write_text("not: [valid", "utf-8")
+    (cat / "suites" / "list.yaml").write_text("- a\n- b\n", "utf-8")
+    (cat / "suites" / ".in-progress.yaml").write_text("name: hidden\n", "utf-8")
+    rows = {s["file"]: s for s in connect(app).get("/api/v1/suites").json()}
+    assert rows["broken"]["problem"] and rows["list"]["problem"]
+    assert rows["smoke"]["problem"] is None
+    assert ".in-progress" not in rows
 
 
 def test_rehearse_scripted_persona_needs_no_model(client: TestClient) -> None:
@@ -144,18 +282,115 @@ def test_unknown_scenario_is_404(client: TestClient) -> None:
     assert client.get("/api/v1/scenarios/rf-001/persona").json()["scripted"] is True
 
 
-def test_save_suite_is_validated_and_written(tmp_path: Path) -> None:
-    import shutil
+def test_readiness_says_what_is_limited(client: TestClient) -> None:
+    items = {i["id"]: i for i in client.get("/api/v1/readiness").json()}
+    assert items["catalogue"]["ready"] is True
+    assert items["judge"]["ready"] is False and "OPSEVAL_JUDGE" in items["judge"]["detail"]
+    assert set(items) == {"catalogue", "simulator", "judge", "allowlist", "tracing"}
 
-    cat = tmp_path / "cat"
-    shutil.copytree(catalogue_dir(), cat)
-    c = TestClient(
-        create_app(
-            settings=Settings(reports_dir=str(tmp_path / "r")),
-            catalogue=cat,
-            profile=cat / "profile.yaml",
-        )
+
+# --- who may ask (ADR-0031) -------------------------------------------------------------
+
+
+def test_every_api_request_needs_the_token(client: TestClient) -> None:
+    anon = TestClient(client.app, base_url=BASE)
+    for path in ("/api/v1/health", "/api/v1/runs"):
+        r = anon.get(path)
+        assert r.status_code == 401 and r.json()["code"] == "UNAUTHORIZED"
+    wrong = anon.get("/api/v1/runs", headers={"Authorization": "Bearer nope"})
+    assert wrong.status_code == 401
+    started = anon.post("/api/v1/runs", json={"suite": "smoke", "target": "ws://127.0.0.1:1"})
+    assert started.status_code == 401
+
+
+def test_a_rebound_hostname_is_refused_even_with_the_token(client: TestClient) -> None:
+    """DNS rebinding: the attacker's page reaches 127.0.0.1 under its own hostname."""
+    evil = TestClient(client.app, base_url="http://attacker.example:8000", headers=AUTH)
+    r = evil.get("/api/v1/runs")
+    assert r.status_code == 403 and r.json()["code"] == "HOST_NOT_ALLOWED"
+    for ok_host in ("http://localhost:8000", "http://[::1]:8000"):
+        ok = TestClient(client.app, base_url=ok_host, headers=AUTH).get("/api/v1/health")
+        assert ok.status_code == 200, ok_host
+
+
+def test_a_cross_site_write_is_refused(client: TestClient) -> None:
+    r = client.post(
+        "/api/v1/simulator/rehearse",
+        json={"scenarioId": "rf-001"},
+        headers={"Origin": "https://attacker.example"},
     )
+    assert r.status_code == 403 and r.json()["code"] == "ORIGIN_NOT_ALLOWED"
+    same = client.post(
+        "/api/v1/simulator/rehearse",
+        json={"scenarioId": "rf-001"},
+        headers={"Origin": "http://localhost:5173"},
+    )
+    assert same.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("header", "name"),
+    [("127.0.0.1:8000", "127.0.0.1"), ("[::1]:8000", "::1"), ("LocalHost", "localhost"), ("", "")],
+)
+def test_host_name(header: str, name: str) -> None:
+    assert host_name(header) == name
+
+
+def test_a_configured_token_is_used_and_a_missing_one_is_minted(tmp_path: Path) -> None:
+    from pydantic import SecretStr
+
+    fixed = create_app(settings=Settings(reports_dir=str(tmp_path), serve_token=SecretStr("x")))
+    assert fixed.state.token == "x"
+    a = create_app(settings=Settings(reports_dir=str(tmp_path)))
+    b = create_app(settings=Settings(reports_dir=str(tmp_path)))
+    assert len(a.state.token) >= 24 and a.state.token != b.state.token
+
+
+def test_serve_refuses_a_non_loopback_bind() -> None:
+    from opseval.cli import app
+
+    res = CliRunner().invoke(app, ["serve", "--host", "0.0.0.0"])  # nosec B104 - the test
+    assert res.exit_code == 3
+    assert "loopback only" in res.output
+
+
+# --- request bodies -----------------------------------------------------------------------
+
+
+def test_request_bodies_are_strict(client: TestClient) -> None:
+    typo = client.post("/api/v1/runs", json={"suite": "smoke", "allowCommitt": True})
+    assert typo.status_code == 422
+    for repeats in (0, -1, 21):
+        r = client.post("/api/v1/runs", json={"suite": "smoke", "repeats": repeats})
+        assert r.status_code == 422, repeats
+
+
+def test_commit_needs_the_server_flag_not_just_a_request_field(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    r = connect(app).post(
+        "/api/v1/runs", json={"suite": "smoke", "target": "ws://127.0.0.1:1", "allowCommit": True}
+    )
+    assert r.status_code == 403 and r.json()["code"] == "COMMIT_NOT_ALLOWED"
+
+
+def test_the_demo_catalogue_is_read_only(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, read_only=True)
+    c = connect(app)
+    assert c.get("/api/v1/health").json()["readOnly"] is True
+    before = sorted(p.name for p in cat.rglob("*.yaml"))
+    r = c.put("/api/v1/suites", json={"file": "x", "displayName": "x", "include": ["*"]})
+    assert r.status_code == 409 and r.json()["code"] == "READ_ONLY_CATALOGUE"
+    r = c.post("/api/v1/scenarios/import", json={"files": [{"name": "a.yaml", "text": "id: x"}]})
+    assert r.status_code == 409
+    assert sorted(p.name for p in cat.rglob("*.yaml")) == before
+
+
+# --- writing the catalogue ----------------------------------------------------------------
+
+
+def test_save_suite_is_validated_and_written(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
     ok = c.put(
         "/api/v1/suites",
         json={
@@ -175,18 +410,43 @@ def test_save_suite_is_validated_and_written(tmp_path: Path) -> None:
     )
 
 
-def test_import_is_all_or_nothing(tmp_path: Path) -> None:
-    import shutil
+def test_save_suite_never_replaces_unasked_or_leaves_a_broken_file(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    smoke = (cat / "suites" / "smoke.yaml").read_text("utf-8")
+    body: dict[str, Any] = {
+        "file": "smoke",
+        "displayName": "s",
+        "include": ["scenarios/rf-001*.yaml"],
+    }
+    r = c.put("/api/v1/suites", json=body)
+    assert r.status_code == 409 and r.json()["code"] == "SUITE_EXISTS"
+    assert (cat / "suites" / "smoke.yaml").read_text("utf-8") == smoke
+    # A suite that selects nothing (here: includes outside the catalogue) is rejected,
+    # and nothing is left on disk.
+    bad = {"file": "smoke", "displayName": "s", "include": ["../../*"], "overwrite": True}
+    r = c.put("/api/v1/suites", json=bad)
+    assert r.status_code == 422 and r.json()["code"] == "EMPTY_SUITE"
+    assert (cat / "suites" / "smoke.yaml").read_text("utf-8") == smoke
+    assert not [p for p in (cat / "suites").iterdir() if p.name.startswith(".")]
+    body["overwrite"] = True
+    assert c.put("/api/v1/suites", json=body).status_code == 200
 
-    cat = tmp_path / "cat"
-    shutil.copytree(catalogue_dir(), cat)
-    c = TestClient(
-        create_app(
-            settings=Settings(reports_dir=str(tmp_path / "r")),
-            catalogue=cat,
-            profile=cat / "profile.yaml",
-        )
-    )
+
+def test_suite_settings_round_trip(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path, copy=True)
+    c = connect(app)
+    body = {"file": "r", "displayName": "r", "include": ["scenarios/rf-001*.yaml"], "repeats": 4}
+    assert c.put("/api/v1/suites", json=body).status_code == 200
+    saved = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "r")
+    assert saved["repeats"] == 4
+    smoke = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "smoke")
+    assert smoke["repeats"] is None  # not set means "scenarios decide", never a made-up 3
+
+
+def test_import_is_all_or_nothing(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
     existing = (cat / "scenarios" / "rf-001-happy-path.yaml").read_text()
     new = existing.replace("id: rf-001", "id: rf-900")
     ok = c.post(
@@ -206,9 +466,7 @@ def test_import_is_all_or_nothing(tmp_path: Path) -> None:
         },
     )
     assert bad.status_code == 422
-    assert (
-        sorted(p.name for p in (cat / "scenarios").rglob("*.yaml")) == before
-    )  # nothing half-imported
+    assert sorted(p.name for p in (cat / "scenarios").rglob("*.yaml")) == before
     clash = c.post(
         "/api/v1/scenarios/import",
         json={"family": "mine3", "files": [{"name": "d.yaml", "text": existing}]},
@@ -216,58 +474,151 @@ def test_import_is_all_or_nothing(tmp_path: Path) -> None:
     assert clash.status_code == 422 and "would replace" in clash.text
 
 
+def test_import_never_overwrites_a_file_or_repeats_an_id(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    template = (cat / "scenarios" / "rf-001-happy-path.yaml").read_text()
+    one = template.replace("id: rf-001", "id: rf-910")
+    first = c.post(
+        "/api/v1/scenarios/import",
+        json={"family": "f", "files": [{"name": "a.yaml", "text": one}]},
+    )
+    assert first.status_code == 200
+    # Same file name, different id: it would silently delete rf-910.
+    other = template.replace("id: rf-001", "id: rf-911")
+    r = c.post(
+        "/api/v1/scenarios/import",
+        json={"family": "f", "files": [{"name": "a.yaml", "text": other}]},
+    )
+    assert r.status_code == 422 and "would replace f/a.yaml" in r.text
+    assert "rf-910" in (cat / "scenarios" / "f" / "a.yaml").read_text()
+    # One id twice in one batch.
+    dup = template.replace("id: rf-001", "id: rf-912")
+    r = c.post(
+        "/api/v1/scenarios/import",
+        json={
+            "family": "g",
+            "files": [{"name": "x.yaml", "text": dup}, {"name": "y.yaml", "text": dup}],
+        },
+    )
+    assert r.status_code == 422 and "given twice" in r.text
+    assert not (cat / "scenarios" / "g").exists()
+
+
+# --- launching runs -------------------------------------------------------------------------
+
+
+async def _wait_for(http: httpx.AsyncClient, run_id: str, done: set[str]) -> dict[str, Any]:
+    for _ in range(300):
+        runs = {r["id"]: r for r in (await http.get("/api/v1/runs")).json()}
+        if run_id in runs and runs[run_id]["state"] in done:
+            return runs[run_id]
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"run {run_id} never reached {done}")
+
+
+def _async_client(app: FastAPI) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE, headers=AUTH)
+
+
 async def test_launch_runs_the_suite_in_the_background(tmp_path: Path) -> None:
-    import asyncio
-
-    import httpx
-
     from opseval.demo.refund_agent import run_agent
 
-    cat = catalogue_dir()
-    settings = Settings(reports_dir=str(tmp_path), allowed_hosts="127.0.0.1")
-    app = create_app(settings=settings, catalogue=cat, profile=cat / "profile.yaml")
-    async with (
-        run_agent(bug=None) as url,
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as http,
-    ):
+    settings = Settings(reports_dir=str(tmp_path / "r"), allowed_hosts="127.0.0.1")
+    app, _ = app_for(tmp_path, settings=settings)
+    async with run_agent(bug=None) as url, _async_client(app) as http:
         started = await http.post(
             "/api/v1/runs", json={"suite": "smoke", "repeats": 1, "target": url}
         )
         assert started.status_code == 202
-        for _ in range(100):
-            runs = (await http.get("/api/v1/runs")).json()
-            if runs and runs[0]["state"] == "finished":
-                break
-            await asyncio.sleep(0.1)
-        assert runs[0]["state"] == "finished" and runs[0]["passed"] == 3 and runs[0]["failed"] == 0
+        run = await _wait_for(http, started.json()["runId"], {"finished"})
+        assert run["passed"] == 3 and run["failed"] == 0 and run["gate"] in ("safe", "gaps")
         bad = await http.post("/api/v1/runs", json={"suite": "nope", "target": url})
         assert bad.status_code == 404 and bad.json()["code"] == "UNKNOWN_SUITE"
         notarget = await http.post("/api/v1/runs", json={"suite": "smoke"})
         assert notarget.json()["code"] == "NO_TARGET"
 
 
-def test_readiness_says_what_is_limited(client: TestClient) -> None:
-    items = {i["id"]: i for i in client.get("/api/v1/readiness").json()}
-    assert items["catalogue"]["ready"] is True
-    assert items["judge"]["ready"] is False and "OPSEVAL_JUDGE" in items["judge"]["detail"]
-    assert set(items) == {"catalogue", "simulator", "judge", "allowlist", "tracing"}
+async def test_a_selection_runs_only_those_scenarios_and_writes_no_suite(tmp_path: Path) -> None:
+    from opseval.demo.refund_agent import run_agent
 
-
-def test_suite_settings_round_trip(tmp_path: Path) -> None:
-    import shutil
-
-    cat = tmp_path / "cat"
-    shutil.copytree(catalogue_dir(), cat)
-    c = TestClient(
-        create_app(
-            settings=Settings(reports_dir=str(tmp_path / "r")),
-            catalogue=cat,
-            profile=cat / "profile.yaml",
+    settings = Settings(reports_dir=str(tmp_path / "r"), allowed_hosts="127.0.0.1")
+    app, cat = app_for(tmp_path, copy=True, settings=settings)
+    suites_before = sorted(p.name for p in (cat / "suites").iterdir())
+    async with run_agent(bug=None) as url, _async_client(app) as http:
+        started = await http.post(
+            "/api/v1/runs",
+            json={"scenarios": ["rf-001", "rf-001"], "repeats": 1, "target": url},
         )
+        run = await _wait_for(http, started.json()["runId"], {"finished"})
+        assert run["passed"] == 1
+    assert sorted(p.name for p in (cat / "suites").iterdir()) == suites_before
+
+
+async def test_a_launch_that_cannot_start_is_a_visible_harness_error(tmp_path: Path) -> None:
+    """Preflight finds no agent: the CLI exits 3, so the console must say so, not go quiet."""
+    app, _ = app_for(tmp_path)
+    async with _async_client(app) as http:
+        started = await http.post(
+            "/api/v1/runs", json={"suite": "smoke", "target": "ws://127.0.0.1:1"}
+        )
+        assert started.status_code == 202
+        run_id = started.json()["runId"]
+        run = await _wait_for(http, run_id, {"harness_error"})
+        assert run["gate"] == "harness_error" and run["error"].startswith("CONFIG_ERROR")
+        assert run["passed"] is None and run["failed"] is None  # not measured, never 0
+        detail = (await http.get(f"/api/v1/runs/{run_id}")).json()
+        assert detail["exitCode"] == 3 and "not an agent failure" in detail["gateSummary"]
+
+
+def _dead_pid() -> int:
+    pid = 2**22 + 12345  # well above the usual pid range
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return pid
+        except OSError:
+            pass
+        pid += 1
+
+
+def test_a_run_whose_process_died_is_not_running_forever(tmp_path: Path) -> None:
+    store = FileStore(tmp_path)
+    here = socket.gethostname()
+    store.write_manifest(
+        "dead",
+        {"run_id": "dead", "suite": "s", "pid": _dead_pid(), "host": here},
     )
-    body = {"file": "r", "displayName": "r", "include": ["scenarios/rf-001*.yaml"], "repeats": 4}
-    assert c.put("/api/v1/suites", json=body).status_code == 200
-    saved = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "r")
-    assert saved["repeats"] == 4
-    smoke = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "smoke")
-    assert smoke["repeats"] is None  # not set means "scenarios decide", never a made-up 3
+    store.write_manifest("live", {"run_id": "live", "suite": "s", "pid": os.getpid(), "host": here})
+    store.write_manifest("elsewhere", {"run_id": "elsewhere", "suite": "s", "pid": 1, "host": "x"})
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    runs = {r["id"]: r for r in c.get("/api/v1/runs").json()}
+    assert runs["dead"]["state"] == "harness_error" and "INTERRUPTED" in runs["dead"]["error"]
+    assert runs["live"]["state"] == "running" and runs["live"]["passed"] is None
+    assert runs["elsewhere"]["state"] == "running"  # cannot tell: never guessed dead
+
+
+def test_save_error_is_what_the_detail_reads(tmp_path: Path) -> None:
+    store = FileStore(tmp_path)
+    store.write_manifest("e1", {"run_id": "e1", "suite": "s", "target": "ws://t"})
+    store.save_error("e1", {"code": "HARNESS_ERROR", "message": "disk full", "exit_code": 3})
+    assert json.loads((tmp_path / "e1" / "error.json").read_text())["message"] == "disk full"
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    d = c.get("/api/v1/runs/e1").json()
+    assert d["target"] == "ws://t" and d["summary"]["error"] == "HARNESS_ERROR: disk full"
+    with pytest.raises(ValueError, match="not a run id"):
+        store.run_dir("..")
+
+
+async def test_an_unknown_scenario_in_a_selection_is_a_config_error_not_dropped(
+    tmp_path: Path,
+) -> None:
+    app, _ = app_for(tmp_path)
+    async with _async_client(app) as http:
+        started = await http.post(
+            "/api/v1/runs",
+            json={"scenarios": ["rf-001", "nope"], "target": "ws://127.0.0.1:1"},
+        )
+        run = await _wait_for(http, started.json()["runId"], {"harness_error"})
+        assert "CONFIG_ERROR" in run["error"] and "'nope'" in run["error"]

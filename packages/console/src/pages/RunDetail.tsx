@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { ChevronDown } from "lucide-react";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
-import type { TestResult } from "../lib/types";
+import type { Gate, RunDetail as Detail, TestResult } from "../lib/types";
 import { AreaPill, Callout, Card, Data, GatePill, Mono, NotMeasured, Page, PageHeader, Pill, ResultBar, Stat, cx } from "../components/ui";
 
 const tone = (s: TestResult["status"]) => (s === "passed" ? "pass" : s === "failed" ? "fail" : "mute");
@@ -26,6 +26,7 @@ function Scenario({ t }: { t: TestResult }) {
       {open && (
         <div className="border-t border-line bg-soft px-5 py-4">
           {t.reason && <p className="mb-3 text-ink"><b>Why:</b> {t.reason}</p>}
+          {t.unmeasuredScorers.length > 0 && <p className="mb-3 text-ink"><b>Not measured:</b> <Mono>{t.unmeasuredScorers.join(", ")}</Mono>. The verdict was reached without them.</p>}
           {t.attempts.length === 0 && <p>Not run, so there are no attempts to show.</p>}
           {t.attempts.map((a) => (
             <div key={a.index} className="mb-4 last:mb-0">
@@ -39,6 +40,7 @@ function Scenario({ t }: { t: TestResult }) {
                     <AreaPill area={s.axis} /><Mono>{s.scorerId}</Mono>
                     <span className="ml-auto flex items-center gap-2">
                       {s.degraded && <Pill tone="warn">degraded</Pill>}
+                      {s.vacuous && <Pill tone="mute" dashed>vacuous</Pill>}
                       {s.status === "infra_error" ? <NotMeasured text="not measured" /> : <><Mono>{s.score?.toFixed(2)}</Mono><Pill tone={s.status === "passed" ? "pass" : "fail"}>{s.status}</Pill></>}
                     </span>
                     {s.reason && <span className="basis-full text-muted-ink">{s.reason}</span>}
@@ -50,26 +52,58 @@ function Scenario({ t }: { t: TestResult }) {
   );
 }
 
+const HEADLINE: Record<Gate, string> = {
+  safe: "Safe to release.",
+  gaps: "No blocking issues, but not everything passed.",
+  blocked: "Blocked.",
+  not_judged: "Not judged: too little could be judged to clear the gate.",
+  harness_error: "Opseval could not carry out this run.",
+};
+
+function Caveats({ r }: { r: Detail }) {
+  const rows: [string, string[], string][] = [
+    ["Not measured", r.unmeasuredScorers, "could not produce a score in at least one judged attempt (harness error). The verdict above was reached without them."],
+    ["Degraded evidence", r.degradedScorers, "scored on weaker evidence than they ask for. These scores counted toward the verdict."],
+    ["Passed vacuously", r.vacuousScorers, "passed because the situation they check never arose. Those passes are evidence of nothing."],
+  ];
+  const failedSinks = r.sinks.filter((s) => !s.published);
+  return (<>
+    {rows.filter(([, ids]) => ids.length > 0).map(([title, ids, text]) => (
+      <Callout key={title} tone="warn"><b>{title}:</b> <Mono>{ids.join(", ")}</Mono> {text}</Callout>))}
+    {failedSinks.length > 0 && <Callout tone="warn"><b>Not published:</b> {failedSinks.map((s) => `${s.sink} (${s.detail})`).join("; ")}. The verdict is unaffected.</Callout>}
+  </>);
+}
+
 export default function RunDetail() {
   const { id = "" } = useParams();
   const res = useApi(() => api.run(id), [id]);
+  // A run in progress has no detail yet (404): wait for it rather than calling it missing.
+  const pending = res.error?.status === 404;
+  useEffect(() => {
+    if (!pending) return;
+    const t = setTimeout(res.reload, 2500);
+    return () => clearTimeout(t);
+  }, [pending, res.reload, res.error]);
+  const gate = res.data?.summary.gate ?? null;
   return (
     <>
-      <PageHeader title="Run" sub={<Mono>{id}</Mono>} aside={res.data && <GatePill gate={res.data.summary.gate} />} />
+      <PageHeader title="Run" sub={<Mono>{id}</Mono>} aside={res.data && <GatePill gate={gate} />} />
       <Page>
+        {pending ? <Callout>This run is still in progress, or has not started yet. This page refreshes on its own.</Callout> : (
         <Data res={res}>{(r) => (<>
-          <Callout tone={r.gateStatus === "pass" ? "info" : "warn"}><b>{r.gateStatus === "pass" ? "Cleared the ship gate." : "Blocked."}</b> {r.gateSummary}</Callout>
+          <Callout tone={r.summary.gate === "safe" ? "info" : "warn"}><b>{r.summary.gate ? HEADLINE[r.summary.gate] : "In progress."}</b> {r.gateSummary}</Callout>
+          <Caveats r={r} />
           {r.loadErrors.length > 0 && <Callout><b>Load errors (harness, not the agent):</b><ul className="list-disc pl-5">{r.loadErrors.map((e) => <li key={e}>{e}</li>)}</ul></Callout>}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat tone="teal" label="Passed" value={r.summary.passed} />
-            <Stat tone="blush" label="Failed" value={r.summary.failed} />
-            <Stat label="Not judged" value={r.summary.unjudged} note="harness or precondition, not the agent" />
-            <Stat tone="ink" label="Target" value={<span className="text-lg">{r.target}</span>} note={`profile ${r.profile}`} />
+            <Stat tone="teal" label="Passed" value={r.summary.passed ?? <NotMeasured text="—" />} />
+            <Stat tone="blush" label="Failed" value={r.summary.failed ?? <NotMeasured text="—" />} />
+            <Stat label="Not judged" value={r.summary.unjudged ?? <NotMeasured text="—" />} note="harness or precondition, not the agent" />
+            <Stat tone="ink" label="Target" value={<span className="text-lg">{r.target || "—"}</span>} note={`profile ${r.profile || "—"}`} />
           </div>
           <ResultBar passed={r.summary.passed} failed={r.summary.failed} unjudged={r.summary.unjudged} />
           <div className="space-y-3">{r.tests.map((t) => <Scenario key={t.id} t={t} />)}</div>
           {r.usage.length > 0 && <Card title="Model usage"><ul className="text-sm">{r.usage.map((u) => <li key={u.role} className="flex justify-between py-1"><span>{u.role} · <Mono>{u.model}</Mono></span><span><Mono>{(u.inputTokens + u.outputTokens).toLocaleString()}</Mono> tokens · {u.costUsd === null ? <NotMeasured /> : <Mono>${u.costUsd.toFixed(3)}</Mono>}</span></li>)}</ul></Card>}
-        </>)}</Data>
+        </>)}</Data>)}
       </Page>
     </>
   );

@@ -78,6 +78,10 @@ class Settings(BaseSettings):
 
     reports_dir: str = "reports"
 
+    # `opseval serve` (ADR-0031). Every API request must carry this bearer token; when it
+    # is unset, the server makes a random one per start and prints the console link.
+    serve_token: SecretStr | None = None
+
     def allowlist(self) -> set[str]:
         return {h.strip().lower() for h in self.allowed_hosts.split(",") if h.strip()}
 
@@ -88,6 +92,7 @@ SECRET_FIELDS = (
     "simulator_api_key",
     "judge_api_key",
     "langfuse_secret_key",
+    "serve_token",
 )
 
 

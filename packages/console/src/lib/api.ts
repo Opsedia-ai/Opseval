@@ -7,10 +7,32 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The API answers only requests carrying the token `opseval serve` printed (ADR-0031). The
+ * printed link carries it in the fragment (never sent to a server, never in logs); it is
+ * kept for this browser and dropped from the address bar.
+ */
+const TOKEN_KEY = "opseval.token";
+function adoptToken(): string | null {
+  const m = window.location.hash.match(/(?:^#|&)token=([^&]+)/);
+  try {
+    if (m) {
+      localStorage.setItem(TOKEN_KEY, decodeURIComponent(m[1]));
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return m ? decodeURIComponent(m[1]) : null; // storage blocked: this page view only
+  }
+}
+const token = adoptToken();
+
 async function call<R>(path: string, init?: RequestInit): Promise<R> {
   let res: Response;
   try {
-    res = await fetch(`/api/v1${path}`, { headers: { "content-type": "application/json" }, ...init });
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    res = await fetch(`/api/v1${path}`, { ...init, headers });
   } catch {
     throw new ApiError(0, "OFFLINE", "Cannot reach the Opseval API. Start it with: opseval serve");
   }
@@ -38,7 +60,7 @@ export const api = {
   readiness: () => call<T.Readiness[]>("/readiness"),
   config: () => call<T.SettingRow[]>("/config"),
   rehearse: (scenarioId: string, transcript: T.Turn[]) => post<T.Rehearsal>("/simulator/rehearse", { scenarioId, transcript }),
-  startRun: (body: T.LaunchBody) => post<{ accepted: boolean; message: string }>("/runs", body),
+  startRun: (body: T.LaunchBody) => post<T.Launched>("/runs", body),
   saveSuite: (body: T.SuiteBody) => call<T.Suite>("/suites", { method: "PUT", body: JSON.stringify(body) }),
   importScenarios: (family: string, files: { name: string; text: string }[]) =>
     post<{ imported: string[] }>("/scenarios/import", { family, files }),
