@@ -80,8 +80,16 @@ justifies that cost.
   the gate blocks and the exit code is 2. A failure that happened before the stop still exits 1.
 - Without a cancel or a policy, Ctrl-C (exit 130, ADR-0030) is still the only way to stop a
   run, and it leaves no result. A cancel request is the clean way.
-- The console's Cancel button and stop-policy controls build on this (`cancel.json` and
-  `RunOptions.stop`). No new runner behaviour is needed for them.
+- The console builds on the same pieces, with no runner behaviour of its own:
+  - `POST /api/v1/runs/{id}/cancel` writes `cancel.json` (`by: console`). It answers 409
+    `RUN_NOT_RUNNING` for a finished or interrupted run, and `accepted: false` when a cancel was
+    already requested.
+  - A running run's progress carries `cancelRequested`.
+  - `LaunchIn.stop` overrides fields for one run. A null field keeps the suite's value.
+  - `SuiteIn.stop` edits the suite's `stop:` block (omitted: kept; null: removed), and
+    `SuiteOut.stop` shows it.
+  - Run detail carries `stopPolicy`, `stopped`, and each test's `skipKind` and `cutShortOf`.
+  - Every dropdown names what it falls back to ("stop (suite)").
 - Partner suites with many repeats may want a stop *inside* a long scenario (for example, a
   wall-clock limit per scenario). That is a separate decision, because of the partial-verdict
   problem above.

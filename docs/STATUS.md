@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with stop policies and cancellation in the core).
+**As of 2026-10-09** (`main` with run control in the core and the console).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 80% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 83% of 69.
+**Overall: 81% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 84% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 46 / 10 / 3 | 86% |
+| v0.1 | 59 | 47 / 9 / 3 | 87% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
 | v0.5 | 12 | 5 / 3 / 4 | 54% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 63 / 15 / 10 | **80%** |
+| **All** | 88 | 64 / 14 / 10 | **81%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -123,7 +123,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-DX-03 | Demo | M | v0.1 | Done | `opseval demo`, exit codes 0/1/1/3 |
 | FR-DX-04 | Docs site | M | v0.1 | Missing | README and ADRs only |
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
-| FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Partial | all five stop policies (suite `stop:` and `run` flags) and cancel between attempts (`opseval cancel`, ADR-0035); rescore, calibrate, preflight; the console cannot cancel or set stop policies yet |
+| FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Done | all five stop policies (suite `stop:`, `run` flags, console launch form and suite editor) and cancel before any attempt (`opseval cancel`, console Cancel run; ADR-0035); rescore, calibrate, preflight |
 | FR-AUT | Authoring workbench | M | v0.5 | Partial | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground. Missing: a warnings / "not checked" tier beside errors |
 | FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API, serving the built console same-origin (ADR-0034) with run detail down to each attempt's conversation and live progress for runs in flight, token auth (ADR-0029, ADR-0031); no Postgres, workers, accounts, OIDC or live events; console not yet in the wheel |
 

@@ -1378,3 +1378,98 @@ def test_the_csp_check_itself_catches_a_host_coming_back() -> None:
     assert not _csp_sources_are_local("default-src 'self'; font-src 'self' fonts.gstatic.com")
     assert not _csp_sources_are_local("font-src 'self' data:")
     assert not _csp_sources_are_local("script-src *")
+
+
+# --- run control (ADR-0035) ---------------------------------------------------------------------
+
+
+def test_a_running_run_can_be_cancelled_once(tmp_path: Path) -> None:
+    log = _live(tmp_path, ["a", "b"])
+    log.started("a", 2)
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    first = c.post("/api/v1/runs/live/cancel")
+    assert first.status_code == 202 and first.json()["accepted"] is True
+    assert json.loads((tmp_path / "live" / "cancel.json").read_text())["by"] == "console"
+    again = c.post("/api/v1/runs/live/cancel")
+    assert again.status_code == 202 and again.json()["accepted"] is False
+    # The list and the run's own 409 both say it is stopping, so the page can show it.
+    run = next(r for r in c.get("/api/v1/runs").json() if r["id"] == "live")
+    assert run["state"] == "running" and run["progress"]["cancelRequested"] is True
+    detail = c.get("/api/v1/runs/live").json()["detail"]
+    assert detail["progress"]["cancelRequested"] is True
+
+
+def test_only_a_running_run_can_be_cancelled(client: TestClient, tmp_path: Path) -> None:
+    finished = client.post("/api/v1/runs/r1/cancel")
+    assert finished.status_code == 409 and finished.json()["code"] == "RUN_NOT_RUNNING"
+    missing = client.post("/api/v1/runs/nope/cancel")
+    assert missing.status_code == 404
+    store = FileStore(tmp_path / "dead")
+    store.write_manifest(
+        "dead", {"run_id": "dead", "suite": "s", "pid": _dead_pid(), "host": socket.gethostname()}
+    )
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path / "dead")), token=TOKEN))
+    gone = c.post("/api/v1/runs/dead/cancel")
+    assert gone.status_code == 409 and not (tmp_path / "dead" / "dead" / "cancel.json").exists()
+
+
+def test_cancelling_needs_the_token(client: TestClient) -> None:
+    anon = TestClient(client.app, base_url=BASE)
+    assert anon.post("/api/v1/runs/r1/cancel").status_code == 401
+
+
+def test_launch_refuses_a_stop_policy_the_runner_would_not_accept(client: TestClient) -> None:
+    for stop in ({"maxConsecutiveFailures": 0}, {"stopOnCriticalFailur": True}):
+        r = client.post("/api/v1/runs", json={"suite": "smoke", "stop": stop})
+        assert r.status_code == 422, stop
+
+
+async def test_a_launch_with_a_stop_policy_stops_and_says_why(tmp_path: Path) -> None:
+    from opseval.demo.refund_agent import run_agent
+
+    settings = Settings(reports_dir=str(tmp_path / "r"), allowed_hosts="127.0.0.1")
+    app, _ = app_for(tmp_path, settings=settings)
+    async with run_agent(bug="skip-approval") as url, _async_client(app) as http:
+        started = await http.post(
+            "/api/v1/runs",
+            json={
+                "suite": "smoke",
+                "repeats": 1,
+                "target": url,
+                "stop": {"stopOnCriticalFailure": True, "maxWallClockSeconds": None},
+            },
+        )
+        assert started.status_code == 202
+        run_id = started.json()["runId"]
+        await _wait_for(http, run_id, {"finished"})
+        detail = (await http.get(f"/api/v1/runs/{run_id}")).json()
+    assert detail["stopped"]["by"] == "stop_on_critical_failure"
+    assert detail["stopped"]["after"] == "rf-001"
+    assert detail["stopPolicy"]["stopOnCriticalFailure"] is True
+    assert detail["stopPolicy"]["maxWallClockSeconds"] is None, "null kept the suite's value"
+    kinds = {t["id"]: (t["status"], t["skipKind"]) for t in detail["tests"]}
+    assert kinds["rf-002"] == ("skipped_precondition", "stopped")
+    assert detail["safeToRelease"] is False
+
+
+def test_a_suite_stop_policy_is_saved_kept_and_removed(tmp_path: Path) -> None:
+    import yaml
+
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    base = {"file": "st", "displayName": "st", "include": ["scenarios/rf-001*.yaml"]}
+    stop = {"maxConsecutiveFailures": 3, "stopOnRateLimit": True, "failFast": None}
+    saved = c.put("/api/v1/suites", json={**base, "stop": stop}).json()
+    assert saved["stop"]["maxConsecutiveFailures"] == 3 and saved["stop"]["failFast"] is False
+    doc = yaml.safe_load((cat / "suites" / "st.yaml").read_text())
+    assert doc["stop"] == {"max_consecutive_failures": 3, "stop_on_rate_limit": True}
+    row = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "st")
+    assert row["stop"]["stopOnRateLimit"] is True
+    # Omitted on an edit: kept. An explicit null: removed, and the suite never stops early.
+    c.put("/api/v1/suites", json={**base, "displayName": "st2", "overwrite": True})
+    assert "stop" in yaml.safe_load((cat / "suites" / "st.yaml").read_text())
+    out = c.put("/api/v1/suites", json={**base, "stop": None, "overwrite": True}).json()
+    assert "stop" not in yaml.safe_load((cat / "suites" / "st.yaml").read_text())
+    assert out["stop"] is None
+    plain = next(s for s in c.get("/api/v1/suites").json() if s["file"] == "smoke")
+    assert plain["stop"] is None

@@ -10,7 +10,8 @@ export function ProgressLine({ p }: { p: RunProgress }) {
         <span className="block h-full bg-coral transition-all" style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-1 text-xs">{p.scenariosDone}/{p.scenariosPlanned} scenarios · {p.attemptsRecorded} attempt(s)
-        {p.stage === "finishing" ? " · writing the gate, reports and sinks" : p.current && <> · now <Mono>{p.current}</Mono></>}</div>
+        {p.stage === "finishing" ? " · writing the gate, reports and sinks" : p.current && <> · now <Mono>{p.current}</Mono></>}
+        {p.cancelRequested && p.stage !== "finishing" && <> · <b data-state="cancelling">cancelling</b></>}</div>
     </div>
   );
 }

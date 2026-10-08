@@ -28,6 +28,7 @@ from opseval.models.gate import (
 )
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
+from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
@@ -127,6 +128,7 @@ def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
         attempts_recorded=sum(r.attempts for r in rows),
         current=p.current,
         scenarios=rows,
+        cancel_requested=store.cancel_requested(run_id),
     )
 
 
@@ -232,6 +234,8 @@ def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
             pass_rate=t.pass_rate,
             flaky=t.flaky,
             unmeasured_scorers=t.unmeasured_scorers,
+            skip_kind=t.skip_kind,
+            cut_short_of=t.cut_short_of,
             attempts=[
                 s.AttemptOut(
                     index=a.attempt_index,
@@ -287,6 +291,12 @@ def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
         vacuous_scorers=r.vacuous_scorers,
         unmeasured_scorers=r.unmeasured_scorers,
         sinks=[s.SinkOut(sink=o.sink, published=o.published, detail=o.detail) for o in r.sinks],
+        stop_policy=stop_out(r.stop) if r.stop else None,
+        stopped=(
+            s.StoppedOut(by=r.stopped.by, after=r.stopped.after, detail=r.stopped.detail)
+            if r.stopped
+            else None
+        ),
     )
 
 
@@ -482,9 +492,14 @@ def list_suites(
                 gate=gate_out(
                     GatePolicy.model_validate(raw.get("gate") or {}), fail_on_flaky=fail_on_flaky
                 ),
+                stop=stop_out(StopPolicy.model_validate(raw["stop"])) if raw.get("stop") else None,
             )
         )
     return out
+
+
+def stop_out(policy: StopPolicy) -> s.StopOut:
+    return s.StopOut(**policy.model_dump())
 
 
 def gate_out(policy: GatePolicy, *, fail_on_flaky: bool = False) -> s.GateOut:

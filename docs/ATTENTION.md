@@ -31,8 +31,7 @@ settles it.
 
 | # | Sev | Issue | Effect | Plan |
 |---|---|---|---|---|
-| I6 | High | The judges' handling of agent text can be strengthened (security) | A misbehaving agent could influence the judges that grade it. | Next, with I8 (needs a scorer version bump) |
-| I8 | High | Run control from the console: the core has all five stop policies and cancellation (ADR-0035), but the console has no Cancel button or stop-policy controls | A run started from the console can be stopped only with `opseval cancel` in a terminal. | Next PR |
+| I6 | High | The judges' handling of agent text can be strengthened (security) | A misbehaving agent could influence the judges that grade it. | Next (needs a scorer version bump) |
 | I9 | High | No concurrency: attempts run one at a time | Partner suites with repeats will be slow (the requirement is ≥ 20 concurrent attempts). | With D6 (lanes) |
 
 ## For your information
