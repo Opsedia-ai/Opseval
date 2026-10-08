@@ -19,6 +19,8 @@ from opseval.demo import catalogue_dir as demo_catalogue_dir
 from opseval.driver import Driver
 from opseval.errors import ConfigError
 from opseval.llm import UsageMeter, client_for_role
+from opseval.models.gate import Preset
+from opseval.models.gate import resolve as resolve_gate
 from opseval.models.preflight import PreflightReport
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
@@ -82,6 +84,8 @@ class RunOptions:
     run_id: str | None = None
     """Use this run id instead of minting one, so a caller (the console server) can point
     at the run before it starts and record a failure against it."""
+    gate: Preset | None = None
+    """A gate preset that replaces the suite's policy whole (``opseval run --gate``)."""
     only_ids: list[str] | None = None
     """Run only these scenario ids (any of them, unlike ``filters``, which must all hold).
     An id that is not in the catalogue is a configuration error, never silently dropped."""
@@ -301,11 +305,15 @@ async def launch(
             )
         store.save_scenario(run_id, scenario)
         if scenario.is_blocked:
-            verdicts.append(skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'"))
+            verdicts.append(
+                skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'", "quarantine")
+            )
             continue
         blocked_by = _unmet(scenario, health, sim_client is None)
         if blocked_by is not None:
-            verdicts.append(skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, blocked_by))
+            verdicts.append(
+                skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, blocked_by, "dependency")
+            )
             continue
         if _needs_llm_persona(scenario) and sim_client is None:
             verdicts.append(
@@ -314,6 +322,7 @@ async def launch(
                     VerdictStatus.SKIPPED_PRECONDITION,
                     "needs an LLM persona: set OPSEVAL_SIMULATOR_BASE_URL and "
                     "OPSEVAL_SIMULATOR_MODEL",
+                    "simulator",
                 )
             )
             continue
@@ -324,6 +333,7 @@ async def launch(
                     VerdictStatus.SKIPPED_PRECONDITION,
                     "commit guard: this scenario performs the irreversible outcome; "
                     "re-run with --allow-commit against a test tenant",
+                    "commit_guard",
                 )
             )
             continue
@@ -363,9 +373,10 @@ async def launch(
             log("fail-fast: stopping after the first failed scenario")
             break
 
-    gate = release_gate(
-        verdicts, fail_on_flaky=settings.gate_fail_on_flaky, load_errors=len(catalogue.problems)
+    policy = resolve_gate(
+        catalogue.gate, preset=options.gate, fail_on_flaky=settings.gate_fail_on_flaky
     )
+    gate = release_gate(verdicts, policy=policy, load_errors=len(catalogue.problems))
     result = SuiteResult(
         opseval_version=__version__,
         run_id=run_id,
@@ -376,7 +387,7 @@ async def launch(
         ended_at=datetime.now(UTC),
         tests=verdicts,
         gate=gate,
-        exit_code=exit_code(verdicts, load_errors=len(catalogue.problems)),
+        exit_code=exit_code(verdicts, load_errors=len(catalogue.problems), gate=gate),
         usage=meter.snapshot(),
         config_digest=config_digest(settings),
         load_errors=[str(p) for p in catalogue.problems],

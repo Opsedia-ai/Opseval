@@ -19,6 +19,7 @@ from opseval import __version__
 from opseval.catalogue import builtin_profiles, load_catalogue, load_profile
 from opseval.config import Settings
 from opseval.errors import ConfigError
+from opseval.models.gate import Preset
 from opseval.models.results import SuiteResult
 from opseval.reporting import console_summary
 from opseval.runner import RunOptions, launch
@@ -55,6 +56,13 @@ ProfileOpt = Annotated[
 JunitOpt = Annotated[
     Optional[Path],  # noqa: UP045 - typer needs Optional here
     typer.Option("--junit", help="Also write JUnit XML here (for CI test reports)."),
+]
+GateOpt = Annotated[
+    Optional[Preset],  # noqa: UP045
+    typer.Option(
+        "--gate",
+        help="Gate preset (strict | standard | lenient) replacing the suite's gate policy.",
+    ),
 ]
 
 
@@ -177,6 +185,7 @@ def run(
         bool, typer.Option(help="Read the agent's traces if the profile declares a source.")
     ] = True,
     junit: JunitOpt = None,
+    gate: GateOpt = None,
     open_report: Annotated[
         bool, typer.Option("--open", help="Open report.html when done.")
     ] = False,
@@ -196,6 +205,7 @@ def run(
         traces=traces,
         preflight=preflight,
         verify_llm=verify_llm,
+        gate=gate,
     )
     raise typer.Exit(_execute(path, options, settings, open_report, junit))
 
@@ -212,6 +222,7 @@ def rescore(
         typer.Option("--profile", "-p", help="SUT profile to use with --catalogue."),
     ] = None,
     junit: JunitOpt = None,
+    gate: GateOpt = None,
     open_report: Annotated[
         bool, typer.Option("--open", help="Open report.html when done.")
     ] = False,
@@ -222,7 +233,9 @@ def rescore(
     settings = Settings()
     try:
         outcome = asyncio.run(
-            rescore_run(run_dir, settings, catalogue=catalogue, profile=profile, log=typer.echo)
+            rescore_run(
+                run_dir, settings, catalogue=catalogue, profile=profile, gate=gate, log=typer.echo
+            )
         )
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg="red", err=True)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import html
 import re
 
+from opseval.models.gate import describe, looser_than_standard
 from opseval.models.results import SuiteResult, VerdictStatus
 
 MARKER = "<!-- opseval-gate -->"
@@ -45,6 +46,19 @@ def _rate(value: float | None) -> str:
     return "not measured" if value is None else f"{value:.0%}"
 
 
+def _policy_lines(result: SuiteResult) -> list[str]:
+    """The gate policy, and anything in it looser than standard (ADR-0032)."""
+    policy = result.gate.policy
+    if policy is None:
+        return []
+    lines = [f"Gate policy: `{_code(describe(policy), 300)}`", ""]
+    looser = looser_than_standard(policy)
+    if looser:
+        listed = ", ".join(f"`{_code(x, 60)}`" for x in looser)
+        lines += [f"⚠️ **Looser than standard** · {listed}", ""]
+    return lines
+
+
 def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> str:
     if result.gate.status != "pass":
         head = "🔴 **Release blocked**"
@@ -62,6 +76,7 @@ def markdown_summary(result: SuiteResult, *, report_url: str | None = None) -> s
         "",
         _md(result.gate.summary, 600),
         "",
+        *_policy_lines(result),
         "| Scenario | Criticality | Verdict | Pass rate |",
         "|---|---|---|---|",
     ]

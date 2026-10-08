@@ -107,6 +107,9 @@ class RunDetail(Api):
     warnings: list[str]
     exit_code: int | None  # None: the run never finished
     safe_to_release: bool
+    gate_policy: str | None = None  # "standard", or "strict + flaky=warn"; None before policies
+    looser_than_standard: list[str] = []
+    ignored: list[str] = []
     tests: list[TestOut]
     usage: list[UsageOut]
     load_errors: list[str]

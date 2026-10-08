@@ -5,7 +5,7 @@ CLAUDE.md, "Definition of done"). The summary below is **computed** from the tab
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-08** (`main` plus #28).
+**As of 2026-10-08** (`main` with the gate policy, ADR-0032).
 
 ## Completion
 
@@ -99,7 +99,7 @@ These are not in the percentage, and today they gate more than code does.
 | FR-VER-04 | Five-state verdicts | M | v0.1 | Done | `VerdictStatus` |
 | FR-VER-05 | pass^k | S | v0.2 | Done | `_pass_hat_k` |
 | FR-GATE-01 | Exit codes 0/1/2/3 | M | v0.1 | Done | `exit_code`, CI demo checks 0/1/1/3 |
-| FR-GATE-02 | Criticality-aware gate | M | v0.1 | Done | `release_gate`; "Safe to release" only when everything passed (ADR-0030) |
+| FR-GATE-02 | Criticality-aware gate | M | v0.1 | Done | `release_gate`; per-suite gate policy with presets, recorded in every result (ADR-0032); "Safe to release" only when nothing blocks or warns (ADR-0030) |
 | FR-GATE-03 | GitHub Action | M | v0.2 | Done | `action.yml`, dogfooded in CI |
 | FR-GATE-04 | pytest plugin | S | v0.2 | Done | `packages/pytest-opseval` |
 | FR-GATE-05 | Other CI templates | S | v0.5 | Missing | only `opseval summary` |
@@ -129,7 +129,7 @@ These are not in the percentage, and today they gate more than code does.
 | FR-DX-03 | Demo | M | v0.1 | Done | `opseval demo`, exit codes 0/1/1/3 |
 | FR-DX-04 | Docs site | M | v0.1 | Missing | README and ADRs only |
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
-| FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Partial | rescore, calibrate and preflight done; only `fail_fast` of five stop policies; no cancel |
+| FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Partial | rescore (with `--gate` re-gating), calibrate and preflight done; only `fail_fast` of five stop policies; no cancel |
 | FR-AUT | Authoring workbench | M | v0.5 | Partial | bulk import, suite editor, persona playground; no live scenario YAML editor |
 | FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API and console with token auth (ADR-0029, ADR-0031); no Postgres, workers, accounts, OIDC or live events |
 

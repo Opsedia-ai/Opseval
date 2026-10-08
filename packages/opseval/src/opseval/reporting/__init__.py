@@ -8,6 +8,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from opseval.flow import flow_maps
+from opseval.models.gate import describe, looser_than_standard
 from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
@@ -19,6 +20,7 @@ _env = Environment(
     trim_blocks=True,
     lstrip_blocks=True,
 )
+_env.globals.update(describe_policy=describe, looser_than_standard=looser_than_standard)
 
 
 def fmt_score(value: float | None) -> str:
@@ -74,6 +76,11 @@ def console_summary(result: SuiteResult) -> str:
         mark = "published" if outcome.published else "NOT PUBLISHED"
         lines.append(f"  {mark:<13} {outcome.sink}: {outcome.detail}")
     lines += ["", f"Gate: {result.gate.status.upper()} — {result.gate.summary}"]
+    if result.gate.policy is not None:
+        lines.append(f"Gate policy: {describe(result.gate.policy)}")
+        looser = looser_than_standard(result.gate.policy)
+        if looser:
+            lines.append(f"  ⚠ looser than standard: {', '.join(looser)}")
     lines.append(f"Exit code: {result.exit_code}")
     return "\n".join(lines)
 

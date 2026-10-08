@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from opseval.models.gate import ResolvedGatePolicy
 from opseval.models.preflight import PreflightReport
 from opseval.models.record import TerminalState
 from opseval.models.scenario import Criticality
@@ -84,6 +85,9 @@ class VerdictStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+SkipKind = Literal["dependency", "simulator", "commit_guard", "quarantine"]
+
+
 class TestVerdict(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     __test__ = False  # not a pytest test class
@@ -93,6 +97,9 @@ class TestVerdict(BaseModel):
     criticality: Criticality
     status: VerdictStatus
     reason: str | None = None
+    skip_kind: SkipKind | None = None
+    """Why a skipped scenario was not run, so a gate policy can treat an outage and the
+    operator's own choice (the commit guard) differently (ADR-0032)."""
     pass_rate: float | None = None
     pass_hat_k: float | None = None
     flaky: bool = False
@@ -162,6 +169,16 @@ class Gate(BaseModel):
     blocking: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     summary: str = ""
+    ignored: list[str] = Field(default_factory=list)
+    """What the policy chose to ignore. Listed, so "ignored" is never "not there"."""
+    agent_blocked: bool = False
+    """At least one blocking reason is agent behaviour (a failure or flakiness), rather than
+    something that could not be judged."""
+    safe: bool | None = None
+    """True when nothing blocks, nothing warns, and (under ``exit_code: strict``) every
+    scenario passed. ``None`` on results written before gate policies (ADR-0032)."""
+    policy: ResolvedGatePolicy | None = None
+    """The policy this gate was decided with. ``None`` on results written before it."""
 
 
 class ScorerChange(BaseModel):
@@ -258,4 +275,6 @@ class SuiteResult(BaseModel):
         The gate passed, every scenario passed (exit 0, so nothing failed, was skipped or
         failed to load), and every agent-facing check produced a score.
         """
+        if self.gate.safe is not None:  # decided under a gate policy (ADR-0032)
+            return self.gate.status == "pass" and self.gate.safe
         return self.gate.status == "pass" and self.exit_code == 0 and not self.unmeasured_scorers

@@ -29,6 +29,7 @@ export interface Sink { sink: string; published: boolean; detail: string }
 export interface RunDetail {
   summary: RunSummary; target: string; profile: string; gateStatus: string; gateSummary: string;
   blocking: string[]; warnings: string[]; exitCode: number | null; safeToRelease: boolean;
+  gatePolicy: string | null; looserThanStandard: string[]; ignored: string[];
   tests: TestResult[]; usage: Usage[]; loadErrors: string[];
   degradedScorers: string[]; vacuousScorers: string[]; unmeasuredScorers: string[]; sinks: Sink[];
 }
