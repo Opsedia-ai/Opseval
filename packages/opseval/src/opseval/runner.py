@@ -28,6 +28,7 @@ from opseval.models.scenario import Criticality, Scenario
 from opseval.models.telemetry import TelemetryEvent
 from opseval.plugins import load_scorers
 from opseval.preflight import preflight
+from opseval.progress import ProgressLog
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
@@ -303,93 +304,108 @@ async def launch(
     )
     declared = any(sc.criticality is not Criticality.NORMAL for sc in catalogue.scenarios)
     verdicts: list[TestVerdict] = []
+    tracker = ProgressLog(store, run_id, [sc.id for sc in catalogue.scenarios])
     for position, scenario in enumerate(catalogue.scenarios):
-        if options.repeats:
-            scenario = scenario.model_copy(
-                update={
-                    "execution": scenario.execution.model_copy(update={"repeats": options.repeats})
-                }
-            )
-        store.save_scenario(run_id, scenario)
-        if scenario.is_blocked:
-            verdicts.append(
-                skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'", "quarantine")
-            )
-            continue
-        blocked_by = _unmet(scenario, health, sim_client is None)
-        if blocked_by is not None:
-            reason, kind = blocked_by
-            verdicts.append(skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, reason, kind))
-            continue
-        if _needs_llm_persona(scenario) and sim_client is None:
-            verdicts.append(
-                skipped(
-                    scenario,
-                    VerdictStatus.SKIPPED_PRECONDITION,
-                    "needs an LLM persona: set OPSEVAL_SIMULATOR_BASE_URL and "
-                    "OPSEVAL_SIMULATOR_MODEL",
-                    "simulator",
+        before = len(verdicts)
+        try:
+            if options.repeats:
+                scenario = scenario.model_copy(
+                    update={
+                        "execution": scenario.execution.model_copy(
+                            update={"repeats": options.repeats}
+                        )
+                    }
                 )
-            )
-            continue
-        if scenario.conversation.stop_at == "outcome_committed" and not options.allow_commit:
-            verdicts.append(
-                skipped(
-                    scenario,
-                    VerdictStatus.SKIPPED_PRECONDITION,
-                    "commit guard: this scenario performs the irreversible outcome; "
-                    "re-run with --allow-commit against a test tenant",
-                    "commit_guard",
-                )
-            )
-            continue
-        log(f"▶ {scenario.id} · {scenario.name}")
-        attempts = []
-        for i in range(scenario.execution.repeats):
-            seed = attempt_seed(scenario.id, i)
-            sim: Simulator = (
-                ScriptedSimulator(scenario, seed)
-                if scenario.conversation.scripted_turns or sim_client is None
-                else LLMSimulator(scenario, seed, sim_client)
-            )
-            driver = Driver(
-                scenario=scenario,
-                profile=profile,
-                transport=make_transport(profile),
-                simulator=sim,
-                run_id=run_id,
-                attempt_index=i,
-                seed=seed,
-                allow_commit=options.allow_commit,
-            )
-            record = await driver.run()
-            if trace_source is not None:
-                record = await enrich(record, trace_source, profile)
-            path = store.save_record(record)
-            scores = await engine.score(record, scenario, profile)
-            verdict = attempt_verdict(record, scores, str(path))
-            attempts.append(verdict)
-            state = (
-                "not judged" if verdict.passed is None else ("pass" if verdict.passed else "FAIL")
-            )
-            coverage = " · traces" if record.trace_coverage == "full" else ""
-            log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
-        verdicts.append(fold_attempts(scenario, attempts))
-        if (
-            options.fail_fast
-            and verdicts[-1].status is VerdictStatus.FAILED
-            # A failure the policy would not block is no reason to stop.
-            and failure_blocks(policy, scenario.criticality, declared)
-        ):
-            log("fail-fast: stopping after the first failed scenario the gate blocks on")
-            # Name what was not run, so it cannot vanish from the result.
-            reason = f"not run: --fail-fast stopped the run after {scenario.id} failed"
-            for rest in catalogue.scenarios[position + 1 :]:
+            store.save_scenario(run_id, scenario)
+            tracker.started(scenario.id, scenario.execution.repeats)
+            if scenario.is_blocked:
                 verdicts.append(
-                    skipped(rest, VerdictStatus.SKIPPED_PRECONDITION, reason, "fail_fast")
+                    skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'", "quarantine")
                 )
-            break
+                continue
+            blocked_by = _unmet(scenario, health, sim_client is None)
+            if blocked_by is not None:
+                reason, kind = blocked_by
+                verdicts.append(skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, reason, kind))
+                continue
+            if _needs_llm_persona(scenario) and sim_client is None:
+                verdicts.append(
+                    skipped(
+                        scenario,
+                        VerdictStatus.SKIPPED_PRECONDITION,
+                        "needs an LLM persona: set OPSEVAL_SIMULATOR_BASE_URL and "
+                        "OPSEVAL_SIMULATOR_MODEL",
+                        "simulator",
+                    )
+                )
+                continue
+            if scenario.conversation.stop_at == "outcome_committed" and not options.allow_commit:
+                verdicts.append(
+                    skipped(
+                        scenario,
+                        VerdictStatus.SKIPPED_PRECONDITION,
+                        "commit guard: this scenario performs the irreversible outcome; "
+                        "re-run with --allow-commit against a test tenant",
+                        "commit_guard",
+                    )
+                )
+                continue
+            log(f"▶ {scenario.id} · {scenario.name}")
+            attempts = []
+            for i in range(scenario.execution.repeats):
+                seed = attempt_seed(scenario.id, i)
+                sim: Simulator = (
+                    ScriptedSimulator(scenario, seed)
+                    if scenario.conversation.scripted_turns or sim_client is None
+                    else LLMSimulator(scenario, seed, sim_client)
+                )
+                driver = Driver(
+                    scenario=scenario,
+                    profile=profile,
+                    transport=make_transport(profile),
+                    simulator=sim,
+                    run_id=run_id,
+                    attempt_index=i,
+                    seed=seed,
+                    allow_commit=options.allow_commit,
+                )
+                record = await driver.run()
+                if trace_source is not None:
+                    record = await enrich(record, trace_source, profile)
+                path = store.save_record(record)
+                tracker.attempt(scenario.id)
+                scores = await engine.score(record, scenario, profile)
+                verdict = attempt_verdict(record, scores, str(path))
+                attempts.append(verdict)
+                state = (
+                    "not judged"
+                    if verdict.passed is None
+                    else ("pass" if verdict.passed else "FAIL")
+                )
+                coverage = " · traces" if record.trace_coverage == "full" else ""
+                log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
+            verdicts.append(fold_attempts(scenario, attempts))
+            if (
+                options.fail_fast
+                and verdicts[-1].status is VerdictStatus.FAILED
+                # A failure the policy would not block is no reason to stop.
+                and failure_blocks(policy, scenario.criticality, declared)
+            ):
+                log("fail-fast: stopping after the first failed scenario the gate blocks on")
+                # Name what was not run, so it cannot vanish from the result.
+                reason = f"not run: --fail-fast stopped the run after {scenario.id} failed"
+                for rest in catalogue.scenarios[position + 1 :]:
+                    verdicts.append(
+                        skipped(rest, VerdictStatus.SKIPPED_PRECONDITION, reason, "fail_fast")
+                    )
+                break
+        finally:
+            # Every way out of an iteration (a skip, the end of its attempts, a fail-fast
+            # stop that also skips the rest) has appended its verdicts: record each one.
+            for decided in verdicts[before:]:
+                tracker.ended(decided)
 
+    tracker.finishing()
     gate = release_gate(verdicts, policy=policy, load_errors=len(catalogue.problems))
     result = SuiteResult(
         opseval_version=__version__,

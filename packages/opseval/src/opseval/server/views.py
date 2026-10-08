@@ -106,7 +106,28 @@ def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
             gate="harness_error",
             error=f"{error.get('code', 'HARNESS_ERROR')}: {error.get('message', '')}",
         )
-    return s.RunSummary(**common, state="running", gate=None)
+    return s.RunSummary(
+        **common, state="running", gate=None, progress=_progress(store, folder.name)
+    )
+
+
+def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
+    """The runner's own account of how far it got (progress.json), or ``None``."""
+    p = store.load_progress(run_id)
+    if p is None:
+        return None
+    rows = [
+        s.ScenarioProgressOut(id=r.id, state=r.state, attempts=r.attempts, repeats=r.repeats)
+        for r in p.scenarios
+    ]
+    return s.RunProgress(
+        stage=p.stage,
+        scenarios_planned=len(rows),
+        scenarios_done=sum(r.state in ("done", "skipped") for r in rows),
+        attempts_recorded=sum(r.attempts for r in rows),
+        current=p.current,
+        scenarios=rows,
+    )
 
 
 def _process_gone(manifest: dict[str, Any]) -> bool:
@@ -157,7 +178,11 @@ def list_runs(store: FileStore) -> list[s.RunSummary]:
 
 
 class RunInProgress(Exception):
-    """The run exists but has not finished: there is no detail to show yet."""
+    """The run exists but has not finished: there is no detail yet, only its progress."""
+
+    def __init__(self, run_id: str, progress: s.RunProgress | None) -> None:
+        super().__init__(run_id)
+        self.progress = progress
 
 
 def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
@@ -166,7 +191,7 @@ def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
     if summary is None:
         return None  # no such run
     if summary.state == "running":
-        raise RunInProgress(run_id)
+        raise RunInProgress(run_id, summary.progress)
     m = store.load_manifest(run_id)
     return s.RunDetail(
         summary=summary,

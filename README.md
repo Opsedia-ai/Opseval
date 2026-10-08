@@ -467,8 +467,9 @@ Two rules shape what is in there:
 
 Run detail opens the **conversation behind each attempt**: every turn (right to left for Arabic
 personas), each checkpoint raised and the customer's decision, tool calls from the trace, and any
-harness error, with the record's redaction stated, never implied. Not built yet: live
-per-scenario progress and a scenario editor (bulk import is there). See
+harness error, with the record's redaction stated, never implied. A run in flight shows its
+**live progress**: scenarios done, attempts recorded, and the one running now; verdicts appear
+only when it ends. Not built yet: a scenario editor (bulk import is there). See
 [ADR-0029](docs/adr/0029-console-api.md).
 
 ## Publish a finished run

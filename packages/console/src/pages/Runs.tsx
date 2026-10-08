@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { GitCompareArrows, Play } from "lucide-react";
 import { api } from "../lib/api";
+import { ProgressLine } from "../components/Progress";
 import { useApi } from "../lib/useApi";
 import { Button, Card, CoralButton, Count, Data, Explainer, GatePill, Mono, Page, PageHeader, ResultBar, StatePill, Table } from "../components/ui";
 
@@ -28,7 +29,7 @@ export default function Runs() {
                       <td className="text-ink">{r.suite}</td>
                       <td><StatePill state={r.state} /></td>
                       <td title={r.error ?? undefined}><GatePill gate={r.gate} />{r.error && <div className="mt-1 max-w-64 truncate text-xs">{r.error}</div>}</td>
-                      <td><ResultBar passed={r.passed} failed={r.failed} unjudged={r.unjudged} /></td>
+                      <td>{r.progress ? <ProgressLine p={r.progress} /> : <ResultBar passed={r.passed} failed={r.failed} unjudged={r.unjudged} />}</td>
                       <td><Count n={r.passed} /></td><td><Count n={r.failed} /></td><td><Count n={r.unjudged} /></td><td><Count n={r.flaky} /></td>
                     </tr>))}
                 </Table>)}

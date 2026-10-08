@@ -1068,3 +1068,104 @@ def test_a_record_from_before_redaction_says_it_was_never_checked(tmp_path: Path
             "detail": '{"why": "boom"}',
         }
     ]
+
+
+# --- live progress ------------------------------------------------------------------------------
+
+
+def _live(tmp_path: Path, planned: list[str]) -> Any:
+    from opseval.progress import ProgressLog
+
+    store = FileStore(tmp_path)
+    store.write_manifest(
+        "live",
+        {
+            "run_id": "live",
+            "suite": "s",
+            "planned": planned,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+        },
+    )
+    return ProgressLog(store, "live", planned)
+
+
+def _verdict(tid: str, status: VerdictStatus) -> TestVerdict:
+    return TestVerdict(test_id=tid, name=tid, criticality=Criticality.NORMAL, status=status)
+
+
+def test_a_running_run_reports_the_runners_own_progress(tmp_path: Path) -> None:
+    log = _live(tmp_path, ["a", "b", "c"])
+    log.started("a", 2)
+    log.attempt("a")
+    log.attempt("a")
+    log.ended(_verdict("a", VerdictStatus.PASSED))
+    log.started("b", 2)
+    log.attempt("b")
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    run = next(r for r in c.get("/api/v1/runs").json() if r["id"] == "live")
+    p = run["progress"]
+    assert run["state"] == "running" and run["passed"] is None  # progress, not a verdict
+    assert (p["scenariosPlanned"], p["scenariosDone"], p["attemptsRecorded"]) == (3, 1, 3)
+    assert p["current"] == "b" and p["stage"] == "running"
+    assert [(x["id"], x["state"], x["attempts"], x["repeats"]) for x in p["scenarios"]] == [
+        ("a", "done", 2, 2),
+        ("b", "running", 1, 2),
+        ("c", "waiting", 0, None),
+    ]
+    # The run's own page gets the same progress inside its 409: no second poll needed.
+    r = c.get("/api/v1/runs/live")
+    assert r.status_code == 409 and r.json()["code"] == "RUN_IN_PROGRESS"
+    assert r.json()["detail"]["progress"]["current"] == "b"
+
+
+def test_skipped_and_finishing_are_said_not_guessed(tmp_path: Path) -> None:
+    """Review of #37: a skipped last scenario looked "running" for ever, and a scenario
+    looked "done" while its attempts were still being scored."""
+    log = _live(tmp_path, ["a", "b"])
+    log.started("a", 3)
+    log.attempt("a")
+    log.attempt("a")
+    log.attempt("a")  # all recorded, still being scored: not done yet
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    rows = lambda: next(r for r in c.get("/api/v1/runs").json() if r["id"] == "live")["progress"]  # noqa: E731
+    assert rows()["scenarios"][0]["state"] == "running"
+    log.ended(_verdict("a", VerdictStatus.PASSED))
+    log.started("b", 2)
+    log.ended(_verdict("b", VerdictStatus.SKIPPED_PRECONDITION))
+    log.finishing()
+    p = rows()
+    assert [x["state"] for x in p["scenarios"]] == ["done", "skipped"]
+    assert p["current"] is None and p["stage"] == "finishing" and p["scenariosDone"] == 2
+
+
+def test_an_unreadable_progress_file_is_no_progress_not_a_500(tmp_path: Path) -> None:
+    _live(tmp_path, ["a"])
+    (tmp_path / "live" / "progress.json").write_text('{"scenarios": null}', "utf-8")
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    runs = c.get("/api/v1/runs")
+    assert runs.status_code == 200
+    assert next(r for r in runs.json() if r["id"] == "live")["progress"] is None
+
+
+def test_a_finished_run_carries_no_progress(client: TestClient) -> None:
+    assert all(r["progress"] is None for r in client.get("/api/v1/runs").json())
+
+
+async def test_the_runner_records_a_skipped_last_scenario(tmp_path: Path) -> None:
+    """rf-101 needs an LLM persona and there is none, so it is the last and is skipped."""
+    from opseval.demo.refund_agent import run_agent
+    from opseval.runner import RunOptions, launch
+
+    cat = catalogue_dir()
+    settings = Settings(reports_dir=str(tmp_path), allowed_hosts="127.0.0.1")
+    async with run_agent() as url:
+        result = await launch(
+            cat / "suites" / "full.yaml",
+            RunOptions(target=url, profile=cat / "profile.yaml", repeats=1),
+            settings,
+        )
+    p = FileStore(tmp_path).load_progress(result.run_id)
+    assert p is not None and p.stage == "finishing" and p.current is None
+    states = {r.id: r.state for r in p.scenarios}
+    assert states["rf-101"] == "skipped" and states["rf-001"] == "done"

@@ -223,6 +223,19 @@ def create_app(
     def _api_error(_: Request, exc: actions.ApiError) -> JSONResponse:
         return _deny(exc.status, exc.code, exc.message)
 
+    @app.exception_handler(views.RunInProgress)
+    def _in_progress(_: Request, exc: views.RunInProgress) -> JSONResponse:
+        # The progress rides along, so a page waiting on this run needs no second poll.
+        progress = exc.progress.model_dump(by_alias=True) if exc.progress else None
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "RUN_IN_PROGRESS",
+                "message": f"run {exc} has not finished yet",
+                "detail": {"progress": progress},
+            },
+        )
+
     @app.exception_handler(StarletteHTTPException)
     def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
         # Every API error carries a machine code the console can act on, including the
@@ -254,12 +267,7 @@ def create_app(
 
     @app.get(API + "/runs/{run_id}")
     def run(run_id: str) -> s.RunDetail:
-        try:
-            detail = views.run_detail(ctx.store, _run_id(run_id))
-        except views.RunInProgress as exc:
-            raise actions.ApiError(
-                409, "RUN_IN_PROGRESS", f"run {run_id!r} has not finished yet"
-            ) from exc
+        detail = views.run_detail(ctx.store, _run_id(run_id))  # RunInProgress: 409
         if detail is None:
             raise actions.ApiError(404, "UNKNOWN_RUN", f"no run {run_id!r}")
         return detail

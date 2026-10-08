@@ -7,6 +7,7 @@
 <root>/<run_id>/records/<test_id>__attempt<N>.json
 <root>/<run_id>/result.json        (written last: marks completion)
 <root>/<run_id>/error.json         (instead of result.json: the run could not be carried out)
+<root>/<run_id>/progress.json      (while it runs: the runner's own account of how far it got)
 <root>/<run_id>/report.html
 <root>/<run_id>/junit.xml
 <root>/<run_id>/rescore-<UTC time>/{result.json, report.html, junit.xml}   (opseval rescore)
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from opseval.models.profile import SutProfile
+from opseval.models.progress import RunProgress
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
 from opseval.models.scenario import Scenario
@@ -115,6 +117,20 @@ class FileStore:
         path = self.run_dir(record.run_id) / "records" / name
         _atomic_write(path, record.model_dump_json(indent=2))
         return path
+
+    def save_progress(self, run_id: str, progress: RunProgress) -> Path:
+        path = self.run_dir(run_id) / "progress.json"
+        _atomic_write(path, progress.model_dump_json(indent=2))
+        return path
+
+    def load_progress(self, run_id: str) -> RunProgress | None:
+        """The runner's progress, or ``None`` if it wrote none (or it cannot be read)."""
+        try:
+            return RunProgress.model_validate_json(
+                (self.run_dir(run_id) / "progress.json").read_text("utf-8")
+            )
+        except (OSError, ValueError):
+            return None
 
     def load_record(self, run_id: str, test_id: str, attempt: int) -> RunRecord | None:
         """One attempt's record, or ``None`` if it was not (or not yet) written. A record that

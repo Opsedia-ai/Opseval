@@ -10,6 +10,7 @@ export type Gate = NonNullable<G.RunSummary["gate"]>;
 export type RunState = G.RunSummary["state"];
 
 export type RunSummary = G.RunSummary;
+export type RunProgress = G.RunProgress;
 export type Score = G.ScoreOut;
 export type Attempt = G.AttemptOut;
 export type TestResult = G.TestOut;

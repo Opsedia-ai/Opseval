@@ -45,6 +45,24 @@ GateState = Literal["safe", "gaps", "blocked", "not_judged", "harness_error"]
 """
 
 
+class ScenarioProgressOut(Api):
+    id: str
+    state: Literal["waiting", "running", "done", "skipped"]
+    attempts: int  # attempts recorded so far
+    repeats: int | None  # attempts planned; None until the scenario has started
+
+
+class RunProgress(Api):
+    """How far a run in flight has got, as the runner itself recorded it."""
+
+    stage: Literal["running", "finishing"]  # finishing: gate, reports and sinks
+    scenarios_planned: int
+    scenarios_done: int  # done or skipped
+    attempts_recorded: int
+    current: str | None  # the scenario being run now
+    scenarios: list[ScenarioProgressOut]
+
+
 class RunSummary(Api):
     id: str
     suite: str
@@ -56,6 +74,7 @@ class RunSummary(Api):
     unjudged: int | None
     flaky: int | None
     error: str | None = None  # why a harness_error run could not be carried out
+    progress: RunProgress | None = None  # only while running
 
 
 class ScoreOut(Api):
