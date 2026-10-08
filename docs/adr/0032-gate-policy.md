@@ -86,23 +86,36 @@ differently.
 
 - A suite where nothing was judged always blocks.
 - Exit 3 (every attempt was a harness failure) is always 3.
-- "Safe to release" (`Gate.safe`) needs nothing blocking and nothing warning. Under
-  `exit_code: strict` it also needs every scenario to have passed and loaded, so it never
-  sits next to a non-zero exit code.
+- "Safe to release" (`Gate.safe`) needs nothing blocking, nothing warning, and every
+  scenario passed and loaded, **under every policy**. What a policy ignores can let the gate
+  pass, but it can never make a run "safe". A lenient run with an ignored normal failure
+  passes the gate and exits 0, and still reads "No blocking issues, but not everything
+  passed".
 
 **Exit codes.**
 
 - `strict` (the default): codes say what happened (any failure 1, anything unjudged 2),
-  whatever the gate chose.
+  with one floor: a gate that blocks never exits 0. A policy can block a run in which
+  every scenario passed, for example on flakiness or an unmeasured check. That run exits 1
+  if what blocked was agent behaviour and 2 otherwise, or CI would go green on a release
+  the gate refused.
 - `gate`: codes follow the decision (pass 0; blocked by agent behaviour 1, from
   `Gate.agent_blocked`; blocked by what could not be judged 2).
 
+**`--fail-fast` follows the policy.** A run stops only on a failure the policy *blocks*.
+The scenarios it never reached are recorded as `skipped_precondition` with
+`skip_kind: fail_fast`, so they cannot disappear from the result.
+
 ## Consequences
 
-- Under `standard`, the behaviour is the same as before with one exception. A **flaky**
-  scenario that passed used to read "Safe to release". It now reads "No blocking issues, but
-  not everything passed" (`warn` is a gap). A flaky critical scenario is something a release
-  manager should see.
+- Under `standard`, what blocks and the exit codes are the same as before. What changed:
+  - A **flaky** pass used to read "Safe to release". It now reads "No blocking issues, but:
+    … flaky" (`warn` is a gap). A flaky critical scenario is something a release manager
+    should see.
+  - `Gate.warnings` now also lists unmeasured checks and files that failed to load. Both
+    were already named in the summary since ADR-0030.
+  - Results from before skip kinds were recorded are read from their reason. A re-gated
+    commit-guard skip can therefore never block.
 - `result.json` gains `gate.policy`, `gate.ignored`, `gate.agent_blocked`, `gate.safe` and
   `tests[].skip_kind`, and `suite.json` gains `gate`. The published schemas are regenerated.
   Results from before this change still read, and `safe_to_release` falls back to the

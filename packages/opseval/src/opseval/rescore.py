@@ -260,7 +260,7 @@ async def rescore_run(
         reused_judge_scores=rescorer.reused,
     )
     if gate is not None:
-        policy = resolve_gate(preset=gate)
+        policy = resolve_gate(preset=gate, fail_on_flaky=settings.gate_fail_on_flaky)
     elif original.gate.policy is not None:
         policy = original.gate.policy
     else:  # a run from before gate policies was gated by the standard rules

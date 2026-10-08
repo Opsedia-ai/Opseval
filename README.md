@@ -157,9 +157,15 @@ gate:
 `opseval run --gate strict` overrides the suite for one run, and `opseval rescore <run> --gate
 lenient` asks what another policy would have said about a saved run. Every report names the
 policy, and flags any setting looser than `standard`, so a lenient green never passes for a
-strict one. Two things are not up to the policy: a suite that judged nothing always blocks, and
-a run where every attempt was a harness failure always exits 3
-([ADR-0032](docs/adr/0032-gate-policy.md)).
+strict one. Some things are not up to the policy:
+
+- A suite that judged nothing always blocks.
+- A run where every attempt was a harness failure always exits 3.
+- A gate that blocks never exits 0.
+- "Safe to release" always means every scenario passed. What a policy ignores can let the gate
+  pass, never make a run clean.
+
+See [ADR-0032](docs/adr/0032-gate-policy.md).
 
 ### Gate releases in CI
 

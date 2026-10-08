@@ -23,8 +23,8 @@ from opseval.models.gate import Preset
 from opseval.models.gate import resolve as resolve_gate
 from opseval.models.preflight import PreflightReport
 from opseval.models.profile import SutProfile
-from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
-from opseval.models.scenario import Scenario
+from opseval.models.results import SkipKind, SuiteResult, TestVerdict, VerdictStatus
+from opseval.models.scenario import Criticality, Scenario
 from opseval.models.telemetry import TelemetryEvent
 from opseval.plugins import load_scorers
 from opseval.preflight import preflight
@@ -49,6 +49,7 @@ from opseval.transport import (
 from opseval.verdicts import (
     attempt_verdict,
     exit_code,
+    failure_blocks,
     fold_attempts,
     release_gate,
     skipped,
@@ -161,7 +162,9 @@ def _needs_llm_persona(scenario: Scenario) -> bool:
     return not scenario.conversation.scripted_turns
 
 
-def _unmet(scenario: Scenario, health: PreflightReport, no_simulator: bool) -> str | None:
+def _unmet(
+    scenario: Scenario, health: PreflightReport, no_simulator: bool
+) -> tuple[str, SkipKind] | None:
     """Why preflight says this scenario cannot produce a verdict, if it says so.
 
     Only *dependency* outages reach here. An unreachable agent is refused by ``launch``
@@ -174,7 +177,7 @@ def _unmet(scenario: Scenario, health: PreflightReport, no_simulator: bool) -> s
     """
     needs_persona = _needs_llm_persona(scenario) and not no_simulator
     if needs_persona and (reason := health.reason("simulator")) is not None:
-        return reason
+        return reason, "simulator"
     requires = [
         cls.requires
         for spec in effective_specs(scenario)
@@ -182,10 +185,10 @@ def _unmet(scenario: Scenario, health: PreflightReport, no_simulator: bool) -> s
     ]
     all_llm = bool(requires) and all(r == "llm" for r in requires)
     if all_llm and (reason := health.reason("judge")) is not None:
-        return f"every scorer needs a judge, and {reason}"
+        return f"every scorer needs a judge, and {reason}", "dependency"
     all_trace = bool(requires) and all(r == "trace" for r in requires)
     if all_trace and (reason := health.reason("traces")) is not None:
-        return f"every scorer needs traces, and {reason}"
+        return f"every scorer needs traces, and {reason}", "dependency"
     return None
 
 
@@ -295,8 +298,12 @@ async def launch(
     )
     store.save_profile(run_id, profile)
 
+    policy = resolve_gate(
+        catalogue.gate, preset=options.gate, fail_on_flaky=settings.gate_fail_on_flaky
+    )
+    declared = any(sc.criticality is not Criticality.NORMAL for sc in catalogue.scenarios)
     verdicts: list[TestVerdict] = []
-    for scenario in catalogue.scenarios:
+    for position, scenario in enumerate(catalogue.scenarios):
         if options.repeats:
             scenario = scenario.model_copy(
                 update={
@@ -311,9 +318,8 @@ async def launch(
             continue
         blocked_by = _unmet(scenario, health, sim_client is None)
         if blocked_by is not None:
-            verdicts.append(
-                skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, blocked_by, "dependency")
-            )
+            reason, kind = blocked_by
+            verdicts.append(skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, reason, kind))
             continue
         if _needs_llm_persona(scenario) and sim_client is None:
             verdicts.append(
@@ -369,13 +375,21 @@ async def launch(
             coverage = " · traces" if record.trace_coverage == "full" else ""
             log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
         verdicts.append(fold_attempts(scenario, attempts))
-        if options.fail_fast and verdicts[-1].status is VerdictStatus.FAILED:
-            log("fail-fast: stopping after the first failed scenario")
+        if (
+            options.fail_fast
+            and verdicts[-1].status is VerdictStatus.FAILED
+            # A failure the policy would not block is no reason to stop.
+            and failure_blocks(policy, scenario.criticality, declared)
+        ):
+            log("fail-fast: stopping after the first failed scenario the gate blocks on")
+            # Name what was not run, so it cannot vanish from the result.
+            reason = f"not run: --fail-fast stopped the run after {scenario.id} failed"
+            for rest in catalogue.scenarios[position + 1 :]:
+                verdicts.append(
+                    skipped(rest, VerdictStatus.SKIPPED_PRECONDITION, reason, "fail_fast")
+                )
             break
 
-    policy = resolve_gate(
-        catalogue.gate, preset=options.gate, fail_on_flaky=settings.gate_fail_on_flaky
-    )
     gate = release_gate(verdicts, policy=policy, load_errors=len(catalogue.problems))
     result = SuiteResult(
         opseval_version=__version__,
