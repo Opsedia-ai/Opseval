@@ -91,8 +91,16 @@ class LaunchBook:
         ]
 
     def _prune(self) -> None:
+        """Drop old *settled* launches only.
+
+        Evicting by age alone would discard a long-running launch that has not failed
+        yet, and its later crash would then have nowhere to land — back to a folder
+        reading "running" for ever, which is the hole this class exists to close.
+        """
         if len(self._launches) <= MAX_REMEMBERED:
             return
-        oldest = sorted(self._launches.values(), key=lambda x: x.started_at)
-        for launch in oldest[: len(self._launches) - MAX_REMEMBERED]:
+        settled = sorted(
+            (x for x in self._launches.values() if x.error), key=lambda x: x.started_at
+        )
+        for launch in settled[: len(self._launches) - MAX_REMEMBERED]:
             self._launches.pop(launch.token, None)

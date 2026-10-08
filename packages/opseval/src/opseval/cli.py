@@ -593,6 +593,7 @@ def serve(
     from opseval.demo import catalogue_dir
     from opseval.server.app import LOOPBACK_HOSTS
 
+    token = token.strip() if token else None  # `--token "$UNSET"` is no token at all
     if host in LOOPBACK_HOSTS:
         # Loopback: the Host-header check is the control, refusing the DNS-rebinding
         # trick where a page's own domain re-resolves to 127.0.0.1.

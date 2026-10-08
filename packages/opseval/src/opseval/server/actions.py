@@ -147,6 +147,23 @@ def start_run(
         unknown = sorted(set(body.scenarios) - set(cat.sources))
         if unknown:
             raise ApiError(404, "UNKNOWN_SCENARIO", f"no valid scenario {', '.join(unknown)}")
+        if cat.problems:
+            # A filter selects which scenarios *run*, but the whole directory is still
+            # read, so every file's load errors reach the result and force exit 2. The
+            # chosen scenario would be judged perfectly well and the run would still
+            # report "not judged" because of a file nobody picked.
+            #
+            # Dropping those errors is not the answer — a broken scenario file has to
+            # stay loud (a suite scopes them through its include patterns, which is why
+            # only this path has the problem). So refuse, and say which files.
+            broken = sorted({p.path for p in cat.problems})
+            raise ApiError(
+                409,
+                "CATALOGUE_HAS_ERRORS",
+                f"{len(broken)} file(s) in the catalogue do not load, and a selection "
+                "reads the whole directory, so the run would come back not judged. Fix "
+                f"them or run a suite that excludes them: {', '.join(broken[:5])}",
+            )
         suite_path = root
         filters = [f"id={','.join(sorted(set(body.scenarios)))}"]
         label = "selection"
@@ -251,7 +268,7 @@ def save_suite(catalogue: Path | None, profile: SutProfile | None, body: s.Suite
     path.parent.mkdir(parents=True, exist_ok=True)
     # Resolve against the real catalogue *before* the file is in place, so a suite that
     # matches nothing is rejected without having overwritten a working one.
-    scratch = path.with_name(f".{body.file}.checking.yaml")
+    scratch = path.with_name(f".{body.file}.checking.tmp")  # not *.yaml: list_suites globs that
     text = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
     scratch.write_text(text, "utf-8")
     try:

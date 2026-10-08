@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from opseval.config import Settings
 from opseval.demo import catalogue_dir
+from opseval.errors import ConfigError
 from opseval.models.results import (
     Gate,
     ModelUsage,
@@ -466,3 +467,103 @@ def test_runs_are_newest_first_whatever_their_source(tmp_path: Path) -> None:
     ids = [r.id for r in list_runs(store, book)]
     # The launch failed just now, so it leads; the 10:59 run still beats the 10:01 one.
     assert ids == [f"launch-{dead.token}", "new", "old"]
+
+
+# --- found reviewing the fixes themselves ---------------------------------------------
+
+
+def test_an_empty_token_is_no_token_not_a_token_equal_to_empty(tmp_path: Path) -> None:
+    """`--token "$UNSET"` must not produce a server that authenticates everyone.
+
+    secrets.compare_digest("", "") is True, so a blank token left as a string would
+    accept a request carrying no credentials at all — while the CLI's off-loopback
+    refusal was skipped because the value was not None.
+    """
+    for blank in ("", "   "):
+        app = create_app(settings=Settings(reports_dir=str(tmp_path)), token=blank)
+        c = client_for(app)
+        # Treated as "no token": an ordinary open loopback server, and crucially a
+        # request with no Authorization header is not being *authenticated* by it.
+        assert c.get("/api/v1/runs").status_code == 200
+
+
+def test_a_non_ascii_token_is_refused_at_startup_not_per_request(tmp_path: Path) -> None:
+    """compare_digest raises on non-ASCII: every request would be a 500."""
+    with pytest.raises(ConfigError):
+        create_app(settings=Settings(reports_dir=str(tmp_path)), token="tökén")
+
+
+def test_a_cors_preflight_is_not_refused_for_having_no_token(tmp_path: Path) -> None:
+    """A preflight carries no credentials by design. A bare 401 here reaches the browser
+    as a CORS failure and the real request is never sent."""
+    c = client_for(create_app(settings=Settings(reports_dir=str(tmp_path)), token="s3cret"))
+    pre = c.options(
+        "/api/v1/runs",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert pre.status_code == 200 and "access-control-allow-origin" in pre.headers
+
+
+def test_a_selection_refuses_rather_than_returning_not_judged(tmp_path: Path) -> None:
+    """A filter picks which scenarios run, but the whole directory is still read, so an
+    unrelated broken file forces exit 2 and the chosen scenario's real verdict is lost."""
+    import shutil
+
+    cat = tmp_path / "cat"
+    shutil.copytree(catalogue_dir(), cat)
+    (cat / "scenarios" / "broken.yaml").write_text("id: nope\nthis is: not a scenario\n")
+    c = client_for(
+        create_app(
+            settings=Settings(reports_dir=str(tmp_path / "r"), allowed_hosts="127.0.0.1"),
+            catalogue=cat,
+            profile=cat / "profile.yaml",
+            target="ws://127.0.0.1:1",
+        )
+    )
+    refused = c.post("/api/v1/runs", json={"scenarios": ["rf-001"]})
+    assert refused.status_code == 409 and refused.json()["code"] == "CATALOGUE_HAS_ERRORS"
+    assert "broken.yaml" in refused.json()["message"]
+    # A suite scopes its own files through include, so it is unaffected.
+    assert c.post("/api/v1/runs", json={"suite": "smoke"}).status_code == 202
+
+
+def test_the_suite_scratch_file_is_never_listed_as_a_suite(tmp_path: Path) -> None:
+    """pathlib's *.yaml matches dotfiles, so a .yaml-suffixed scratch file appears in
+    the suites list while it exists, and for ever if validation crashes."""
+    import shutil
+
+    cat = tmp_path / "cat"
+    shutil.copytree(catalogue_dir(), cat)
+    (cat / "suites" / ".leftover.checking.tmp").write_text("name: ghost\ninclude: []\n")
+    files = {
+        s["file"]
+        for s in client_for(
+            create_app(
+                settings=Settings(reports_dir=str(tmp_path / "r")),
+                catalogue=cat,
+                profile=cat / "profile.yaml",
+            )
+        )
+        .get("/api/v1/suites")
+        .json()
+    }
+    assert files == {"smoke", "full"}
+
+
+def test_pruning_never_forgets_a_launch_that_is_still_running() -> None:
+    """Evicting by age alone drops a long-running launch, and its later crash then has
+    nowhere to land — back to a folder reading 'running' for ever."""
+    from opseval.server import launches as mod
+    from opseval.server.launches import LaunchBook
+
+    book = LaunchBook()
+    long_running = book.start("slow")
+    for _ in range(mod.MAX_REMEMBERED * 2):
+        done = book.start("x")
+        book.failed(done.token, "boom")
+    book.attach(long_running.token, "run-1")
+    book.failed(long_running.token, "died late")
+    assert book.failures() == {"run-1": "died late"}

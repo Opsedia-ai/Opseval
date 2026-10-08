@@ -7,13 +7,32 @@ export class ApiError extends Error {
   }
 }
 
+const TOKEN_KEY = "opseval.token";
+/** Only needed when the server was started with --token. Per-browser, never sent anywhere
+ *  but this same-origin API. */
+export const getToken = (): string => {
+  try { return localStorage.getItem(TOKEN_KEY) ?? ""; } catch { return ""; }
+};
+export const setToken = (v: string): void => {
+  try { v.trim() ? localStorage.setItem(TOKEN_KEY, v.trim()) : localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ }
+};
+
 async function call<R>(path: string, init?: RequestInit): Promise<R> {
   let res: Response;
+  const token = getToken();
   try {
-    res = await fetch(`/api/v1${path}`, { headers: { "content-type": "application/json" }, ...init });
+    res = await fetch(`/api/v1${path}`, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(init?.headers ?? {}),
+      },
+    });
   } catch {
     throw new ApiError(0, "OFFLINE", "Cannot reach the Opseval API. Start it with: opseval serve");
   }
+  if (res.status === 401) throw new ApiError(401, "UNAUTHORIZED", "This server needs an access token. Add it in Settings.");
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const detail = body.detail;

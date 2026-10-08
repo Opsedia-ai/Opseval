@@ -17,6 +17,7 @@ export default function Suites() {
   const [picked, setPicked] = useState<string[]>([]);
   const [repeats, setRepeats] = useState<number | "">("");
   const [msg, setMsg] = useState<{ ok: boolean; text: string }>();
+  const [clash, setClash] = useState(false);
 
   // "include" patterns are file paths relative to the catalogue, so the picker works on scenario ids via the tag-free path list
   const ids = catalogue.data?.scenarios ?? [];
@@ -28,12 +29,15 @@ export default function Suites() {
   useEffect(() => { if (!sel && suites.data?.[0]) setSel(suites.data[0].file); }, [suites.data, sel]);
 
   const yaml = useMemo(() => [`name: ${name}`, `description: ${desc}`, "include:", ...picked.map((f) => `  - ${f}`), ...(repeats === "" ? [] : ["overrides:", `  execution.repeats: ${repeats}`])].join("\n"), [name, desc, picked, repeats]);
-  const save = async () => {
+  const save = async (overwrite = false) => {
     try {
-      const existing = suites.data?.some((x) => x.file === file) ?? false;
-      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? undefined : repeats, overwrite: existing });
-      setMsg({ ok: true, text: `Saved. Resolves to ${s.scenarioCount} scenario(s).` }); suites.reload();
-    } catch (e) { setMsg({ ok: false, text: (e as ApiError).message }); }
+      const s = await api.saveSuite({ file, displayName: name, description: desc, include: picked, repeats: repeats === "" ? undefined : repeats, overwrite });
+      setMsg({ ok: true, text: `Saved. Resolves to ${s.scenarioCount} scenario(s).` }); setClash(false); suites.reload();
+    } catch (e) {
+      const err = e as ApiError;
+      setClash(err.code === "SUITE_EXISTS");
+      setMsg({ ok: false, text: err.message });
+    }
   };
   const toggle = (p: string) => setPicked((x) => (x.includes(p) ? x.filter((y) => y !== p) : [...x, p]));
   // every scenario file pattern the catalogue offers: one per scenario id (matched by id prefix in its file name)
@@ -68,7 +72,9 @@ export default function Suites() {
             </div>
             <div className="space-y-5">
               <Card title="Generated YAML" tone="ink"><pre className="overflow-x-auto font-mono text-[13px] leading-relaxed text-ink-text">{yaml}</pre></Card>
-              {msg && <Callout tone={msg.ok ? "info" : "warn"}>{msg.text}</Callout>}
+              {msg && <Callout tone={msg.ok ? "info" : "warn"}>{msg.text}
+                {clash && <div className="mt-3"><CoralButton onClick={() => void save(true)}>Replace {file}.yaml</CoralButton></div>}
+              </Callout>}
             </div>
           </div>)}</Data>
       </Page>

@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, Response
 from opseval import __version__
 from opseval.catalogue import load_profile
 from opseval.config import Settings
+from opseval.errors import ConfigError
 from opseval.models.profile import SutProfile
 from opseval.plugins import load_scorers
 from opseval.server import actions, views
@@ -47,6 +48,14 @@ def create_app(
     dev_origins: tuple[str, ...] = ("http://127.0.0.1:5173", "http://localhost:5173"),
 ) -> FastAPI:
     settings = settings or Settings()
+    # An empty or blank token is *no* token, not a token equal to "". Left as a string it
+    # would authenticate a request that sent no credentials at all, and callers get one
+    # from an unset environment variable (`--token "$OPSEVAL_TOKEN"`) without noticing.
+    token = token.strip() if token else None
+    if token is not None and not token.isascii():
+        # secrets.compare_digest raises on non-ASCII strings, which would turn every
+        # request into a 500 — an unusable server rather than a refused one.
+        raise ConfigError("--token must be ASCII")
     store = FileStore(settings.reports_dir)
     # Before any catalogue is read: a suite may name a plugin's scorer, and without this
     # the console would report it as an unknown scorer while the CLI accepts it.
@@ -63,10 +72,13 @@ def create_app(
     async def _require_token(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if token is not None and request.url.path.startswith(API):
+        # A CORS preflight carries no credentials by design, so demanding one here
+        # answers it with a bare 401 and no CORS headers — the browser then reports a
+        # CORS failure and the real request is never sent.
+        if token is not None and request.method != "OPTIONS" and request.url.path.startswith(API):
             header = request.headers.get("authorization", "")
             offered = header[7:] if header.lower().startswith("bearer ") else ""
-            if not secrets.compare_digest(offered, token):
+            if not secrets.compare_digest(offered.encode(), token.encode()):
                 return JSONResponse(
                     status_code=401,
                     content={

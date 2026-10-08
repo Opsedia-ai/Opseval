@@ -111,6 +111,28 @@ subset is expressed as a filter and nothing is written. `RunOptions.suite_label`
 from being labelled after whatever directory it was loaded from, which would group it with
 unrelated runs in Compare and Trend.
 
+That trade has a cost the suite path does not have. A filter selects which scenarios *run*, but
+the whole directory is still **read**, so load errors from files nobody picked reach the result
+and force exit 2 — the chosen scenario would be judged perfectly well and the run would still come
+back "not judged". Dropping those errors is not an option, because a broken scenario file has to
+stay loud. So a selection against a catalogue with load errors is **refused** (409, naming the
+files) rather than started. A suite is unaffected: its `include` patterns scope which files are
+read in the first place.
+
+### A blank token is not a token
+
+`--token "$OPSEVAL_TOKEN"` with the variable unset passes the empty string, which is not `None`.
+Left as a string it skipped the off-loopback refusal, disabled the Host check, and then
+`compare_digest("", "")` returned true for a request carrying no credentials at all: a wide-open
+API on every interface, announcing "(token required)". A blank token is now normalised to "no
+token" at both the CLI and `create_app`. A non-ASCII token is refused at startup, because
+`compare_digest` raises on those and every request would otherwise be a 500 — an unusable server
+rather than a refused one.
+
+The token check also skips `OPTIONS`: a CORS preflight carries no credentials by design, and
+answering it with a bare 401 reaches the browser as a CORS failure, so the real request is never
+sent.
+
 ### Plain React Router, hand-mirrored types
 
 TanStack Query/Router and shadcn/ui are not in; `react-router-dom` and about 200 lines of Tailwind
@@ -179,3 +201,10 @@ not built; today Vite proxies `/api` to `:8000`, and CORS allows only the two de
   the code did not support. Tests now cover each one: a foreign `Host`, a body-supplied
   `allow_commit`, a launch that dies, the gate-to-colour mapping, a read-only catalogue, and a
   save that would have replaced a working suite.
+- **Reviewing the fixes found seven more**, including a blank `--token` that produced a
+  wide-open API on every interface — worse than the hole it was added to close. The pattern is
+  worth naming: each fix introduced a new edge (an empty string, a non-ASCII string, a preflight
+  with no credentials, a filter that widens what is read, a dotfile that a `*.yaml` glob matches,
+  an eviction policy that forgets the thing it exists to remember). Security and reporting fixes
+  deserve the same adversarial reading as the code they replace, and a green suite says nothing
+  about whether they got it.
