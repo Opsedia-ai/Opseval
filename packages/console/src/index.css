@@ -1,5 +1,17 @@
 @import "tailwindcss";
 
+/* The typefaces ship with the console (all OFL-1.1, via Fontsource; licences in
+   public/licenses): no page view goes to a font CDN, and an air-gapped machine renders the
+   same (ADR-0034). Variable fonts where Fontsource has them (woff2 only, every axis):
+   Bricolage Grotesque keeps its optical-size axis, as Google Fonts served it. */
+@import "@fontsource-variable/bricolage-grotesque/opsz.css";
+@import "@fontsource-variable/alexandria/index.css";
+@import "@fontsource-variable/figtree/index.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-sans-arabic/400.css";
+@import "@fontsource/ibm-plex-sans-arabic/600.css";
+
 /* Opseval "Coral Field" design system. See docs/Design system.pdf.
    Contrast rule: never white text on coral or teal. Ink on them; white only on ink. */
 @theme {
@@ -16,8 +28,8 @@
   --color-teal-tint: #dcf1f0; /* derived: pass / ready surfaces */
   --color-ink-deep: #0b1f21;
 
-  --font-display: "Bricolage Grotesque", "Alexandria", system-ui, sans-serif;
-  --font-sans: "Figtree", "IBM Plex Sans Arabic", system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque Variable", "Alexandria Variable", system-ui, sans-serif;
+  --font-sans: "Figtree Variable", "IBM Plex Sans Arabic", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
   --radius-card: 28px;

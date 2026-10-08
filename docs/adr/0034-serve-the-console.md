@@ -53,4 +53,7 @@ The Vite dev server and its proxy remain the way to *work on* the console.
   release-pipeline change and waits for the first real release (Gate 0).
 - *Update:* the typefaces ship with the console (Fontsource packages, all OFL-1.1), so a page
   view is reported to no font CDN, an air-gapped machine renders the same, and the CSP allows
-  nothing from another origin (`font-src 'self'`).
+  nothing from another origin (`font-src 'self'`). Vite never inlines assets
+  (`assetsInlineLimit: 0`), since an inlined `data:` font would be refused by that policy. Variable
+  fonts are used where Fontsource has them (woff2 only, every axis, so Bricolage keeps its optical
+  size); the OFL texts ship in `licenses/` and the attributions are in `NOTICE`.

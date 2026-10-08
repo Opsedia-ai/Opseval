@@ -9,5 +9,8 @@ const api = env?.OPSEVAL_API ?? "http://127.0.0.1:8000";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Never inline assets as data: URIs: the console's CSP is font-src 'self' (no data:), so an
+  // inlined small font subset would be refused by the browser (ADR-0034).
+  build: { assetsInlineLimit: 0 },
   server: { port: 5173, proxy: { "/api": api } },
 });

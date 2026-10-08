@@ -893,7 +893,7 @@ def test_the_console_is_served_same_origin(tmp_path: Path, console_dir: Path) ->
     assert page.status_code == 200 and "id=root" in page.text
     assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
     # Nothing from another origin, fonts included: a page view is reported to no one.
-    assert "https:" not in page.headers["content-security-policy"]
+    assert _csp_sources_are_local(page.headers["content-security-policy"])
     assert page.headers["x-frame-options"] == "DENY" and page.headers["cache-control"] == "no-store"
     assert anon.get("/runs/20261008T000000Z-abc").text == page.text  # a console route
     asset = anon.get("/assets/app.js")
@@ -1328,3 +1328,24 @@ def test_the_demo_catalogue_cannot_be_edited(tmp_path: Path) -> None:
     src = c.get("/api/v1/scenarios/rf-001/source").json()
     r = _put(c, src["file"], src["text"], src["etag"])
     assert r.status_code == 409 and r.json()["code"] == "READ_ONLY_CATALOGUE"
+
+
+def _csp_sources_are_local(header: str) -> bool:
+    """Every source in every directive is this origin or a keyword, never a host, a scheme
+    or a wildcard (review of #39: a substring check would let a bare font host back in)."""
+    local = {"'self'", "'none'", "'unsafe-inline'"}
+    for directive in filter(None, (d.strip() for d in header.split(";"))):
+        name, *sources = directive.split()
+        allowed = local | ({"data:"} if name == "img-src" else set())
+        if not set(sources) <= allowed:
+            return False
+    return True
+
+
+def test_the_csp_check_itself_catches_a_host_coming_back() -> None:
+    from opseval.server.app import CONSOLE_HEADERS
+
+    assert _csp_sources_are_local(CONSOLE_HEADERS["Content-Security-Policy"])
+    assert not _csp_sources_are_local("default-src 'self'; font-src 'self' fonts.gstatic.com")
+    assert not _csp_sources_are_local("font-src 'self' data:")
+    assert not _csp_sources_are_local("script-src *")
