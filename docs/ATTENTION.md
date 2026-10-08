@@ -41,5 +41,8 @@ settles it.
 
 - **Behaviour you may notice:** a flaky pass, a skip or an unmeasured check reads "No blocking
   issues, but …" (yellow), never "Safe to release" (ADR-0030, ADR-0032).
+- **Behaviour you may notice:** every host Opseval contacts must be in `OPSEVAL_ALLOWED_HOSTS`,
+  `127.0.0.1` included, and `opseval preflight` now exits 3 (not 2) when one is missing. A plugin
+  sink publishes only when named in `OPSEVAL_SINKS`.
 - **The console is not in the Python package yet**; that is a release-pipeline step for after
   Gate 0 (ADR-0034). It needs the Node versions in `packages/console/package.json` `engines`.

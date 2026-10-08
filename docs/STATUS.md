@@ -104,8 +104,8 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-RPT-05 | Flow map | S | v0.2 | Done | ADR-0023 |
 | FR-RPT-06 | Compare and trend | M | v0.5 | Partial | compare and per-run trend in the console; no per-scenario trend |
 | FR-RPT-07 | JUnit XML | S | v0.2 | Done | `reporting/junit.py` |
-| FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not, preflight probes included), Langfuse, sinks, telemetry (`check_url_allowed`) |
-| FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes name only the host |
+| FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not; only the ones a suite uses are built), every preflight probe (exit 3 when refused), Langfuse, sinks, telemetry (`check_url_allowed`; errors show only scheme and host) |
+| FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes and allowlist errors name only the host |
 | FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Missing | not started (see FR-RUN-08) |
 | FR-SAF-04 | Committed-outcome guard | M | v0.1 | Partial | CLI and console (`serve --allow-commit`, ADR-0031); a profile without a `commit_gate` is not yet refused (ATTENTION I7) |
 | FR-SAF-05 | Artifact cleanup planning | S | v0.5 | Missing | not started |
@@ -134,7 +134,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | Reliability | Done | fault-injection suite across transports, scorers and trace sources |
 | Code quality | Done | `mypy --strict`, ruff, coverage ≥ 85% (≈ 95%), scorer contract kit; console API types generated from the server models with a drift check; console tests (Vitest) in CI; no transport contract kit |
 | Determinism | Done | seeds, prompt and rubric hashes, `opseval rescore` |
-| Security | Partial | bandit, pip-audit, SECURITY.md, console API token auth, actions pinned to SHAs with Dependabot, releases gated on `make check` and the demo exit codes; no threat model, SBOM or signed images |
+| Security | Partial | bandit, pip-audit, SECURITY.md, console API token auth, actions pinned to SHAs with Dependabot, releases gated on `make check` (Python 3.11–3.13), the demo exit codes and matching versions, plugin sinks imported only when named; no threat model, SBOM or signed images |
 | Privacy | Partial | content-free telemetry; credential values redacted (ADR-0033); console loads nothing from another origin (fonts bundled) |
 | Scalability | Missing | attempts run one after another (≥ 20 concurrent is the target) |
 | Performance | Missing | no overhead benchmark |

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -27,7 +28,6 @@ from websockets.exceptions import InvalidStatus, WebSocketException
 
 from opseval.auth import HS256Tokens
 from opseval.config import Settings, check_url_allowed
-from opseval.errors import ConfigError
 from opseval.models.preflight import CheckStatus, HealthCheck, PreflightReport
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario
@@ -61,6 +61,26 @@ def _requirements(scenarios: Iterable[Scenario]) -> dict[str, int]:
     return counts
 
 
+def llm_roles_needed(scenarios: Iterable[Scenario]) -> set[str]:
+    """The LLM roles (``simulator``, ``judge``) at least one runnable scenario uses.
+
+    Only these are built: a suite of scripted, deterministic scenarios sends nothing to an
+    LLM, so an endpoint it never uses must not stop it.
+    """
+    roles: set[str] = set()
+    for scenario in scenarios:
+        if scenario.is_blocked:
+            continue
+        if not scenario.conversation.scripted_turns:
+            roles.add("simulator")
+        if any(
+            (cls := REGISTRY.get(spec.id)) is not None and cls.requires == "llm"
+            for spec in effective_specs(scenario)
+        ):
+            roles.add("judge")
+    return roles
+
+
 async def _probe_http(url: str) -> tuple[bool, str]:
     """Any HTTP answer proves reachability, including 401 or 404."""
     try:
@@ -86,6 +106,15 @@ async def _probe_websocket(url: str) -> tuple[bool, str]:
 
 async def _already_ok(name: str, detail: str) -> HealthCheck:
     return HealthCheck(name=name, status=CheckStatus.OK, detail=detail)
+
+
+def _check_target_allowed(target: str, settings: Settings) -> None:
+    """The agent's host is allowlisted like any other: the probe is the first thing sent."""
+    scheme = (urlparse(target).scheme or "").lower()
+    if scheme in ("ws", "wss"):
+        check_url_allowed(target, settings.allowlist(), secure_schemes=("wss",))
+    elif scheme in ("http", "https"):
+        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
 
 
 async def probe_target(target: str, transport: str) -> HealthCheck:
@@ -162,13 +191,9 @@ async def check_llm(
             detail=f"set OPSEVAL_{role.upper()}_BASE_URL and OPSEVAL_{role.upper()}_MODEL",
             needed_by=needed_by,
         )
-    try:
-        # Not even a health probe goes to a host the operator did not allowlist.
-        check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
-    except ConfigError as exc:
-        return HealthCheck(
-            name=role, status=CheckStatus.UNAVAILABLE, detail=str(exc), needed_by=needed_by
-        )
+    # Not even a health probe goes to a host the operator did not allowlist. That is a
+    # configuration error (exit 3), not an outage that would only skip scenarios.
+    check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
     ok, detail = await _probe_http(base)
     if not ok:
         return HealthCheck(
@@ -225,6 +250,23 @@ async def check_traces(
             status=CheckStatus.NOT_NEEDED,
             detail="the profile declares no trace source" if profile.traces is None else "disabled",
         )
+    if profile.traces.source == "otlp-file":
+        # Read from disk, never over the network: there is no host to allowlist or probe.
+        path = settings.otlp_spans_path
+        if not path:
+            return HealthCheck(
+                name="traces",
+                status=CheckStatus.NOT_CONFIGURED,
+                detail="set OPSEVAL_OTLP_SPANS_PATH, or run with --no-traces",
+                needed_by=needed_by,
+            )
+        found = Path(path).exists()
+        return HealthCheck(
+            name="traces",
+            status=CheckStatus.OK if found else CheckStatus.UNAVAILABLE,
+            detail=f"OTLP spans at {path}" if found else f"{path} does not exist",
+            needed_by=needed_by,
+        )
     host = settings.langfuse_host
     if not (host and settings.langfuse_public_key and settings.langfuse_secret_key):
         return HealthCheck(
@@ -236,6 +278,7 @@ async def check_traces(
             ),
             needed_by=needed_by,
         )
+    check_url_allowed(host, settings.allowlist(), secure_schemes=("https",))
     ok, detail = await _probe_http(host)
     return HealthCheck(
         name="traces",
@@ -263,6 +306,14 @@ async def preflight(
     """
     listed = list(scenarios)
     needs = _requirements(listed)
+    # Before anything is probed, so a refused host never leaves other probes running. Every
+    # LLM role the suite uses is checked, including one whose outage would skip nothing.
+    if probe_target_host and transport != "python":
+        _check_target_allowed(target, settings)
+    for role in sorted(llm_roles_needed(listed)):
+        base = getattr(settings, f"{role}_base_url")
+        if base:
+            check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
     probe = (
         probe_target(target, transport)
         if probe_target_host
@@ -281,6 +332,7 @@ __all__ = [
     "check_llm",
     "check_token",
     "check_traces",
+    "llm_roles_needed",
     "preflight",
     "probe_target",
 ]

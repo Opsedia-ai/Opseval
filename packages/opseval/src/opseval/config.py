@@ -132,14 +132,18 @@ def check_url_allowed(url: str, allowlist: set[str], *, secure_schemes: tuple[st
     """
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
+    # Only the scheme and host are ever repeated: a webhook URL's path is its secret, and a
+    # URL can carry credentials in its user-info or query string.
     if not host:
-        raise AllowedHostError(f"URL has no host: {url!r}")
+        raise AllowedHostError(
+            f"URL has no host (scheme {parsed.scheme or 'missing'!r}); expected https://host/..."
+        )
     if host not in allowlist:
         raise AllowedHostError(
             f"host {host!r} is not in OPSEVAL_ALLOWED_HOSTS; add it explicitly to allow it"
         )
     if parsed.scheme not in secure_schemes and not _is_local(host):
         raise AllowedHostError(
-            f"{url!r} must use one of {secure_schemes} (plain schemes are allowed only on "
-            "localhost)"
+            f"{parsed.scheme}://{host} must use one of {secure_schemes} "
+            "(plain schemes are allowed only on localhost)"
         )

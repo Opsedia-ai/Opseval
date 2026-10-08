@@ -4,19 +4,23 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import pytest
 from pydantic import SecretStr
 
-from opseval.config import Settings, config_digest
+from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.errors import AllowedHostError, ConfigError
 from opseval.llm import UsageMeter, client_for_role
 from opseval.models.results import Gate, SuiteResult
-from opseval.sinks import WebhookSink, build_sinks
+from opseval.plugins import reset_for_tests
+from opseval.sinks import Sink, WebhookSink, build_sinks
+
+from .test_plugins import FakeEntryPoint
 
 
-class AcmeSink:
+class AcmeSink(Sink):
     name = "acme"
 
     async def publish(self, result: SuiteResult) -> str:
@@ -51,18 +55,38 @@ class TestLlmEndpoints:
 
 class TestPluginSinks:
     @pytest.fixture(autouse=True)
-    def installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("opseval.plugins.load_sinks", lambda: {"acme": AcmeSink})
+    def installed(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """``acme`` is installed and works; ``other`` is installed and must never be imported."""
+        reset_for_tests()
+        self.entries = [
+            FakeEntryPoint("acme", AcmeSink),
+            FakeEntryPoint("other", RuntimeError("imported a plugin nobody enabled")),
+        ]
+        monkeypatch.setattr("opseval.plugins._iter_entry_points", lambda g: iter(self.entries))
+        yield
+        reset_for_tests()
 
     def test_installing_a_plugin_publishes_nothing(self) -> None:
         assert build_sinks(Settings()) == []
 
-    def test_a_named_plugin_is_enabled(self) -> None:
+    def test_a_named_plugin_is_enabled_and_no_other_is_imported(self) -> None:
         assert [s.name for s in build_sinks(Settings(sinks="acme"))] == ["acme"]
 
+    def test_every_run_in_one_process_gets_its_sinks(self) -> None:
+        """The console server and the pytest plugin build sinks once per run."""
+        for _ in range(2):
+            assert [s.name for s in build_sinks(Settings(sinks="acme"))] == ["acme"]
+
+    def test_a_name_given_twice_publishes_once(self) -> None:
+        assert [s.name for s in build_sinks(Settings(sinks="acme, acme"))] == ["acme"]
+
     def test_naming_a_plugin_that_is_not_installed_is_an_error(self) -> None:
-        with pytest.raises(ConfigError, match="no installed plugin provides.*installed: acme"):
+        with pytest.raises(ConfigError, match="no installed plugin.*installed: acme, other"):
             build_sinks(Settings(sinks="acme, nope"))
+
+    def test_a_broken_plugin_that_is_named_stops_the_run(self) -> None:
+        with pytest.raises(ConfigError, match="could not be imported"):
+            build_sinks(Settings(sinks="other"))
 
 
 class TestWebhookUrlIsASecret:
@@ -94,3 +118,20 @@ class TestWebhookUrlIsASecret:
         )
         detail = await sink.publish(result)
         assert "hooks.slack.com" in detail and "XXXX" not in detail and "/services/" not in detail
+
+
+class TestAllowlistErrorsNeverRepeatTheUrl:
+    """A webhook URL's path is its secret; a URL can carry credentials in user-info or query."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://hooks.example.com/services/SECRET-PATH?token=SECRET-QUERY",
+            "https://user:SECRET-PASS@other.example.com/SECRET-PATH",
+            "https:///SECRET-PATH?token=SECRET-QUERY",
+        ],
+    )
+    def test_only_the_scheme_and_host_are_shown(self, url: str) -> None:
+        with pytest.raises(AllowedHostError) as caught:
+            check_url_allowed(url, {"hooks.example.com"}, secure_schemes=("https",))
+        assert "SECRET" not in str(caught.value)

@@ -7,15 +7,27 @@ permissions:
 jobs:
   # Nothing reaches PyPI that did not pass the same checks as a pull request: the full
   # `make check` and the four demo exit codes, on the tagged commit itself.
+  # Every supported Python, as CI does, so a release never ships what CI would have caught.
   verify:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: ${{ matrix.python }}
       - run: uv sync --locked
       - run: make check
+      # The tag, both packages and the plugin's pin on opseval must agree, so pip can never
+      # pair pytest-opseval with an opseval it was not tested against.
+      - name: Versions match the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: uv run python scripts/check_release.py "$TAG"
       - name: Demo exit codes are 0 / 1 / 1 / 3
         run: |
           set +e

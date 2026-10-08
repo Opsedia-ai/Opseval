@@ -96,7 +96,10 @@ says which scenarios would be skipped and why. `opseval run` does the same autom
 - a **dependency** outage skips only the scenarios it silences (`skipped_precondition`), so a
   scenario that still has a deterministic scorer keeps running;
 - an **unreachable agent** stops the run with exit 3 instead of skipping, because a skip is only a
-  gate warning and would report "safe to release" on a suite that tested nothing.
+  gate warning and would report "safe to release" on a suite that tested nothing;
+- a **host that is not in `OPSEVAL_ALLOWED_HOSTS`** (the agent, an LLM endpoint the suite uses,
+  or the trace host) is a configuration error, exit 3, and is never probed. An LLM endpoint the
+  suite does not use (scripted scenarios, no judge) is neither checked nor contacted.
 
 A reachable LLM endpoint reports `unverified`, not `ok`: a probe cannot prove a key works. Pass
 `--verify-llm` to spend one token proving it, or `--no-preflight` to skip the checks. See
@@ -497,7 +500,8 @@ from the agent failing.
 
 Third parties can add a sink over the `opseval.sinks` entry point with
 `async def publish(self, result) -> str`. Installing one publishes nothing until you name it:
-`OPSEVAL_SINKS=acme` (comma-separated; a name no installed plugin provides is an error). The
+`OPSEVAL_SINKS=acme`, the plugin's entry-point name (comma-separated; a name no installed plugin
+provides is an error). Only the named plugins are imported. The
 webhook URL is treated as a secret (chat webhook URLs carry their channel's token): it is redacted
 in every output, and results say only which host they were posted to. See
 [ADR-0027](docs/adr/0027-sinks.md).

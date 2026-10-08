@@ -136,7 +136,11 @@ async def rehearse(ctx: ServerContext, body: s.RehearseIn) -> s.RehearseOut:
     if sc.conversation.scripted_turns:
         sim = ScriptedSimulator(sc, attempt_seed(sc.id, 0))
     else:
-        client = client_for_role(ctx.settings, "simulator", UsageMeter())
+        try:
+            client = client_for_role(ctx.settings, "simulator", UsageMeter())
+        except ConfigError as exc:
+            # The persona would be sent to a host the operator has not allowlisted.
+            raise ApiError(503, "SIMULATOR_NOT_ALLOWED", str(exc)) from exc
         if client is None:
             raise ApiError(
                 503,

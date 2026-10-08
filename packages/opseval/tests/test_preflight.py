@@ -32,6 +32,7 @@ from opseval.preflight import (
     check_llm,
     check_token,
     check_traces,
+    llm_roles_needed,
     preflight,
     probe_target,
 )
@@ -239,11 +240,100 @@ class TestLlm:
             return httpx.Response(200)
 
         monkeypatch.setattr(httpx.AsyncClient, "get", spy)
-        check = await check_llm(
-            "judge", Settings(judge_base_url="http://gpu-box.lan:11434/v1", judge_model="m"), 1
-        )
-        assert check.status is CheckStatus.UNAVAILABLE and "OPSEVAL_ALLOWED_HOSTS" in check.detail
+        with pytest.raises(ConfigError, match="OPSEVAL_ALLOWED_HOSTS"):
+            await check_llm(
+                "judge", Settings(judge_base_url="http://gpu-box.lan:11434/v1", judge_model="m"), 1
+            )
         assert probed == []
+
+    def test_standalone_preflight_exits_3_for_a_host_that_is_not_allowlisted(
+        self, cat_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A configuration error, like `run`; not an outage that would only skip scenarios.
+
+        The full suite's LLM scenario also has a deterministic scorer, so a missing judge
+        would skip nothing (it reads "not needed") — but the judge still grades it, so the
+        judge's host is checked all the same."""
+        monkeypatch.setenv("OPSEVAL_ALLOWED_HOSTS", "127.0.0.1")
+        monkeypatch.setenv("OPSEVAL_JUDGE_BASE_URL", "https://llm.example.com/v1")
+        monkeypatch.setenv("OPSEVAL_JUDGE_MODEL", "m")
+        res = CliRunner().invoke(
+            app,
+            [
+                "preflight",
+                str(cat_dir / "suites" / "full.yaml"),
+                "--profile",
+                str(cat_dir / "profile.yaml"),
+                "--target",
+                "python:x",
+                "--transport",
+                "python",
+            ],
+        )
+        assert res.exit_code == 3, res.output
+        assert "OPSEVAL_ALLOWED_HOSTS" in res.output
+
+
+class TestEgress:
+    """Even a health probe is something sent: every host is allowlisted before it."""
+
+    async def test_an_agent_that_is_not_allowlisted_is_never_probed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        probed: list[str] = []
+
+        async def spy(self: Any, url: str) -> httpx.Response:
+            probed.append(url)
+            return httpx.Response(200)
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", spy)
+        with pytest.raises(ConfigError, match="OPSEVAL_ALLOWED_HOSTS"):
+            await preflight(
+                [make_scenario()],
+                SutProfile(name="p"),
+                Settings(),
+                target="https://agent.example.com/chat",
+                transport="http-json",
+            )
+        assert probed == []
+
+    async def test_an_allowlisted_agent_needs_tls(self) -> None:
+        with pytest.raises(ConfigError, match="must use"):
+            await preflight(
+                [make_scenario()],
+                SutProfile(name="p"),
+                Settings(allowed_hosts="agent.example.com"),
+                target="ws://agent.example.com/chat",
+                transport="websocket",
+            )
+
+    async def test_a_trace_host_that_is_not_allowlisted_is_never_probed(
+        self, profile: SutProfile
+    ) -> None:
+        settings = Settings(
+            langfuse_host="https://langfuse.example.com",
+            langfuse_public_key="pk",
+            langfuse_secret_key=SecretStr("sk"),
+        )
+        p = profile.model_copy(update={"traces": TraceConfig()})
+        with pytest.raises(ConfigError, match="OPSEVAL_ALLOWED_HOSTS"):
+            await check_traces(p, settings, 1, enabled=True)
+
+
+class TestLlmRolesNeeded:
+    def test_a_scripted_deterministic_scenario_needs_no_llm(self) -> None:
+        assert llm_roles_needed([make_scenario()]) == set()
+
+    def test_an_llm_persona_needs_the_simulator(self) -> None:
+        scenario = make_scenario(conversation={"scripted_turns": [], "flow": "ask for a refund"})
+        assert llm_roles_needed([scenario]) == {"simulator"}
+
+    def test_any_judge_scorer_needs_the_judge(self) -> None:
+        """Even beside a deterministic scorer: the judge still grades something."""
+        scenario = make_scenario(
+            scorers=[{"id": "output.terminal_state"}, {"id": "judge.goal_achievement"}]
+        )
+        assert llm_roles_needed([scenario]) == {"judge"}
 
 
 class TestTraces:
@@ -261,6 +351,21 @@ class TestTraces:
         check = await check_traces(p, Settings(), 1, enabled=True)
         assert check.status is CheckStatus.NOT_CONFIGURED
         assert "--no-traces" in check.detail
+
+    async def test_otlp_spans_are_read_from_disk_not_langfuse(
+        self, profile: SutProfile, tmp_path: Path
+    ) -> None:
+        """An OTLP-file profile needs no Langfuse settings; its scenarios must not be skipped."""
+        p = profile.model_copy(update={"traces": TraceConfig(source="otlp-file")})
+        unset = await check_traces(p, Settings(), 1, enabled=True)
+        assert unset.status is CheckStatus.NOT_CONFIGURED
+        assert "OPSEVAL_OTLP_SPANS_PATH" in unset.detail
+        missing = await check_traces(
+            p, Settings(otlp_spans_path=str(tmp_path / "nope")), 1, enabled=True
+        )
+        assert missing.status is CheckStatus.UNAVAILABLE
+        found = await check_traces(p, Settings(otlp_spans_path=str(tmp_path)), 1, enabled=True)
+        assert found.status is CheckStatus.OK
 
 
 # --- the report ----------------------------------------------------------------------
@@ -374,8 +479,11 @@ class TestRunnerIntegration:
 class TestCli:
     runner = CliRunner()
 
-    def test_an_unreachable_agent_is_exit_2_and_names_the_check(self, cat_dir: Path) -> None:
+    def test_an_unreachable_agent_is_exit_2_and_names_the_check(
+        self, cat_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Standalone preflight reports; it is `run` that refuses. Exit 2 = not judged."""
+        monkeypatch.setenv("OPSEVAL_ALLOWED_HOSTS", "127.0.0.1")
         res = self.runner.invoke(
             app,
             [

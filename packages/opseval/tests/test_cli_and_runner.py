@@ -163,17 +163,41 @@ async def test_launch_skips_llm_scenarios_without_keys(cat_dir: Path, settings: 
     assert manifest["planned"] == ["rf-001", "rf-002", "rf-003", "rf-101"]
 
 
-async def test_llm_endpoint_with_key_must_be_allowlisted(cat_dir: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("role", ["simulator", "judge"])
+async def test_an_llm_endpoint_the_suite_uses_must_be_allowlisted(
+    cat_dir: Path, tmp_path: Path, role: str
+) -> None:
+    """The full suite has an LLM persona graded by a judge, so it uses both roles."""
+    settings = Settings(
+        allowed_hosts="127.0.0.1",
+        reports_dir=str(tmp_path),
+        **{f"{role}_base_url": "https://llm.example.com/v1", f"{role}_model": "m"},
+    )
+    with pytest.raises(AllowedHostError):
+        await launch(
+            cat_dir / "suites" / "full.yaml",
+            RunOptions(target="ws://127.0.0.1:9", profile=cat_dir / "profile.yaml"),
+            settings,
+        )
+
+
+async def test_an_llm_endpoint_the_suite_never_uses_is_not_built(
+    cat_dir: Path, tmp_path: Path
+) -> None:
+    """A scripted, deterministic suite sends nothing to an LLM, so an endpoint configured
+    for other suites (and not allowlisted) must not stop it."""
     settings = Settings(
         allowed_hosts="127.0.0.1",
         reports_dir=str(tmp_path),
         simulator_base_url="https://llm.example.com/v1",
         simulator_model="m",
-        simulator_api_key="sk-1",
-    )  # type: ignore[arg-type]
-    with pytest.raises(AllowedHostError):
-        await launch(
+        judge_base_url="https://llm.example.com/v1",
+        judge_model="m",
+    )
+    async with run_agent() as url:
+        result = await launch(
             cat_dir / "suites" / "smoke.yaml",
-            RunOptions(target="ws://127.0.0.1:9", profile=cat_dir / "profile.yaml"),
+            RunOptions(target=url, profile=cat_dir / "profile.yaml", repeats=1),
             settings,
         )
+    assert result.exit_code == 0

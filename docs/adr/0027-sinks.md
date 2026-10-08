@@ -94,8 +94,10 @@ run — the guard doing its job a day after it was built.
 ## Amendment (2026-10-08)
 
 - **Plugin sinks are opt-in.** An installed `opseval.sinks` plugin publishes only when named in
-  `OPSEVAL_SINKS`; naming one that is not installed is a `ConfigError`. Installing a package
-  must never start sending results anywhere on its own.
+  `OPSEVAL_SINKS`, by entry-point name; naming one that is not installed is a `ConfigError`.
+  Installing a package must never start sending results anywhere on its own, so only the named
+  entry points are imported, and a plugin nobody enabled runs no code. Loaded classes are cached
+  per process, so the console server and the pytest plugin get the same sinks on every run.
 - **The webhook URL is a secret.** Slack, Teams and Discord incoming-webhook URLs carry their
   channel's token, so `OPSEVAL_WEBHOOK_URL` is a `SecretStr` in `SECRET_FIELDS` (redacted in the
   config digest, `/config` and reports), and a sink outcome names only the host.

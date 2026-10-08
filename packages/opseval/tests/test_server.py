@@ -294,6 +294,35 @@ def test_readiness_says_what_is_limited(client: TestClient) -> None:
     assert set(items) == {"catalogue", "simulator", "judge", "allowlist", "tracing"}
 
 
+def test_an_llm_host_that_is_not_allowlisted_is_not_ready(tmp_path: Path) -> None:
+    """Configured is not enough: a run would refuse the host, so the console says so."""
+    cat = catalogue_dir()
+    settings = Settings(
+        reports_dir=str(tmp_path),
+        allowed_hosts="127.0.0.1",
+        simulator_base_url="https://llm.example.com/v1",
+        simulator_model="m",
+        judge_base_url="https://judge.example.com/v1",
+        judge_model="m",
+    )
+    api = connect(
+        create_app(settings=settings, catalogue=cat, profile=cat / "profile.yaml", token=TOKEN)
+    )
+    items = {i["id"]: i for i in api.get("/api/v1/readiness").json()}
+    assert items["simulator"]["ready"] is False
+    assert "OPSEVAL_ALLOWED_HOSTS" in items["simulator"]["detail"]
+    assert items["judge"]["ready"] is False
+
+    llm = next(
+        s
+        for s in api.get("/api/v1/scenarios").json()["scenarios"]
+        if s["id"] not in ("rf-001", "rf-002", "rf-003")
+    )
+    r = api.post("/api/v1/simulator/rehearse", json={"scenarioId": llm["id"]})
+    assert r.status_code == 503 and r.json()["code"] == "SIMULATOR_NOT_ALLOWED"
+    assert "/v1" not in r.json()["message"], "only the scheme and host are repeated"
+
+
 # --- who may ask (ADR-0031) -------------------------------------------------------------
 
 

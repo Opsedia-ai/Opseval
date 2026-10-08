@@ -84,3 +84,15 @@ nothing was attempted).
   honest trade, but it does mean the default run does not fully satisfy FR-CTL's "LLM keys valid".
 - The report is on `SuiteResult`, so the HTML report and the gate summary could surface it. They
   do not yet; today it is in `result.json` and the console log only.
+
+## Amendment (2026-10-08)
+
+- **Every probe is egress, so every probed host is allowlisted first.** The agent, each LLM
+  endpoint a scenario uses and the Langfuse host are checked against `OPSEVAL_ALLOWED_HOSTS`
+  (and for TLS off loopback) before anything is sent. A refusal is a `ConfigError`, exit 3, for
+  `opseval preflight` as for `opseval run`: it is a configuration mistake, not an outage, and
+  reporting it as `unavailable` would only skip scenarios.
+- **Only the LLM roles a suite uses are built or checked.** A suite of scripted, deterministic
+  scenarios is not stopped by an endpoint it never contacts.
+- **OTLP-file trace sources** are checked on disk (`OPSEVAL_OTLP_SPANS_PATH`), not as Langfuse;
+  before this, their trace-only scenarios were skipped for missing Langfuse settings.
