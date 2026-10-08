@@ -124,8 +124,8 @@ Definition of done for any change: `make check` is green (which now includes `op
 2. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
 3. Plugin groups beyond scorers: transports, langpacks, trace sources, sinks (ADR-0022).
 
-**Needs a decision from the maintainers, not more code:** a telemetry collector and its
-data-processing terms (ADR-0010 decisions 2 and 3). The code is built and dark until then.
+**Decisions waiting on the maintainers** (Gate 0, design partners, calibration labels, the
+product name, the telemetry collector, …) are tracked in one place: `docs/ATTENTION.md`.
 
 ## Planning documents
 
