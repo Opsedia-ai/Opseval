@@ -1,7 +1,8 @@
 # Project status
 
 Updated with every pull request that changes what Opseval can do (see CONTRIBUTING and
-CLAUDE.md, "Definition of done"). The summary below is **computed** from the table by
+CLAUDE.md, "Definition of done"). Decisions waiting on the maintainers, and critical or high
+issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed** from the table by
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
@@ -10,16 +11,16 @@ number cannot drift from the rows.
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 80% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 83% of 69.
+**Overall: 78% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 80% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 45 / 11 / 3 | 86% |
+| v0.1 | 59 | 42 / 14 / 3 | 83% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
 | v0.5 | 12 | 5 / 3 / 4 | 54% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 62 / 16 / 10 | **80%** |
+| **All** | 88 | 59 / 19 / 10 | **78%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -29,16 +30,9 @@ evidence column. A deliberate, recorded divergence from the requirement (an ADR)
 
 ## Not code: what gates the next milestones
 
-These are not in the percentage, and today they gate more than code does.
-
-| Milestone | Needs | Status |
-|---|---|---|
-| Gate 0 | IP clearance sign-off; keep the repo private until then | Open |
-| Product name | Trademark search and decision | Open |
-| M1 | Two design-partner agents running the suite | Not started |
-| M2 | The GitHub Action gating a design partner's pipeline | Not started |
-| M2 | At least 10 human labels per judge for `opseval calibrate` | Not started |
-| Telemetry | A collector and its data-processing terms (ADR-0010) | Needs a decision |
+Gate 0, the product name, design partners, calibration labels and the telemetry collector are
+decisions, not code. They are not in the percentage, and today they gate more than code does.
+They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 
 ## Requirements
 
@@ -68,7 +62,7 @@ These are not in the percentage, and today they gate more than code does.
 | FR-RUN-03 | Credentials | M | v0.1 | Partial | static and HS256 with refresh (ADR-0012); no custom provider plugin |
 | FR-RUN-04 | Driver state machine | M | v0.1 | Done | `driver.py`, PROBES state (ADR-0025) |
 | FR-RUN-05 | Terminal states | M | v0.1 | Done | `TerminalState` |
-| FR-RUN-06 | Timeouts count against the agent | M | v0.1 | Done | connect/pool timeouts are harness errors (ADR-0030) |
+| FR-RUN-06 | Timeouts count against the agent | M | v0.1 | Partial | connect/pool timeouts are harness errors (ADR-0030); time spent waiting on the simulator still counts against the agent's deadline (ATTENTION I1) |
 | FR-RUN-07 | Protocol probes | S | v0.2 | Done | `profile.probes` (ADR-0025) |
 | FR-RUN-08 | Tenant pool and locks | M | v0.1 | Missing | runner is sequential; a `feat/tenant-pool` branch exists, unmerged |
 | FR-RUN-09 | Isolated attempts | M | v0.1 | Done | new driver, transport and simulator per attempt |
@@ -111,9 +105,9 @@ These are not in the percentage, and today they gate more than code does.
 | FR-RPT-06 | Compare and trend | M | v0.5 | Partial | compare and per-run trend in the console; no per-scenario trend |
 | FR-RPT-07 | JUnit XML | S | v0.2 | Done | `reporting/junit.py` |
 | FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Partial | targets, Langfuse, sinks, telemetry; a keyless LLM base URL skips the check |
-| FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS`, `config_digest` |
+| FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Partial | `SECRET_FIELDS`, `config_digest`; the webhook URL is not yet treated as a secret (ATTENTION I3) |
 | FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Missing | not started (see FR-RUN-08) |
-| FR-SAF-04 | Committed-outcome guard | M | v0.1 | Done | CLI and console (`serve --allow-commit`, ADR-0031) |
+| FR-SAF-04 | Committed-outcome guard | M | v0.1 | Partial | CLI and console (`serve --allow-commit`, ADR-0031); a profile without a `commit_gate` is not yet refused (ATTENTION I7) |
 | FR-SAF-05 | Artifact cleanup planning | S | v0.5 | Missing | not started |
 | FR-SAF-06 | Retention | M | v0.5 | Missing | not started |
 | FR-SAF-07 | Content-free telemetry | M | v0.1 | Done | implemented, ships dark (ADR-0021) |

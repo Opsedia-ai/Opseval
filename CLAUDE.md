@@ -73,7 +73,7 @@ make console                 # the web console on :5173, proxying /api to :8000 
 make console-check           # typecheck + build the console (runs in CI)
 ```
 
-Definition of done for any change: `make check` is green (which now includes `opseval schemas --check`, so run `opseval schemas` after touching a model), coverage stays ≥ 85%, and the four demo exit codes are unchanged. New behaviour comes with tests, plus docs (README, ROADMAP or ADR) when a user would notice it. **Every PR that changes what Opseval can do updates `docs/STATUS.md`** (the row's status and evidence, and the "As of" line), then runs `uv run python scripts/project_status.py` to recompute the percentages; `make check` fails if they are stale.
+Definition of done for any change: `make check` is green (which now includes `opseval schemas --check`, so run `opseval schemas` after touching a model), coverage stays ≥ 85%, and the four demo exit codes are unchanged. New behaviour comes with tests, plus docs (README, ROADMAP or ADR) when a user would notice it. **Every PR that changes what Opseval can do updates `docs/STATUS.md`** (the row's status and evidence, and the "As of" line), then runs `uv run python scripts/project_status.py` to recompute the percentages; `make check` fails if they are stale. **`docs/ATTENTION.md`** (decisions only the maintainers can make, and critical/high issues) is updated in the same PR whenever one is raised or settled.
 
 ## Conventions
 
@@ -124,8 +124,8 @@ Definition of done for any change: `make check` is green (which now includes `op
 2. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
 3. Plugin groups beyond scorers: transports, langpacks, trace sources, sinks (ADR-0022).
 
-**Needs a decision from the maintainers, not more code:** a telemetry collector and its
-data-processing terms (ADR-0010 decisions 2 and 3). The code is built and dark until then.
+**Decisions waiting on the maintainers** (Gate 0, design partners, calibration labels, the
+product name, the telemetry collector, …) are tracked in one place: `docs/ATTENTION.md`.
 
 ## Planning documents
 

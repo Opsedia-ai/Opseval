@@ -18,6 +18,7 @@
 - [ ] Unmeasured values stay `None` / "not measured" (never `0`)
 - [ ] Docs updated for user-facing changes
 - [ ] `docs/STATUS.md` updated (status, evidence, "As of") and percentages recomputed
+- [ ] `docs/ATTENTION.md` updated if this PR raises or settles a decision or a critical/high issue
 - [ ] Public contract changed? → linked RFC + ADR
 - [ ] Commits are signed off (`git commit -s`, DCO)
 - [ ] No code, prompts or data copied from private or incompatibly licensed sources
