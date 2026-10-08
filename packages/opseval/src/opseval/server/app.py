@@ -63,11 +63,11 @@ def _run_id(run_id: str) -> str:
 
 CONSOLE_HEADERS = {
     # The console can start runs and edit suites: it must never be framed by another site
-    # (clickjacking), and it loads nothing but its own files and its fonts.
+    # (clickjacking), and it loads nothing from anywhere but its own origin, fonts included.
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'none'; "
+        "style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'none'; "
         "form-action 'none'"
     ),
     "X-Frame-Options": "DENY",

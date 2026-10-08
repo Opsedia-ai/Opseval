@@ -6,3 +6,16 @@ except for files under the ee/ directory, which are licensed under the
 Opseval Enterprise License (see ee/LICENSE).
 
 Third-party attributions are listed below as dependencies are added.
+
+Fonts bundled with the web console (packages/console), each under the SIL Open Font
+License, Version 1.1, shipped unmodified. The licence text is distributed with the console
+in licenses/ (packages/console/public/licenses):
+
+- Bricolage Grotesque: Copyright 2022 The Bricolage Grotesque Project Authors
+  (https://github.com/ateliertriay/bricolage)
+- Alexandria: Copyright 2022 The Alexandria Project Authors
+  (https://github.com/Gue3bara/Alexandria)
+- Figtree: Copyright 2022 The Figtree Project Authors
+  (https://github.com/erikdkennedy/figtree)
+- IBM Plex Mono: Copyright 2017 IBM Corp.
+- IBM Plex Sans Arabic: Copyright 2019 IBM Corp.

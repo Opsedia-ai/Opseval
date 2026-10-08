@@ -51,7 +51,9 @@ The Vite dev server and its proxy remain the way to *work on* the console.
 - The wheel does not include the console yet. Releasing it needs the build to run before
   packaging and the files to be included as package data (a hatch build hook). That is a
   release-pipeline change and waits for the first real release (Gate 0).
-- The console fetches its typefaces from Google Fonts, so a page view tells Google the
-  viewer's address, and an air-gapped machine falls back to system fonts. The privacy NFR
-  asks for air-gapped operation. Self-hosting the fonts (all are under the OFL) is a
-  follow-up, and the CSP will then drop the two font hosts.
+- *Update:* the typefaces ship with the console (Fontsource packages, all OFL-1.1), so a page
+  view is reported to no font CDN, an air-gapped machine renders the same, and the CSP allows
+  nothing from another origin (`font-src 'self'`). Vite never inlines assets
+  (`assetsInlineLimit: 0`), since an inlined `data:` font would be refused by that policy. Variable
+  fonts are used where Fontsource has them (woff2 only, every axis, so Bricolage keeps its optical
+  size); the OFL texts ship in `licenses/` and the attributions are in `NOTICE`.
