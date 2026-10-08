@@ -1173,65 +1173,156 @@ async def test_the_runner_records_a_skipped_last_scenario(tmp_path: Path) -> Non
 
 # --- the scenario editor -------------------------------------------------------------------------
 
+RF1 = "scenarios/rf-001-happy-path.yaml"
+
+
+def _put(c: TestClient, file: str, text: str, etag: str) -> Any:
+    return c.put(
+        "/api/v1/scenarios/source", params={"file": file}, json={"text": text, "etag": etag}
+    )
+
 
 def test_the_editor_reads_a_scenarios_own_yaml(tmp_path: Path) -> None:
     app, cat = app_for(tmp_path, copy=True)
-    src = connect(app).get("/api/v1/scenarios/rf-001/source").json()
-    assert src["file"] == "scenarios/rf-001-happy-path.yaml"
-    assert src["text"] == (cat / src["file"]).read_text("utf-8") and len(src["etag"]) == 16
-    assert connect(app).get("/api/v1/scenarios/nope/source").status_code == 404
+    c = connect(app)
+    by_id = c.get("/api/v1/scenarios/rf-001/source").json()
+    by_file = c.get("/api/v1/scenarios/source", params={"file": RF1}).json()
+    assert by_id == by_file and by_id["id"] == "rf-001" and by_id["file"] == RF1
+    assert by_id["text"] == (cat / RF1).read_text("utf-8") and len(by_id["etag"]) == 16
+    assert c.get("/api/v1/scenarios/nope/source").status_code == 404
+    for bad in ("../profile.yaml", "suites/smoke.yaml", "scenarios/nope.yaml", "/etc/passwd"):
+        assert c.get("/api/v1/scenarios/source", params={"file": bad}).status_code == 404, bad
 
 
 def test_validation_is_the_loaders_with_field_paths(tmp_path: Path) -> None:
     app, cat = app_for(tmp_path, copy=True)
     c = connect(app)
-    own = (cat / "scenarios" / "rf-001-happy-path.yaml").read_text("utf-8")
-    assert c.post("/api/v1/scenarios/validate", json={"text": own, "editing": "rf-001"}).json()[
-        "ok"
-    ]
-    # Its own id is a clash for anything but itself.
+    own = (cat / RF1).read_text("utf-8")
+    assert c.post("/api/v1/scenarios/validate", json={"text": own, "file": RF1}).json()["ok"]
     dup = c.post("/api/v1/scenarios/validate", json={"text": own}).json()
-    assert (
-        not dup["ok"]
-        and "already used by scenarios/rf-001-happy-path.yaml" in dup["problems"][0]["message"]
-    )
+    assert not dup["ok"] and "already used by scenarios/rf-001-happy-path.yaml" in str(dup)
     bad = c.post("/api/v1/scenarios/validate", json={"text": own.replace("goal:", "gaol:")}).json()
-    fields = {p["field"] for p in bad["problems"]}
-    assert not bad["ok"] and {"goal", "gaol"} <= fields
+    assert not bad["ok"] and {"goal", "gaol"} <= {p["field"] for p in bad["problems"]}
     broken = c.post("/api/v1/scenarios/validate", json={"text": "id: [x"}).json()
-    assert not broken["ok"] and broken["problems"][0]["path"].startswith("line ")
-    scorer = c.post(
+    assert not broken["ok"] and broken["problems"][0]["field"].startswith("line ")
+    listy = c.post("/api/v1/scenarios/validate", json={"text": "- a\n- b\n"}).json()
+    assert "mapping" in listy["problems"][0]["message"]
+    # A reference problem carries its field, as the loader reports it.
+    ref = c.post(
         "/api/v1/scenarios/validate",
         json={"text": own.replace("id: rf-001", "id: rf-777") + "\nscorers: [{id: no.such}]\n"},
     ).json()
-    assert not scorer["ok"]
+    assert not ref["ok"] and all(p["field"] for p in ref["problems"])
 
 
 def test_a_save_is_valid_atomic_and_never_over_a_newer_file(tmp_path: Path) -> None:
     app, cat = app_for(tmp_path, copy=True)
     c = connect(app)
-    path = cat / "scenarios" / "rf-001-happy-path.yaml"
-    src = c.get("/api/v1/scenarios/rf-001/source").json()
+    path = cat / RF1
+    src = c.get("/api/v1/scenarios/source", params={"file": RF1}).json()
     edited = src["text"].replace("criticality: critical", "criticality: blocker")
-    out = c.put("/api/v1/scenarios/rf-001/source", json={"text": edited, "etag": src["etag"]})
+    out = _put(c, RF1, edited, src["etag"])
     assert out.status_code == 200 and path.read_text("utf-8") == edited
-    assert out.json()["etag"] != src["etag"]
-    # The old etag no longer matches: someone else's change (or a git pull) is never overwritten.
-    stale = c.put(
-        "/api/v1/scenarios/rf-001/source", json={"text": src["text"], "etag": src["etag"]}
-    )
+    stale = _put(c, RF1, src["text"], src["etag"])
     assert stale.status_code == 409 and stale.json()["code"] == "SCENARIO_CHANGED"
+    fresh = c.get("/api/v1/scenarios/source", params={"file": RF1}).json()
+    assert _put(c, RF1, "id: [x", fresh["etag"]).status_code == 422
     assert path.read_text("utf-8") == edited
-    # Invalid text is refused and the file is untouched; no temp file is left behind.
-    fresh = c.get("/api/v1/scenarios/rf-001/source").json()
-    bad = c.put("/api/v1/scenarios/rf-001/source", json={"text": "id: [x", "etag": fresh["etag"]})
-    assert bad.status_code == 422 and path.read_text("utf-8") == edited
     assert not [p for p in path.parent.iterdir() if p.name.startswith(".")]
+
+
+def test_two_saves_of_one_version_cannot_both_win(tmp_path: Path) -> None:
+    """Review of #38: the version check and the write share one lock per file."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    app, cat = app_for(tmp_path, copy=True)
+    src = connect(app).get("/api/v1/scenarios/source", params={"file": RF1}).json()
+    texts = [
+        src["text"].replace("criticality: critical", f"criticality: {c}")
+        for c in ("blocker", "normal")
+    ]
+
+    def save(text: str) -> int:
+        return int(_put(connect(app), RF1, text, src["etag"]).status_code)
+
+    with ThreadPoolExecutor(2) as pool:
+        codes = sorted(pool.map(save, texts))
+    assert codes == [200, 409]
+    assert (cat / RF1).read_text("utf-8") in texts
+
+
+def test_a_save_keeps_line_endings_and_permissions(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    path = cat / RF1
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    path.chmod(0o640)
+    src = c.get("/api/v1/scenarios/source", params={"file": RF1}).json()
+    edited = src["text"].replace("criticality: critical", "criticality: blocker")
+    assert _put(c, RF1, edited.replace("\r\n", "\n"), src["etag"]).status_code == 200
+    data = path.read_bytes()
+    assert b"criticality: blocker\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
+    assert path.stat().st_mode & 0o777 == 0o640
+
+
+def test_a_broken_file_opens_and_can_be_fixed(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    path = cat / RF1
+    good = path.read_text("utf-8")
+    path.write_text(good.replace("goal:", "gaol:"), "utf-8")
+    listed = c.get("/api/v1/scenarios").json()
+    assert RF1 in {p["path"] for p in listed["problems"]}  # relative: the editor can open it
+    src = c.get("/api/v1/scenarios/source", params={"file": RF1}).json()
+    assert src["id"] is None
+    assert _put(c, RF1, good, src["etag"]).status_code == 200
+    assert "rf-001" in {s["id"] for s in c.get("/api/v1/scenarios").json()["scenarios"]}
+
+
+def test_a_rename_that_would_empty_a_suite_is_refused(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    (cat / "suites" / "only1.yaml").write_text(
+        "name: only1\ninclude: ['scenarios/**/*.yaml']\nfilters: [id=rf-001]\n", "utf-8"
+    )
+    own = (cat / RF1).read_text("utf-8")
+    renamed = own.replace("id: rf-001", "id: rf-901")
+    out = c.post("/api/v1/scenarios/validate", json={"text": renamed, "file": RF1}).json()
+    assert not out["ok"] and "suite 'only1' selects id=rf-001" in str(out)
+
+
+def test_a_new_file_is_checked_before_it_is_written(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    text = (cat / RF1).read_text("utf-8").replace("id: rf-001", "id: rf-960")
+    ok = c.post(
+        "/api/v1/scenarios/validate", json={"text": text, "family": "mine", "fileName": "a.yaml"}
+    ).json()
+    assert ok["ok"]
+    taken = c.post(
+        "/api/v1/scenarios/validate",
+        json={"text": text, "family": ".", "fileName": "rf-001-happy-path.yaml"},
+    ).json()
+    assert not taken["ok"]
+    bad_name = c.post(
+        "/api/v1/scenarios/validate", json={"text": text, "family": "mine", "fileName": "a.txt"}
+    ).json()
+    assert not bad_name["ok"] and bad_name["problems"][0]["field"] == "file"
+
+
+def test_a_symlink_out_of_the_catalogue_is_reported_not_a_500(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    outside = tmp_path / "shared.yaml"
+    outside.write_text((cat / RF1).read_text("utf-8").replace("id: rf-001", "id: rf-970"), "utf-8")
+    (cat / "scenarios" / "linked.yaml").symlink_to(outside)
+    text = outside.read_text("utf-8")
+    r = connect(app).post("/api/v1/scenarios/validate", json={"text": text})
+    assert r.status_code == 200 and not r.json()["ok"]
 
 
 def test_the_demo_catalogue_cannot_be_edited(tmp_path: Path) -> None:
     app, cat = app_for(tmp_path, read_only=True)
     c = connect(app)
     src = c.get("/api/v1/scenarios/rf-001/source").json()
-    r = c.put("/api/v1/scenarios/rf-001/source", json={"text": src["text"], "etag": src["etag"]})
+    r = _put(c, src["file"], src["text"], src["etag"])
     assert r.status_code == 409 and r.json()["code"] == "READ_ONLY_CATALOGUE"

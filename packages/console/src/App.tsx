@@ -27,7 +27,7 @@ export default function App() {
         <Route path="simulator" element={<Simulator />} />
         <Route path="scenarios" element={<Scenarios />} />
         <Route path="scenarios/new" element={<ScenarioEditor />} />
-        <Route path="scenarios/:id/edit" element={<ScenarioEditor />} />
+        <Route path="scenarios/edit" element={<ScenarioEditor />} />
         <Route path="import" element={<BulkImport />} />
         <Route path="suites" element={<Suites />} />
         <Route path="checks" element={<Checks />} />

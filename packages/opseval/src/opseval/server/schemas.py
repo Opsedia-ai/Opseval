@@ -198,6 +198,7 @@ class ScenarioOut(Api):
     allow_commit: bool
     language: str
     persona_role: str
+    file: str  # relative to the catalogue, for the editor
 
 
 class SuiteOut(Api):
@@ -389,17 +390,19 @@ class ImportIn(ApiIn):
 
 
 class ScenarioSourceOut(Api):
-    """One scenario's YAML as it is on disk, for the editor."""
+    """One scenario file as it is on disk, for the editor: valid or not."""
 
-    id: str
     file: str  # relative to the catalogue
+    id: str | None  # None when the file does not validate
     text: str
     etag: str  # changes when the file does: a save must name the version it edited
 
 
 class ScenarioTextIn(ApiIn):
     text: Annotated[str, Field(max_length=200_000)]
-    editing: str | None = None  # the scenario being edited, so its own id is no clash
+    file: str | None = None  # the file being edited: its own id is no clash
+    family: str | None = None  # for a new file: the folder under scenarios/
+    file_name: str | None = None  # for a new file: its name, checked before it is written
 
 
 class ScenarioSaveIn(ApiIn):

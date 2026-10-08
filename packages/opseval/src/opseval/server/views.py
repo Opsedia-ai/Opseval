@@ -424,11 +424,21 @@ def load_scenarios(catalogue: Path | None, profile: SutProfile | None) -> s.Cata
                 allow_commit=sc.conversation.allow_commit,
                 language=sc.persona.language,
                 persona_role=sc.persona.role,
+                file=_relative(catalogue, cat.sources[sc.id]),
             )
             for sc in cat.scenarios
         ],
-        problems=[s.Problem(path=p.path, field=p.field, message=p.message) for p in cat.problems],
+        # Catalogue-relative, so the console can open a broken file in the editor.
+        problems=[
+            s.Problem(path=_relative(catalogue, p.path), field=p.field, message=p.message)
+            for p in cat.problems
+        ],
     )
+
+
+def _relative(root: Path, path: str) -> str:
+    resolved, base = Path(path).resolve(), root.resolve()
+    return resolved.relative_to(base).as_posix() if resolved.is_relative_to(base) else path
 
 
 def list_suites(

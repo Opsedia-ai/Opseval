@@ -329,13 +329,17 @@ def create_app(
     def config() -> list[s.SettingRow]:
         return views.settings_rows(settings)
 
+    @app.get(f"{API}/scenarios/source")
+    def scenario_file(file: str) -> s.ScenarioSourceOut:
+        return actions.scenario_source(ctx, file)
+
+    @app.put(f"{API}/scenarios/source")
+    def save_scenario_file(file: str, body: s.ScenarioSaveIn) -> s.ScenarioSourceOut:
+        return actions.save_scenario_source(ctx, file, body)
+
     @app.get(API + "/scenarios/{scenario_id}/source")
     def scenario_source(scenario_id: str) -> s.ScenarioSourceOut:
-        return actions.scenario_source(ctx, scenario_id)
-
-    @app.put(API + "/scenarios/{scenario_id}/source")
-    def save_scenario_source(scenario_id: str, body: s.ScenarioSaveIn) -> s.ScenarioSourceOut:
-        return actions.save_scenario_source(ctx, scenario_id, body)
+        return actions.scenario_source_by_id(ctx, scenario_id)
 
     @app.post(f"{API}/scenarios/validate")
     def validate_scenario(body: s.ScenarioTextIn) -> s.ScenarioCheckOut:

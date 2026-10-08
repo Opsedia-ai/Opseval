@@ -57,10 +57,10 @@ export const api = {
   usage: () => call<T.RunUsage[]>("/usage"),
   scenarios: () => call<T.Catalogue>("/scenarios"),
   persona: (id: string) => call<T.Persona>(`/scenarios/${encodeURIComponent(id)}/persona`),
-  scenarioSource: (id: string) => call<T.ScenarioSource>(`/scenarios/${encodeURIComponent(id)}/source`),
-  saveScenarioSource: (id: string, text: string, etag: string) =>
-    call<T.ScenarioSource>(`/scenarios/${encodeURIComponent(id)}/source`, { method: "PUT", body: JSON.stringify({ text, etag }) }),
-  validateScenario: (text: string, editing?: string) => post<T.ScenarioCheck>("/scenarios/validate", { text, editing }),
+  scenarioFile: (file: string) => call<T.ScenarioSource>(`/scenarios/source?file=${encodeURIComponent(file)}`),
+  saveScenarioFile: (file: string, text: string, etag: string) =>
+    call<T.ScenarioSource>(`/scenarios/source?file=${encodeURIComponent(file)}`, { method: "PUT", body: JSON.stringify({ text, etag }) }),
+  validateScenario: (body: { text: string; file?: string; family?: string; fileName?: string }) => post<T.ScenarioCheck>("/scenarios/validate", body),
   suites: () => call<T.Suite[]>("/suites"),
   checks: () => call<T.Check[]>("/checks"),
   gate: () => call<T.GateCatalog>("/gate"),

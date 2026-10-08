@@ -161,6 +161,7 @@ export interface ScenarioOut {
   allowCommit: boolean;
   language: string;
   personaRole: string;
+  file: string;
 }
 
 export interface SuiteOut {
@@ -344,17 +345,19 @@ export interface ImportIn {
   files: ImportFile[];
 }
 
-/** One scenario's YAML as it is on disk, for the editor. */
+/** One scenario file as it is on disk, for the editor: valid or not. */
 export interface ScenarioSourceOut {
-  id: string;
   file: string;
+  id: string | null;
   text: string;
   etag: string;
 }
 
 export interface ScenarioTextIn {
   text: string;
-  editing?: string | null;
+  file?: string | null;
+  family?: string | null;
+  fileName?: string | null;
 }
 
 export interface ScenarioSaveIn {
