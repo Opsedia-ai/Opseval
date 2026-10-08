@@ -162,6 +162,13 @@ class Judge(Scorer):
         blob = f"{RUBRIC_FORMAT}|{self.id}|" + "".join(f"{len(p)}:{p}" for p in parts)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
+    def _quote_source(self) -> str:
+        """Where a quote may come from, said exactly as :meth:`_haystack` checks it: a judge
+        told it may quote something the check then refuses invalidates its own ballot."""
+        if self.quotes_from == "customer":
+            return "the text of one customer turn"
+        return "one turn's text, or from a harness fact,"
+
     def _haystack(self, record: RunRecord) -> str:
         """What a quote must come from: the turns' own text, never their JSON encoding."""
         turns = record.transcript()
@@ -244,8 +251,8 @@ class Judge(Scorer):
                     f"<{fence}>\n{transcript}\n</{fence}>\n\n"
                     f"Grade each criterion with 0, 0.5 or 1:\n{criteria}\n\n"
                     'Reply with JSON: {"criteria": {"<id>": {"grade": 0|0.5|1, "quote": '
-                    "\"<exact words copied from one turn's text, or from a harness fact, "
-                    'that justify the grade>"}}}'
+                    f'"<exact words copied from {self._quote_source()} that justify the '
+                    'grade>"}}}'
                 ),
             },
         ]

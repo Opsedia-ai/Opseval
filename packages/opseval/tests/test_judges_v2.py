@@ -408,6 +408,23 @@ class TestTheTranscriptFence:
         res = await score(rec(turns), self.goal(), profile, judge)
         assert res.status is ScoreStatus.INFRA_ERROR and "JUDGE_INVALID_QUOTE" in (res.reason or "")
 
+    async def test_each_judge_is_told_exactly_where_it_may_quote_from(
+        self, profile: SutProfile
+    ) -> None:
+        """The persona judge checks quotes against customer turns only; telling it a harness
+        fact would do invalidates its own ballot (review of #47)."""
+        turns = [("customer", "My order 10482 arrived broken."), ("agent", "Sorry about that.")]
+        persona = make_scenario(scorers=[{"id": "judge.persona_consistency"}])
+        ids = [c.id for c in PersonaConsistency.criteria]
+        judge = StubJudge(ballot({i: (1, "arrived broken") for i in ids}))
+        await score(rec(turns), persona, profile, judge)
+        assert "copied from the text of one customer turn" in judge.prompts[0]
+        assert "harness fact" not in judge.prompts[0].split("Reply with JSON", 1)[1]
+
+        goal = StubJudge(self.all_ones("Sorry about that."))
+        await score(rec(turns), self.goal(), profile, goal)
+        assert "or from a harness fact" in goal.prompts[0].split("Reply with JSON", 1)[1]
+
     def test_the_format_is_part_of_every_judges_version_and_prompt(self) -> None:
         from opseval.scoring import REGISTRY
         from opseval.scoring.judges import TRANSCRIPT_FORMAT, Judge
