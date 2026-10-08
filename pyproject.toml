@@ -16,6 +16,8 @@ opseval = { workspace = true }
 pytest-opseval = { workspace = true }
 
 [dependency-groups]
+# The wheel's build backend, locked with hashes for the container image (ADR-0038).
+build = ["hatchling>=1.24"]
 dev = [
   "opseval[serve]",
   "pytest-opseval",

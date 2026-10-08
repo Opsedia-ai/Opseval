@@ -19,8 +19,12 @@ A `Dockerfile` at the repository root builds a **CLI image** (`ENTRYPOINT ["opse
 
 - **Pinned and reproducible.** Base images are pinned by digest (Dependabot keeps them current).
   Runtime dependencies are installed from `uv export --frozen` with `pip --require-hashes`, so
-  the image has exactly the locked versions and a tampered package fails the build. Opseval
-  itself is installed as a wheel built in a separate stage.
+  the image has exactly the locked versions and a tampered package fails the build.
+- **The build backend is locked too.** Hatchling sits in a `build` dependency group in
+  `uv.lock`. It is installed hash-checked in the build stage, and the wheel is built without
+  isolation and **without a network** (`RUN --network=none`), so nothing unchecked enters the
+  image. The digests are written out on each `FROM` line, because Dependabot reads those, not
+  `ARG` defaults.
 - **Least privilege.** It runs as an unprivileged user (uid 10001) in `/work`, with no compilers
   and no `serve` extra.
 - **An allowlist build context.** `.dockerignore` sends only what the build reads. Everything
