@@ -141,6 +141,34 @@ class SuiteOut(Api):
     repeats: int | None = None  # the suite's override; None = scenarios decide
     stop_at: str | None = None
     problem: str | None = None  # the file could not be read or validated
+    gate: GateOut | None = None  # the release gate this suite runs with (ADR-0032)
+
+
+class GateSettingOut(Api):
+    key: str  # "failed.normal", "flaky", ...
+    label: str
+    help: str
+    choices: list[str]  # only what the loader accepts: the console cannot offer more
+
+
+class GateCatalogOut(Api):
+    settings: list[GateSettingOut]
+    presets: dict[str, dict[str, str]]  # preset -> every setting's value
+
+
+class GateOut(Api):
+    """A suite's gate: what its YAML says, and what that resolves to."""
+
+    preset: str
+    overrides: dict[str, str]  # only the settings the suite changes from its preset
+    effective: dict[str, str]  # every setting, as a run would use it
+    describe: str  # "strict + flaky=warn"
+    looser_than_standard: list[str]
+
+
+class GateIn(ApiIn):
+    preset: Literal["strict", "standard", "lenient"] = "standard"
+    overrides: dict[str, str] = {}
 
 
 class CheckOut(Api):
@@ -277,6 +305,7 @@ class SuiteIn(ApiIn):
     include: Annotated[list[str], Field(min_length=1, max_length=500)]
     repeats: Repeats | None = None
     stop_at: str | None = None
+    gate: GateIn | None = None  # omitted: keep the file's gate; null: remove it (standard)
     overwrite: bool = False  # replacing an existing suite must be asked for
 
 

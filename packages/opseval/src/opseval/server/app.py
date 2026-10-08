@@ -167,6 +167,14 @@ def create_app(
     def suites() -> list[s.SuiteOut]:
         return views.list_suites(catalogue, ctx.profile)
 
+    @app.get(f"{API}/gate")
+    def gate() -> s.GateCatalogOut:
+        return views.gate_catalog()
+
+    @app.post(f"{API}/gate/resolve")
+    def gate_resolve(body: s.GateIn) -> s.GateOut:
+        return actions.preview_gate(body)
+
     @app.get(f"{API}/checks")
     def checks() -> list[s.CheckOut]:
         return views.checks()

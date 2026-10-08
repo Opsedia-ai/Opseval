@@ -14,7 +14,17 @@ import yaml
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, config_digest
 from opseval.errors import ConfigError
-from opseval.models.gate import describe, looser_than_standard
+from opseval.models.gate import (
+    PRESETS,
+    SETTINGS,
+    GatePolicy,
+    choices,
+    describe,
+    flatten,
+    looser_than_standard,
+    overrides,
+    resolve,
+)
 from opseval.models.profile import SutProfile
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.scoring import INVARIANTS, REGISTRY
@@ -428,9 +438,34 @@ def list_suites(catalogue: Path | None, profile: SutProfile | None) -> list[s.Su
                 scenario_count=count,
                 repeats=_nested(raw, "overrides", "execution", "repeats"),
                 stop_at=_nested(raw, "defaults", "conversation", "stop_at"),
+                # load_catalogue validated the file, so its gate block is well-formed here.
+                gate=gate_out(GatePolicy.model_validate(raw.get("gate") or {})),
             )
         )
     return out
+
+
+def gate_out(policy: GatePolicy) -> s.GateOut:
+    """A gate block as the console shows it. Resolution happens here, never in the browser."""
+    resolved = resolve(policy)
+    return s.GateOut(
+        preset=policy.preset,
+        overrides=overrides(policy),
+        effective=flatten(resolved),
+        describe=describe(resolved),
+        looser_than_standard=looser_than_standard(resolved),
+    )
+
+
+def gate_catalog() -> s.GateCatalogOut:
+    """Every gate setting with the values it accepts, and every preset, for the editor."""
+    return s.GateCatalogOut(
+        settings=[
+            s.GateSettingOut(key=key, label=label, help=text, choices=list(choices(key)))
+            for key, label, text in SETTINGS
+        ],
+        presets={name: flatten(p) for name, p in PRESETS.items()},
+    )
 
 
 def _nested(raw: dict[str, Any], *path: str) -> Any:

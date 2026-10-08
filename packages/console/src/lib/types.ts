@@ -39,7 +39,13 @@ export interface Scenario {
 }
 export interface Problem { path: string; field: string; message: string }
 export interface Catalogue { scenarios: Scenario[]; problems: Problem[] }
-export interface Suite { file: string; displayName: string; description: string; include: string[]; scenarioCount: number; repeats: number | null; stopAt: string | null; problem: string | null }
+export type GatePreset = "strict" | "standard" | "lenient";
+export interface GateSetting { key: string; label: string; help: string; choices: string[] }
+export interface GateCatalog { settings: GateSetting[]; presets: Record<GatePreset, Record<string, string>> }
+/** A suite's gate, as the server resolved it (ADR-0032). */
+export interface GateView { preset: GatePreset; overrides: Record<string, string>; effective: Record<string, string>; describe: string; looserThanStandard: string[] }
+export interface GateBody { preset: GatePreset; overrides: Record<string, string> }
+export interface Suite { file: string; displayName: string; description: string; include: string[]; scenarioCount: number; repeats: number | null; stopAt: string | null; problem: string | null; gate: GateView | null }
 export interface Readiness { id: string; label: string; ready: boolean; detail: string }
 export interface Check { id: string; question: string; area: Area; kind: "deterministic" | "judge"; reads: "chat" | "trace" | "frames" }
 export interface RunUsage { run: string; simulatorTokens: number | null; judgeTokens: number | null; costUsd: number | null }
@@ -58,4 +64,4 @@ export interface Turn { who: "customer" | "agent"; text: string }
 export interface Rehearsal { turn: Turn; goalReached: boolean; model: string | null }
 export interface LaunchBody { suite?: string; scenarios?: string[]; target?: string; repeats?: number; allowCommit?: boolean; failFast?: boolean }
 export interface Launched { accepted: boolean; runId: string; message: string }
-export interface SuiteBody { file: string; displayName: string; description: string; include: string[]; repeats?: number | null; stopAt?: string | null; overwrite?: boolean }
+export interface SuiteBody { file: string; displayName: string; description: string; include: string[]; repeats?: number | null; stopAt?: string | null; gate?: GateBody | null; overwrite?: boolean }
