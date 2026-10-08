@@ -43,7 +43,13 @@ from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
 from opseval.scoring.base import Scorer, check_judge_independence, infra_error
 from opseval.storage import FileStore
-from opseval.verdicts import attempt_verdict, exit_code, fold_attempts, release_gate
+from opseval.verdicts import (
+    attempt_verdict,
+    exit_code,
+    fold_attempts,
+    fold_cut_short,
+    release_gate,
+)
 
 
 @dataclass
@@ -229,11 +235,11 @@ async def rescore_run(
             tests.append(old)  # skipped/blocked tests have nothing to re-score
             continue
         # Fold over the attempts that actually ran (a --repeats override or an edited
-        # catalogue must not turn a judged run into "inconclusive").
+        # catalogue must not turn a judged run into "inconclusive"). A scenario a cancel cut
+        # short is folded against the repeats it planned, by the same rule as the run.
+        planned = old.cut_short_of or len(old.attempts)
         scenario = scenario.model_copy(
-            update={
-                "execution": scenario.execution.model_copy(update={"repeats": len(old.attempts)})
-            }
+            update={"execution": scenario.execution.model_copy(update={"repeats": planned})}
         )
         attempts = []
         for a in old.attempts:
@@ -244,7 +250,11 @@ async def rescore_run(
             before_scores += a.scores
             after_scores += scores
             attempts.append(attempt_verdict(record, scores, a.record_path))
-        new = fold_attempts(scenario, attempts)
+        new = (
+            fold_cut_short(scenario, attempts)
+            if old.cut_short_of
+            else fold_attempts(scenario, attempts)
+        )
         tests.append(new)
         if new.status is not old.status:
             verdict_changes.append(
@@ -283,6 +293,9 @@ async def rescore_run(
         config_digest=config_digest(settings),
         load_errors=original.load_errors,
         rescore=info,
+        # A re-score changes no scenario that was not run: why the run stopped still holds.
+        stop=original.stop,
+        stopped=original.stopped,
     )
     out = store.save_rescore(
         run_id,

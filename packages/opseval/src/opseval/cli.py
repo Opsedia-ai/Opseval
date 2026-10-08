@@ -21,10 +21,12 @@ from opseval.config import Settings
 from opseval.errors import ConfigError
 from opseval.models.gate import Preset
 from opseval.models.results import SuiteResult
+from opseval.models.stop import StopPolicy
 from opseval.reporting import console_summary
 from opseval.runner import RunOptions, launch
 from opseval.scaffold import TEMPLATES, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY
+from opseval.storage import FileStore
 from opseval.verdicts import EXIT_HARNESS, EXIT_NOT_JUDGED
 
 app = typer.Typer(
@@ -169,7 +171,42 @@ def run(
     allow_commit: Annotated[
         bool, typer.Option(help="Allow scenarios to perform the irreversible outcome.")
     ] = False,
-    fail_fast: Annotated[bool, typer.Option(help="Stop after the first failed scenario.")] = False,
+    fail_fast: Annotated[
+        Optional[bool],  # noqa: UP045
+        typer.Option(
+            "--fail-fast/--no-fail-fast",
+            help="Stop after the first failed scenario the gate blocks on.",
+            show_default="the suite's stop: policy",
+        ),
+    ] = None,
+    max_consecutive_failures: Annotated[
+        Optional[int],  # noqa: UP045
+        typer.Option(min=1, help="Stop after this many failed scenarios in a row."),
+    ] = None,
+    stop_on_critical_failure: Annotated[
+        Optional[bool],  # noqa: UP045
+        typer.Option(
+            "--stop-on-critical-failure/--no-stop-on-critical-failure",
+            help="Stop after a critical or blocker scenario fails.",
+            show_default="the suite's stop: policy",
+        ),
+    ] = None,
+    stop_on_rate_limit: Annotated[
+        Optional[bool],  # noqa: UP045
+        typer.Option(
+            "--stop-on-rate-limit/--no-stop-on-rate-limit",
+            help="Stop when a rate limit outlasts its retries and invalidates an attempt.",
+            show_default="the suite's stop: policy",
+        ),
+    ] = None,
+    max_wall_clock: Annotated[
+        Optional[float],  # noqa: UP045
+        typer.Option(
+            "--max-wall-clock",
+            min=1,
+            help="Start no scenario once the run has taken this many seconds.",
+        ),
+    ] = None,
     preflight: Annotated[
         bool,
         typer.Option(help="Check dependencies first, so an outage skips instead of failing."),
@@ -200,7 +237,13 @@ def run(
         profile=profile,
         repeats=repeats,
         allow_commit=allow_commit,
-        fail_fast=fail_fast,
+        stop=_stop_flags(
+            fail_fast=fail_fast,
+            max_consecutive_failures=max_consecutive_failures,
+            stop_on_critical_failure=stop_on_critical_failure,
+            stop_on_rate_limit=stop_on_rate_limit,
+            max_wall_clock_seconds=max_wall_clock,
+        ),
         filters=filter_ or [],
         traces=traces,
         preflight=preflight,
@@ -208,6 +251,36 @@ def run(
         gate=gate,
     )
     raise typer.Exit(_execute(path, options, settings, open_report, junit))
+
+
+def _stop_flags(**flags: object) -> StopPolicy | None:
+    """Only the flags given: each replaces that one field of the suite's ``stop:`` policy."""
+    given = {name: value for name, value in flags.items() if value is not None}
+    return StopPolicy.model_validate(given) if given else None
+
+
+@app.command()
+def cancel(
+    run_dir: Annotated[Path, typer.Argument(help="A running run's folder, e.g. reports/<run_id>.")],
+) -> None:
+    """Ask a running run to stop (it may run in another process, or the console).
+
+    The run stops before its next attempt and records everything it did not run as
+    cancelled, so the result still says what was and was not tested. Exit 0 when the
+    request is recorded, 3 when there is no such running run.
+    """
+    folder = run_dir.resolve()
+    if not (folder / "manifest.json").is_file():
+        typer.secho(f"error: {run_dir}: not a run folder (no manifest.json)", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS)
+    if (folder / "result.json").is_file() or (folder / "error.json").is_file():
+        typer.secho(f"error: {run_dir}: this run has already finished", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS)
+    store = FileStore(folder.parent)
+    if store.request_cancel(folder.name, by="cli"):
+        typer.echo(f"Cancel requested: {folder.name} stops before its next attempt.")
+    else:
+        typer.echo(f"Cancel was already requested for {folder.name}.")
 
 
 @app.command()

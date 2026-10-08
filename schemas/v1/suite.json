@@ -262,6 +262,54 @@
       },
       "title": "GatePolicy",
       "type": "object"
+    },
+    "StopPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "fail_fast": {
+          "default": false,
+          "title": "Fail Fast",
+          "type": "boolean"
+        },
+        "max_consecutive_failures": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Consecutive Failures"
+        },
+        "max_wall_clock_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Wall Clock Seconds"
+        },
+        "stop_on_critical_failure": {
+          "default": false,
+          "title": "Stop On Critical Failure",
+          "type": "boolean"
+        },
+        "stop_on_rate_limit": {
+          "default": false,
+          "title": "Stop On Rate Limit",
+          "type": "boolean"
+        }
+      },
+      "title": "StopPolicy",
+      "type": "object"
     }
   },
   "$id": "https://opsedia.ai/schemas/v1/suite.json",
@@ -319,6 +367,17 @@
       "additionalProperties": true,
       "title": "Overrides",
       "type": "object"
+    },
+    "stop": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StopPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

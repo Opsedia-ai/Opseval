@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from opseval.config import Settings, check_url_allowed
-from opseval.errors import LLMInfraError, LLMRequestError
+from opseval.errors import LLMInfraError, LLMRateLimited, LLMRequestError
 from opseval.models.results import ModelUsage
 
 # USD per 1M tokens (input, output). Deliberately small; unknown models are "no rate".
@@ -147,7 +147,8 @@ class ChatClient:
                     retry_after = _retry_after(resp)
                 if attempt == self._max_retries:
                     self._meter.record(self.role, self.model, None, rate_limited)
-                    raise LLMInfraError(
+                    gave_up = LLMRateLimited if error == "HTTP 429" else LLMInfraError
+                    raise gave_up(
                         f"{self.role} LLM unavailable after {attempt + 1} attempts ({error})"
                     )
                 await self._sleep(

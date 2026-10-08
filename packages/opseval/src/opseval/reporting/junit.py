@@ -53,6 +53,8 @@ def render_junit(result: SuiteResult) -> str:
         ("exit_code", str(result.exit_code)),
     ):
         ET.SubElement(props, "property", name=key, value=value)
+    if result.stopped is not None:
+        ET.SubElement(props, "property", name="stopped_early", value=result.stopped.detail)
     if result.degraded_scorers:
         ET.SubElement(
             props,

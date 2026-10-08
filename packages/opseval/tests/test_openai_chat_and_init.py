@@ -194,6 +194,14 @@ class TestOpenAIChat:
         rec = await run_once(s, oc_profile, tr)
         assert rec.terminal_state is TerminalState.TRANSPORT_FAILURE
         assert await judged(rec, s, oc_profile) is None
+        assert "rate_limited" in rec.notes, "stop_on_rate_limit reads this, not error text"
+
+    async def test_an_auth_rejection_is_not_noted_as_a_rate_limit(
+        self, oc_profile: SutProfile
+    ) -> None:
+        s = oc_scenario()
+        rec = await run_once(s, oc_profile, transport(oc_profile, lambda r: httpx.Response(401)))
+        assert "rate_limited" not in rec.notes
 
     async def test_auth_rejection_is_not_blamed(self, oc_profile: SutProfile) -> None:
         s = oc_scenario()

@@ -81,6 +81,8 @@ def console_summary(result: SuiteResult) -> str:
     for outcome in result.sinks:
         mark = "published" if outcome.published else "NOT PUBLISHED"
         lines.append(f"  {mark:<13} {outcome.sink}: {outcome.detail}")
+    if result.stopped is not None:
+        lines += ["", f"Stopped early: {result.stopped.detail}"]
     lines += ["", f"Gate: {result.gate.status.upper()} — {result.gate.summary}"]
     if result.gate.policy is not None:
         lines.append(f"Gate policy: {describe(result.gate.policy)}")
