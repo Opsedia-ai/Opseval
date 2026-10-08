@@ -16,7 +16,12 @@ cd packages/console && npm ci && npm run dev            # http://localhost:5173
 To *use* the console, `npm run build` once: `opseval serve` then serves `dist/` itself on
 the API's port and prints that link (ADR-0034). The dev server above is for working on it.
 
-Every API request needs the bearer token `opseval serve` printed (ADR-0031). The link carries it
+Every API request needs the bearer token `opseval serve` printed (ADR-0031).
+
+`npm test` (Vitest, in CI) pins the console's share of the one rule: only a safe run is green, a
+harness error never looks like an agent failure, an agent error is never drawn as a normal turn,
+an unmeasured count is never 0, progress is never a verdict, and the token is taken from the
+link's fragment, dropped from the address bar and sent on every call. The link carries it
 in the URL fragment; `src/lib/api.ts` keeps it in `localStorage` and drops it from the address bar.
 
 `src/lib/api.gen.ts` is **generated** from `packages/opseval/src/opseval/server/schemas.py` by `scripts/console_types.py` (`make check` fails if it drifts); `src/lib/types.ts` only gives those types the console's names. Change a Python model, then run `uv run python scripts/console_types.py`. The browser never

@@ -3,7 +3,7 @@ import type { TranscriptEntry } from "../lib/types";
 import { useApi } from "../lib/useApi";
 import { Callout, Data, Mono, NotMeasured, Pill, cx } from "./ui";
 
-function Entry({ e }: { e: TranscriptEntry }) {
+export function Entry({ e }: { e: TranscriptEntry }) {
   if (e.kind === "message") {
     const customer = e.who === "customer";
     return (
