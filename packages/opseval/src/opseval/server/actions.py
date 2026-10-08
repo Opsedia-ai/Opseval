@@ -9,6 +9,7 @@ reason. Never a silent absence (ADR-0030, ADR-0031).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -408,3 +409,97 @@ def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
             path.unlink(missing_ok=True)
         raise ApiError(500, "WRITE_FAILED", f"nothing was imported: {exc}") from exc
     return s.ImportOut(imported=[sc.id for _, _, sc in parsed], problems=[])
+
+
+# --- the scenario editor ---------------------------------------------------------------
+
+
+def _etag(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _located(ctx: ServerContext, sid: str) -> tuple[Path, Path, dict[str, str]]:
+    """(catalogue root, the scenario's file, every id -> file) for a valid scenario."""
+    root, profile = ctx.need_catalogue()
+    cat, _ = load_catalogue(
+        scenario_root(root),
+        profile,
+        known_scorers=REGISTRY.keys(),
+        known_invariants=set(INVARIANTS),
+    )
+    source = cat.sources.get(sid)
+    if source is None:
+        raise ApiError(404, "UNKNOWN_SCENARIO", f"no valid scenario {sid!r}")
+    path = Path(source).resolve()
+    if not path.is_relative_to(root.resolve()):
+        raise ApiError(404, "UNKNOWN_SCENARIO", f"no valid scenario {sid!r}")
+    return root, path, dict(cat.sources)
+
+
+def scenario_source(ctx: ServerContext, sid: str) -> s.ScenarioSourceOut:
+    root, path, _ = _located(ctx, sid)
+    text = path.read_text("utf-8")
+    return s.ScenarioSourceOut(
+        id=sid, file=path.relative_to(root.resolve()).as_posix(), text=text, etag=_etag(text)
+    )
+
+
+def check_scenario(ctx: ServerContext, body: s.ScenarioTextIn) -> s.ScenarioCheckOut:
+    """The loader's verdict on one scenario's text, with each problem at its field path."""
+    root, profile = ctx.need_catalogue()
+    problems: list[s.Problem] = []
+    try:
+        raw = yaml.safe_load(body.text)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        where = f"line {mark.line + 1}" if mark is not None else ""
+        return s.ScenarioCheckOut(
+            ok=False, id=None, title=None, problems=[_problem(where, "", f"not YAML: {exc}")]
+        )
+    try:
+        sc = Scenario.model_validate(raw)
+    except ValidationError as exc:
+        for err in exc.errors():
+            field = ".".join(str(part) for part in err["loc"])
+            problems.append(_problem("", field, str(err["msg"])))
+        return s.ScenarioCheckOut(ok=False, id=None, title=None, problems=problems)
+    for msg in check_references(sc, profile, REGISTRY, set(INVARIANTS)):
+        problems.append(_problem("", "", msg))
+    scenarios = scenario_root(root)
+    if scenarios.is_dir():
+        cat, _ = load_catalogue(
+            scenarios, profile, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+        )
+        other = cat.sources.get(sc.id)
+        if other is not None and sc.id != body.editing:
+            where = Path(other).resolve().relative_to(root.resolve()).as_posix()
+            problems.append(_problem("", "id", f"id {sc.id!r} is already used by {where}"))
+    return s.ScenarioCheckOut(ok=not problems, id=sc.id, title=sc.name, problems=problems)
+
+
+def save_scenario_source(
+    ctx: ServerContext, sid: str, body: s.ScenarioSaveIn
+) -> s.ScenarioSourceOut:
+    """Replace one scenario's file, only if the text is valid and the file is the version
+    the editor opened (a `git pull` meanwhile is refused, never overwritten)."""
+    ctx.need_writable()
+    root, path, _ = _located(ctx, sid)
+    if _etag(path.read_text("utf-8")) != body.etag:
+        raise ApiError(
+            409, "SCENARIO_CHANGED", "the file changed on disk since you opened it; reload it"
+        )
+    check = check_scenario(ctx, s.ScenarioTextIn(text=body.text, editing=sid))
+    if not check.ok:
+        raise ApiError(422, "INVALID_SCENARIO", "; ".join(p.message for p in check.problems))
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}")
+    try:
+        temp.write_text(body.text, "utf-8")
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+    return s.ScenarioSourceOut(
+        id=check.id or sid,
+        file=path.relative_to(root.resolve()).as_posix(),
+        text=body.text,
+        etag=_etag(body.text),
+    )

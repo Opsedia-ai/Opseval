@@ -388,6 +388,34 @@ class ImportIn(ApiIn):
     files: Annotated[list[ImportFile], Field(min_length=1, max_length=200)]
 
 
+class ScenarioSourceOut(Api):
+    """One scenario's YAML as it is on disk, for the editor."""
+
+    id: str
+    file: str  # relative to the catalogue
+    text: str
+    etag: str  # changes when the file does: a save must name the version it edited
+
+
+class ScenarioTextIn(ApiIn):
+    text: Annotated[str, Field(max_length=200_000)]
+    editing: str | None = None  # the scenario being edited, so its own id is no clash
+
+
+class ScenarioSaveIn(ApiIn):
+    text: Annotated[str, Field(max_length=200_000)]
+    etag: str
+
+
+class ScenarioCheckOut(Api):
+    """What the loader would say about this text: the same checks as `opseval validate`."""
+
+    ok: bool
+    id: str | None
+    title: str | None
+    problems: list[Problem]
+
+
 class ImportOut(Api):
     imported: list[str]
     problems: list[Problem]

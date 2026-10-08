@@ -1169,3 +1169,69 @@ async def test_the_runner_records_a_skipped_last_scenario(tmp_path: Path) -> Non
     assert p is not None and p.stage == "finishing" and p.current is None
     states = {r.id: r.state for r in p.scenarios}
     assert states["rf-101"] == "skipped" and states["rf-001"] == "done"
+
+
+# --- the scenario editor -------------------------------------------------------------------------
+
+
+def test_the_editor_reads_a_scenarios_own_yaml(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    src = connect(app).get("/api/v1/scenarios/rf-001/source").json()
+    assert src["file"] == "scenarios/rf-001-happy-path.yaml"
+    assert src["text"] == (cat / src["file"]).read_text("utf-8") and len(src["etag"]) == 16
+    assert connect(app).get("/api/v1/scenarios/nope/source").status_code == 404
+
+
+def test_validation_is_the_loaders_with_field_paths(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    own = (cat / "scenarios" / "rf-001-happy-path.yaml").read_text("utf-8")
+    assert c.post("/api/v1/scenarios/validate", json={"text": own, "editing": "rf-001"}).json()[
+        "ok"
+    ]
+    # Its own id is a clash for anything but itself.
+    dup = c.post("/api/v1/scenarios/validate", json={"text": own}).json()
+    assert (
+        not dup["ok"]
+        and "already used by scenarios/rf-001-happy-path.yaml" in dup["problems"][0]["message"]
+    )
+    bad = c.post("/api/v1/scenarios/validate", json={"text": own.replace("goal:", "gaol:")}).json()
+    fields = {p["field"] for p in bad["problems"]}
+    assert not bad["ok"] and {"goal", "gaol"} <= fields
+    broken = c.post("/api/v1/scenarios/validate", json={"text": "id: [x"}).json()
+    assert not broken["ok"] and broken["problems"][0]["path"].startswith("line ")
+    scorer = c.post(
+        "/api/v1/scenarios/validate",
+        json={"text": own.replace("id: rf-001", "id: rf-777") + "\nscorers: [{id: no.such}]\n"},
+    ).json()
+    assert not scorer["ok"]
+
+
+def test_a_save_is_valid_atomic_and_never_over_a_newer_file(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    path = cat / "scenarios" / "rf-001-happy-path.yaml"
+    src = c.get("/api/v1/scenarios/rf-001/source").json()
+    edited = src["text"].replace("criticality: critical", "criticality: blocker")
+    out = c.put("/api/v1/scenarios/rf-001/source", json={"text": edited, "etag": src["etag"]})
+    assert out.status_code == 200 and path.read_text("utf-8") == edited
+    assert out.json()["etag"] != src["etag"]
+    # The old etag no longer matches: someone else's change (or a git pull) is never overwritten.
+    stale = c.put(
+        "/api/v1/scenarios/rf-001/source", json={"text": src["text"], "etag": src["etag"]}
+    )
+    assert stale.status_code == 409 and stale.json()["code"] == "SCENARIO_CHANGED"
+    assert path.read_text("utf-8") == edited
+    # Invalid text is refused and the file is untouched; no temp file is left behind.
+    fresh = c.get("/api/v1/scenarios/rf-001/source").json()
+    bad = c.put("/api/v1/scenarios/rf-001/source", json={"text": "id: [x", "etag": fresh["etag"]})
+    assert bad.status_code == 422 and path.read_text("utf-8") == edited
+    assert not [p for p in path.parent.iterdir() if p.name.startswith(".")]
+
+
+def test_the_demo_catalogue_cannot_be_edited(tmp_path: Path) -> None:
+    app, cat = app_for(tmp_path, read_only=True)
+    c = connect(app)
+    src = c.get("/api/v1/scenarios/rf-001/source").json()
+    r = c.put("/api/v1/scenarios/rf-001/source", json={"text": src["text"], "etag": src["etag"]})
+    assert r.status_code == 409 and r.json()["code"] == "READ_ONLY_CATALOGUE"

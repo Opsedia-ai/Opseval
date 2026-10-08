@@ -21,6 +21,8 @@ export type Sink = G.SinkOut;
 export type RunDetail = G.RunDetail;
 export type Scenario = G.ScenarioOut;
 export type Problem = G.Problem;
+export type ScenarioSource = G.ScenarioSourceOut;
+export type ScenarioCheck = G.ScenarioCheckOut;
 export type Catalogue = G.CatalogueOut;
 
 export type GatePreset = G.GateOut["preset"];

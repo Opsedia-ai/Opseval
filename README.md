@@ -469,7 +469,9 @@ Run detail opens the **conversation behind each attempt**: every turn (right to 
 personas), each checkpoint raised and the customer's decision, tool calls from the trace, and any
 harness error, with the record's redaction stated, never implied. A run in flight shows its
 **live progress**: scenarios done, attempts recorded, and the one running now; verdicts appear
-only when it ends. Not built yet: a scenario editor (bulk import is there). See
+only when it ends. **Test cases are edited in the console**: the YAML with the same checks as
+`opseval validate` as you type (schema, scorer and checkpoint names, ids used elsewhere), saved
+only when valid and never over a newer version of the file; new ones start from a template. See
 [ADR-0029](docs/adr/0029-console-api.md).
 
 ## Publish a finished run

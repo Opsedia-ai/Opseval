@@ -1,4 +1,5 @@
-import { Upload } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Plus, Upload } from "lucide-react";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import { Button, Callout, Card, Data, Explainer, Mono, Page, PageHeader, Pill, Table } from "../components/ui";
@@ -8,7 +9,7 @@ export default function Scenarios() {
   return (
     <>
       <PageHeader title="Test cases" sub="One situation each, as YAML in your catalogue." aside={<>
-        <Button to="/suites">Suites</Button><Button to="/import"><Upload size={16} />Bulk import</Button></>} />
+        <Button to="/suites">Suites</Button><Button to="/import"><Upload size={16} />Bulk import</Button><Button to="/scenarios/new"><Plus size={16} />New test case</Button></>} />
       <Page>
         <Explainer><b>A test case describes one situation to put the agent in:</b> who the customer is, what they want, how they behave at approval checkpoints and which checks decide whether the agent handled it.</Explainer>
         <Data res={res}>{(c) => (<>
@@ -17,7 +18,7 @@ export default function Scenarios() {
             <Table head={["Scenario", "Difficulty", "Criticality", "Stops at", "Repeats", "Tags"]}>
               {c.scenarios.map((s) => (
                 <tr key={s.id}>
-                  <td className="text-ink">{s.title}<div><Mono>{s.id}</Mono></div></td>
+                  <td className="text-ink"><Link to={`/scenarios/${encodeURIComponent(s.id)}/edit`} className="font-medium underline">{s.title}</Link><div><Mono>{s.id}</Mono></div></td>
                   <td><Pill tone={s.difficulty === "high" ? "fail" : "neutral"}>{s.difficulty}</Pill></td>
                   <td><Pill tone={s.criticality === "normal" ? "mute" : "warn"}>{s.criticality}</Pill></td>
                   <td><Mono>{s.stopAt}</Mono>{s.allowCommit && <> <Pill tone="warn">allow_commit</Pill></>}</td>

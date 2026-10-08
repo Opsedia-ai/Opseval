@@ -344,6 +344,32 @@ export interface ImportIn {
   files: ImportFile[];
 }
 
+/** One scenario's YAML as it is on disk, for the editor. */
+export interface ScenarioSourceOut {
+  id: string;
+  file: string;
+  text: string;
+  etag: string;
+}
+
+export interface ScenarioTextIn {
+  text: string;
+  editing?: string | null;
+}
+
+export interface ScenarioSaveIn {
+  text: string;
+  etag: string;
+}
+
+/** What the loader would say about this text: the same checks as `opseval validate`. */
+export interface ScenarioCheckOut {
+  ok: boolean;
+  id: string | null;
+  title: string | null;
+  problems: Problem[];
+}
+
 export interface ImportOut {
   imported: string[];
   problems: Problem[];
