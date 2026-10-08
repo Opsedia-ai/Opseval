@@ -56,6 +56,44 @@ export interface TestOut {
   unmeasuredScorers: string[];
 }
 
+/** One thing that happened in a conversation, in order. */
+export interface TranscriptEntry {
+  seq: number;
+  kind: "message" | "checkpoint" | "decision" | "result" | "error" | "notification";
+  who: "customer" | "agent" | null;
+  text: string | null;
+  phase: string | null;
+  latencyMs: number | null;
+  detail: string | null;
+}
+
+export interface ToolCallOut {
+  name: string;
+  ok: boolean;
+  arguments: string | null;
+}
+
+/** The record behind one attempt: what was said and done, not how it was scored. */
+export interface AttemptRecordOut {
+  testId: string;
+  index: number;
+  terminalState: string;
+  stopReason: string | null;
+  startedAt: string;
+  endedAt: string;
+  language: string | null;
+  dialect: string | null;
+  userTurns: number;
+  traceCoverage: "full" | "frames_only";
+  entries: TranscriptEntry[];
+  toolCalls: ToolCallOut[];
+  infraErrors: string[];
+  connection: string[];
+  plantedInjections: string[];
+  redactionChecked: boolean;
+  redactedKinds: string[];
+}
+
 export interface UsageOut {
   role: string;
   model: string;

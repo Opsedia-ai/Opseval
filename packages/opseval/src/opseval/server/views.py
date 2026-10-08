@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 from pathlib import Path
@@ -26,7 +27,8 @@ from opseval.models.gate import (
     resolve,
     to_yaml_block,
 )
-from opseval.models.profile import SutProfile
+from opseval.models.profile import FrameKind, SutProfile
+from opseval.models.record import FrameRecord, RunRecord
 from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
@@ -535,3 +537,86 @@ def readiness(
             else "Tools checks fall back to frame evidence (degraded) or are not measured",
         ),
     ]
+
+
+def _short(value: object, limit: int = 500) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _field(payload: object, key: str) -> str | None:
+    value = payload.get(key) if isinstance(payload, dict) else None
+    return None if value is None else str(value)
+
+
+def _entries(record: RunRecord) -> list[s.TranscriptEntry]:
+    """The conversation, the way the HTML report shows it: messages, checkpoints raised,
+    the customer's decisions, and what the agent sent back that was not a message."""
+    out: list[s.TranscriptEntry] = []
+
+    def add(f: FrameRecord, kind: str, **kw: Any) -> None:
+        base: dict[str, Any] = {
+            "seq": f.seq,
+            "kind": kind,
+            "who": None,
+            "text": None,
+            "phase": f.phase,
+            "latency_ms": f.latency_ms,
+            "detail": None,
+        }
+        out.append(s.TranscriptEntry(**{**base, **kw}))
+
+    for f in record.frames:
+        kind = f.kind
+        if f.text:
+            add(f, "message", who="customer" if f.direction == "sent" else "agent", text=f.text)
+        if kind is FrameKind.NEEDS_HUMAN:
+            add(f, "checkpoint", detail=_field(f.payload, "checkpoint"))
+        elif kind is FrameKind.RESUME:
+            add(f, "decision", detail=_field(f.payload, "action"))
+        elif kind is FrameKind.ERROR and not f.text:
+            add(f, "error", detail=_short(f.payload))
+        elif kind is FrameKind.RESULT and not f.text:
+            add(f, "result", detail=_short(f.payload))
+        elif kind is FrameKind.NOTIFICATION and not f.text:
+            add(f, "notification", detail=_short(f.payload))
+    return out
+
+
+def attempt_record(
+    store: FileStore, run_id: str, test_id: str, index: int
+) -> s.AttemptRecordOut | None:
+    """One attempt's conversation; ``None`` if that attempt has no record (yet)."""
+    record = store.load_record(run_id, test_id, index)
+    if record is None:
+        return None
+    persona = record.persona or {}
+    return s.AttemptRecordOut(
+        test_id=record.test_id,
+        index=record.attempt_index,
+        terminal_state=record.terminal_state.value,
+        stop_reason=record.stop_reason,
+        started_at=record.started_at.isoformat(),
+        ended_at=record.ended_at.isoformat(),
+        language=_field(persona, "language"),
+        dialect=_field(persona, "dialect"),
+        user_turns=record.user_turns,
+        trace_coverage=record.trace_coverage,
+        entries=_entries(record),
+        tool_calls=[
+            s.ToolCallOut(
+                name=c.name,
+                ok=c.ok,
+                arguments=None if c.arguments is None else _short(c.arguments, 2000),
+            )
+            for c in record.tool_calls
+        ],
+        infra_errors=list(record.infra_errors),
+        connection=[
+            e.kind + (f" (code {e.close_code})" if e.close_code else "")
+            for e in record.transport_events
+        ],
+        planted_injections=list(record.planted_injections),
+        redaction_checked=record.redaction.applied,
+        redacted_kinds=list(record.redaction.found),
+    )

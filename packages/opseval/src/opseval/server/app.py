@@ -251,6 +251,17 @@ def create_app(
             raise actions.ApiError(404, "UNKNOWN_RUN", f"no run {run_id!r}")
         return detail
 
+    @app.get(API + "/runs/{run_id}/attempts/{test_id}/{index}")
+    def attempt(run_id: str, test_id: str, index: int) -> s.AttemptRecordOut:
+        if index < 0 or not RUN_ID.match(test_id):
+            raise actions.ApiError(404, "UNKNOWN_ATTEMPT", "no such attempt")
+        out = views.attempt_record(ctx.store, _run_id(run_id), test_id, index)
+        if out is None:
+            raise actions.ApiError(
+                404, "UNKNOWN_ATTEMPT", f"no record of {test_id} attempt {index} in {run_id}"
+            )
+        return out
+
     @app.get(f"{API}/compare")
     def compare(baseline: str, candidate: str) -> s.Comparison:
         result = views.compare(ctx.store, _run_id(baseline), _run_id(candidate))

@@ -49,6 +49,8 @@ export const api = {
   health: () => call<T.Health>("/health"),
   runs: () => call<T.RunSummary[]>("/runs"),
   run: (id: string) => call<T.RunDetail>(`/runs/${encodeURIComponent(id)}`),
+  attempt: (run: string, test: string, index: number) =>
+    call<T.AttemptRecord>(`/runs/${encodeURIComponent(run)}/attempts/${encodeURIComponent(test)}/${index}`),
   compare: (baseline: string, candidate: string) =>
     call<T.Comparison>(`/compare?baseline=${encodeURIComponent(baseline)}&candidate=${encodeURIComponent(candidate)}`),
   trend: () => call<T.TrendPoint[]>("/trend"),

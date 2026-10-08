@@ -465,8 +465,11 @@ Two rules shape what is in there:
 > says `allow_commit: true`. A run that cannot be carried out shows as a harness error with the
 > reason, never as a failure and never as silence ([ADR-0031](docs/adr/0031-securing-the-console-api.md)).
 
-Not built yet: conversation transcripts in run detail, live per-scenario progress, and a scenario
-editor (bulk import is there). See [ADR-0029](docs/adr/0029-console-api.md).
+Run detail opens the **conversation behind each attempt**: every turn (right to left for Arabic
+personas), each checkpoint raised and the customer's decision, tool calls from the trace, and any
+harness error, with the record's redaction stated, never implied. Not built yet: live
+per-scenario progress and a scenario editor (bulk import is there). See
+[ADR-0029](docs/adr/0029-console-api.md).
 
 ## Publish a finished run
 
