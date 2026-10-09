@@ -91,3 +91,21 @@ class TestRefusing:
             str(tmp_path / "d"), "--template", "refund-demo", "--target", "https://a.example"
         )
         assert code == 3 and "openai-chat template only" in out
+
+
+def test_an_unknown_template_answer_is_asked_again(tmp_path: Path) -> None:
+    dest = tmp_path / "evals"
+    code, out = init(str(dest), "--interactive", input="nope\nopenai-chat\n\n\n\n")
+    assert code == 0, out
+    assert "Choose one of: openai-chat, refund-demo" in out
+
+
+def test_the_cli_needs_only_its_declared_dependencies() -> None:
+    """`click` came in through a dev tool, not through Opseval's dependencies: importing it
+    broke the CLI in the container image and the GitHub Action (review of #52)."""
+    import subprocess
+    import sys
+
+    probe = "import sys; sys.modules['click'] = None; import opseval.cli"
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr

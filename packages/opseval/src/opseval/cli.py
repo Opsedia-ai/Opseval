@@ -14,7 +14,6 @@ import webbrowser
 from pathlib import Path
 from typing import Annotated, Optional
 
-import click
 import typer
 
 from opseval import __version__
@@ -110,9 +109,10 @@ def init(
             typer.echo("Which kind of agent are you testing?")
             for key, text in TEMPLATES.items():
                 typer.echo(f"  {key:<12} {text}")
-            template = typer.prompt(
-                "Template", default="openai-chat", type=click.Choice(list(TEMPLATES))
-            )
+            template = typer.prompt("Template", default="openai-chat").strip()
+            while template not in TEMPLATES:
+                typer.echo(f"Choose one of: {', '.join(TEMPLATES)}")
+                template = typer.prompt("Template", default="openai-chat").strip()
         if template == "openai-chat":
             if target is None:
                 target = typer.prompt("Your agent's URL", default=PLACEHOLDER_URL)
