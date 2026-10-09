@@ -22,8 +22,9 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -296,6 +297,13 @@ def create_app(
     @app.get(f"{API}/trend")
     def trend() -> list[s.TrendPoint]:
         return views.trend(ctx.store)
+
+    @app.get(f"{API}/trend/scenarios")
+    def scenario_trend(
+        suite: Annotated[str | None, Query(max_length=200)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> s.ScenarioTrend:
+        return views.scenario_trend(ctx.store, suite=suite, limit=limit)
 
     @app.get(f"{API}/usage")
     def usage() -> list[s.RunUsage]:

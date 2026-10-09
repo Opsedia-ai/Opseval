@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image, the docs site and interactive init).
+**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image, the docs site, interactive init and the per-scenario trend).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 83% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 87% of 69.
+**Overall: 84% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 88% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
 | v0.1 | 59 | 48 / 9 / 2 | 89% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
-| v0.5 | 12 | 6 / 3 / 3 | 62% |
+| v0.5 | 12 | 7 / 2 / 3 | 67% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 66 / 14 / 8 | **83%** |
+| **All** | 88 | 67 / 13 / 8 | **84%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -102,7 +102,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-RPT-03 | Plain-language verdict sentence | M | v0.1 | Done | `Gate.summary` |
 | FR-RPT-04 | Usage and cost, "no rate" not $0 | M | v0.1 | Done | report usage table |
 | FR-RPT-05 | Flow map | S | v0.2 | Done | ADR-0023 |
-| FR-RPT-06 | Compare and trend | M | v0.5 | Partial | compare and per-run trend in the console; no per-scenario trend |
+| FR-RPT-06 | Compare and trend | M | v0.5 | Done | compare, per-run trend, and a per-scenario trend grid (`GET /api/v1/trend/scenarios`: verdict per run, absent distinct from not judged, server-counted flips) |
 | FR-RPT-07 | JUnit XML | S | v0.2 | Done | `reporting/junit.py` |
 | FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not; only the ones a suite uses are built), every preflight probe (exit 3 when refused), Langfuse, sinks, telemetry (`check_url_allowed`; errors show only scheme and host) |
 | FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes and allowlist errors name only the host |
