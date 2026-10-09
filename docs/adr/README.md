@@ -40,5 +40,6 @@
 | [0036](0036-judge-transcript-fence.md) | The judge's transcript is fenced data: JSON lines in a nonce-named fence, harness facts outside | Proposed |
 | [0037](0037-retention.md) | `opseval prune`: delete runs older than N days, dry run unless `--yes`, never a run that may still be going | Proposed |
 | [0038](0038-container-image.md) | A CLI container image built from the lock: digest-pinned, hash-checked, non-root, no console | Proposed |
+| [0039](0039-docs-site.md) | The documentation site: MkDocs Material, generated reference pages, strict builds, not deployed before Gate 0 | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

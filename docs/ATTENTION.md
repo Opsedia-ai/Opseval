@@ -19,7 +19,7 @@ settles it.
 
 | # | Sev | Decision | Why it matters now | Blocks |
 |---|---|---|---|---|
-| D1 | Critical | **Gate 0: IP clearance** | Every week of building adds to what the clearance covers. The steps and their state are in `docs-internal/06-*`. | Going public, any release, PyPI |
+| D1 | Critical | **Gate 0: IP clearance** | Every week of building adds to what the clearance covers. The steps and their state are in `docs-internal/06-*`. | Going public, any release, PyPI, the container image, the docs site |
 | D2 | Critical | **Two design-partner agents** | M1 and M2 cannot close without real agents; the GitHub Action has only ever gated the demo. | M1, M2 |
 | D3 | High | **Human labels for judge calibration** (≥ 10 per judge) | `opseval calibrate` exists but has nothing to measure, so judge accuracy and false-pass rate are unknown. | M2 |
 | D4 | High | **Product name / trademark** (D-06) | `opseval` is reserved on PyPI ahead of the decision; a rename costs more each week. | Launch, PyPI |

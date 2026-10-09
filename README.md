@@ -42,6 +42,12 @@ It tests your **deployed** agent the way your customers meet it:
 - A connection that never opened is a harness error: the attempt is not judged, never failed. A crash inside Opseval itself exits `3`, and Ctrl-C exits `130`, never `1` ([ADR-0030](docs/adr/0030-closing-core-rule-leaks.md)).
 - The attempt deadline measures the agent: time spent waiting on the simulator LLM is taken off its clock. A simulator call has its own limit (`OPSEVAL_SIMULATOR_TIMEOUT_SECONDS`, default 300), and overrunning it is a harness error.
 
+## Documentation
+
+The full guide (quickstart, concepts, the SUT profile guide, a cookbook, and a scorer and
+settings reference generated from the code) is a MkDocs site in `docs/`. Until the first
+release, build it locally with `uv run mkdocs serve`.
+
 ## Quickstart (from source, pre-release)
 
 ```bash
@@ -55,7 +61,8 @@ uv run opseval demo --bug crash           # the connection drops → "not judged
 Point it at your own agent. If it speaks the OpenAI Chat Completions API, start from a template:
 
 ```bash
-uv run opseval init my-evals                      # profile, example scenarios, suites, .env.example
+uv run opseval init my-evals                      # asks for your agent's URL, name and model, then writes
+                                                  # a profile, scenarios, suites and .env.example that validate
 export OPSEVAL_ALLOWED_HOSTS=agent.example.com
 uv run opseval validate my-evals/suites/smoke.yaml --profile my-evals/profile.yaml
 uv run opseval run my-evals/suites/smoke.yaml --profile my-evals/profile.yaml \
@@ -488,7 +495,8 @@ built-in demo, read-only. Open the console from the printed link: it carries the
 API request needs.
 
 It reads the run folders you already have. You can browse runs and their per-check scores,
-compare two runs, watch the trend, see token usage, edit suites with their **release gate**
+compare two runs, watch the trend (per run, and each scenario's verdict over the last runs, with
+how often it flipped), see token usage, edit suites with their **release gate**
 (a preset plus one dropdown per outcome, see below) and **when to stop early**, bulk-import
 scenarios, start a run (overriding the suite's stop policy for that run), and **cancel** a
 running one.

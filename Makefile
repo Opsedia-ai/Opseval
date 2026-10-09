@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test check audit demo schemas status console-types console console-check
+.PHONY: install lint typecheck test check audit demo schemas status reference docs console-types console console-check
 
 # Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
 ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
@@ -18,7 +18,7 @@ typecheck:
 test:
 	uv run pytest --cov=opseval --cov=pytest_opseval --cov-report=term-missing --cov-fail-under=85
 
-check: lint typecheck test schemas status
+check: lint typecheck test schemas status reference docs
 
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
@@ -42,6 +42,15 @@ schemas:
 # docs/STATUS.md: the completion percentages are computed from its table, never typed.
 status:
 	uv run python scripts/project_status.py --check
+
+# docs/reference/ is generated from the scorer registry and config.Settings; a stale page fails.
+reference:
+	uv run python scripts/reference_docs.py --check
+
+# The documentation site, built strictly (a broken link or anchor fails). Not deployed before Gate 0.
+# Never add --quiet: it hides the warnings that strict mode counts, so nothing would fail.
+docs:
+	uv run mkdocs build
 
 # Regenerate packages/console/src/lib/api.gen.ts from the server's models. Drift is caught by
 # the test suite (tests/test_console_types.py), so there is one check, not three.

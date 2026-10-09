@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention and the container image).
+**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image, the docs site, interactive init and the per-scenario trend).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 82% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 86% of 69.
+**Overall: 84% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 88% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 47 / 9 / 3 | 87% |
+| v0.1 | 59 | 48 / 9 / 2 | 89% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
-| v0.5 | 12 | 6 / 3 / 3 | 62% |
+| v0.5 | 12 | 7 / 2 / 3 | 67% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 65 / 14 / 9 | **82%** |
+| **All** | 88 | 67 / 13 / 8 | **84%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -102,7 +102,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-RPT-03 | Plain-language verdict sentence | M | v0.1 | Done | `Gate.summary` |
 | FR-RPT-04 | Usage and cost, "no rate" not $0 | M | v0.1 | Done | report usage table |
 | FR-RPT-05 | Flow map | S | v0.2 | Done | ADR-0023 |
-| FR-RPT-06 | Compare and trend | M | v0.5 | Partial | compare and per-run trend in the console; no per-scenario trend |
+| FR-RPT-06 | Compare and trend | M | v0.5 | Done | compare, per-run trend, and a per-scenario trend grid (`GET /api/v1/trend/scenarios`: verdict per run, absent distinct from not judged, server-counted flips) |
 | FR-RPT-07 | JUnit XML | S | v0.2 | Done | `reporting/junit.py` |
 | FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not; only the ones a suite uses are built), every preflight probe (exit 3 when refused), Langfuse, sinks, telemetry (`check_url_allowed`; errors show only scheme and host) |
 | FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes and allowlist errors name only the host |
@@ -119,9 +119,9 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-INT-06 | PyRIT adapter | S | v0.8 | Missing | not started (not due) |
 | FR-INT-07 | Webhooks | S | v0.5 | Done | sinks (ADR-0027) |
 | FR-DX-01 | `pip install` and a container image | M | v0.1 | Partial | CLI image from the lock (`Dockerfile`, digest-pinned, hash-checked, non-root; built and demo-checked in CI; ADR-0038); nothing published yet: PyPI name reserved, image and wheel wait for Gate 0 |
-| FR-DX-02 | Interactive `init` | M | v0.1 | Partial | template-based, not interactive |
+| FR-DX-02 | Interactive `init` | M | v0.1 | Done | asks for template, agent URL, name and model in a terminal (flags otherwise, never prompts in CI); fills the profile, allowlist and run command; validates the result |
 | FR-DX-03 | Demo | M | v0.1 | Done | `opseval demo`, exit codes 0/1/1/3 |
-| FR-DX-04 | Docs site | M | v0.1 | Missing | README and ADRs only |
+| FR-DX-04 | Docs site | M | v0.1 | Partial | MkDocs Material site with quickstart, concepts, SUT profile guide, cookbook, ADRs, and a scorer and settings reference generated from the code (drift fails CI); built strictly in CI (ADR-0039); not deployed before Gate 0 |
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
 | FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Done | all five stop policies (suite `stop:`, `run` flags, console launch form and suite editor) and cancel before any attempt (`opseval cancel`, console Cancel run; ADR-0035); rescore, calibrate, preflight |
 | FR-AUT | Authoring workbench | M | v0.5 | Partial | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground. Missing: a warnings / "not checked" tier beside errors |

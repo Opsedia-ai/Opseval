@@ -54,6 +54,8 @@ export const api = {
   compare: (baseline: string, candidate: string) =>
     call<T.Comparison>(`/compare?baseline=${encodeURIComponent(baseline)}&candidate=${encodeURIComponent(candidate)}`),
   trend: () => call<T.TrendPoint[]>("/trend"),
+  scenarioTrend: (suite: string) =>
+    call<T.ScenarioTrend>(`/trend/scenarios${suite ? `?suite=${encodeURIComponent(suite)}` : ""}`),
   usage: () => call<T.RunUsage[]>("/usage"),
   scenarios: () => call<T.Catalogue>("/scenarios"),
   persona: (id: string) => call<T.Persona>(`/scenarios/${encodeURIComponent(id)}/persona`),

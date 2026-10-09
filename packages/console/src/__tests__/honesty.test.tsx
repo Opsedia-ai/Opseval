@@ -9,9 +9,11 @@ import { Entry } from "../components/Transcript";
 import { ProgressLine } from "../components/Progress";
 import StopEditor, { NEVER, budget, stopFields } from "../components/StopEditor";
 import { CancelRun, StoppedNotice } from "../components/RunControl";
-import type { Gate, RunProgress, TranscriptEntry } from "../lib/types";
+import { Cell } from "../components/ScenarioTrend";
+import { MemoryRouter } from "react-router-dom";
+import type { Gate, RunProgress, TranscriptEntry, TrendCell } from "../lib/types";
 
-const tone = (el: Element | null) => el?.getAttribute("data-tone");
+const tone = (el: Element | null | undefined) => el?.getAttribute("data-tone");
 
 describe("the gate pill", () => {
   const pill = (gate: Gate | null) => render(<GatePill gate={gate} />).container.querySelector("span");
@@ -149,5 +151,30 @@ describe("stopping early (ADR-0035)", () => {
   it("only what was set is sent: everything else keeps the suite's value", () => {
     expect(stopFields({ failFast: false, stopOnRateLimit: null, maxConsecutiveFailures: undefined, maxWallClockSeconds: 600 }))
       .toEqual({ failFast: false, maxWallClockSeconds: 600 });
+  });
+});
+
+describe("the per-scenario trend (FR-RPT-06)", () => {
+  const cell = (status: TrendCell["status"], flaky = false): Element | null =>
+    render(<MemoryRouter><Cell cell={{ run: "r1", status, passRate: status === null ? null : 1, flaky }} /></MemoryRouter>).container.firstElementChild;
+
+  it("draws each verdict as what it means", () => {
+    const pill = (el: Element | null) => el?.querySelector("[data-tone]") ?? null;
+    expect(tone(pill(cell("passed")))).toBe("pass");
+    expect(tone(pill(cell("passed", true)))).toBe("warn"); // a flaky pass is a gap, not a pass
+    expect(tone(pill(cell("failed")))).toBe("fail");
+  });
+
+  it("never draws what was not judged as a failure", () => {
+    for (const status of ["inconclusive", "skipped_precondition", "blocked"] as const) {
+      const pill = cell(status)?.querySelector("[data-tone]");
+      expect([status, tone(pill), pill?.getAttribute("data-dashed")]).toEqual([status, "mute", "true"]);
+    }
+  });
+
+  it("a scenario that was not in a run is an absence, not a result", () => {
+    const el = cell(null);
+    expect(el?.getAttribute("data-state")).toBe("absent");
+    expect(el?.querySelector("[data-tone]")).toBeNull();
   });
 });

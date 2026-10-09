@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
 import traceback
 import webbrowser
 from pathlib import Path
@@ -24,7 +25,7 @@ from opseval.models.results import SuiteResult
 from opseval.models.stop import StopPolicy
 from opseval.reporting import console_summary
 from opseval.runner import RunOptions, launch
-from opseval.scaffold import TEMPLATES, scaffold
+from opseval.scaffold import PLACEHOLDER_URL, TEMPLATES, Answers, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.storage import FileStore
 from opseval.verdicts import EXIT_HARNESS, EXIT_NOT_JUDGED
@@ -74,19 +75,92 @@ def init(
         "opseval"
     ),
     template: Annotated[
-        str, typer.Option(help=" | ".join(f"{k}: {v}" for k, v in TEMPLATES.items()))
-    ] = "openai-chat",
+        Optional[str],  # noqa: UP045
+        typer.Option(help=" | ".join(f"{k}: {v}" for k, v in TEMPLATES.items())),
+    ] = None,
+    target: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(help="Your agent's URL; its host is put in the allowlist."),
+    ] = None,
+    name: Annotated[Optional[str], typer.Option(help="A name for your agent.")] = None,  # noqa: UP045
+    sut_model: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(help="The model your agent runs on, so a same-family judge is refused."),
+    ] = None,
+    interactive: Annotated[
+        Optional[bool],  # noqa: UP045
+        typer.Option(
+            "--interactive/--no-interactive",
+            help="Ask for what was not given. Default: ask only in a terminal.",
+            show_default=False,
+        ),
+    ] = None,
     force: Annotated[bool, typer.Option(help="Overwrite existing files.")] = False,
 ) -> None:
-    """Create a starter catalogue (profile, scenarios, suites) that validates as is."""
+    """Create a starter catalogue (profile, scenarios, suites) that validates as is.
+
+    In a terminal it asks what kind of agent you have, where it is, and what it runs on, and
+    writes those into the files; flags answer the same questions without asking. In CI (no
+    terminal) it never prompts.
+    """
+    ask = sys.stdin.isatty() if interactive is None else interactive
+    if ask:
+        if template is None:
+            typer.echo("Which kind of agent are you testing?")
+            for key, text in TEMPLATES.items():
+                typer.echo(f"  {key:<12} {text}")
+            template = typer.prompt("Template", default="openai-chat").strip()
+            while template not in TEMPLATES:
+                typer.echo(f"Choose one of: {', '.join(TEMPLATES)}")
+                template = typer.prompt("Template", default="openai-chat").strip()
+        if template == "openai-chat":
+            if target is None:
+                target = typer.prompt("Your agent's URL", default=PLACEHOLDER_URL)
+            if name is None:
+                name = typer.prompt("A name for your agent", default="my-agent")
+            if sut_model is None:
+                sut_model = (
+                    typer.prompt(
+                        "The model it runs on (blank if unknown)", default="", show_default=False
+                    ).strip()
+                    or None
+                )
+    template = template or "openai-chat"
+    if template != "openai-chat" and any(v is not None for v in (target, name, sut_model)):
+        typer.secho(
+            "error: --target, --name and --sut-model apply to the openai-chat template only; "
+            "the refund-demo template is a fixed worked example",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(EXIT_HARNESS)
+    answers = Answers(
+        target=None if target == PLACEHOLDER_URL else target, name=name, sut_model=sut_model
+    )
     try:
-        written = scaffold(directory, template, force=force)
+        written = scaffold(directory, template, force=force, answers=answers)
+        profile = load_profile(directory / "profile.yaml")
+        cat, _ = load_catalogue(
+            directory / "suites" / "full.yaml",
+            profile,
+            known_scorers=REGISTRY.keys(),
+            known_invariants=set(INVARIANTS),
+        )
     except ConfigError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
     for path in written:
         typer.echo(f"  created {path}")
-    typer.echo(f"\nNext: read {directory / 'README.md'}")
+    typer.echo(f"\nValid: {len(cat.scenarios)} scenario(s), {len(cat.problems)} problem(s).")
+    if template == "openai-chat":
+        where = answers.target or PLACEHOLDER_URL
+        typer.echo(
+            f"\nNext: copy {directory / '.env.example'} to .env, then\n"
+            f"  opseval run {directory / 'suites' / 'smoke.yaml'} --profile "
+            f"{directory / 'profile.yaml'} --transport openai-chat --target {where}"
+        )
+    else:
+        typer.echo(f"\nNext: read {directory / 'README.md'}")
 
 
 @app.command()
