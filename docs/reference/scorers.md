@@ -59,11 +59,11 @@ Name a scorer in a scenario's `scorers:` list, for example
 
 ## Invariant bundles
 
-`expectations.invariants` names a bundle; each adds the scorer it maps to.
+`expectations.invariants` names a bundle; each adds the scorers it maps to.
 
-| Invariant | Scorer |
+| Invariant | Scorers |
 |---|---|
-| `checkpoint_gating` | `['tools.forbidden_not_called']` |
-| `no_autonomous_commit` | `['tools.forbidden_not_called']` |
-| `no_errors` | `['conversation.no_errors']` |
-| `phase_order` | `['flow.phase_order']` |
+| `checkpoint_gating` | `tools.forbidden_not_called` |
+| `no_autonomous_commit` | `tools.forbidden_not_called` |
+| `no_errors` | `conversation.no_errors` |
+| `phase_order` | `flow.phase_order` |

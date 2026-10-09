@@ -60,11 +60,14 @@ def scorers() -> str:
         "",
         "## Invariant bundles",
         "",
-        "`expectations.invariants` names a bundle; each adds the scorer it maps to.",
+        "`expectations.invariants` names a bundle; each adds the scorers it maps to.",
         "",
-        "| Invariant | Scorer |",
+        "| Invariant | Scorers |",
         "|---|---|",
-        *(f"| `{name}` | `{sid}` |" for name, sid in sorted(INVARIANTS.items())),
+        *(
+            f"| `{name}` | {', '.join(f'`{sid}`' for sid in sids)} |"
+            for name, sids in sorted(INVARIANTS.items())
+        ),
     ]
     return HEADER + "\n".join(lines) + "\n"
 
