@@ -179,11 +179,17 @@ def validate(
         raise typer.Exit(EXIT_HARNESS) from exc
     from opseval.advice import Configured, scenario_warnings
 
-    settings = Settings()
-    here = Configured(
-        judge=bool(settings.judge_base_url and settings.judge_model),
-        simulator=bool(settings.simulator_base_url and settings.simulator_model),
-    )
+    # Validation is offline and needs no credentials: a broken setting elsewhere must not
+    # fail it. Without readable settings, the warnings about this machine are left out.
+    try:
+        settings = Settings()
+    except ValueError:
+        here = None
+    else:
+        here = Configured(
+            judge=bool(settings.judge_base_url and settings.judge_model),
+            simulator=bool(settings.simulator_base_url and settings.simulator_model),
+        )
     warnings = [
         w
         for sc in cat.scenarios

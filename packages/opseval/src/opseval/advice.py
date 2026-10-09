@@ -40,7 +40,9 @@ def scenario_warnings(
     specs = effective_specs(scenario)
     needs = {spec.id: getattr(REGISTRY.get(spec.id), "requires", None) for spec in specs}
     if scenario.is_blocked:
+        # Nothing else applies to a scenario that never runs.
         warn("tags", "tagged 'blocked': quarantined, it is reported but never run")
+        return out
     if scenario.execution.repeats == 1:
         warn(
             "execution.repeats",

@@ -106,3 +106,51 @@ def test_the_editor_gets_warnings_beside_an_ok(tmp_path: Path) -> None:
     out = connect(app).post("/api/v1/scenarios/validate", json={"text": text, "file": RF1}).json()
     assert out["ok"] is True, "a warning never makes a scenario invalid"
     assert "execution.repeats" in {w["field"] for w in out["warnings"]}
+
+
+def test_a_quarantined_scenario_gets_only_that_warning(profile: SutProfile) -> None:
+    got = fields(
+        profile,
+        Configured(judge=False, simulator=False),
+        tags=["blocked"],
+        execution={"repeats": 1},
+        scorers=[{"id": "judge.goal_achievement"}],
+    )
+    assert got == {"tags"}
+
+
+def test_a_broken_setting_does_not_fail_validation(cat_dir: Path) -> None:
+    """Validation is offline (review of #55): an unrelated bad OPSEVAL_* value is no reason
+    to fail it; only the warnings about this machine are left out."""
+    res = CliRunner().invoke(
+        app,
+        [
+            "validate",
+            str(cat_dir / "suites" / "full.yaml"),
+            "--profile",
+            str(cat_dir / "profile.yaml"),
+        ],
+        env={"OPSEVAL_JUDGE_CONCURRENCY": "not-a-number"},
+    )
+    assert res.exit_code == 0, res.output
+    assert "no judge is configured here" not in res.output
+
+
+async def test_the_simulator_warning_matches_what_the_runner_does(
+    cat_dir: Path, tmp_path: Path
+) -> None:
+    """The warning says an LLM persona without a simulator is skipped; the run agrees."""
+    from opseval.config import Settings
+    from opseval.demo.refund_agent import run_agent
+    from opseval.runner import RunOptions, launch
+
+    settings = Settings(reports_dir=str(tmp_path), allowed_hosts="127.0.0.1")
+    settings = settings.model_copy(update={"simulator_base_url": None, "simulator_model": None})
+    async with run_agent() as url:
+        result = await launch(
+            cat_dir / "suites" / "full.yaml",
+            RunOptions(target=url, profile=cat_dir / "profile.yaml", repeats=1),
+            settings,
+        )
+    persona = next(t for t in result.tests if t.test_id == "rf-101")
+    assert (persona.status.value, persona.skip_kind) == ("skipped_precondition", "simulator")
