@@ -77,6 +77,15 @@ class TestRefusing:
         code, out = init(str(bad), "--no-interactive", "--name", "x\ncommit_gate: none")
         assert code == 3 and not bad.exists()
 
+    @pytest.mark.parametrize("junk", ["\nsut_model: claude-3", "\r\ncommit_gate: x", "\t", " x"])
+    def test_a_target_cannot_add_lines_to_the_files(self, tmp_path: Path, junk: str) -> None:
+        """urlparse drops tabs and line breaks, so they are refused before it sees them
+        (review of #52)."""
+        dest = tmp_path / "evals"
+        code, out = init(str(dest), "--no-interactive", "--target", f"https://a.example/v1{junk}")
+        assert code == 3 and "spaces, tabs or line breaks" in out
+        assert not dest.exists()
+
     def test_the_refund_demo_takes_no_answers(self, tmp_path: Path) -> None:
         code, out = init(
             str(tmp_path / "d"), "--template", "refund-demo", "--target", "https://a.example"

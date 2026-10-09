@@ -52,6 +52,12 @@ class Answers:
     def check(self, template: str) -> None:
         """Refuse an answer the generated files could not hold, with what to do instead."""
         if self.target is not None:
+            # urlparse silently drops tabs and line breaks, so it would pass a target that
+            # then writes a new line (a new YAML key) into the files. Refuse them first.
+            if any(c.isspace() or not c.isprintable() for c in self.target):
+                raise ConfigError(
+                    f"target {self.target!r} contains spaces, tabs or line breaks; give one URL"
+                )
             url = urlparse(self.target)
             schemes = ("http", "https") if template == "openai-chat" else ("ws", "wss")
             if url.scheme not in schemes or not url.hostname:
