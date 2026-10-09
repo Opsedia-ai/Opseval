@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image, the docs site, interactive init and the per-scenario trend).
+**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image, the docs site, interactive init, the per-scenario trend and the versioned run layout).
 
 ## Completion
 
@@ -15,12 +15,12 @@ number cannot drift from the rows.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 48 / 9 / 2 | 89% |
+| v0.1 | 59 | 49 / 8 / 2 | 90% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
 | v0.5 | 12 | 7 / 2 / 3 | 67% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 67 / 13 / 8 | **84%** |
+| **All** | 88 | 68 / 12 / 8 | **84%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -75,7 +75,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-REC-02 | Persist as you go | M | v0.1 | Done | `FileStore`, `result.json` last, `error.json` on failure (ADR-0031) |
 | FR-REC-03 | Redaction | M | v0.1 | Partial | key names, plus credential *values* in text and payloads (ADR-0033); PII is deliberately kept, and unrecognised token formats pass through |
 | FR-REC-04 | Trace enrichment | M | v0.2 | Partial | Langfuse and OTLP tool calls; no SUT scores or release tag |
-| FR-REC-05 | Layout contract | M | v0.1 | Partial | documented in `storage.py`; no layout version; no `Storage` protocol (ADR-0005 is stale) |
+| FR-REC-05 | Layout contract | M | v0.1 | Done | versioned layout (`opseval-runs/1` in every manifest; unknown layouts refused by every reader, shown as errors in the console, never pruned) and the `storage.RunStore` protocol `FileStore` meets (ADR-0005 amendment) |
 | FR-SCR-01 | Three-state scores | M | v0.1 | Done | `ScoreResult` validator |
 | FR-SCR-02 | Axes | M | v0.1 | Done | `Axis` |
 | FR-SCR-03 | Deterministic scorers | M | v0.1 | Partial | `output.required_fields` is `output.payload_equals` |

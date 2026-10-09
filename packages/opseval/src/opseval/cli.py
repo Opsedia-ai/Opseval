@@ -27,7 +27,7 @@ from opseval.reporting import console_summary
 from opseval.runner import RunOptions, launch
 from opseval.scaffold import PLACEHOLDER_URL, TEMPLATES, Answers, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY
-from opseval.storage import FileStore
+from opseval.storage import FileStore, load_result_at
 from opseval.verdicts import EXIT_HARNESS, EXIT_NOT_JUDGED
 
 app = typer.Typer(
@@ -477,13 +477,7 @@ def summary(
     """Print a Markdown gate summary (for PR comments and CI job summaries)."""
     from opseval.reporting.markdown import markdown_summary
 
-    path = run_dir / "result.json"
-    try:
-        result = SuiteResult.model_validate_json(path.read_text("utf-8"))
-    except (OSError, ValueError) as exc:
-        typer.secho(f"error: {path}: not a finished run ({exc})", fg="red", err=True)
-        raise typer.Exit(EXIT_HARNESS) from exc
-    typer.echo(markdown_summary(result, report_url=report_url))
+    typer.echo(markdown_summary(_finished_run(run_dir), report_url=report_url))
 
 
 telemetry_app = typer.Typer(
@@ -651,8 +645,8 @@ def preflight(
 def _finished_run(run_dir: Path) -> SuiteResult:
     path = run_dir / "result.json"
     try:
-        return SuiteResult.model_validate_json(path.read_text("utf-8"))
-    except (OSError, ValueError) as exc:
+        return load_result_at(run_dir)
+    except (OSError, ValueError, ConfigError) as exc:
         typer.secho(f"error: {path}: not a finished run ({exc})", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
 
