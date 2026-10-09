@@ -177,11 +177,27 @@ def validate(
     except ConfigError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
+    from opseval.advice import Configured, scenario_warnings
+
+    settings = Settings()
+    here = Configured(
+        judge=bool(settings.judge_base_url and settings.judge_model),
+        simulator=bool(settings.simulator_base_url and settings.simulator_model),
+    )
+    warnings = [
+        w
+        for sc in cat.scenarios
+        for w in scenario_warnings(sc, cat.sources.get(sc.id, sc.id), prof, here)
+    ]
     for problem in cat.problems:
         typer.secho(f"✗ {problem}", fg="red")
+    for warning in warnings:
+        typer.secho(f"⚠ {warning}", fg="yellow")
     typer.echo(
-        f"{len(cat.scenarios)} valid scenario(s) in {suite!r}; {len(cat.problems)} problem(s)."
+        f"{len(cat.scenarios)} valid scenario(s) in {suite!r}; {len(cat.problems)} problem(s); "
+        f"{len(warnings)} warning(s)."
     )
+    # Warnings never change the exit code: the scenarios are valid.
     raise typer.Exit(EXIT_HARNESS if cat.problems else 0)
 
 

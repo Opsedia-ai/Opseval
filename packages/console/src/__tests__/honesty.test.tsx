@@ -10,6 +10,7 @@ import { ProgressLine } from "../components/Progress";
 import StopEditor, { NEVER, budget, stopFields } from "../components/StopEditor";
 import { CancelRun, StoppedNotice } from "../components/RunControl";
 import { Cell } from "../components/ScenarioTrend";
+import { Warnings } from "../components/Warnings";
 import { MemoryRouter } from "react-router-dom";
 import type { Gate, RunProgress, TranscriptEntry, TrendCell } from "../lib/types";
 
@@ -176,5 +177,20 @@ describe("the per-scenario trend (FR-RPT-06)", () => {
     const el = cell(null);
     expect(el?.getAttribute("data-state")).toBe("absent");
     expect(el?.querySelector("[data-tone]")).toBeNull();
+  });
+});
+
+describe("scenario warnings (FR-AUT)", () => {
+  it("are shown as warnings, never as errors", () => {
+    const { container } = render(<Warnings items={[{ path: "x.yaml", field: "execution.repeats", message: "one attempt cannot show flakiness" }]} />);
+    const panel = container.querySelector('[data-state="warnings"]');
+    expect(panel?.textContent).toMatch(/1 warning\(s\)/);
+    expect(panel?.textContent).toMatch(/one attempt cannot show flakiness/);
+    expect(panel?.querySelector('[data-tone="fail"]')).toBeNull();
+    expect(tone(panel?.querySelector("[data-tone]"))).toBe("warn");
+  });
+
+  it("no warnings, no panel", () => {
+    expect(render(<Warnings items={[]} />).container.textContent).toBe("");
   });
 });

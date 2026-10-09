@@ -490,6 +490,7 @@ class ScenarioCheckOut(Api):
     id: str | None
     title: str | None
     problems: list[Problem]
+    warnings: list[Problem] = []  # valid, but it will measure less than it looks; never blocks
 
 
 class ImportOut(Api):

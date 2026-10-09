@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image, the docs site, interactive init, the per-scenario trend and the versioned run layout).
+**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image, the docs site, interactive init, the per-scenario trend, the versioned run layout and editor warnings).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 84% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 88% of 69.
+**Overall: 85% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 89% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
 | v0.1 | 59 | 49 / 8 / 2 | 90% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
-| v0.5 | 12 | 7 / 2 / 3 | 67% |
+| v0.5 | 12 | 8 / 1 / 3 | 71% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 68 / 12 / 8 | **84%** |
+| **All** | 88 | 69 / 11 / 8 | **85%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -124,7 +124,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-DX-04 | Docs site | M | v0.1 | Partial | MkDocs Material site with quickstart, concepts, SUT profile guide, cookbook, ADRs, and a scorer and settings reference generated from the code (drift fails CI); built strictly in CI (ADR-0039); not deployed before Gate 0 |
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
 | FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Done | all five stop policies (suite `stop:`, `run` flags, console launch form and suite editor) and cancel before any attempt (`opseval cancel`, console Cancel run; ADR-0035); rescore, calibrate, preflight |
-| FR-AUT | Authoring workbench | M | v0.5 | Partial | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground. Missing: a warnings / "not checked" tier beside errors |
+| FR-AUT | Authoring workbench | M | v0.5 | Done | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground.; a warnings tier beside errors (`advice.scenario_warnings`: what a valid scenario will not measure, in the editor and `opseval validate`, never blocking) |
 | FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API, serving the built console same-origin (ADR-0034) with run detail down to each attempt's conversation and live progress for runs in flight, token auth (ADR-0029, ADR-0031); no Postgres, workers, accounts, OIDC or live events; console not yet in the wheel |
 
 ## Non-functional requirements
