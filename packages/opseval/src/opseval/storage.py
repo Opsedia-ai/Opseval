@@ -14,6 +14,10 @@
 <root>/<run_id>/rescore-<UTC time>/{result.json, report.html, junit.xml}   (opseval rescore)
 
 Records are written once and never modified; re-scoring writes a new folder.
+
+The layout is versioned (``manifest.json`` ``"layout"``, ADR-0005 amendment). A folder without
+the field predates versioning and has layout 1. A reader refuses a layout it does not know
+(:class:`UnknownLayout`) instead of guessing at a newer one.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import re
 import socket
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import ValidationError
 
@@ -50,6 +54,51 @@ def _first_error(exc: Exception) -> str:
         first = exc.errors()[0]
         return str(first.get("msg", exc))
     return f"{type(exc).__name__}: {exc}"
+
+
+LAYOUT = "opseval-runs/1"
+"""The layout this version writes. Bump it (and keep reading the old one) on any change a
+reader of an older folder, or an older reader of a new folder, could misread."""
+KNOWN_LAYOUTS = frozenset({LAYOUT})
+
+
+class UnknownLayout(ConfigError):
+    """A run folder in a layout this version cannot read: written by a newer Opseval."""
+
+
+@runtime_checkable
+class RunStore(Protocol):
+    """What the runner, rescore, calibrate, prune and the console need from storage (ADR-0005).
+
+    :class:`FileStore` (run folders on disk) is the one implementation today. A server-mode
+    store (a database plus an object store) implements the same contract, so nothing above
+    it changes. Every method names a run by id; a reader refuses a layout it does not know.
+    """
+
+    def layout(self, run_id: str) -> str: ...
+    def layout_known(self, run_id: str) -> bool: ...
+    def check_layout(self, run_id: str) -> None: ...
+    def write_manifest(self, run_id: str, manifest: dict[str, Any]) -> Path: ...
+    def load_manifest(self, run_id: str) -> dict[str, Any]: ...
+    def save_profile(self, run_id: str, profile: SutProfile) -> Path: ...
+    def save_scenario(self, run_id: str, scenario: Scenario) -> Path: ...
+    def load_snapshot(self, run_id: str) -> tuple[SutProfile, dict[str, Scenario]] | None: ...
+    def save_record(self, record: RunRecord) -> Path: ...
+    def load_record(self, run_id: str, test_id: str, attempt: int) -> RunRecord | None: ...
+    def load_records(self, run_id: str) -> list[RunRecord]: ...
+    def save_progress(self, run_id: str, progress: RunProgress) -> Path: ...
+    def load_progress(self, run_id: str) -> RunProgress | None: ...
+    def request_cancel(self, run_id: str, *, by: str) -> bool: ...
+    def cancel_requested(self, run_id: str) -> bool: ...
+    def save_error(self, run_id: str, error: dict[str, Any]) -> Path: ...
+    def load_error(self, run_id: str) -> dict[str, Any] | None: ...
+    def save_result(self, result: SuiteResult) -> Path: ...
+    def load_result(self, run_id: str) -> SuiteResult: ...
+    def save_report(self, run_id: str, html: str) -> Path: ...
+    def save_junit(self, run_id: str, xml: str) -> Path: ...
+    def save_rescore(
+        self, run_id: str, stamp: str, result: SuiteResult, html: str, xml: str
+    ) -> Path: ...
 
 
 def process_gone(manifest: dict[str, Any]) -> bool:
@@ -100,9 +149,28 @@ class FileStore:
             return None
         return data if isinstance(data, dict) else None
 
+    def layout(self, run_id: str) -> str:
+        """The run folder's layout. A manifest without one predates versioning: layout 1."""
+        found = self.load_manifest(run_id).get("layout", LAYOUT)
+        return found if isinstance(found, str) else repr(found)
+
+    def layout_known(self, run_id: str) -> bool:
+        return self.layout(run_id) in KNOWN_LAYOUTS
+
+    def check_layout(self, run_id: str) -> None:
+        """Raise :class:`UnknownLayout` rather than read a folder this version may misread."""
+        found = self.layout(run_id)
+        if found not in KNOWN_LAYOUTS:
+            raise UnknownLayout(
+                f"run {run_id!r} was written in layout {found!r}, which this version of "
+                f"Opseval cannot read (it reads {', '.join(sorted(KNOWN_LAYOUTS))}); "
+                "upgrade Opseval to read it"
+            )
+
     def write_manifest(self, run_id: str, manifest: dict[str, Any]) -> Path:
         path = self.run_dir(run_id) / "manifest.json"
-        _atomic_write(path, json.dumps(manifest, indent=2, ensure_ascii=False, default=str))
+        body = {"layout": LAYOUT, **manifest}
+        _atomic_write(path, json.dumps(body, indent=2, ensure_ascii=False, default=str))
         return path
 
     def load_manifest(self, run_id: str) -> dict[str, Any]:
@@ -133,6 +201,7 @@ class FileStore:
         run (say, a profile check) can reject what was valid then. That is not a crash, and
         the run can still be scored against current files.
         """
+        self.check_layout(run_id)
         folder = self.run_dir(run_id)
         profile_path = folder / "profile.json"
         if not profile_path.is_file():
@@ -152,6 +221,7 @@ class FileStore:
         return profile, {s.id: s for s in scenarios}
 
     def load_result(self, run_id: str) -> SuiteResult:
+        self.check_layout(run_id)
         return SuiteResult.model_validate_json(
             (self.run_dir(run_id) / "result.json").read_text("utf-8")
         )
@@ -196,6 +266,7 @@ class FileStore:
     def load_record(self, run_id: str, test_id: str, attempt: int) -> RunRecord | None:
         """One attempt's record, or ``None`` if it was not (or not yet) written. A record that
         exists but cannot be read raises (``ValueError``/``OSError``): that is not absence."""
+        self.check_layout(run_id)
         name = f"{SAFE.sub('_', test_id)}__attempt{attempt}.json"
         path = self.run_dir(run_id) / "records" / name
         try:
@@ -204,6 +275,7 @@ class FileStore:
             return None
 
     def load_records(self, run_id: str) -> list[RunRecord]:
+        self.check_layout(run_id)
         folder = self.run_dir(run_id) / "records"
         records = [
             RunRecord.model_validate_json(p.read_text("utf-8")) for p in folder.glob("*.json")

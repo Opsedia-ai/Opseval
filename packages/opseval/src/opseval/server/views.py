@@ -84,6 +84,14 @@ def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
     error = store.load_error(folder.name)
     if not m and error is None:
         return None  # not a run folder
+    if not store.layout_known(folder.name):
+        # Written by a newer Opseval: shown as an error the reader can act on (upgrade),
+        # never read with rules that may not apply to it, and never silently dropped.
+        error = {
+            "code": "UNKNOWN_LAYOUT",
+            "message": f"layout {store.layout(folder.name)!r} "
+            "was written by a newer Opseval; upgrade to read this run",
+        }
     common = {
         "id": str(m.get("run_id", folder.name)),
         "suite": str(m.get("suite", "")),
@@ -134,6 +142,8 @@ def load_results(store: FileStore) -> list[SuiteResult]:
     """Every finished run, newest first. A run without result.json is still in flight."""
     out: list[SuiteResult] = []
     for folder in store.root.glob("*/result.json"):
+        if not store.layout_known(folder.parent.name):
+            continue  # listed by _in_flight as an error row: shown, never misread
         try:
             out.append(store.load_result(folder.parent.name))
         except (ValueError, OSError):
@@ -146,7 +156,9 @@ def _in_flight(store: FileStore) -> list[s.RunSummary]:
     if not store.root.is_dir():
         return out
     for folder in store.root.iterdir():
-        if not folder.is_dir() or (folder / "result.json").is_file():
+        if not folder.is_dir():
+            continue
+        if (folder / "result.json").is_file() and store.layout_known(folder.name):
             continue
         summary = _unfinished(store, folder)
         if summary is not None:
@@ -200,7 +212,7 @@ def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
     from "not found" (a console that waits on a typo waits for ever).
     """
     path = store.run_dir(run_id) / "result.json"
-    if not path.is_file():
+    if not path.is_file() or not store.layout_known(run_id):
         return _error_detail(store, run_id)
     r = store.load_result(run_id)
     tests = [
@@ -379,7 +391,7 @@ def _area_scores(r: SuiteResult) -> dict[str, float | None]:
 
 def compare(store: FileStore, base_id: str, cand_id: str) -> s.Comparison | None:
     for rid in (base_id, cand_id):
-        if not (store.run_dir(rid) / "result.json").is_file():
+        if not (store.run_dir(rid) / "result.json").is_file() or not store.layout_known(rid):
             return None
     base, cand = store.load_result(base_id), store.load_result(cand_id)
     before = {t.test_id: t for t in base.tests}

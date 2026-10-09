@@ -36,7 +36,7 @@ from opseval.errors import ConfigError
 from opseval.plugins import load_scorers
 from opseval.server import actions, views
 from opseval.server import schemas as s
-from opseval.storage import FileStore
+from opseval.storage import FileStore, UnknownLayout
 
 API = "/api/v1"
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -281,6 +281,8 @@ def create_app(
             out = views.attempt_record(ctx.store, _run_id(run_id), test_id, index)
         except views.RecordUnreadable as exc:
             raise actions.ApiError(500, "UNREADABLE_RECORD", f"cannot read {exc}") from exc
+        except UnknownLayout as exc:
+            raise actions.ApiError(409, "UNKNOWN_LAYOUT", str(exc)) from exc
         if out is None:
             raise actions.ApiError(
                 404, "UNKNOWN_ATTEMPT", f"no record of {test_id} attempt {index} in {run_id}"

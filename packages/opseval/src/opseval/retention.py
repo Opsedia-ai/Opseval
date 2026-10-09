@@ -79,7 +79,10 @@ def plan(store: FileStore, *, older_than_days: int, now: datetime | None = None)
             continue  # not a run folder
         started = _started(store, name)
         ended = _ended(store, folder)
-        if started is None:
+        if not store.layout_known(name):
+            reason = f"written by a newer Opseval (layout {store.layout(name)!r})"
+            items.append(PruneItem(name, "keep", reason, started))
+        elif started is None:
             items.append(PruneItem(name, "keep", "its start time cannot be read"))
         elif started > cutoff:
             items.append(PruneItem(name, "keep", f"newer than {older_than_days} days", started))
@@ -137,7 +140,7 @@ def apply(store: FileStore, items: list[PruneItem]) -> PruneOutcome:
         folder = store.root / item.run_id
         if folder.is_symlink() or not folder.is_dir() or folder.resolve().parent != root:
             continue
-        if _ended(store, folder) is None:
+        if _ended(store, folder) is None or not store.layout_known(item.run_id):
             continue
         try:
             _remove_run(folder)
