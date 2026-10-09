@@ -44,6 +44,9 @@ export type Readiness = G.ReadinessItem;
 export type Check = G.CheckOut;
 export type RunUsage = G.RunUsage;
 export type TrendPoint = G.TrendPoint;
+/** Each scenario's verdict across runs (FR-RPT-06). A null status is "not in that run". */
+export type ScenarioTrend = G.ScenarioTrend;
+export type TrendCell = G.TrendCell;
 export type SettingRow = G.SettingRow;
 export type Health = G.Health;
 export type Change = G.Change;

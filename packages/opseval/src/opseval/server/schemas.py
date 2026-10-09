@@ -286,6 +286,37 @@ class TrendPoint(Api):
     pass_rate: float | None
 
 
+class TrendRun(Api):
+    run: str
+    label: str
+    suite: str
+
+
+class TrendCell(Api):
+    """One scenario in one run. ``status`` None means the scenario was not in that run: an
+    absence, never a result."""
+
+    run: str
+    status: VerdictStatus | None
+    pass_rate: float | None
+    flaky: bool = False
+
+
+class ScenarioTrendRow(Api):
+    id: str
+    name: str
+    cells: list[TrendCell]  # in the order of ScenarioTrend.runs
+    flips: int  # how often its judged verdict changed between consecutive judged runs
+
+
+class ScenarioTrend(Api):
+    """Each scenario's verdict across recent finished runs (FR-RPT-06), oldest run first."""
+
+    suites: list[str]  # every suite with a finished run, for the filter
+    runs: list[TrendRun]
+    scenarios: list[ScenarioTrendRow]
+
+
 class SettingRow(Api):
     key: str
     value: str | None

@@ -246,6 +246,34 @@ export interface TrendPoint {
   passRate: number | null;
 }
 
+export interface TrendRun {
+  run: string;
+  label: string;
+  suite: string;
+}
+
+/** One scenario in one run. ``status`` None means the scenario was not in that run: an absence, never a result. */
+export interface TrendCell {
+  run: string;
+  status: VerdictStatus | null;
+  passRate: number | null;
+  flaky: boolean;
+}
+
+export interface ScenarioTrendRow {
+  id: string;
+  name: string;
+  cells: TrendCell[];
+  flips: number;
+}
+
+/** Each scenario's verdict across recent finished runs (FR-RPT-06), oldest run first. */
+export interface ScenarioTrend {
+  suites: string[];
+  runs: TrendRun[];
+  scenarios: ScenarioTrendRow[];
+}
+
 export interface SettingRow {
   key: string;
   value: string | null;

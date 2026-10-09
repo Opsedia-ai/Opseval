@@ -322,6 +322,42 @@ def trend(store: FileStore) -> list[s.TrendPoint]:
     return points
 
 
+def scenario_trend(store: FileStore, *, suite: str | None, limit: int) -> s.ScenarioTrend:
+    """Every scenario's verdict across the last ``limit`` finished runs (of one suite).
+
+    Computed here, never in the browser (ADR-0029). A scenario that was not in a run has an
+    empty cell, which is not a skip and not a failure; ``flips`` counts only changes between
+    judged verdicts, so an outage between two passes is not instability.
+    """
+    results = load_results(store)
+    suites = sorted({r.suite for r in results})
+    chosen = [r for r in results if suite is None or r.suite == suite][:limit]
+    chosen.reverse()  # oldest first, left to right
+    by_run = [{t.test_id: t for t in r.tests} for r in chosen]
+    names = {tid: t.name for tests in by_run for tid, t in tests.items()}  # newest name wins
+    rows = []
+    for test_id in sorted(names):
+        cells = []
+        for r, tests in zip(chosen, by_run, strict=True):
+            found = tests.get(test_id)
+            cells.append(
+                s.TrendCell(
+                    run=r.run_id,
+                    status=found.status if found else None,
+                    pass_rate=found.pass_rate if found else None,
+                    flaky=found.flaky if found else False,
+                )
+            )
+        judged = [c.status for c in cells if c.status in JUDGED_STATUSES]
+        flips = sum(1 for a, b in zip(judged, judged[1:], strict=False) if a != b)
+        rows.append(s.ScenarioTrendRow(id=test_id, name=names[test_id], cells=cells, flips=flips))
+    runs = [
+        s.TrendRun(run=r.run_id, label=r.started_at.strftime("%b %-d %H:%M"), suite=r.suite)
+        for r in chosen
+    ]
+    return s.ScenarioTrend(suites=suites, runs=runs, scenarios=rows)
+
+
 def _area_scores(r: SuiteResult) -> dict[str, float | None]:
     buckets: dict[str, list[float]] = {a: [] for a in ("output", "flow", "tools", "security")}
     for t in r.tests:

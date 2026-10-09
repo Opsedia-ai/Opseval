@@ -1486,3 +1486,33 @@ def test_a_run_writing_its_result_is_too_late_to_cancel(tmp_path: Path) -> None:
     r = c.post("/api/v1/runs/live/cancel")
     assert r.status_code == 409 and r.json()["code"] == "RUN_FINISHING"
     assert not (tmp_path / "live" / "cancel.json").exists()
+
+
+# --- per-scenario trend (FR-RPT-06) -------------------------------------------------------------
+
+
+def test_each_scenario_has_a_row_across_runs(client: TestClient) -> None:
+    body = client.get("/api/v1/trend/scenarios").json()
+    assert body["suites"] == ["smoke"]
+    assert [r["run"] for r in body["runs"]] == ["r1", "r2", "r3", "r4", "r5"]  # oldest first
+    rows = {row["id"]: row for row in body["scenarios"]}
+    assert [c["status"] for c in rows["a"]["cells"]] == [
+        "passed",
+        "failed",
+        "inconclusive",
+        "failed",
+        "inconclusive",
+    ]
+    # passed -> failed is one flip; the inconclusive runs between failures are not flips.
+    assert rows["a"]["flips"] == 1
+    # b was not in r4 and r5: an absence, never a result.
+    assert [c["status"] for c in rows["b"]["cells"]] == ["passed", "passed", "passed", None, None]
+    assert rows["b"]["flips"] == 0
+
+
+def test_the_trend_can_be_narrowed(client: TestClient) -> None:
+    last_two = client.get("/api/v1/trend/scenarios?limit=2").json()
+    assert [r["run"] for r in last_two["runs"]] == ["r4", "r5"]
+    other = client.get("/api/v1/trend/scenarios?suite=nope").json()
+    assert other["runs"] == [] and other["scenarios"] == [] and other["suites"] == ["smoke"]
+    assert client.get("/api/v1/trend/scenarios?limit=0").status_code == 422

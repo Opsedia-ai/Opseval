@@ -495,7 +495,8 @@ built-in demo, read-only. Open the console from the printed link: it carries the
 API request needs.
 
 It reads the run folders you already have. You can browse runs and their per-check scores,
-compare two runs, watch the trend, see token usage, edit suites with their **release gate**
+compare two runs, watch the trend (per run, and each scenario's verdict over the last runs, with
+how often it flipped), see token usage, edit suites with their **release gate**
 (a preset plus one dropdown per outcome, see below) and **when to stop early**, bulk-import
 scenarios, start a run (overriding the suite's stop policy for that run), and **cancel** a
 running one.
