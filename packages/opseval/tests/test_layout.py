@@ -114,3 +114,18 @@ def test_the_file_store_meets_the_storage_contract(tmp_path: Path) -> None:
     assert isinstance(FileStore(tmp_path), RunStore)
     store: RunStore = FileStore(tmp_path)  # and mypy checks every signature matches
     assert store.layout("nothing-here") == LAYOUT
+
+
+@pytest.mark.parametrize("name", ["run 1", "rün"])
+def test_summary_reads_the_folder_it_is_given(run: Path, name: str) -> None:
+    """Any folder name, and `.` from inside it (review of #54): the path is read as given."""
+    import os
+
+    renamed = run.rename(run.parent / name)
+    assert CliRunner().invoke(app, ["summary", str(renamed)]).exit_code == 0
+    here = os.getcwd()
+    os.chdir(renamed)
+    try:
+        assert CliRunner().invoke(app, ["summary", "."]).exit_code == 0
+    finally:
+        os.chdir(here)

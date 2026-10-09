@@ -66,6 +66,28 @@ class UnknownLayout(ConfigError):
     """A run folder in a layout this version cannot read: written by a newer Opseval."""
 
 
+def layout_at(folder: Path) -> str:
+    """The layout of the run folder at ``folder``; no field means layout 1."""
+    try:
+        data = json.loads((folder / "manifest.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    found = data.get("layout", LAYOUT) if isinstance(data, dict) else LAYOUT
+    return found if isinstance(found, str) else repr(found)
+
+
+def load_result_at(folder: Path) -> SuiteResult:
+    """The finished run at exactly ``folder`` (any name, ``.`` included), layout checked."""
+    found = layout_at(folder)
+    if found not in KNOWN_LAYOUTS:
+        raise UnknownLayout(
+            f"the run in {folder.name or folder} was written in layout {found!r}, which this "
+            f"version of Opseval cannot read (it reads {', '.join(sorted(KNOWN_LAYOUTS))}); "
+            "upgrade Opseval to read it"
+        )
+    return SuiteResult.model_validate_json((folder / "result.json").read_text("utf-8"))
+
+
 @runtime_checkable
 class RunStore(Protocol):
     """What the runner, rescore, calibrate, prune and the console need from storage (ADR-0005).
@@ -151,8 +173,7 @@ class FileStore:
 
     def layout(self, run_id: str) -> str:
         """The run folder's layout. A manifest without one predates versioning: layout 1."""
-        found = self.load_manifest(run_id).get("layout", LAYOUT)
-        return found if isinstance(found, str) else repr(found)
+        return layout_at(self.run_dir(run_id))
 
     def layout_known(self, run_id: str) -> bool:
         return self.layout(run_id) in KNOWN_LAYOUTS
@@ -221,10 +242,7 @@ class FileStore:
         return profile, {s.id: s for s in scenarios}
 
     def load_result(self, run_id: str) -> SuiteResult:
-        self.check_layout(run_id)
-        return SuiteResult.model_validate_json(
-            (self.run_dir(run_id) / "result.json").read_text("utf-8")
-        )
+        return load_result_at(self.run_dir(run_id))
 
     def save_record(self, record: RunRecord) -> Path:
         name = f"{SAFE.sub('_', record.test_id)}__attempt{record.attempt_index}.json"
