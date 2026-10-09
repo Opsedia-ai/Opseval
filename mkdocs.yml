@@ -1,0 +1,50 @@
+# The documentation site (FR-DX-04, ADR-0039). Built in CI with --strict; not deployed before
+# Gate 0, because a published site is public. Build it locally with `make docs`.
+site_name: Opseval
+site_description: Open-source, black-box evaluation for conversational AI agents
+repo_url: https://github.com/Opsedia-ai/Opseval
+docs_dir: docs
+site_dir: build/site
+strict: true
+
+# Internal process documents are not part of the site.
+exclude_docs: |
+  STATUS.md
+  ATTENTION.md
+  specs/
+  adr/template.md
+
+not_in_nav: |
+  adr/0*.md
+
+nav:
+  - Home: index.md
+  - Guide:
+      - Quickstart: guide/quickstart.md
+      - Concepts: guide/concepts.md
+      - SUT profile guide: guide/profile.md
+      - Cookbook: guide/cookbook.md
+  - Reference:
+      - Scorers: reference/scorers.md
+      - Settings: reference/settings.md
+  - Decisions: adr/README.md
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn

@@ -42,6 +42,12 @@ It tests your **deployed** agent the way your customers meet it:
 - A connection that never opened is a harness error: the attempt is not judged, never failed. A crash inside Opseval itself exits `3`, and Ctrl-C exits `130`, never `1` ([ADR-0030](docs/adr/0030-closing-core-rule-leaks.md)).
 - The attempt deadline measures the agent: time spent waiting on the simulator LLM is taken off its clock. A simulator call has its own limit (`OPSEVAL_SIMULATOR_TIMEOUT_SECONDS`, default 300), and overrunning it is a harness error.
 
+## Documentation
+
+The full guide (quickstart, concepts, the SUT profile guide, a cookbook, and a scorer and
+settings reference generated from the code) is a MkDocs site in `docs/`. Until the first
+release, build it locally with `uv run mkdocs serve`.
+
 ## Quickstart (from source, pre-release)
 
 ```bash

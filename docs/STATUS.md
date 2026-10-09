@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention and the container image).
+**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image and the docs site).
 
 ## Completion
 
@@ -15,12 +15,12 @@ number cannot drift from the rows.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 47 / 9 / 3 | 87% |
+| v0.1 | 59 | 47 / 10 / 2 | 88% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
 | v0.5 | 12 | 6 / 3 / 3 | 62% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 65 / 14 / 9 | **82%** |
+| **All** | 88 | 65 / 15 / 8 | **82%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -121,7 +121,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-DX-01 | `pip install` and a container image | M | v0.1 | Partial | CLI image from the lock (`Dockerfile`, digest-pinned, hash-checked, non-root; built and demo-checked in CI; ADR-0038); nothing published yet: PyPI name reserved, image and wheel wait for Gate 0 |
 | FR-DX-02 | Interactive `init` | M | v0.1 | Partial | template-based, not interactive |
 | FR-DX-03 | Demo | M | v0.1 | Done | `opseval demo`, exit codes 0/1/1/3 |
-| FR-DX-04 | Docs site | M | v0.1 | Missing | README and ADRs only |
+| FR-DX-04 | Docs site | M | v0.1 | Partial | MkDocs Material site with quickstart, concepts, SUT profile guide, cookbook, ADRs, and a scorer and settings reference generated from the code (drift fails CI); built strictly in CI (ADR-0039); not deployed before Gate 0 |
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
 | FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Done | all five stop policies (suite `stop:`, `run` flags, console launch form and suite editor) and cancel before any attempt (`opseval cancel`, console Cancel run; ADR-0035); rescore, calibrate, preflight |
 | FR-AUT | Authoring workbench | M | v0.5 | Partial | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground. Missing: a warnings / "not checked" tier beside errors |
