@@ -23,7 +23,11 @@ run is the point of the whole tool: the agent did not get to answer, so nothing 
 
 ## Point it at your agent
 
-`opseval init` writes a starting catalogue: a profile, example scenarios and two suites.
+`opseval init` writes a starting catalogue: a profile, example scenarios and two suites. In a
+terminal it asks what kind of agent you have, its URL, a name, and the model it runs on, and puts
+the answers in the files (the URL's host goes into the allowlist in `.env.example`). Flags answer
+the same questions (`--target`, `--name`, `--sut-model`), and without a terminal (in CI) it never
+asks. It validates what it wrote and prints the command to run next.
 
 ```bash
 uv run opseval init my-evals
