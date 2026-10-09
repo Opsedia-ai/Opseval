@@ -32,7 +32,7 @@ export default function Trend() {
             <option value="">All suites</option>
             {perScenario.data.suites.map((x) => <option key={x} value={x}>{x}</option>)}
           </select>)}>
-          <p className="mb-3 text-sm">Each scenario&apos;s verdict in the last 20 runs, oldest on the left. <b>n/j</b> is not judged and <b>·</b> means the scenario was not in that run: neither is a failure. <b>Flips</b> counts how often a judged verdict changed, a sign of a flaky scenario or a regression.</p>
+          <p className="mb-3 text-sm">Each scenario&apos;s verdict in the last 20 runs, oldest on the left. <b>n/j</b> is not judged and <b>·</b> means the scenario was not in that run: neither is a failure. <b>Flips</b> counts how often a judged verdict changed within a suite, a sign of a flaky scenario or a regression.</p>
           <Data res={perScenario}>{(d) => <ScenarioTrendGrid data={d} />}</Data>
         </Card>
       </Page>

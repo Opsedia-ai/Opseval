@@ -1516,3 +1516,19 @@ def test_the_trend_can_be_narrowed(client: TestClient) -> None:
     other = client.get("/api/v1/trend/scenarios?suite=nope").json()
     assert other["runs"] == [] and other["scenarios"] == [] and other["suites"] == ["smoke"]
     assert client.get("/api/v1/trend/scenarios?limit=0").status_code == 422
+
+
+def test_flips_are_counted_within_a_suite_only(tmp_path: Path) -> None:
+    """A scenario that one suite always passes and another always fails is steady, not
+    flaky, even when the two suites' runs alternate (review of #53)."""
+    store = FileStore(tmp_path)
+    for i, (suite, status) in enumerate(
+        [("smoke", VerdictStatus.PASSED), ("full", VerdictStatus.FAILED)] * 2
+    ):
+        r = _result(f"r{i}", i, {"a": status})
+        store.save_result(r.model_copy(update={"suite": suite}))
+    store.save_result(_result("r9", 9, {"a": VerdictStatus.FAILED}))  # smoke, now failing
+    c = connect(create_app(settings=Settings(reports_dir=str(tmp_path)), token=TOKEN))
+    row = c.get("/api/v1/trend/scenarios").json()["scenarios"][0]
+    assert [x["status"] for x in row["cells"]] == ["passed", "failed", "passed", "failed", "failed"]
+    assert row["flips"] == 1, "only smoke changed: passed, passed, then failed"

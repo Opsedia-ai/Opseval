@@ -327,7 +327,8 @@ def scenario_trend(store: FileStore, *, suite: str | None, limit: int) -> s.Scen
 
     Computed here, never in the browser (ADR-0029). A scenario that was not in a run has an
     empty cell, which is not a skip and not a failure; ``flips`` counts only changes between
-    judged verdicts, so an outage between two passes is not instability.
+    judged verdicts of the same suite, so an outage between two passes is not instability,
+    and neither is a scenario that one suite passes and another fails.
     """
     results = load_results(store)
     suites = sorted({r.suite for r in results})
@@ -348,8 +349,16 @@ def scenario_trend(store: FileStore, *, suite: str | None, limit: int) -> s.Scen
                     flaky=found.flaky if found else False,
                 )
             )
-        judged = [c.status for c in cells if c.status in JUDGED_STATUSES]
-        flips = sum(1 for a, b in zip(judged, judged[1:], strict=False) if a != b)
+        # Within one suite only: two suites can run a scenario differently (repeats,
+        # thresholds), so alternating between them is not the scenario changing.
+        flips = 0
+        for name in {r.suite for r in chosen}:
+            judged = [
+                c.status
+                for c, r in zip(cells, chosen, strict=True)
+                if r.suite == name and c.status in JUDGED_STATUSES
+            ]
+            flips += sum(1 for a, b in zip(judged, judged[1:], strict=False) if a != b)
         rows.append(s.ScenarioTrendRow(id=test_id, name=names[test_id], cells=cells, flips=flips))
     runs = [
         s.TrendRun(run=r.run_id, label=r.started_at.strftime("%b %-d %H:%M"), suite=r.suite)

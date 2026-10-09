@@ -306,7 +306,7 @@ class ScenarioTrendRow(Api):
     id: str
     name: str
     cells: list[TrendCell]  # in the order of ScenarioTrend.runs
-    flips: int  # how often its judged verdict changed between consecutive judged runs
+    flips: int  # changes between consecutive judged verdicts, counted within each suite
 
 
 class ScenarioTrend(Api):
