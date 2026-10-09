@@ -61,7 +61,8 @@ uv run opseval demo --bug crash           # the connection drops → "not judged
 Point it at your own agent. If it speaks the OpenAI Chat Completions API, start from a template:
 
 ```bash
-uv run opseval init my-evals                      # profile, example scenarios, suites, .env.example
+uv run opseval init my-evals                      # asks for your agent's URL, name and model, then writes
+                                                  # a profile, scenarios, suites and .env.example that validate
 export OPSEVAL_ALLOWED_HOSTS=agent.example.com
 uv run opseval validate my-evals/suites/smoke.yaml --profile my-evals/profile.yaml
 uv run opseval run my-evals/suites/smoke.yaml --profile my-evals/profile.yaml \
