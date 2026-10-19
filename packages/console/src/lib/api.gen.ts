@@ -437,6 +437,7 @@ export interface ScenarioCheckOut {
   id: string | null;
   title: string | null;
   problems: Problem[];
+  warnings: Problem[];
 }
 
 export interface ImportOut {

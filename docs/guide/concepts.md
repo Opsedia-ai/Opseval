@@ -70,3 +70,11 @@ computes the score, never the model. A judge from the same vendor family as the 
 is refused at launch (declare your agent's model as `sut_model` in the profile). Security judges
 vote three times, and a split vote is *not judged*, never a pass. A judge receives the
 conversation as fenced data, so nothing the agent writes can pose as the harness.
+
+## Warnings
+
+`opseval validate` and the console's editor separate **errors** (the file does not load) from
+**warnings** (it loads, but it will measure less than it looks). Examples: a single repeat, a
+pass threshold below 1, injections no scorer grades, trace checks without a trace source, or
+judge checks when no judge is configured. A warning never blocks a save or changes an exit code.
+
