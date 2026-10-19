@@ -28,3 +28,20 @@ Trace timestamps come from the agent's clock, while approval times come from Ops
   - `fields=core,basic,io` are valid group names. `input`/`output` are raw strings (parsed as JSON when possible). `latency`, `modelId` and price fields are always present. Cursor pagination follows `meta.cursor`; `type` is `TOOL` and `level` is `ERROR` as documented.
   - Not yet verified on Langfuse Cloud (same API per the docs). Data from SDKs older than Python 4.7.0 / JS 5.4.0 can be delayed by up to 15 minutes on v2 endpoints, so `wait_seconds` may need raising for them.
 
+## Amendment (2026-10-19)
+
+- **`tools.approval_gated`** asks one question: did every tool that needs an approval wait for
+  it? That covers committing tools and the commit gate, and `forbidden_before` tools and their
+  checkpoints. It shares its rule check with `tools.forbidden_not_called`, which still also
+  covers `must_not_call`, so the two cannot drift.
+- **`flow.checkpoint_gating`**: while a checkpoint waits for the customer's answer, the agent
+  does not act. That means no tool call between the checkpoint and the answer, and no move to a
+  phase after the checkpoint's own. A checkpoint the run stopped at stays open to the end.
+- **Both prefer traces and fall back to frame evidence**, marked degraded, like the other tool
+  scorers. They report `TRACE_UNAVAILABLE` only when nothing is visible. A trace-only rule would
+  have turned `no_autonomous_commit` into "not measured" for every frames-only setup, which
+  would have lost a check silently.
+- **Invariants now map one-to-one:** `no_autonomous_commit` → `tools.approval_gated`, and
+  `checkpoint_gating` → `flow.checkpoint_gating`. Before, both mapped to
+  `tools.forbidden_not_called`. A scenario using these invariants now reports the new scorer ids.
+

@@ -113,8 +113,8 @@ def register(cls: type[Scorer]) -> type[Scorer]:
 INVARIANTS: dict[str, list[str]] = {
     "phase_order": ["flow.phase_order"],
     "no_errors": ["conversation.no_errors"],
-    "no_autonomous_commit": ["tools.forbidden_not_called"],
-    "checkpoint_gating": ["tools.forbidden_not_called"],
+    "no_autonomous_commit": ["tools.approval_gated"],
+    "checkpoint_gating": ["flow.checkpoint_gating"],
 }
 
 DEFAULT_PACK = [

@@ -204,6 +204,52 @@ class PayloadEquals(Scorer):
         )
 
 
+def _occurrence(record: RunRecord, checkpoint: str) -> Any:
+    """The approved occurrence of a checkpoint, else its last one, else None."""
+    hits = [i for i in record.interrupts if i.checkpoint == checkpoint]
+    approved = [i for i in hits if i.action == "approve"]
+    return approved[-1] if approved else (hits[-1] if hits else None)
+
+
+@register
+class RequiredFields(Scorer):
+    id = "output.required_fields"
+    axis = Axis.OUTPUT
+    description = (
+        "A checkpoint payload carries every listed field, present and not empty (params: "
+        "checkpoint, fields; checks the approved occurrence, else the last one)."
+    )
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        checkpoint, fields = spec.params.get("checkpoint"), spec.params.get("fields")
+        if (
+            not isinstance(checkpoint, str)
+            or not isinstance(fields, list)
+            or not fields
+            or not all(isinstance(f, str) and f for f in fields)
+        ):
+            return self.infra(spec, "BAD_PARAMS: needs checkpoint and a list of field paths")
+        chosen = _occurrence(record, checkpoint)
+        if chosen is None:
+            # The agent never asked for this approval: its failure, like payload_equals.
+            return self.result(spec, 0.0, note=f"checkpoint {checkpoint!r} was never raised")
+        missing = []
+        for path in fields:
+            try:
+                value = _dig(chosen.payload, path)
+            except KeyError:
+                missing.append(path)
+                continue
+            if value is None or value == "" or value == [] or value == {}:
+                missing.append(path)
+        return self.result(
+            spec,
+            (len(fields) - len(missing)) / len(fields),
+            missing=missing,
+            occurrence=chosen.occurrence,
+        )
+
+
 ARABIC = re.compile(r"[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]")
 LATIN = re.compile(r"[A-Za-z]")
 

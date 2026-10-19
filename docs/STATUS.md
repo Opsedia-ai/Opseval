@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-19** (`main` with the GitHub Issues sink).
+**As of 2026-10-19** (`main` with the GitHub Issues sink and the remaining core scorers).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 85% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 89% of 69.
+**Overall: 87% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 91% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 49 / 8 / 2 | 90% |
-| v0.2 | 15 | 12 / 2 / 1 | 87% |
+| v0.1 | 59 | 51 / 6 / 2 | 92% |
+| v0.2 | 15 | 13 / 1 / 1 | 90% |
 | v0.5 | 12 | 8 / 2 / 2 | 75% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 69 / 12 / 7 | **85%** |
+| **All** | 88 | 72 / 9 / 7 | **87%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -78,15 +78,15 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-REC-05 | Layout contract | M | v0.1 | Done | versioned layout (`opseval-runs/1` in every manifest; unknown layouts refused by every reader, shown as errors in the console, never pruned) and the `storage.RunStore` protocol `FileStore` meets (ADR-0005 amendment) |
 | FR-SCR-01 | Three-state scores | M | v0.1 | Done | `ScoreResult` validator |
 | FR-SCR-02 | Axes | M | v0.1 | Done | `Axis` |
-| FR-SCR-03 | Deterministic scorers | M | v0.1 | Partial | `output.required_fields` is `output.payload_equals` |
-| FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Partial | expected/forbidden/ordering/call_success/args_valid; no separate `approval_gated` or `flow.checkpoint_gating` |
+| FR-SCR-03 | Deterministic scorers | M | v0.1 | Done | every listed scorer, including `output.required_fields` (present and non-empty payload fields) beside `output.payload_equals` |
+| FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Done | expected/forbidden/ordering/call_success/args_valid, `tools.approval_gated` and `flow.checkpoint_gating` (traces, else degraded frame evidence; `TRACE_UNAVAILABLE` when nothing is visible) |
 | FR-SCR-05 | LLM judges with quoted ballots | M | v0.1 | Done | `scoring/judges.py`; the conversation is fenced JSON-lines data with harness facts outside (ADR-0036) |
 | FR-SCR-06 | Quality and security judges | M | v0.2 | Done | ADR-0014, ADR-0016 |
 | FR-SCR-07 | Judge audit trail | M | v0.1 | Done | prompt hash, quotes, model; rubric digests (ADR-0017) |
 | FR-SCR-08 | Vendor-family guard | S | v0.2 | Done | refused at launch by default (ADR-0016) |
 | FR-SCR-09 | Criterion permutation | C | v0.5 | Done | rotated ballots (ADR-0017) |
 | FR-SCR-10 | Scorer plugin API and contract kit | M | v0.2 | Done | `plugins.py`, `opseval.testing.ScorerContract` (ADR-0022) |
-| FR-SCR-11 | Invariants and default pack | M | v0.1 | Partial | two invariants map to one scorer |
+| FR-SCR-11 | Invariants and default pack | M | v0.1 | Done | each invariant has its own scorer (`no_autonomous_commit` → `tools.approval_gated`, `checkpoint_gating` → `flow.checkpoint_gating`) and the default pack |
 | FR-VER-01 | Attempt invalidation | M | v0.1 | Done | `attempt_verdict` |
 | FR-VER-02 | Fold attempts | M | v0.1 | Done | `fold_attempts` |
 | FR-VER-03 | Flaky detection | M | v0.1 | Done | `TestVerdict.flaky` |
