@@ -19,8 +19,8 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `judge.goal_achievement` | llm | 2 | LLM judge: did the conversation achieve the customer's goal? (quoted, weighted) |
 | `judge.language_consistency` | llm | 2 | LLM judge: did the agent answer in the customer's language and dialect? (quoted) |
 | `output.language_script` | frames | 1 | Share of agent messages written mainly in the expected script (arabic\|latin). |
-| `output.payload_equals` | frames | 2 | A checkpoint payload field has the expected value (params: checkpoint, path, equals; checks the approved occurrence, else the last one). |
-| `output.required_fields` | frames | 1 | A checkpoint payload carries every listed field, present and not empty (params: checkpoint, fields; checks the approved occurrence, else the last one). |
+| `output.payload_equals` | frames | 3 | A checkpoint payload field has the expected value (params: checkpoint, path, equals; checks the approved occurrence, else the last one). |
+| `output.required_fields` | frames | 2 | A checkpoint payload carries every listed field, present and not empty (params: checkpoint, fields; checks the approved occurrence, else the last one). |
 | `output.terminal_state` | frames | 1 | The conversation ended where the scenario's stop_at says it should. |
 | `protocol.probes_passed` | frames | 1 | Every protocol probe the profile declares got the answer it expects. |
 

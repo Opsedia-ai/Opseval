@@ -24,6 +24,28 @@ class FrameKind(StrEnum):
     UNKNOWN = "unknown"  # unclassifiable, recorded verbatim
 
 
+class ArtifactSpec(BaseModel):
+    """Something the agent creates in the system under test, and where its id appears
+    (FR-REC-01). Recorded per attempt, so a test tenant's leftovers can be found and cleaned."""
+
+    model_config = ConfigDict(extra="forbid")
+    kind: str = Field(min_length=1, max_length=60)
+    """What it is, e.g. ``refund`` or ``ticket``."""
+    path: str = Field(min_length=1, max_length=200)
+    """Dotted path to its id inside a frame's payload, e.g. ``data.refund_status.refund_id``."""
+    frame_kinds: list[FrameKind] = Field(default_factory=lambda: [FrameKind.RESULT], min_length=1)
+    """Which received frames to look in."""
+
+    @model_validator(mode="after")
+    def _received_kinds_only(self) -> ArtifactSpec:
+        sent = {FrameKind.USER_MESSAGE, FrameKind.RESUME}
+        mine = sorted(k.value for k in self.frame_kinds if k in sent)
+        if mine:
+            # Those are frames Opseval sends: an artifact can never be read from them.
+            raise ValueError(f"frame_kinds {mine} are frames Opseval sends, not the agent")
+        return self
+
+
 class ToolSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     evidence_key: str | None = None
@@ -165,6 +187,8 @@ class SutProfile(BaseModel):
     reconnect: ReconnectConfig | None = None
     token: TokenConfig | None = None
     """Mint HS256 tokens per attempt instead of using ``OPSEVAL_STATIC_TOKEN``."""
+    artifacts: list[ArtifactSpec] = Field(default_factory=list)
+    """What the agent creates and where to read its id, so each record lists it (FR-REC-01)."""
     probes: list[Probe] = Field(default_factory=list)
     """Raw protocol frames checked once per attempt, after connecting and before the
     conversation starts (FR-RUN-04's PROBES state). Graded by ``protocol.probes_passed``;

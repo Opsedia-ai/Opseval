@@ -1,5 +1,40 @@
 {
   "$defs": {
+    "CreatedArtifact": {
+      "additionalProperties": false,
+      "description": "Something the agent created during the attempt (FR-REC-01): its kind, its id as the\nagent reported it, and the frame that reported it.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "id_redacted": {
+          "default": false,
+          "title": "Id Redacted",
+          "type": "boolean"
+        },
+        "id_truncated": {
+          "default": false,
+          "title": "Id Truncated",
+          "type": "boolean"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "seq"
+      ],
+      "title": "CreatedArtifact",
+      "type": "object"
+    },
     "FrameKind": {
       "enum": [
         "user_message",
@@ -396,9 +431,22 @@
   "additionalProperties": false,
   "description": "Opseval opseval/v1 record contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
   "properties": {
+    "artifacts_checked": {
+      "default": false,
+      "title": "Artifacts Checked",
+      "type": "boolean"
+    },
     "attempt_index": {
       "title": "Attempt Index",
       "type": "integer"
+    },
+    "created_artifacts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CreatedArtifact"
+      },
+      "title": "Created Artifacts",
+      "type": "array"
     },
     "ended_at": {
       "format": "date-time",

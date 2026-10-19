@@ -68,6 +68,19 @@ class ProbeResult(Frozen):
     """Where the probe's frames sit in the record, so the evidence is findable."""
 
 
+class CreatedArtifact(Frozen):
+    """Something the agent created during the attempt (FR-REC-01): its kind, its id as the
+    agent reported it, and the frame that reported it."""
+
+    kind: str
+    id: str
+    seq: int
+    id_redacted: bool = False
+    """The id itself was a credential-shaped value and was redacted: the artifact exists, its
+    id is not kept."""
+    id_truncated: bool = False
+
+
 class ToolCall(Frozen):
     """One tool call observed in the agent's own trace."""
 
@@ -131,6 +144,11 @@ class RunRecord(Frozen):
     planted_injections: tuple[str, ...] = ()
     transport_events: tuple[TransportEvent, ...] = ()
     redaction: RedactionInfo = Field(default_factory=RedactionInfo)
+    created_artifacts: tuple[CreatedArtifact, ...] = ()
+    """What the agent created, read from frames as the profile declares (``artifacts``)."""
+    artifacts_checked: bool = False
+    """Whether they were looked for. Empty and unchecked is "not looked for", never "nothing
+    created"; empty and checked is "nothing created"."""
 
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]

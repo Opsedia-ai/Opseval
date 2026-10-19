@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-19** (`main` with the GitHub Issues sink and the remaining core scorers).
+**As of 2026-10-19** (`main` with the GitHub Issues sink, the remaining core scorers and created artifacts).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 87% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 91% of 69.
+**Overall: 88% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 92% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 51 / 6 / 2 | 92% |
+| v0.1 | 59 | 52 / 5 / 2 | 92% |
 | v0.2 | 15 | 13 / 1 / 1 | 90% |
 | v0.5 | 12 | 8 / 2 / 2 | 75% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 72 / 9 / 7 | **87%** |
+| **All** | 88 | 73 / 8 / 7 | **88%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -71,7 +71,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-CHK-03 | Rejections | M | v0.1 | Done | rejection loop guard |
 | FR-CHK-04 | Status-check checkpoints | S | v0.2 | Missing | not started |
 | FR-CHK-05 | `stop_at` | M | v0.1 | Done | commit guard tests |
-| FR-REC-01 | Run record | M | v0.1 | Partial | no "created artifacts" field |
+| FR-REC-01 | Run record | M | v0.1 | Done | every listed field, including `created_artifacts` (what the agent created, read from frames as the profile's `artifacts:` declares) |
 | FR-REC-02 | Persist as you go | M | v0.1 | Done | `FileStore`, `result.json` last, `error.json` on failure (ADR-0031) |
 | FR-REC-03 | Redaction | M | v0.1 | Partial | key names, plus credential *values* in text and payloads (ADR-0033); PII is deliberately kept, and unrecognised token formats pass through |
 | FR-REC-04 | Trace enrichment | M | v0.2 | Partial | Langfuse and OTLP tool calls; no SUT scores or release tag |

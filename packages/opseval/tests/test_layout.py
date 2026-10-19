@@ -21,7 +21,7 @@ from opseval.demo.refund_agent import run_agent
 from opseval.rescore import rescore_run
 from opseval.retention import apply, plan
 from opseval.runner import RunOptions, launch
-from opseval.storage import LAYOUT, FileStore, UnknownLayout
+from opseval.storage import LAYOUT, LEGACY_LAYOUT, FileStore, UnknownLayout
 
 FUTURE = "opseval-runs/9"
 
@@ -51,12 +51,14 @@ def relayout(run: Path, layout: str | None, *, started: datetime | None = None) 
 
 def test_a_new_run_records_its_layout(run: Path) -> None:
     assert json.loads((run / "manifest.json").read_text("utf-8"))["layout"] == LAYOUT
+    assert LAYOUT == "opseval-runs/2", "2: records may carry created_artifacts"
 
 
 def test_a_run_from_before_versioning_reads_as_layout_1(run: Path) -> None:
     relayout(run, None)
     store = FileStore(run.parent)
-    assert store.layout(run.name) == LAYOUT
+    assert store.layout(run.name) == LEGACY_LAYOUT == "opseval-runs/1"
+    assert store.layout_known(run.name), "layout 1 is still read"
     assert store.load_result(run.name).run_id == run.name
 
 
@@ -113,7 +115,7 @@ def test_the_file_store_meets_the_storage_contract(tmp_path: Path) -> None:
 
     assert isinstance(FileStore(tmp_path), RunStore)
     store: RunStore = FileStore(tmp_path)  # and mypy checks every signature matches
-    assert store.layout("nothing-here") == LAYOUT
+    assert store.layout("nothing-here") == LEGACY_LAYOUT
 
 
 @pytest.mark.parametrize("name", ["run 1", "rün"])

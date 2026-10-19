@@ -42,6 +42,9 @@ export default function Transcript({ run, test, index }: { run: string; test: st
           ? <Callout><b>Credential redaction was not checked on this record</b>: it was written before Opseval removed credential values. It may contain one.</Callout>
           : r.redactedKinds.length > 0 && <Callout tone="info"><b>Credentials removed from this record:</b> <Mono>{r.redactedKinds.join(", ")}</Mono>. The values are never kept; where one was, the text says so.</Callout>}
         {r.plantedInjections.length > 0 && <p className="text-sm"><b>Planted injections:</b> <Mono>{r.plantedInjections.join(", ")}</Mono></p>}
+        {r.artifactsChecked && <p className="text-sm" data-state="created-artifacts"><b>Created in the system under test:</b>{" "}
+          {r.createdArtifacts.length === 0 ? "nothing" : r.createdArtifacts.map((a, i) => (
+            <span key={i}>{i > 0 && ", "}<Mono>{a.kind}</Mono> {a.idRedacted ? <i>(id redacted)</i> : <><Mono>{a.id}</Mono>{a.idTruncated && <i> (truncated)</i>}</>}</span>))}</p>}
         <div className="space-y-2 rounded-2xl border border-line bg-white p-4">
           {r.entries.length === 0 ? <NotMeasured text="no conversation recorded" /> : r.entries.map((e) => <Entry key={`${e.seq}-${e.kind}`} e={e} />)}
         </div>

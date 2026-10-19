@@ -1,5 +1,37 @@
 {
   "$defs": {
+    "ArtifactSpec": {
+      "additionalProperties": false,
+      "description": "Something the agent creates in the system under test, and where its id appears\n(FR-REC-01). Recorded per attempt, so a test tenant's leftovers can be found and cleaned.",
+      "properties": {
+        "frame_kinds": {
+          "items": {
+            "$ref": "#/$defs/FrameKind"
+          },
+          "minItems": 1,
+          "title": "Frame Kinds",
+          "type": "array"
+        },
+        "kind": {
+          "maxLength": 60,
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "title": "ArtifactSpec",
+      "type": "object"
+    },
     "CheckpointSpec": {
       "additionalProperties": false,
       "properties": {
@@ -282,6 +314,13 @@
   "additionalProperties": false,
   "description": "Maps an agent's wire protocol onto Opseval's canonical model. Opseval opseval/v1 profile contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
   "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactSpec"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
     "auth_frame": {
       "anyOf": [
         {

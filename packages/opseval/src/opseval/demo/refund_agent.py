@@ -179,6 +179,7 @@ class Conversation:
             "text": self.t("issued"),
             "data": {
                 "refund_status": {
+                    "refund_id": f"rf-{self.order}",
                     "order": self.order,
                     "amount": info["amount"],
                     "method": self.method,
