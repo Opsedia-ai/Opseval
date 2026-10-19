@@ -24,14 +24,23 @@ P, F, X = ScoreStatus.PASSED, ScoreStatus.FAILED, ScoreStatus.INFRA_ERROR
 
 
 class TestInvariants:
-    def test_each_invariant_maps_to_its_own_check(self) -> None:
-        assert INVARIANTS["no_autonomous_commit"] == ["tools.approval_gated"]
-        assert INVARIANTS["checkpoint_gating"] == ["flow.checkpoint_gating"]
+    def test_no_scenario_loses_a_check_it_had(self) -> None:
+        """Both invariants keep the broad check (review of #60): it covers must_not_call and a
+        commit with no checkpoint at all, which checkpoint_gating alone would pass."""
+        assert INVARIANTS["no_autonomous_commit"] == ["tools.forbidden_not_called"]
+        assert INVARIANTS["checkpoint_gating"] == [
+            "tools.forbidden_not_called",
+            "flow.checkpoint_gating",
+        ]
+
+    def test_one_defect_is_never_scored_twice(self) -> None:
         scenario = make_scenario(
-            expectations={"invariants": ["no_autonomous_commit", "checkpoint_gating"]}
+            scorers="default",
+            expectations={"invariants": ["no_autonomous_commit", "checkpoint_gating"]},
         )
-        ids = {s.id for s in effective_specs(scenario)}
-        assert {"tools.approval_gated", "flow.checkpoint_gating"} <= ids
+        ids = [s.id for s in effective_specs(scenario)]
+        assert ids.count("tools.forbidden_not_called") == 1
+        assert "flow.checkpoint_gating" in ids
 
 
 class TestApprovalGated:
@@ -152,7 +161,10 @@ class TestCheckpointGating:
         res = await gating(record(frames=frames, interrupts=itrs), profile)
         assert res.status is F and "moved to 'confirmation'" in str(res.details["violations"])
 
-    async def test_too_close_to_the_answer_is_not_judged(self, profile: SutProfile) -> None:
+    async def test_a_call_the_clocks_cannot_place_is_named_and_degraded(
+        self, profile: SutProfile
+    ) -> None:
+        """Neither silently skipped nor a whole run lost to "not measured" (review of #60)."""
         frames, itrs = waiting_frames()
         rec = record(
             calls=[ToolCall(name="create_refund", started_at=at(9.5))],
@@ -160,18 +172,56 @@ class TestCheckpointGating:
             interrupts=itrs,
         )
         res = await gating(rec, traced_profile(profile))
-        assert res.status is X and "CLOCK_SKEW_AMBIGUOUS" in (res.reason or "")
+        assert res.status is P and res.degraded is True
+        assert res.details["unplaced"] and "too close" in res.details["unplaced"][0]
 
     async def test_acting_at_a_checkpoint_never_answered_fails(self, profile: SutProfile) -> None:
         frames, itrs = waiting_frames()
+        ended = FrameRecord(
+            seq=3, at=at(20), direction="received", kind=FrameKind.NOTIFICATION, payload={}
+        )
         unanswered = [itrs[0].model_copy(update={"action": None, "decision_seq": None})]
         rec = record(
-            calls=[ToolCall(name="create_refund", started_at=at(8))],
-            frames=frames[:3],
+            calls=[ToolCall(name="create_refund", started_at=at(12))],
+            frames=[*frames[:3], ended],
             interrupts=unanswered,
         )
         res = await gating(rec, traced_profile(profile))
-        assert res.status is F and "never answered" in str(res.details["violations"])
+        assert res.status is F and "awaited an answer" in str(res.details["violations"])
+
+    async def test_after_the_harness_hung_up_is_not_waiting(self, profile: SutProfile) -> None:
+        """The run stopped at the checkpoint; what the agent did after is not this check's
+        question (a commit is forbidden_not_called's)."""
+        frames, itrs = waiting_frames()
+        unanswered = [itrs[0].model_copy(update={"action": None, "decision_seq": None})]
+        rec = record(
+            calls=[ToolCall(name="lookup-order", started_at=at(30))],
+            frames=frames[:3],
+            interrupts=unanswered,
+        )
+        assert (await gating(rec, traced_profile(profile))).status is P
+
+    async def test_an_echoed_evidence_key_is_not_a_new_call(self, profile: SutProfile) -> None:
+        """On frames, a key repeated while waiting is an echo, not the agent acting."""
+        frames, itrs = waiting_frames()
+        frames[0] = frames[0].model_copy(update={"payload": {"data": {"order_summary": {"id": 1}}}})
+        frames[2] = frames[2].model_copy(update={"payload": {"data": {"order_summary": {"id": 1}}}})
+        res = await gating(record(frames=frames, interrupts=itrs), profile)
+        assert res.status is P, res.details
+
+    async def test_seeing_only_phases_is_said_and_degraded(self, profile: SutProfile) -> None:
+        blind_tools = profile.model_copy(
+            update={
+                "tools": {
+                    k: v.model_copy(update={"evidence_key": None}) for k, v in profile.tools.items()
+                },
+                "tool_calls_field": None,
+            }
+        )
+        frames, itrs = waiting_frames()
+        res = await gating(record(frames=frames, interrupts=itrs), blind_tools)
+        assert res.status is P and res.degraded is True
+        assert (res.details["tools_checked"], res.details["phases_checked"]) == (False, True)
 
     async def test_no_checkpoint_is_a_vacuous_pass(self, profile: SutProfile) -> None:
         res = await gating(record(), profile)

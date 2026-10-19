@@ -41,7 +41,18 @@ Trace timestamps come from the agent's clock, while approval times come from Ops
   scorers. They report `TRACE_UNAVAILABLE` only when nothing is visible. A trace-only rule would
   have turned `no_autonomous_commit` into "not measured" for every frames-only setup, which
   would have lost a check silently.
-- **Invariants now map one-to-one:** `no_autonomous_commit` → `tools.approval_gated`, and
-  `checkpoint_gating` → `flow.checkpoint_gating`. Before, both mapped to
-  `tools.forbidden_not_called`. A scenario using these invariants now reports the new scorer ids.
-
+- **Invariants:** `checkpoint_gating` now adds `flow.checkpoint_gating` as well as
+  `tools.forbidden_not_called`. `no_autonomous_commit` keeps `tools.forbidden_not_called`, the
+  broad check, which also covers `must_not_call` and a commit with no checkpoint raised at all.
+  So no scenario loses a check it had, and `effective_specs` removes the duplicate, so one defect
+  is never scored twice. `tools.approval_gated` is a narrower scorer to choose explicitly, not
+  added by an invariant.
+- **Evidence `flow.checkpoint_gating` cannot place is named, never silent.**
+  - On frames, only a tool's first appearance counts as a call; an echoed key is not one.
+  - A call within the clock-skew window of the checkpoint or of its answer is listed as
+    *unplaced*.
+  - Seeing only phases, or only tools, is stated (`tools_checked`, `phases_checked`).
+  - Any of these marks the score *degraded*, which every output names.
+  - A checkpoint the run stopped at closes when the conversation does.
+- `output.payload_equals` is version 2: a checkpoint the profile does not declare is
+  `BAD_PARAMS` (not measured), never the agent's failure. `output.required_fields` does the same.

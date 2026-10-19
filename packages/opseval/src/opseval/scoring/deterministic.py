@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from opseval.models.profile import FrameKind
-from opseval.models.record import RunRecord, TerminalState
+from opseval.models.record import InterruptRecord, RunRecord, TerminalState
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import RESERVED_STOP_AT, ScorerSpec
 from opseval.redaction import strip_markers
@@ -170,6 +170,7 @@ def _dig(value: Any, path: str) -> Any:
 class PayloadEquals(Scorer):
     id = "output.payload_equals"
     axis = Axis.OUTPUT
+    version = "2"  # 2: a checkpoint the profile does not declare is BAD_PARAMS, not a failure
     description = (
         "A checkpoint payload field has the expected value (params: checkpoint, path, equals; "
         "checks the approved occurrence, else the last one)."
@@ -184,11 +185,12 @@ class PayloadEquals(Scorer):
         ):
             return self.infra(spec, "BAD_PARAMS: needs checkpoint, path and equals")
         expected = spec.params["equals"]
-        hits = [i for i in record.interrupts if i.checkpoint == checkpoint]
-        if not hits:
+        unknown = _unknown_checkpoint(checkpoint, ctx)
+        if unknown:
+            return self.infra(spec, unknown)
+        chosen = _occurrence(record, checkpoint)
+        if chosen is None:
             return self.result(spec, 0.0, note=f"checkpoint {checkpoint!r} was never raised")
-        approved = [i for i in hits if i.action == "approve"]
-        chosen = approved[-1] if approved else hits[-1]
         try:
             observed = _dig(chosen.payload, path)
         except KeyError:
@@ -204,11 +206,20 @@ class PayloadEquals(Scorer):
         )
 
 
-def _occurrence(record: RunRecord, checkpoint: str) -> Any:
+def _occurrence(record: RunRecord, checkpoint: str) -> InterruptRecord | None:
     """The approved occurrence of a checkpoint, else its last one, else None."""
     hits = [i for i in record.interrupts if i.checkpoint == checkpoint]
     approved = [i for i in hits if i.action == "approve"]
     return approved[-1] if approved else (hits[-1] if hits else None)
+
+
+def _unknown_checkpoint(checkpoint: str, ctx: ScoringContext) -> str | None:
+    """A checkpoint name the profile does not declare is an authoring mistake: not measured,
+    never the agent's failure for not raising it."""
+    if ctx.profile.checkpoints and checkpoint not in ctx.profile.checkpoints:
+        known = ", ".join(sorted(ctx.profile.checkpoints))
+        return f"BAD_PARAMS: the profile declares no checkpoint {checkpoint!r} (known: {known})"
+    return None
 
 
 @register
@@ -229,6 +240,9 @@ class RequiredFields(Scorer):
             or not all(isinstance(f, str) and f for f in fields)
         ):
             return self.infra(spec, "BAD_PARAMS: needs checkpoint and a list of field paths")
+        unknown = _unknown_checkpoint(checkpoint, ctx)
+        if unknown:
+            return self.infra(spec, unknown)
         chosen = _occurrence(record, checkpoint)
         if chosen is None:
             # The agent never asked for this approval: its failure, like payload_equals.

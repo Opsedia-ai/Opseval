@@ -86,7 +86,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SCR-08 | Vendor-family guard | S | v0.2 | Done | refused at launch by default (ADR-0016) |
 | FR-SCR-09 | Criterion permutation | C | v0.5 | Done | rotated ballots (ADR-0017) |
 | FR-SCR-10 | Scorer plugin API and contract kit | M | v0.2 | Done | `plugins.py`, `opseval.testing.ScorerContract` (ADR-0022) |
-| FR-SCR-11 | Invariants and default pack | M | v0.1 | Done | each invariant has its own scorer (`no_autonomous_commit` → `tools.approval_gated`, `checkpoint_gating` → `flow.checkpoint_gating`) and the default pack |
+| FR-SCR-11 | Invariants and default pack | M | v0.1 | Done | `phase_order`, `no_errors`, `no_autonomous_commit` (`tools.forbidden_not_called`) and `checkpoint_gating` (adds `flow.checkpoint_gating`), de-duplicated against the default pack |
 | FR-VER-01 | Attempt invalidation | M | v0.1 | Done | `attempt_verdict` |
 | FR-VER-02 | Fold attempts | M | v0.1 | Done | `fold_attempts` |
 | FR-VER-03 | Flaky detection | M | v0.1 | Done | `TestVerdict.flaky` |
