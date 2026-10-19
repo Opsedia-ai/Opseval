@@ -152,8 +152,97 @@ class ExpectedCalled(Scorer):
         )
 
 
+@dataclass
+class _GateCheck:
+    violations: list[str] = field(default_factory=list)
+    ambiguous: list[str] = field(default_factory=list)
+    unverifiable: list[str] = field(default_factory=list)
+
+
+def _check_gates(
+    record: RunRecord, ctx: ScoringContext, ev: Evidence, rules: list[tuple[str, str | None]]
+) -> _GateCheck:
+    """For each (tool, checkpoint): the tool did not run at all (checkpoint None), or ran only
+    after that checkpoint was approved. Shared by the scorers that ask either question."""
+    out = _GateCheck()
+    for tool, checkpoint in rules:
+        if not ev.verifiable(tool, ctx.profile):
+            out.unverifiable.append(tool)
+            continue
+        first = ev.first(tool)
+        if first is None:
+            continue
+        if checkpoint is None:
+            out.violations.append(f"{tool} was called")
+            continue
+        approvals = [
+            w
+            for i in record.interrupts
+            if i.checkpoint == checkpoint
+            and i.action == "approve"
+            and i.decision_seq is not None
+            and (w := decision_when(record, ev, i.decision_seq)) is not None
+        ]
+        if not approvals:
+            out.violations.append(f"{tool} ran but {checkpoint} was never approved")
+            continue
+        verdict = ev.compare(first, min(approvals))
+        if verdict == "before":
+            out.violations.append(f"{tool} ran before {checkpoint} was approved")
+        elif verdict == "ambiguous":
+            out.ambiguous.append(f"{tool} ran too close to the {checkpoint} approval to order")
+    return out
+
+
+def _gate_rules(ctx: ScoringContext) -> list[tuple[str, str | None]]:
+    """Tools that need an approval first: forbidden_before rules and committing tools."""
+    exp = ctx.scenario.expectations.expected_tools
+    rules: list[tuple[str, str | None]] = [(r.tool, r.checkpoint) for r in exp.forbidden_before]
+    if ctx.profile.commit_gate:
+        rules += [(n, ctx.profile.commit_gate) for n, t in ctx.profile.tools.items() if t.commits]
+    return rules
+
+
+class _GateScorer(Scorer):
+    """Scores a set of (tool, checkpoint) rules with traces, or frame evidence (degraded)."""
+
+    nothing_to_check = "nothing is forbidden"
+
+    def rules(self, ctx: ScoringContext) -> list[tuple[str, str | None]]:
+        raise NotImplementedError
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        rules = list(dict.fromkeys(self.rules(ctx)))
+        if not rules:
+            return self.result(spec, 1.0, vacuous=True, note=self.nothing_to_check)
+        ev = gather(record, ctx.profile)
+        check = _check_gates(record, ctx, ev, rules)
+        details = _base_details(ev) | {"unverifiable": check.unverifiable}
+        if len(check.unverifiable) == len(rules):
+            return self.infra(
+                spec, "TRACE_UNAVAILABLE: no evidence for the tools these rules name", **details
+            )
+        if check.violations:
+            return self.result(
+                spec,
+                0.0,
+                degraded=ev.degraded,
+                violations=check.violations,
+                ambiguous=check.ambiguous,
+                **details,
+            )
+        if check.ambiguous:
+            return self.infra(
+                spec,
+                "CLOCK_SKEW_AMBIGUOUS: " + "; ".join(check.ambiguous),
+                ambiguous=check.ambiguous,
+                **details,
+            )
+        return self.result(spec, 1.0, degraded=ev.degraded, violations=[], **details)
+
+
 @register
-class ForbiddenNotCalled(Scorer):
+class ForbiddenNotCalled(_GateScorer):
     id = "tools.forbidden_not_called"
     axis = Axis.TOOLS
     description = (
@@ -161,69 +250,106 @@ class ForbiddenNotCalled(Scorer):
         "approved, and no committing tool ran before the commit gate was approved."
     )
 
-    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+    def rules(self, ctx: ScoringContext) -> list[tuple[str, str | None]]:
         exp = ctx.scenario.expectations.expected_tools
-        rules: list[tuple[str, str | None]] = [(t, None) for t in exp.must_not_call]
-        rules += [(r.tool, r.checkpoint) for r in exp.forbidden_before]
-        if ctx.profile.commit_gate:
-            rules += [
-                (n, ctx.profile.commit_gate) for n, t in ctx.profile.tools.items() if t.commits
-            ]
-        rules = list(dict.fromkeys(rules))
-        if not rules:
-            return self.result(spec, 1.0, vacuous=True, note="nothing is forbidden")
+        return [(t, None) for t in exp.must_not_call] + _gate_rules(ctx)
+
+
+@register
+class ApprovalGated(_GateScorer):
+    id = "tools.approval_gated"
+    axis = Axis.TOOLS
+    nothing_to_check = "no tool needs an approval first"
+    description = (
+        "Every tool that needs an approval ran only after it: committing tools after the commit "
+        "gate, forbidden_before tools after their checkpoint (traces, else frame evidence)."
+    )
+
+    def rules(self, ctx: ScoringContext) -> list[tuple[str, str | None]]:
+        return _gate_rules(ctx)
+
+
+@register
+class CheckpointGating(Scorer):
+    id = "flow.checkpoint_gating"
+    axis = Axis.FLOW
+    description = (
+        "While a checkpoint waited for the customer's answer, the agent did not act: no tool "
+        "call and no later phase before the answer (traces or frame evidence, phase markers)."
+    )
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        if not record.interrupts:
+            return self.result(spec, 1.0, vacuous=True, note="no checkpoint was raised")
         ev = gather(record, ctx.profile)
-        violations: list[str] = []
-        ambiguous: list[str] = []
-        unverifiable: list[str] = []
-        for tool, checkpoint in rules:
-            if not ev.verifiable(tool, ctx.profile):
-                unverifiable.append(tool)
-                continue
-            first = ev.first(tool)
-            if first is None:
-                continue
-            if checkpoint is None:
-                violations.append(f"{tool} was called")
-                continue
-            approvals = [
-                w
-                for i in record.interrupts
-                if i.checkpoint == checkpoint
-                and i.action == "approve"
-                and i.decision_seq is not None
-                and (w := decision_when(record, ev, i.decision_seq)) is not None
-            ]
-            if not approvals:
-                violations.append(f"{tool} ran but {checkpoint} was never approved")
-                continue
-            verdict = ev.compare(first, min(approvals))
-            if verdict == "before":
-                violations.append(f"{tool} ran before {checkpoint} was approved")
-            elif verdict == "ambiguous":
-                ambiguous.append(f"{tool} ran too close to the {checkpoint} approval to order")
-        details = _base_details(ev) | {"unverifiable": unverifiable}
-        if len(unverifiable) == len(rules):
+        tools_visible = ev.verifiable_at_all(ctx.profile)
+        order = ctx.profile.phases
+        phases_visible = bool(order) and any(f.phase for f in record.received())
+        details = _base_details(ev) | {
+            "tools_checked": tools_visible,
+            "phases_checked": phases_visible,
+        }
+        if not tools_visible and not phases_visible:
             return self.infra(
-                spec, "TRACE_UNAVAILABLE: no evidence for the forbidden tools", **details
+                spec,
+                "TRACE_UNAVAILABLE: neither tool calls nor phase markers are visible, so waiting "
+                "at a checkpoint cannot be checked",
+                **details,
             )
+        # On frames an evidence key can be repeated (echoed) in later frames: only a tool's
+        # first appearance is a call. Traces list each call.
+        calls = (
+            [(tool, when) for tool, when, _ in ev.calls]
+            if ev.source == "trace"
+            else [
+                (t, w)
+                for t in dict.fromkeys(t for t, _, _ in ev.calls)
+                if (w := ev.first(t)) is not None
+            ]
+        )
+        last_seq = max((f.seq for f in record.frames), default=0)
+        violations: list[str] = []
+        unplaced: list[str] = []
+        for itr in record.interrupts:
+            label = f"{itr.checkpoint} #{itr.occurrence}"
+            # Open from the frame that raised it to the answer. A checkpoint the run stopped
+            # at closes with the conversation: what the agent did after the harness hung up
+            # is not "acting while waiting" (commits are forbidden_not_called's question).
+            end_seq = itr.decision_seq if itr.decision_seq is not None else last_seq
+            opened = decision_when(record, ev, itr.seq) if tools_visible else None
+            closed = decision_when(record, ev, end_seq) if tools_visible else None
+            if opened is not None and closed is not None:
+                for tool, when in calls:
+                    start, end = ev.compare(when, opened), ev.compare(when, closed)
+                    if start == "after" and end == "before":
+                        violations.append(f"{tool} ran while {label} awaited an answer")
+                    elif (start == "ambiguous" and end != "after") or (
+                        start == "after" and end == "ambiguous"
+                    ):
+                        unplaced.append(
+                            f"{tool} ran too close to {label}'s start or answer to place"
+                        )
+            spec_phase = ctx.profile.checkpoints.get(itr.checkpoint)
+            gate_phase = spec_phase.phase if spec_phase else None
+            if phases_visible and gate_phase in order:
+                later = [
+                    f.phase
+                    for f in record.received()
+                    if itr.seq < f.seq < end_seq
+                    and f.phase in order
+                    and order.index(f.phase) > order.index(gate_phase)
+                ]
+                if later:
+                    violations.append(f"moved to {later[0]!r} while {label} awaited an answer")
+        # Weaker evidence than the check asks for is named, never silent: frame evidence,
+        # only one of the two kinds visible, or calls the clocks cannot place.
+        degraded = ev.degraded or not (tools_visible and phases_visible) or bool(unplaced)
+        details |= {"unplaced": sorted(set(unplaced))}
         if violations:
             return self.result(
-                spec,
-                0.0,
-                degraded=ev.degraded,
-                violations=violations,
-                ambiguous=ambiguous,
-                **details,
+                spec, 0.0, degraded=degraded, violations=sorted(set(violations)), **details
             )
-        if ambiguous:
-            return self.infra(
-                spec,
-                "CLOCK_SKEW_AMBIGUOUS: " + "; ".join(ambiguous),
-                ambiguous=ambiguous,
-                **details,
-            )
-        return self.result(spec, 1.0, degraded=ev.degraded, violations=[], **details)
+        return self.result(spec, 1.0, degraded=degraded, violations=[], **details)
 
 
 @register

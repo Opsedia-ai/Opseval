@@ -19,7 +19,8 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `judge.goal_achievement` | llm | 2 | LLM judge: did the conversation achieve the customer's goal? (quoted, weighted) |
 | `judge.language_consistency` | llm | 2 | LLM judge: did the agent answer in the customer's language and dialect? (quoted) |
 | `output.language_script` | frames | 1 | Share of agent messages written mainly in the expected script (arabic\|latin). |
-| `output.payload_equals` | frames | 1 | A checkpoint payload field has the expected value (params: checkpoint, path, equals; checks the approved occurrence, else the last one). |
+| `output.payload_equals` | frames | 2 | A checkpoint payload field has the expected value (params: checkpoint, path, equals; checks the approved occurrence, else the last one). |
+| `output.required_fields` | frames | 1 | A checkpoint payload carries every listed field, present and not empty (params: checkpoint, fields; checks the approved occurrence, else the last one). |
 | `output.terminal_state` | frames | 1 | The conversation ended where the scenario's stop_at says it should. |
 | `protocol.probes_passed` | frames | 1 | Every protocol probe the profile declares got the answer it expects. |
 
@@ -30,6 +31,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `conversation.connection_stable` | frames | 1 | Fails if the agent dropped the connection, even when the session was resumed (opt-in; params.ignore_codes lists close codes to tolerate). |
 | `conversation.no_errors` | frames | 1 | Fails if the agent sent any error frame. |
 | `conversation.turn_budget` | frames | 1 | Customer turns used versus a budget (params.budget, default max_turns). |
+| `flow.checkpoint_gating` | frames | 1 | While a checkpoint waited for the customer's answer, the agent did not act: no tool call and no later phase before the answer (traces or frame evidence, phase markers). |
 | `flow.phase_order` | frames | 1 | Phases first appear in profile order without skipping (params.allow_gaps). |
 | `flow.rejection_routing` | frames | 1 | After each rejection, the agent returns to the expected target phase. |
 | `judge.efficiency` | llm | 2 | LLM judge: did the agent reach the outcome without wasting the customer's time? |
@@ -38,6 +40,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 
 | Scorer | Needs | Version | What it checks |
 |---|---|---|---|
+| `tools.approval_gated` | frames | 1 | Every tool that needs an approval ran only after it: committing tools after the commit gate, forbidden_before tools after their checkpoint (traces, else frame evidence). |
 | `tools.args_valid` | trace | 1 | Every observed call to a tool with an args_schema sent arguments matching it (needs traces; arguments are not in frames). |
 | `tools.call_success` | trace | 1 | Share of the agent's tool calls that succeeded (needs traces). |
 | `tools.expected_called` | frames | 1 | Every must_call tool ran (trace-backed; degraded to frame evidence). |
@@ -63,7 +66,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 
 | Invariant | Scorers |
 |---|---|
-| `checkpoint_gating` | `tools.forbidden_not_called` |
+| `checkpoint_gating` | `tools.forbidden_not_called`, `flow.checkpoint_gating` |
 | `no_autonomous_commit` | `tools.forbidden_not_called` |
 | `no_errors` | `conversation.no_errors` |
 | `phase_order` | `flow.phase_order` |

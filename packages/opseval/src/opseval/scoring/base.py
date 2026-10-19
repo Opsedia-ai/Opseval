@@ -113,8 +113,11 @@ def register(cls: type[Scorer]) -> type[Scorer]:
 INVARIANTS: dict[str, list[str]] = {
     "phase_order": ["flow.phase_order"],
     "no_errors": ["conversation.no_errors"],
+    # forbidden_not_called is the broad check (must_not_call, forbidden_before and the commit
+    # gate). Both invariants keep it, so no scenario loses a check it had; effective_specs
+    # removes the duplicate, so one defect is never scored twice.
     "no_autonomous_commit": ["tools.forbidden_not_called"],
-    "checkpoint_gating": ["tools.forbidden_not_called"],
+    "checkpoint_gating": ["tools.forbidden_not_called", "flow.checkpoint_gating"],
 }
 
 DEFAULT_PACK = [

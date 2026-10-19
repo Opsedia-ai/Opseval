@@ -28,3 +28,31 @@ Trace timestamps come from the agent's clock, while approval times come from Ops
   - `fields=core,basic,io` are valid group names. `input`/`output` are raw strings (parsed as JSON when possible). `latency`, `modelId` and price fields are always present. Cursor pagination follows `meta.cursor`; `type` is `TOOL` and `level` is `ERROR` as documented.
   - Not yet verified on Langfuse Cloud (same API per the docs). Data from SDKs older than Python 4.7.0 / JS 5.4.0 can be delayed by up to 15 minutes on v2 endpoints, so `wait_seconds` may need raising for them.
 
+## Amendment (2026-10-19)
+
+- **`tools.approval_gated`** asks one question: did every tool that needs an approval wait for
+  it? That covers committing tools and the commit gate, and `forbidden_before` tools and their
+  checkpoints. It shares its rule check with `tools.forbidden_not_called`, which still also
+  covers `must_not_call`, so the two cannot drift.
+- **`flow.checkpoint_gating`**: while a checkpoint waits for the customer's answer, the agent
+  does not act. That means no tool call between the checkpoint and the answer, and no move to a
+  phase after the checkpoint's own. A checkpoint the run stopped at stays open to the end.
+- **Both prefer traces and fall back to frame evidence**, marked degraded, like the other tool
+  scorers. They report `TRACE_UNAVAILABLE` only when nothing is visible. A trace-only rule would
+  have turned `no_autonomous_commit` into "not measured" for every frames-only setup, which
+  would have lost a check silently.
+- **Invariants:** `checkpoint_gating` now adds `flow.checkpoint_gating` as well as
+  `tools.forbidden_not_called`. `no_autonomous_commit` keeps `tools.forbidden_not_called`, the
+  broad check, which also covers `must_not_call` and a commit with no checkpoint raised at all.
+  So no scenario loses a check it had, and `effective_specs` removes the duplicate, so one defect
+  is never scored twice. `tools.approval_gated` is a narrower scorer to choose explicitly, not
+  added by an invariant.
+- **Evidence `flow.checkpoint_gating` cannot place is named, never silent.**
+  - On frames, only a tool's first appearance counts as a call; an echoed key is not one.
+  - A call within the clock-skew window of the checkpoint or of its answer is listed as
+    *unplaced*.
+  - Seeing only phases, or only tools, is stated (`tools_checked`, `phases_checked`).
+  - Any of these marks the score *degraded*, which every output names.
+  - A checkpoint the run stopped at closes when the conversation does.
+- `output.payload_equals` is version 2: a checkpoint the profile does not declare is
+  `BAD_PARAMS` (not measured), never the agent's failure. `output.required_fields` does the same.
