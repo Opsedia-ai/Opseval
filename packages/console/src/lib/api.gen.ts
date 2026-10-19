@@ -130,6 +130,7 @@ export interface AttemptRecordOut {
   plantedInjections: string[];
   redactionChecked: boolean;
   redactedKinds: string[];
+  createdArtifacts: string[];
 }
 
 export interface UsageOut {

@@ -57,6 +57,19 @@ tools:
 declares what the agent can call. Tool checks prefer a trace source (Langfuse or OTLP files) and
 fall back to the evidence keys in frames, marked *degraded*.
 
+## What the agent creates
+
+```yaml
+artifacts:
+  - {kind: refund, path: data.refund_status.refund_id}             # in result frames (the default)
+  - {kind: ticket, path: payload.ticket.id, frame_kinds: [needs_human]}
+```
+
+Each attempt's record lists what the agent created (`created_artifacts`: kind, id and the frame
+that reported it), so you can find what a run left in a test tenant. The report and the console
+show it. With no `artifacts:` declared, nothing is looked for, which is not the same as nothing
+created.
+
 ## Credentials and connections
 
 - A static bearer token comes from `OPSEVAL_STATIC_TOKEN`. A `token:` block mints short-lived

@@ -68,6 +68,15 @@ class ProbeResult(Frozen):
     """Where the probe's frames sit in the record, so the evidence is findable."""
 
 
+class CreatedArtifact(Frozen):
+    """Something the agent created during the attempt (FR-REC-01): its kind, its id as the
+    agent reported it, and the frame that reported it."""
+
+    kind: str
+    id: str
+    seq: int
+
+
 class ToolCall(Frozen):
     """One tool call observed in the agent's own trace."""
 
@@ -131,6 +140,9 @@ class RunRecord(Frozen):
     planted_injections: tuple[str, ...] = ()
     transport_events: tuple[TransportEvent, ...] = ()
     redaction: RedactionInfo = Field(default_factory=RedactionInfo)
+    created_artifacts: tuple[CreatedArtifact, ...] = ()
+    """What the agent created, read from frames as the profile declares (``artifacts``). Empty
+    when the profile declares none: that means "not looked for", not "nothing created"."""
 
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]

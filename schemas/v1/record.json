@@ -1,5 +1,30 @@
 {
   "$defs": {
+    "CreatedArtifact": {
+      "additionalProperties": false,
+      "description": "Something the agent created during the attempt (FR-REC-01): its kind, its id as the\nagent reported it, and the frame that reported it.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "seq"
+      ],
+      "title": "CreatedArtifact",
+      "type": "object"
+    },
     "FrameKind": {
       "enum": [
         "user_message",
@@ -399,6 +424,14 @@
     "attempt_index": {
       "title": "Attempt Index",
       "type": "integer"
+    },
+    "created_artifacts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CreatedArtifact"
+      },
+      "title": "Created Artifacts",
+      "type": "array"
     },
     "ended_at": {
       "format": "date-time",

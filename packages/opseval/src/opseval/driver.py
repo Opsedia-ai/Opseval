@@ -25,6 +25,7 @@ from opseval.errors import (
 )
 from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
 from opseval.models.record import (
+    CreatedArtifact,
     FrameRecord,
     InterruptRecord,
     ProbeResult,
@@ -263,6 +264,7 @@ class Driver:
             planted_injections=tuple(self._injections),
             transport_events=session.transport_events() if session else (),
             redaction=RedactionInfo(applied=True, found=tuple(sorted(self._redacted))),
+            created_artifacts=self._created_artifacts(),
         )
 
     def _note_rate_limit(self, exc: Exception) -> None:
@@ -295,6 +297,22 @@ class Driver:
         finally:
             if self._deadline is not None and remaining is not None:
                 self._deadline.reschedule(loop.time() + remaining)
+
+    def _created_artifacts(self) -> tuple[CreatedArtifact, ...]:
+        """Ids of what the agent created, from the (already redacted) frames it sent."""
+        found: dict[tuple[str, str], CreatedArtifact] = {}
+        for spec in self.p.artifacts:
+            for frame in self._frames:
+                if frame.direction != "received" or frame.kind not in spec.frame_kinds:
+                    continue
+                value: Any = frame.payload
+                for part in spec.path.split("."):
+                    value = value.get(part) if isinstance(value, dict) else None
+                if isinstance(value, bool) or not isinstance(value, str | int):
+                    continue
+                key = (spec.kind, str(value)[:200])
+                found.setdefault(key, CreatedArtifact(kind=key[0], id=key[1], seq=frame.seq))
+        return tuple(found.values())
 
     def _scrub(self, text: str) -> str:
         clean, kinds = redact_text(text)

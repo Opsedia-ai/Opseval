@@ -37,4 +37,8 @@ tools:
   create_refund: {evidence_key: refund_status, commits: true}
   notify_customer: {}
 
+# What the agent creates, so each run record lists it (FR-REC-01).
+artifacts:
+  - {kind: refund, path: data.refund_status.refund_id}
+
 timezones: [UTC, Europe/London, Africa/Cairo, Asia/Riyadh, Asia/Dubai]

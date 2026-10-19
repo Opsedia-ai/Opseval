@@ -35,3 +35,8 @@ Opseval must run on a laptop or in CI with no database (local mode), and also as
   treats it as unavailable, and `prune` never deletes it.
 - **When to bump the layout:** on any change that an older reader of a new folder, or a newer
   reader of an old one, could misread. Keep reading the old layouts.
+- *(2026-10-19)* **Additive, optional fields do not bump the layout**, for example
+  `RunRecord.created_artifacts`. An older reader rejects a record with a field it does not know
+  (`extra="forbid"`), so it fails loudly rather than misreading. A change to what an existing
+  field means does bump the layout.
+

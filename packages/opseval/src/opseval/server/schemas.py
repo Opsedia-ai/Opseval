@@ -169,6 +169,7 @@ class AttemptRecordOut(Api):
     planted_injections: list[str]
     redaction_checked: bool  # False: written before value redaction; never checked
     redacted_kinds: list[str]  # the credential kinds taken out; never the values
+    created_artifacts: list[str] = []  # "kind id" the agent created (FR-REC-01)
 
 
 class UsageOut(Api):
