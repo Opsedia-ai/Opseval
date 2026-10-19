@@ -82,7 +82,8 @@ def build_sinks(settings: Settings) -> list[Sink]:
         from opseval.sinks.github_issues import GitHubIssuesSink
 
         repo = settings.github_issues_repo
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        segment = r"(?!\.+(?:/|$))[A-Za-z0-9_.-]+"  # not "." or "..": they would change the path
+        if not re.fullmatch(f"{segment}/{segment}", repo):
             raise ConfigError(f"OPSEVAL_GITHUB_ISSUES_REPO must be owner/name, got {repo!r}")
         if settings.github_token is None:
             raise ConfigError("OPSEVAL_GITHUB_ISSUES_REPO needs OPSEVAL_GITHUB_TOKEN")

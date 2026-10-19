@@ -34,7 +34,8 @@ SECRET_TURN = "my card number is 4111 and I live at 12 Private Road"
 
 
 class FakeGitHub:
-    def __init__(self, *, fail_titles: tuple[str, ...] = ()) -> None:
+    def __init__(self, *, fail_titles: tuple[str, ...] = (), drop_labels: bool = False) -> None:
+        self.drop_labels = drop_labels
         self.issues: list[dict[str, Any]] = []
         self.comments: list[tuple[int, str]] = []
         self.requests: list[httpx.Request] = []
@@ -45,7 +46,13 @@ class FakeGitHub:
         assert request.headers["authorization"] == "Bearer tok"
         path = request.url.path
         if request.method == "GET" and path.endswith("/issues"):
-            return httpx.Response(200, json=[i for i in self.issues if i["state"] == "open"])
+            page = int(request.url.params.get("page", "1"))
+            labelled = [
+                i
+                for i in self.issues
+                if i["state"] == "open" and {"name": "opseval"} in i["labels"]
+            ]
+            return httpx.Response(200, json=labelled[(page - 1) * 100 : page * 100])
         body = json.loads(request.content)
         if request.method == "POST" and path.endswith("/comments"):
             number = int(path.split("/")[-2])
@@ -54,7 +61,8 @@ class FakeGitHub:
         if request.method == "POST" and path.endswith("/issues"):
             if any(t in body["title"] for t in self.fail_titles):
                 return httpx.Response(500, json={"message": "boom"})
-            issue = {"number": 100 + len(self.issues), "state": "open", **body}
+            labels = [] if self.drop_labels else [{"name": n} for n in body.pop("labels")]
+            issue = {"number": 100 + len(self.issues), "state": "open", **body, "labels": labels}
             self.issues.append(issue)
             return httpx.Response(201, json=issue)
         return httpx.Response(404)
@@ -127,14 +135,31 @@ class TestWhatIsReported:
         assert SECRET_TURN not in gh.sent(), "judge quotes stay in the report"
         assert "tools.forbidden_not_called" in gh.sent(), "check ids are kept intact"
 
-    async def test_names_cannot_mention_people_or_break_the_marker(self) -> None:
+    async def test_names_cannot_mention_link_or_reference_anything(self) -> None:
         gh = FakeGitHub()
-        res = result(failing("c-1", name="ping @security-team <b>"), suite="x --> y")
+        res = result(
+            failing("c-1", name="ping @security-team re other-org/repo#12 [x](https://e.vil)")
+        )
         await gh.sink().publish(res)
         issue = gh.issues[0]
-        assert "@security-team" not in issue["title"] and "<b>" not in issue["title"]
-        assert marker("x --> y", "c-1") == "<!-- opseval:x_--__y:c-1 -->"
-        assert issue["body"].count("-->") == 1
+        assert "@security-team" not in issue["title"] and "repo#12" not in issue["title"]
+        # In the body, scenario text is a code span: GitHub renders nothing inside it.
+        assert "`scenario c-1`" not in issue["body"]
+        assert "`ping @security-team re other-org/repo#12 [x](https://e.vil)`" in issue["body"]
+
+    async def test_no_url_leaves_only_the_profile_name(self) -> None:
+        """A target URL can carry a credential or an internal host (review of #59)."""
+        gh = FakeGitHub()
+        res = result(failing("c-1"), target="wss://user:pass@agent.internal/ws?token=abc")
+        await gh.sink().publish(res)
+        for part in ("agent.internal", "user:pass", "token=abc", "wss://"):
+            assert part not in gh.sent(), part
+        assert "**profile:** `p`" in gh.issues[0]["body"]
+
+    def test_markers_are_one_to_one_and_inert(self) -> None:
+        assert marker("smoke test", "a") != marker("smoke_test", "a")
+        assert marker("s", "a:b") != marker("s", "a_b")
+        assert "-->" not in marker("x --> y", "c-1")[:-3]
 
 
 class TestOnceAndBounded:
@@ -157,6 +182,62 @@ class TestOnceAndBounded:
         res = result(*(failing(f"c-{i:02d}") for i in range(12)))
         detail = await gh.sink(max_issues=10).publish(res)
         assert len(gh.issues) == 10 and "2 more not reported (limit 10)" in detail
+
+
+class TestFindingIssues:
+    async def test_a_second_failure_in_the_same_run_comments(self) -> None:
+        gh = FakeGitHub()
+        twice = result(failing("c-1"), failing("c-1"))
+        detail = await gh.sink().publish(twice)
+        assert len(gh.issues) == 1 and "commented on #100" in detail
+
+    async def test_every_open_issue_is_read_not_only_the_first_pages(self) -> None:
+        gh = FakeGitHub()
+        for n in range(250):
+            gh.issues.append(
+                {
+                    "number": 1000 + n,
+                    "state": "open",
+                    "labels": [{"name": "opseval"}],
+                    "body": marker("smoke", f"old-{n}"),
+                }
+            )
+        detail = await gh.sink().publish(result(failing("old-249")))
+        assert "commented on #1249" in detail and len(gh.issues) == 250
+
+    async def test_a_truncated_marker_is_ignored_not_misread(self) -> None:
+        gh = FakeGitHub()
+        gh.issues.append(
+            {
+                "number": 7,
+                "state": "open",
+                "labels": [{"name": "opseval"}],
+                "body": "<!-- opseval:smo",
+            }
+        )
+        detail = await gh.sink().publish(result(failing("c-1")))
+        assert "opened #101" in detail
+
+    async def test_a_dropped_label_stops_the_sink_instead_of_duplicating(self) -> None:
+        """Without the label the next run cannot find the issue (review of #59)."""
+        gh = FakeGitHub(drop_labels=True)
+        outcomes = await publish_all([gh.sink()], result(failing("c-1"), failing("c-2")))
+        assert len(gh.issues) == 1, "it stopped after the first"
+        assert (
+            outcomes[0].published is False and "without the 'opseval' label" in outcomes[0].detail
+        )
+
+    async def test_an_unexpected_list_answer_is_an_error(self) -> None:
+        def odd(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"message": "proxy says hi"})
+
+        sink = GitHubIssuesSink(
+            "acme/agent",
+            "tok",
+            client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(odd)),
+        )
+        outcomes = await publish_all([sink], result(failing("c-1")))
+        assert outcomes[0].published is False and "not a list" in outcomes[0].detail
 
 
 class TestFailuresAreReported:
@@ -182,7 +263,7 @@ class TestConfiguration:
     def test_it_is_built_when_configured(self) -> None:
         assert [s.name for s in build_sinks(self.settings())] == ["github-issues"]
 
-    @pytest.mark.parametrize("repo", ["acme", "acme/agent/x", "a b/c"])
+    @pytest.mark.parametrize("repo", ["acme", "acme/agent/x", "a b/c", "owner/..", "../x", "./x"])
     def test_a_repo_that_is_not_owner_name_is_refused(self, repo: str) -> None:
         with pytest.raises(ConfigError, match="owner/name"):
             build_sinks(self.settings(github_issues_repo=repo))

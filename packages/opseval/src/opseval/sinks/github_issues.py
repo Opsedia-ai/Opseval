@@ -6,11 +6,15 @@ Rules, beyond those every sink follows (ADR-0027):
 - **Only failed ``critical`` or ``blocker`` scenarios.** An inconclusive, skipped or blocked
   scenario is not the agent failing; an issue saying it was would be the core rule broken in
   someone else's tracker.
-- **One issue per scenario, not per run.** A hidden marker (suite and scenario id) finds the
-  open issue a scenario already has; a repeat failure adds a comment to it.
-- **No conversation content.** An issue tracker is another audience, often a wider one, and a
-  transcript can hold personal data. The issue says which scenario failed, which checks, the
-  pass rate, the run and the target; the conversation stays in the run's report.
+- **One issue per scenario, not per run.** A hidden marker (suite and scenario id, encoded so
+  two different names never share one) finds the open issue a scenario already has; a repeat
+  failure adds a comment to it. Finding it depends on the ``opseval`` label, so a token that
+  cannot apply the label stops the sink rather than opening a duplicate on every run.
+- **No conversation content, no URLs.** An issue tracker is another audience, often a wider
+  one: a transcript can hold personal data and a target URL can hold a credential or an
+  internal host. The issue names the scenario, the checks that failed, the pass rate, the run,
+  the suite and the profile. Scenario-supplied text is shown as inert code, so it cannot
+  mention a person, link, or reference another repository's issue.
 - **Bounded.** At most ``max_issues`` issues are opened or commented on per run; the rest are
   counted in the outcome, so a broken agent cannot flood a tracker.
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -29,22 +34,33 @@ from opseval.sinks.base import Sink
 
 LABEL = "opseval"
 SERIOUS = (Criticality.CRITICAL, Criticality.BLOCKER)
+MAX_PAGES = 20
+"""Open labelled issues read to find existing ones (100 per page). Beyond this the sink stops
+rather than guess, because a missed issue would be opened again on every run."""
+MARKER = re.compile(r"<!-- opseval:[A-Za-z0-9_.%-]+:[A-Za-z0-9_.%-]+ -->")
 
 
 def marker(suite: str, test_id: str) -> str:
-    """The hidden tag that finds a scenario's open issue. Only safe characters, so no name
-    can end the HTML comment it sits in."""
-    safe = re.compile(r"[^A-Za-z0-9_.-]")
-    return f"<!-- opseval:{safe.sub('_', suite)}:{safe.sub('_', test_id)} -->"
+    """The hidden tag that finds a scenario's open issue. Percent-encoded, so it is one-to-one
+    (two names never share a marker) and nothing in it can end the HTML comment."""
+    safe = "-_."
+    return f"<!-- opseval:{quote(suite, safe=safe)}:{quote(test_id, safe=safe)} -->"
 
 
-def _md(text: str, limit: int = 300) -> str:
-    """Text from a scenario or a result, made inert in an issue: one line, no HTML or code
-    fences, and no ``@`` that GitHub would turn into a notification to a real person."""
+def _code(text: str, limit: int = 300) -> str:
+    """Scenario or result text for an issue body: one line, inside a code span, where GitHub
+    renders no mention, link, image or issue reference."""
+    flat = " ".join(text.split()).replace("`", "'")[:limit]
+    return f"`{flat}`" if flat else "``"
+
+
+def _title(text: str, limit: int) -> str:
+    """Text for an issue title, where code spans do not render: mentions and issue
+    references are broken with a zero-width space so they notify no one."""
     flat = " ".join(text.split())
-    for ch in "`<>":
-        flat = flat.replace(ch, "")
-    return flat.replace("@", "@\u200b")[:limit]
+    for ch in "@#":
+        flat = flat.replace(ch, ch + "​")
+    return flat[:limit]
 
 
 def failed_serious(result: SuiteResult) -> list[TestVerdict]:
@@ -55,15 +71,20 @@ def failed_serious(result: SuiteResult) -> list[TestVerdict]:
 
 def _facts(result: SuiteResult, t: TestVerdict) -> str:
     rate = "not measured" if t.pass_rate is None else f"{t.pass_rate:.0%}"
-    lines = [
-        f"- **Run:** `{_md(result.run_id, 120)}` ({result.started_at:%Y-%m-%d %H:%M} UTC)",
-        f"- **Suite:** `{_md(result.suite, 120)}` · **target:** `{_md(result.target, 200)}`",
-        f"- **Criticality:** {t.criticality.value} · **pass rate:** {rate}"
-        + (" · flaky" if t.flaky else ""),
-        f"- **Why:** {_md(t.reason or 'failed', 500)}",
-        f"- **Gate:** {result.gate.status} · exit code {result.exit_code}",
-    ]
-    return "\n".join(lines)
+    return "\n".join(
+        [
+            f"- **Run:** {_code(result.run_id, 120)} ({result.started_at:%Y-%m-%d %H:%M} UTC)",
+            f"- **Suite:** {_code(result.suite, 120)} · **profile:** {_code(result.profile, 120)}",
+            f"- **Criticality:** {t.criticality.value} · **pass rate:** {rate}"
+            + (" · flaky" if t.flaky else ""),
+            f"- **Why:** {_code(t.reason or 'failed', 500)}",
+            f"- **Gate:** {result.gate.status} · exit code {result.exit_code}",
+        ]
+    )
+
+
+class LabelNotApplied(RuntimeError):
+    """GitHub created an issue but dropped the label that de-duplication depends on."""
 
 
 class GitHubIssuesSink(Sink):
@@ -101,9 +122,9 @@ class GitHubIssuesSink(Sink):
         return response
 
     async def _open_issues(self, client: httpx.AsyncClient) -> dict[str, int]:
-        """Open opseval issues by marker -> issue number (first 300, newest first)."""
+        """Every open opseval issue, by marker -> issue number. Raises rather than guess."""
         found: dict[str, int] = {}
-        for page in (1, 2, 3):
+        for page in range(1, MAX_PAGES + 1):
             response = await self._call(
                 client,
                 "GET",
@@ -112,16 +133,19 @@ class GitHubIssuesSink(Sink):
             )
             items = response.json()
             if not isinstance(items, list):
-                break
+                raise RuntimeError("GitHub's issue list was not a list: cannot find open issues")
             for item in items:
-                body = item.get("body") or ""
-                start = body.find("<!-- opseval:")
-                if start >= 0 and "pull_request" not in item:
-                    end = body.find("-->", start)
-                    found.setdefault(body[start : end + 3], int(item["number"]))
+                if not isinstance(item, dict) or "pull_request" in item:
+                    continue
+                match = MARKER.search(str(item.get("body") or ""))
+                if match:
+                    found.setdefault(match.group(0), int(item["number"]))
             if len(items) < 100:
-                break
-        return found
+                return found
+        raise RuntimeError(
+            f"more than {MAX_PAGES * 100} open '{LABEL}' issues: close some, so existing "
+            "issues can be found instead of duplicated"
+        )
 
     async def publish(self, result: SuiteResult) -> str:
         failing = failed_serious(result)
@@ -136,8 +160,10 @@ class GitHubIssuesSink(Sink):
             for t in failing[: self._max]:
                 try:
                     await self._report(client, result, t, existing, opened, commented)
-                except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as exc:
-                    # One issue that could not be written must not stop the others.
+                except LabelNotApplied as exc:
+                    errors.append(str(exc))
+                    break  # every further issue would be a future duplicate too
+                except Exception as exc:  # noqa: BLE001 - one issue must not stop the others
                     errors.append(f"{t.test_id}: {type(exc).__name__}: {exc}")
         finally:
             await client.aclose()
@@ -180,16 +206,26 @@ class GitHubIssuesSink(Sink):
             "POST",
             f"/repos/{self._repo}/issues",
             json={
-                "title": f"[opseval] {_md(t.test_id, 80)} failed: {_md(t.name, 120)}",
+                "title": f"[opseval] {_title(t.test_id, 80)} failed: {_title(t.name, 120)}",
                 "labels": [LABEL],
                 "body": (
-                    f"{mark}\nOpseval scenario `{_md(t.test_id, 120)}` "
-                    f"({_md(t.name, 200)}) failed.\n\n{facts}\n\n"
+                    f"{mark}\nOpseval scenario {_code(t.test_id, 120)} "
+                    f"({_code(t.name, 200)}) failed.\n\n{facts}\n\n"
                     "The conversation is in the run's report; it is not copied here."
                 ),
             },
         )
-        opened.append(int(response.json()["number"]))
+        created = response.json()
+        number = int(created["number"])
+        opened.append(number)
+        existing[mark] = number  # a second failure of it in this run comments, not duplicates
+        labels = {str(label.get("name")) for label in created.get("labels") or []}
+        if LABEL not in labels:
+            raise LabelNotApplied(
+                f"issue #{number} was created without the '{LABEL}' label (the token cannot "
+                "apply labels?): without it the next run cannot find it and would open a "
+                "duplicate, so no further issues are written"
+            )
 
 
-__all__ = ["GitHubIssuesSink", "failed_serious", "marker"]
+__all__ = ["GitHubIssuesSink", "LabelNotApplied", "failed_serious", "marker"]
