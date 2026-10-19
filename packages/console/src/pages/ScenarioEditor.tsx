@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Save } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import type { ScenarioCheck } from "../lib/types";
+import { Warnings } from "../components/Warnings";
 import { useApi } from "../lib/useApi";
 import { Callout, Card, CoralButton, Data, Explainer, Mono, Page, PageHeader, Pill } from "../components/ui";
 
@@ -103,6 +104,7 @@ export default function ScenarioEditor() {
                 ? <p className="text-sm text-ink">Valid: <Mono>{verdict.id}</Mono> · {verdict.title}</p>
                 : <ul className="space-y-2 text-sm">{verdict.problems.map((p, i) => (
                     <li key={i} className="text-ink">{(p.field || p.path) && <Mono>{p.field || p.path}</Mono>} {p.message}</li>))}</ul>}
+              {verdict && <Warnings items={verdict.warnings} />}
             </Card>
             {saved && <Callout tone="info">{saved}</Callout>}
             {err && <Callout><b>{err.code}</b> {err.message}

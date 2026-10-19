@@ -24,6 +24,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from opseval.advice import Configured, scenario_warnings
 from opseval.catalogue import check_scenario_text, load_catalogue
 from opseval.config import Settings
 from opseval.errors import ConfigError, OpsevalError
@@ -598,11 +599,22 @@ def check_scenario(ctx: ServerContext, body: s.ScenarioTextIn) -> s.ScenarioChec
                         where, "id", f"suite {suite!r} selects id={before}: renaming empties it"
                     )
                 )
+    warnings = []
+    if sc is not None:
+        here = Configured(
+            judge=bool(ctx.settings.judge_base_url and ctx.settings.judge_model),
+            simulator=bool(ctx.settings.simulator_base_url and ctx.settings.simulator_model),
+        )
+        warnings = [
+            _problem(w.path, w.field, w.message)
+            for w in scenario_warnings(sc, where, profile, here)
+        ]
     return s.ScenarioCheckOut(
         ok=sc is not None and not out,
         id=sc.id if sc else None,
         title=sc.name if sc else None,
         problems=out,
+        warnings=warnings,
     )
 
 
