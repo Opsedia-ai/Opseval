@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     # like every other host that receives data.
     webhook_url: SecretStr | None = None
     """Slack, Teams and Discord incoming-webhook URLs are credentials: redacted everywhere."""
+    github_issues_repo: str | None = None
+    """``owner/name``: open an issue for each failed critical or blocker scenario (ADR-0040)."""
+    github_token: SecretStr | None = None
+    """Token for the issues sink; needs permission to write issues in that repository only."""
+    github_api_url: str = "https://api.github.com"
+    """GitHub API base, for GitHub Enterprise. Its host must be allowlisted."""
+    github_issues_max: int = Field(default=10, ge=1, le=100)
+    """Most issues opened or commented on per run, so a broken agent cannot flood a tracker."""
     sinks: str = ""
     """Plugin sinks to enable, by name (comma-separated). Installing a package never starts
     publishing on its own: a plugin sink runs only when named here."""
@@ -127,6 +135,7 @@ SECRET_FIELDS = (
     "langfuse_secret_key",
     "serve_token",
     "webhook_url",
+    "github_token",
 )
 
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 
@@ -77,6 +78,24 @@ def build_sinks(settings: Settings) -> list[Sink]:
         url = settings.webhook_url.get_secret_value()
         check_url_allowed(url, settings.allowlist(), secure_schemes=("https",))
         built.append(WebhookSink(url))
+    if settings.github_issues_repo:
+        from opseval.sinks.github_issues import GitHubIssuesSink
+
+        repo = settings.github_issues_repo
+        segment = r"(?!\.+(?:/|$))[A-Za-z0-9_.-]+"  # not "." or "..": they would change the path
+        if not re.fullmatch(f"{segment}/{segment}", repo):
+            raise ConfigError(f"OPSEVAL_GITHUB_ISSUES_REPO must be owner/name, got {repo!r}")
+        if settings.github_token is None:
+            raise ConfigError("OPSEVAL_GITHUB_ISSUES_REPO needs OPSEVAL_GITHUB_TOKEN")
+        check_url_allowed(settings.github_api_url, settings.allowlist(), secure_schemes=("https",))
+        built.append(
+            GitHubIssuesSink(
+                repo,
+                settings.github_token.get_secret_value(),
+                api_url=settings.github_api_url,
+                max_issues=settings.github_issues_max,
+            )
+        )
     if settings.langfuse_push_scores:
         host = settings.langfuse_host
         public, secret = settings.langfuse_public_key, settings.langfuse_secret_key

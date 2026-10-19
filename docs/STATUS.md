@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-09** (`main` with run control, the fenced judge transcript, retention, the container image, the docs site, interactive init, the per-scenario trend, the versioned run layout and editor warnings).
+**As of 2026-10-19** (`main` with the GitHub Issues sink).
 
 ## Completion
 
@@ -17,10 +17,10 @@ number cannot drift from the rows.
 |---|---|---|---|
 | v0.1 | 59 | 49 / 8 / 2 | 90% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
-| v0.5 | 12 | 8 / 1 / 3 | 71% |
+| v0.5 | 12 | 8 / 2 / 2 | 75% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 69 / 11 / 8 | **85%** |
+| **All** | 88 | 69 / 12 / 7 | **85%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -115,7 +115,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-INT-02 | Langfuse traces | M | v0.2 | Done | verified on self-hosted 4.44; not yet on Langfuse Cloud |
 | FR-INT-03 | OTLP traces | S | v0.5 | Done | `traces.source: otlp-file` (ADR-0028) |
 | FR-INT-04 | Score push to Langfuse | S | v0.5 | Done | sinks (ADR-0027) |
-| FR-INT-05 | Issue publisher | C | v0.5 | Missing | not started |
+| FR-INT-05 | Issue publisher | C | v0.5 | Partial | GitHub Issues sink: failed critical/blocker scenarios, one issue per scenario (comments on repeats), no conversation content, bounded (ADR-0040); no Jira yet |
 | FR-INT-06 | PyRIT adapter | S | v0.8 | Missing | not started (not due) |
 | FR-INT-07 | Webhooks | S | v0.5 | Done | sinks (ADR-0027) |
 | FR-DX-01 | `pip install` and a container image | M | v0.1 | Partial | CLI image from the lock (`Dockerfile`, digest-pinned, hash-checked, non-root; built and demo-checked in CI; ADR-0038); nothing published yet: PyPI name reserved, image and wheel wait for Gate 0 |
