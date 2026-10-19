@@ -43,3 +43,6 @@ and that it does not run as root.
 - Publishing the image (GHCR) is a release step and waits for Gate 0, like PyPI.
 - The image is about 290 MB (Python slim plus the locked dependencies). A distroless base could
   shrink it later, at the cost of a shell for debugging.
+- *Update (2026-10-19):* the image's Python stays on a version CI tests (3.11–3.13). Dependabot
+  keeps the 3.12 digest current but no longer proposes a new Python version; that move comes
+  with a change to the CI matrix.

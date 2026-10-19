@@ -14,3 +14,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The image's Python must be one CI tests (ci.yml: 3.11–3.13). New digests of 3.12 still
+      # arrive (security fixes); a move to a newer Python comes with the CI matrix change.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
