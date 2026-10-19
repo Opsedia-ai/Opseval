@@ -2,7 +2,7 @@
 """Sinks: where a finished run is published (FR-INT-04, FR-INT-07, ADR-0027).
 
 A sink takes a :class:`~opseval.models.results.SuiteResult` and sends it somewhere — a
-webhook, Langfuse scores, later an issue tracker. The architecture fixes the contract as
+webhook, Langfuse scores, GitHub issues (ADR-0040). The architecture fixes the contract as
 ``async publish(run_result)`` over the ``opseval.sinks`` entry-point group.
 
 Two rules that are not negotiable, because publishing happens *after* the verdict:

@@ -30,6 +30,10 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `CI` or `OPSEVAL_CI` | bool | `False` | Telemetry is off in CI unless OPSEVAL_TELEMETRY=true is set explicitly. |
 | `DO_NOT_TRACK` or `OPSEVAL_DO_NOT_TRACK` | bool | `False` | The community-standard opt-out. Honoured the same as OPSEVAL_TELEMETRY=false. |
 | `OPSEVAL_WEBHOOK_URL` | secret | unset (secret) | Slack, Teams and Discord incoming-webhook URLs are credentials: redacted everywhere. |
+| `OPSEVAL_GITHUB_ISSUES_REPO` | text | unset | ``owner/name``: open an issue for each failed critical or blocker scenario (ADR-0040). |
+| `OPSEVAL_GITHUB_TOKEN` | secret | unset (secret) | Token for the issues sink; needs permission to write issues in that repository only. |
+| `OPSEVAL_GITHUB_API_URL` | text | `https://api.github.com` | GitHub API base, for GitHub Enterprise. Its host must be allowlisted. |
+| `OPSEVAL_GITHUB_ISSUES_MAX` | integer | `10` | Most issues opened or commented on per run, so a broken agent cannot flood a tracker. |
 | `OPSEVAL_SINKS` | text | empty | Plugin sinks to enable, by name (comma-separated). Installing a package never starts publishing on its own: a plugin sink runs only when named here. |
 | `OPSEVAL_LANGFUSE_PUSH_SCORES` | bool | `False` | Publish each finished run's verdicts to Langfuse as scores (ADR-0027). |
 | `OPSEVAL_LANGFUSE_SCORE_NAME` | text | `opseval` | Name prefix for scores pushed to Langfuse. |

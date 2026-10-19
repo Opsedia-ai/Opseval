@@ -554,6 +554,13 @@ Pushed scores keep the three-state contract: `passed` is 1, `failed` is 0, and a
 never measured is pushed as a *category* — never as 0, which on a dashboard is indistinguishable
 from the agent failing.
 
+To open an issue for each failed `critical` or `blocker` scenario, set
+`OPSEVAL_GITHUB_ISSUES_REPO=owner/name` and `OPSEVAL_GITHUB_TOKEN` (a token that can write issues
+there), and allowlist `api.github.com`. A scenario that keeps failing gets a comment on its open
+issue, not a new one. Issues carry which checks failed and the run id, never the conversation,
+and at most `OPSEVAL_GITHUB_ISSUES_MAX` (10) are written per run
+([ADR-0040](docs/adr/0040-github-issues-sink.md)).
+
 Third parties can add a sink over the `opseval.sinks` entry point with
 `async def publish(self, result) -> str`. Installing one publishes nothing until you name it:
 `OPSEVAL_SINKS=acme`, the plugin's entry-point name (comma-separated; a name no installed plugin
