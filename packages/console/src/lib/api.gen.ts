@@ -110,6 +110,14 @@ export interface ToolCallOut {
   arguments: string | null;
 }
 
+export interface ArtifactOut {
+  kind: string;
+  id: string;
+  seq: number;
+  idRedacted: boolean;
+  idTruncated: boolean;
+}
+
 /** The record behind one attempt: what was said and done, not how it was scored. */
 export interface AttemptRecordOut {
   testId: string;
@@ -130,7 +138,8 @@ export interface AttemptRecordOut {
   plantedInjections: string[];
   redactionChecked: boolean;
   redactedKinds: string[];
-  createdArtifacts: string[];
+  createdArtifacts: ArtifactOut[];
+  artifactsChecked: boolean;
 }
 
 export interface UsageOut {

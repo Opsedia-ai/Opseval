@@ -33,8 +33,17 @@ class ArtifactSpec(BaseModel):
     """What it is, e.g. ``refund`` or ``ticket``."""
     path: str = Field(min_length=1, max_length=200)
     """Dotted path to its id inside a frame's payload, e.g. ``data.refund_status.refund_id``."""
-    frame_kinds: list[FrameKind] = Field(default_factory=lambda: [FrameKind.RESULT])
+    frame_kinds: list[FrameKind] = Field(default_factory=lambda: [FrameKind.RESULT], min_length=1)
     """Which received frames to look in."""
+
+    @model_validator(mode="after")
+    def _received_kinds_only(self) -> ArtifactSpec:
+        sent = {FrameKind.USER_MESSAGE, FrameKind.RESUME}
+        mine = sorted(k.value for k in self.frame_kinds if k in sent)
+        if mine:
+            # Those are frames Opseval sends: an artifact can never be read from them.
+            raise ValueError(f"frame_kinds {mine} are frames Opseval sends, not the agent")
+        return self
 
 
 class ToolSpec(BaseModel):

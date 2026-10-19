@@ -8,6 +8,7 @@
           "items": {
             "$ref": "#/$defs/FrameKind"
           },
+          "minItems": 1,
           "title": "Frame Kinds",
           "type": "array"
         },

@@ -56,10 +56,13 @@ def _first_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-LAYOUT = "opseval-runs/1"
-"""The layout this version writes. Bump it (and keep reading the old one) on any change a
-reader of an older folder, or an older reader of a new folder, could misread."""
-KNOWN_LAYOUTS = frozenset({LAYOUT})
+LEGACY_LAYOUT = "opseval-runs/1"
+"""A folder whose manifest has no layout field predates versioning: layout 1."""
+LAYOUT = "opseval-runs/2"
+"""The layout this version writes. Bump it (and keep reading the old) on any change a reader
+of an older folder, or an older reader of a new folder, could misread or reject. 2: run
+records may carry created_artifacts."""
+KNOWN_LAYOUTS = frozenset({LEGACY_LAYOUT, LAYOUT})
 
 
 class UnknownLayout(ConfigError):
@@ -72,7 +75,7 @@ def layout_at(folder: Path) -> str:
         data = json.loads((folder / "manifest.json").read_text("utf-8"))
     except (OSError, ValueError):
         data = {}
-    found = data.get("layout", LAYOUT) if isinstance(data, dict) else LAYOUT
+    found = data.get("layout", LEGACY_LAYOUT) if isinstance(data, dict) else LEGACY_LAYOUT
     return found if isinstance(found, str) else repr(found)
 
 

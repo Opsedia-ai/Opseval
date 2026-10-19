@@ -698,5 +698,15 @@ def attempt_record(
         planted_injections=list(record.planted_injections),
         redaction_checked=record.redaction.applied,
         redacted_kinds=list(record.redaction.found),
-        created_artifacts=[f"{a.kind} {a.id}" for a in record.created_artifacts],
+        created_artifacts=[
+            s.ArtifactOut(
+                kind=a.kind,
+                id="" if a.id_redacted else a.id,
+                seq=a.seq,
+                id_redacted=a.id_redacted,
+                id_truncated=a.id_truncated,
+            )
+            for a in record.created_artifacts
+        ],
+        artifacts_checked=record.artifacts_checked,
     )

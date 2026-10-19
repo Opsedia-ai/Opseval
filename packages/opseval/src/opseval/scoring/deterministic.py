@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from opseval.models.profile import FrameKind
 from opseval.models.record import InterruptRecord, RunRecord, TerminalState
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import RESERVED_STOP_AT, ScorerSpec
+from opseval.paths import dig
 from opseval.redaction import strip_markers
 from opseval.scoring.base import Scorer, ScoringContext, register
 
@@ -158,19 +158,16 @@ class TerminalStateScorer(Scorer):
         )
 
 
-def _dig(value: Any, path: str) -> Any:
-    for part in path.split("."):
-        if not isinstance(value, dict) or part not in value:
-            raise KeyError(path)
-        value = value[part]
-    return value
+_dig = dig  # objects by key, lists by index (opseval.paths)
 
 
 @register
 class PayloadEquals(Scorer):
     id = "output.payload_equals"
     axis = Axis.OUTPUT
-    version = "2"  # 2: a checkpoint the profile does not declare is BAD_PARAMS, not a failure
+    # 2: a checkpoint the profile does not declare is BAD_PARAMS, not a failure.
+    # 3: a numeric path step indexes a list (opseval.paths.dig).
+    version = "3"
     description = (
         "A checkpoint payload field has the expected value (params: checkpoint, path, equals; "
         "checks the approved occurrence, else the last one)."
@@ -226,6 +223,7 @@ def _unknown_checkpoint(checkpoint: str, ctx: ScoringContext) -> str | None:
 class RequiredFields(Scorer):
     id = "output.required_fields"
     axis = Axis.OUTPUT
+    version = "2"  # 2: a numeric path step indexes a list (opseval.paths.dig)
     description = (
         "A checkpoint payload carries every listed field, present and not empty (params: "
         "checkpoint, fields; checks the approved occurrence, else the last one)."

@@ -8,6 +8,16 @@
           "title": "Id",
           "type": "string"
         },
+        "id_redacted": {
+          "default": false,
+          "title": "Id Redacted",
+          "type": "boolean"
+        },
+        "id_truncated": {
+          "default": false,
+          "title": "Id Truncated",
+          "type": "boolean"
+        },
         "kind": {
           "title": "Kind",
           "type": "string"
@@ -421,6 +431,11 @@
   "additionalProperties": false,
   "description": "Opseval opseval/v1 record contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
   "properties": {
+    "artifacts_checked": {
+      "default": false,
+      "title": "Artifacts Checked",
+      "type": "boolean"
+    },
     "attempt_index": {
       "title": "Attempt Index",
       "type": "integer"

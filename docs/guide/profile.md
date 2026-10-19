@@ -67,8 +67,10 @@ artifacts:
 
 Each attempt's record lists what the agent created (`created_artifacts`: kind, id and the frame
 that reported it), so you can find what a run left in a test tenant. The report and the console
-show it. With no `artifacts:` declared, nothing is looked for, which is not the same as nothing
-created.
+show it, and say "nothing" when artifacts were looked for and none were found. With no
+`artifacts:` declared, nothing is looked for, and nothing is claimed. A path can index a list
+(`data.refunds.0.id`). An id that looks like a credential is redacted like any other value; the
+artifact is still listed, with its id marked as redacted.
 
 ## Credentials and connections
 

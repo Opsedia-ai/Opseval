@@ -41,12 +41,14 @@ from opseval.models.scenario import (
     PolicyAction,
     Scenario,
 )
+from opseval.paths import dig
 from opseval.redaction import redact_text, redact_value
 from opseval.simulator import Simulator
 from opseval.transport.base import Session, Transport
 
 T = TypeVar("T")
 
+ARTIFACT_ID_MAX = 500
 RATE_LIMITED_NOTE = "rate_limited"
 """Noted on a record whose attempt a rate limit ended (ADR-0035)."""
 
@@ -238,6 +240,14 @@ class Driver:
         except Exception as exc:  # noqa: BLE001 - any other bug is ours, never the agent's
             state, reason = TerminalState.HARNESS_FAILURE, f"{type(exc).__name__}: {exc}"
             self._infra.append(f"harness: unexpected {type(exc).__name__}: {exc}")
+        artifacts: tuple[CreatedArtifact, ...] = ()
+        artifacts_checked = bool(self.p.artifacts)
+        if artifacts_checked:
+            try:
+                artifacts = self._created_artifacts()
+            except Exception as exc:  # noqa: BLE001 - a bug here must not lose the record
+                artifacts_checked = False
+                self._notes.append(f"created artifacts could not be read: {type(exc).__name__}")
         # Exception text can carry a credential (a URL with ?token=…): it is part of the
         # record, so it goes through the same value redaction as the conversation.
         reason = self._scrub(reason) if reason else reason
@@ -264,7 +274,8 @@ class Driver:
             planted_injections=tuple(self._injections),
             transport_events=session.transport_events() if session else (),
             redaction=RedactionInfo(applied=True, found=tuple(sorted(self._redacted))),
-            created_artifacts=self._created_artifacts(),
+            created_artifacts=artifacts,
+            artifacts_checked=artifacts_checked,
         )
 
     def _note_rate_limit(self, exc: Exception) -> None:
@@ -299,19 +310,40 @@ class Driver:
                 self._deadline.reschedule(loop.time() + remaining)
 
     def _created_artifacts(self) -> tuple[CreatedArtifact, ...]:
-        """Ids of what the agent created, from the (already redacted) frames it sent."""
+        """Ids of what the agent created, from the (already redacted) frames it sent.
+
+        Probe replies are not the conversation and are left out. An id that redaction replaced
+        is kept as an artifact whose id is unknown, one per frame, never merged into one.
+        """
+        probe_frames = {p.received_seq for p in self._probes if p.received_seq is not None}
         found: dict[tuple[str, str], CreatedArtifact] = {}
         for spec in self.p.artifacts:
             for frame in self._frames:
-                if frame.direction != "received" or frame.kind not in spec.frame_kinds:
+                if (
+                    frame.direction != "received"
+                    or frame.kind not in spec.frame_kinds
+                    or frame.seq in probe_frames
+                ):
                     continue
-                value: Any = frame.payload
-                for part in spec.path.split("."):
-                    value = value.get(part) if isinstance(value, dict) else None
+                try:
+                    value = dig(frame.payload, spec.path)
+                except KeyError:
+                    continue
                 if isinstance(value, bool) or not isinstance(value, str | int):
                     continue
-                key = (spec.kind, str(value)[:200])
-                found.setdefault(key, CreatedArtifact(kind=key[0], id=key[1], seq=frame.seq))
+                full = str(value)
+                redacted = full == REDACTED or full.startswith("[redacted:")
+                key = (spec.kind, f"{full}@{frame.seq}" if redacted else full)
+                found.setdefault(
+                    key,
+                    CreatedArtifact(
+                        kind=spec.kind,
+                        id=full[:ARTIFACT_ID_MAX],
+                        seq=frame.seq,
+                        id_redacted=redacted,
+                        id_truncated=len(full) > ARTIFACT_ID_MAX,
+                    ),
+                )
         return tuple(found.values())
 
     def _scrub(self, text: str) -> str:

@@ -75,6 +75,10 @@ class CreatedArtifact(Frozen):
     kind: str
     id: str
     seq: int
+    id_redacted: bool = False
+    """The id itself was a credential-shaped value and was redacted: the artifact exists, its
+    id is not kept."""
+    id_truncated: bool = False
 
 
 class ToolCall(Frozen):
@@ -141,8 +145,10 @@ class RunRecord(Frozen):
     transport_events: tuple[TransportEvent, ...] = ()
     redaction: RedactionInfo = Field(default_factory=RedactionInfo)
     created_artifacts: tuple[CreatedArtifact, ...] = ()
-    """What the agent created, read from frames as the profile declares (``artifacts``). Empty
-    when the profile declares none: that means "not looked for", not "nothing created"."""
+    """What the agent created, read from frames as the profile declares (``artifacts``)."""
+    artifacts_checked: bool = False
+    """Whether they were looked for. Empty and unchecked is "not looked for", never "nothing
+    created"; empty and checked is "nothing created"."""
 
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]

@@ -148,6 +148,14 @@ class ToolCallOut(Api):
     arguments: str | None  # JSON, as the trace recorded it (credential values redacted)
 
 
+class ArtifactOut(Api):
+    kind: str
+    id: str  # empty when the id itself was redacted
+    seq: int  # the frame that reported it
+    id_redacted: bool = False
+    id_truncated: bool = False
+
+
 class AttemptRecordOut(Api):
     """The record behind one attempt: what was said and done, not how it was scored."""
 
@@ -169,7 +177,8 @@ class AttemptRecordOut(Api):
     planted_injections: list[str]
     redaction_checked: bool  # False: written before value redaction; never checked
     redacted_kinds: list[str]  # the credential kinds taken out; never the values
-    created_artifacts: list[str] = []  # "kind id" the agent created (FR-REC-01)
+    created_artifacts: list[ArtifactOut] = []  # what the agent created (FR-REC-01)
+    artifacts_checked: bool = False  # False: not looked for (never "nothing created")
 
 
 class UsageOut(Api):

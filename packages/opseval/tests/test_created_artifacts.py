@@ -45,11 +45,14 @@ async def test_a_refund_the_agent_issued_is_on_the_record(profile: SutProfile) -
 
 
 async def test_nothing_declared_means_nothing_looked_for(profile: SutProfile) -> None:
+    """Empty and unchecked is "not looked for"; empty and checked is "nothing created"."""
     bare = profile.model_copy(update={"artifacts": []})
     s = committing_scenario()
     async with run_agent() as url:
         rec = await drive(s, bare, url, allow_commit=True)
-    assert rec.created_artifacts == ()
+        stopped = await drive(make_scenario(), profile, url)  # stops before the refund
+    assert (rec.created_artifacts, rec.artifacts_checked) == ((), False)
+    assert (stopped.created_artifacts, stopped.artifacts_checked) == ((), True)
 
 
 def frame(
@@ -59,7 +62,10 @@ def frame(
 
 
 def extract(
-    profile: SutProfile, frames: list[FrameRecord], *specs: ArtifactSpec
+    profile: SutProfile,
+    frames: list[FrameRecord],
+    *specs: ArtifactSpec,
+    probes: tuple[Any, ...] = (),
 ) -> list[tuple[str, str, int]]:
     s = make_scenario()
     driver = Driver(
@@ -72,6 +78,7 @@ def extract(
         seed=1,
     )
     driver._frames = frames
+    driver._probes = list(probes)
     return [(a.kind, a.id, a.seq) for a in driver._created_artifacts()]
 
 
@@ -95,6 +102,58 @@ class TestExtraction:
     def test_a_missing_path_is_simply_absent(self, profile: SutProfile) -> None:
         got = extract(profile, [frame(0, {"data": "flat"})], ArtifactSpec(kind="x", path="data.id"))
         assert got == []
+
+
+class TestReviewOf61:
+    def test_redacted_ids_are_kept_one_per_frame(self, profile: SutProfile) -> None:
+        frames = [
+            frame(0, {"x": "***redacted***"}),
+            frame(1, {"x": "[redacted:jwt]"}),
+            frame(2, {"x": "***redacted***"}),
+        ]
+        got = extract(profile, frames, ArtifactSpec(kind="sig", path="x"))
+        assert [seq for _, _, seq in got] == [0, 1, 2], "three artifacts, ids unknown"
+
+    def test_long_ids_are_not_merged_and_are_marked_truncated(self, profile: SutProfile) -> None:
+        a, b = "A" * 600 + "1", "A" * 600 + "2"
+        driver_frames = [frame(0, {"x": a}), frame(1, {"x": b})]
+        got = extract(profile, driver_frames, ArtifactSpec(kind="k", path="x"))
+        assert len(got) == 2 and all(len(i) == 500 for _, i, _ in got)
+
+    def test_a_list_index_reaches_an_id(self, profile: SutProfile) -> None:
+        got = extract(
+            profile,
+            [frame(0, {"data": {"refunds": [{"id": "R-1"}]}})],
+            ArtifactSpec(kind="r", path="data.refunds.0.id"),
+        )
+        assert got == [("r", "R-1", 0)]
+
+    def test_a_probe_reply_is_not_the_conversation(self, profile: SutProfile) -> None:
+        from opseval.models.record import ProbeResult
+
+        probe = ProbeResult(name="p", passed=True, sent_seq=0, received_seq=1)
+        frames = [frame(1, {"id": "from-probe"}), frame(2, {"id": "real"})]
+        got = extract(profile, frames, ArtifactSpec(kind="k", path="id"), probes=(probe,))
+        assert got == [("k", "real", 2)]
+
+    async def test_an_extraction_bug_is_noted_never_loses_the_record(
+        self, profile: SutProfile, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(self: Driver) -> Any:
+            raise RuntimeError("bug")
+
+        monkeypatch.setattr(Driver, "_created_artifacts", boom)
+        s = committing_scenario()
+        async with run_agent() as url:
+            rec = await drive(s, profile, url, allow_commit=True)
+        assert rec.terminal_state.value == "outcome_committed", "the attempt is still recorded"
+        assert rec.artifacts_checked is False
+        assert any("created artifacts could not be read" in n for n in rec.notes)
+
+    @pytest.mark.parametrize("kinds", [[], ["user_message"], ["resume", "result"]])
+    def test_frame_kinds_that_can_never_match_fail_at_load(self, kinds: list[str]) -> None:
+        with pytest.raises(ValidationError):
+            ArtifactSpec(kind="x", path="id", frame_kinds=kinds)  # type: ignore[arg-type]
 
 
 def test_an_artifact_declaration_must_be_complete() -> None:
@@ -133,7 +192,8 @@ async def test_the_report_and_the_console_show_them(profile: SutProfile, tmp_pat
         exit_code=0,
     )
     html = render_html(result, [rec], profile)
-    assert "Created in the system under test" in html and "refund rf-10482" in html
+    assert "Created in the system under test" in html
+    assert "<code>refund</code> <code>rf-10482</code>" in html
 
     pytest.importorskip("fastapi")
     from opseval.server.views import attempt_record
@@ -143,4 +203,7 @@ async def test_the_report_and_the_console_show_them(profile: SutProfile, tmp_pat
     store.write_manifest("r", {"run_id": "r"})
     store.save_record(rec)
     out = attempt_record(store, "r", rec.test_id, rec.attempt_index)
-    assert out is not None and out.created_artifacts == ["refund rf-10482"]
+    assert out is not None and out.artifacts_checked is True
+    assert [(a.kind, a.id, a.id_redacted) for a in out.created_artifacts] == [
+        ("refund", "rf-10482", False)
+    ]

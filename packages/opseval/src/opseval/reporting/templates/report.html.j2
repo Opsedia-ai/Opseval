@@ -154,7 +154,7 @@ forbidden, no matching call, no rule to apply. The passes are honest and they ar
 {% for c in rec.tool_calls %}<tr><td><code>{{ c.name }}</code></td><td>{{ c.started_at.isoformat() }}</td><td class="{{ 'passed' if c.ok else 'failed' }}">{{ 'ok' if c.ok else 'error' }}</td><td>{% if c.arguments is not none %}<pre dir="auto">{{ c.arguments | tojson(indent=2) }}</pre>{% endif %}</td></tr>{% endfor %}
 </table></details>
 {% endif %}
-{% if rec.created_artifacts %}<p>Created in the system under test: {% for x in rec.created_artifacts %}<code>{{ x.kind }} {{ x.id }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+{% if rec.artifacts_checked %}<p>Created in the system under test: {% for x in rec.created_artifacts %}<code>{{ x.kind }}</code> {% if x.id_redacted %}<em>(id redacted)</em>{% else %}<code>{{ x.id }}</code>{% if x.id_truncated %} <em>(truncated)</em>{% endif %}{% endif %}{% if not loop.last %}, {% endif %}{% else %}nothing{% endfor %}</p>{% endif %}
 {% for n in rec.notes if n.startswith('trace_unavailable') %}<p class="inconclusive">Traces not used: {{ n[19:] }} (tool checks fell back to frame evidence)</p>{% endfor %}
 {% endif %}
 </div>
