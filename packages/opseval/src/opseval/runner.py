@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import time
@@ -11,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 from opseval import __version__
 from opseval.auth import HS256Tokens, TokenSource
@@ -35,6 +37,7 @@ from opseval.models.results import (
 from opseval.models.scenario import Criticality, Scenario
 from opseval.models.stop import StopPolicy
 from opseval.models.telemetry import TelemetryEvent
+from opseval.models.tenant import Tenant, TenantPool, lane_count
 from opseval.plugins import load_scorers
 from opseval.preflight import llm_roles_needed, preflight
 from opseval.progress import ProgressLog
@@ -46,6 +49,7 @@ from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attemp
 from opseval.sinks import build_sinks, publish_all
 from opseval.storage import FileStore
 from opseval.telemetry import report as report_telemetry
+from opseval.tenants import TenantLeases, default_lock_dir, load_pool, refreshing, token_for
 from opseval.traces import TraceSource, enrich
 from opseval.traces.langfuse import LangfuseTraceSource
 from opseval.traces.otlp import OtlpFileTraceSource
@@ -106,17 +110,47 @@ class RunOptions:
     An id that is not in the catalogue is a configuration error, never silently dropped."""
 
 
-def build_transport_factory(options: RunOptions, settings: Settings) -> TransportFactory:
+class _TransportCtor(Protocol):
+    """What every network transport's constructor takes."""
+
+    def __call__(
+        self, target: str, profile: SutProfile, /, *, token: str | TokenSource | None = None
+    ) -> Transport: ...
+
+
+TRANSPORTS: dict[str, tuple[_TransportCtor, tuple[str, ...]]] = {
+    "websocket": (WebSocketTransport, ("wss",)),
+    "http-json": (HttpJsonTransport, ("https",)),
+    "openai-chat": (OpenAIChatTransport, ("https",)),
+    "sse": (SseTransport, ("https",)),
+}
+"""Transport class and the schemes that count as secure for it: one table, so a tenant's own
+target is checked exactly like the default one."""
+
+TenantTransportFactory = Callable[[SutProfile, "Tenant | None"], Transport]
+"""Builds the transport for one attempt. With a pool, the tenant supplies its own target and
+credentials (ADR-0041)."""
+
+
+def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTransportFactory:
     if options.transport_factory is not None:
-        return options.transport_factory
+        injected = options.transport_factory
+        return lambda profile, _tenant: injected(profile)
     if not options.target:
         raise ConfigError("no target: pass --target (e.g. ws://localhost:8765)")
-    target = options.target
+    default_target = options.target
     token = settings.static_token.get_secret_value() if settings.static_token else None
     signing_key = settings.token_signing_key
 
-    def credentials(profile: SutProfile) -> str | TokenSource | None:
-        """A fresh token source per attempt: HS256 when the profile asks for it."""
+    def credentials(profile: SutProfile, tenant: Tenant | None) -> str | TokenSource | None:
+        """A fresh token source per attempt: HS256 when the profile asks for it.
+
+        A tenant's own token wins over OPSEVAL_STATIC_TOKEN, because the whole point of
+        the pool is that each tenant authenticates as itself.
+        """
+        own = token_for(tenant, settings) if tenant else None
+        if own:
+            return own
         if profile.token is None:
             return token
         if signing_key is None:
@@ -130,21 +164,47 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> Transpor
             claims=profile.token.claims,
         )
 
-    if options.transport == "websocket":
-        check_url_allowed(target, settings.allowlist(), secure_schemes=("wss",))
-        return lambda profile: WebSocketTransport(target, profile, token=credentials(profile))
-    if options.transport == "http-json":
-        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: HttpJsonTransport(target, profile, token=credentials(profile))
-    if options.transport == "openai-chat":
-        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: OpenAIChatTransport(target, profile, token=credentials(profile))
-    if options.transport == "sse":
-        check_url_allowed(target, settings.allowlist(), secure_schemes=("https",))
-        return lambda profile: SseTransport(target, profile, token=credentials(profile))
-    raise ConfigError(
-        f"unknown transport {options.transport!r}; use websocket, http-json, sse or openai-chat"
-    )
+    try:
+        cls, secure = TRANSPORTS[options.transport]
+    except KeyError:
+        raise ConfigError(
+            f"unknown transport {options.transport!r}; use {', '.join(sorted(TRANSPORTS))}"
+        ) from None
+    check_url_allowed(default_target, settings.allowlist(), secure_schemes=secure)
+
+    def build(profile: SutProfile, tenant: Tenant | None) -> Transport:
+        where = tenant.target if tenant and tenant.target else default_target
+        return cls(where, profile, token=credentials(profile, tenant))
+
+    return build
+
+
+def _check_pool(
+    pool: TenantPool, profile: SutProfile, options: RunOptions, settings: Settings
+) -> None:
+    """Every tenant's credential and target, checked before the first frame (ADR-0041).
+
+    A minted HS256 token carries the profile's claims and knows nothing about tenants, so
+    every lane would authenticate as the *same* account while believing it was isolated:
+    the shared-state corruption the pool exists to prevent, recorded as agent misbehaviour.
+    """
+    if options.transport_factory is not None:
+        raise ConfigError(
+            "a tenant pool needs a network transport: an injected transport has no tenant "
+            "identity to apply, so every lane would share one"
+        )
+    minted = profile.token is not None
+    secure = TRANSPORTS.get(options.transport, (None, ("https",)))[1]
+    for tenant in pool.tenants:
+        own = token_for(tenant, settings)
+        if minted and not own:
+            raise ConfigError(
+                f"profile {profile.name!r} mints its own tokens, which cannot tell one "
+                f"tenant from another, so tenant {tenant.id!r} would authenticate as "
+                "every other one. Give each tenant a token_env."
+            )
+        if tenant.target:
+            check_url_allowed(tenant.target, settings.allowlist(), secure_schemes=secure)
 
 
 def build_trace_source(
@@ -343,6 +403,18 @@ async def launch(
         # A broken file elsewhere in the folder is not part of this run. (A broken file
         # that *was* chosen has no valid id, so it already failed as "no valid scenario".)
         catalogue.problems = []
+    # Loaded and fully validated before the run, like the sinks: an unset tenant token or a
+    # tenant target that is not allowlisted, found mid-suite, would fail the run with records
+    # on disk; with one lane the pool's later tenants might never be drawn at all.
+    pool = load_pool(settings.tenants_file) if settings.tenants_file else None
+    if pool is None and settings.lanes is not None and settings.lanes > 1:
+        raise ConfigError(
+            f"--lanes {settings.lanes} needs --tenants: scenarios may only run in parallel "
+            "once you have said which isolated accounts they may use"
+        )
+    lanes = lane_count(len(pool.tenants), settings.lanes, settings.lane_cap) if pool else 1
+    if pool:
+        _check_pool(pool, profile, options, settings)
     # Built before the run: a destination that is not allowlisted is a configuration
     # error, and finding that out after a suite has something to publish is too late.
     sinks = build_sinks(settings)
@@ -374,7 +446,7 @@ async def launch(
             catalogue.scenarios,
             profile,
             settings,
-            target=make_transport(profile).target,
+            target=make_transport(profile, None).target,
             transport=options.transport,
             traces_enabled=options.traces and profile.traces is not None,
             verify_llm=options.verify_llm,
@@ -386,7 +458,7 @@ async def launch(
             # agent would report "safe to release" on a suite that tested nothing. We
             # could not reach what we were asked to test: that is a config error (exit 3).
             raise ConfigError(
-                f"the agent is not reachable at {make_transport(profile).target}: "
+                f"the agent is not reachable at {make_transport(profile, None).target}: "
                 f"{sut.detail}. Nothing was run. Check the target and the network, or "
                 "pass --no-preflight to try anyway."
             )
@@ -395,7 +467,7 @@ async def launch(
 
     started = datetime.now(UTC)
     run_id = options.run_id or new_run_id(started)
-    target_label = make_transport(profile).target
+    target_label = make_transport(profile, None).target
     store.write_manifest(
         run_id,
         {
@@ -429,57 +501,75 @@ async def launch(
     if options.fail_fast:
         stop = stop.model_copy(update={"fail_fast": True})
     control = _RunControl(stop, store, run_id, policy, declared)
-    for scenario in catalogue.scenarios:
-        before = len(verdicts)
+    # Opt-in: without a tenant pool the run is sequential with no leases, as before.
+    lock_dir = settings.tenant_lock_dir or (str(default_lock_dir(pool)) if pool else None)
+    leases = (
+        TenantLeases(
+            pool,
+            lock_dir or "",
+            holder=f"{run_id}:{os.getpid()}",
+            stale_after=settings.tenant_stale_after_seconds,
+        )
+        if pool
+        else None
+    )
+    if pool:
+        log(f"tenant pool: {len(pool.tenants)} tenant(s), {lanes} lane(s) · locks {lock_dir}")
+
+    async def run_one(scenario: Scenario) -> TestVerdict:
+        """One scenario from start to verdict: run control, skips, the lease, attempts."""
+        halt = control.before_scenario(scenario)
+        if halt is not None:
+            # Named, so what was not run cannot vanish from the result.
+            return halt
+        if options.repeats:
+            scenario = scenario.model_copy(
+                update={
+                    "execution": scenario.execution.model_copy(update={"repeats": options.repeats})
+                }
+            )
+        store.save_scenario(run_id, scenario)
+        tracker.started(scenario.id, scenario.execution.repeats)
+        if scenario.is_blocked:
+            return skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'", "quarantine")
+        blocked_by = _unmet(scenario, health, sim_client is None)
+        if blocked_by is not None:
+            reason, kind = blocked_by
+            return skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, reason, kind)
+        if _needs_llm_persona(scenario) and sim_client is None:
+            return skipped(
+                scenario,
+                VerdictStatus.SKIPPED_PRECONDITION,
+                "needs an LLM persona: set OPSEVAL_SIMULATOR_BASE_URL and OPSEVAL_SIMULATOR_MODEL",
+                "simulator",
+            )
+        if scenario.conversation.stop_at == "outcome_committed" and not options.allow_commit:
+            return skipped(
+                scenario,
+                VerdictStatus.SKIPPED_PRECONDITION,
+                "commit guard: this scenario performs the irreversible outcome; "
+                "re-run with --allow-commit against a test tenant",
+                "commit_guard",
+            )
+        tenant: Tenant | None = None
+        lease = None
+        if leases is not None:
+            lease = await leases.acquire_waiting(timeout=settings.tenant_wait_seconds)
+            if lease is None:
+                # Not the agent's fault: the harness could not obtain a resource. Two
+                # scenarios sharing a tenant would produce false agent failures, far worse
+                # than a skip (ADR-0041).
+                return skipped(
+                    scenario,
+                    VerdictStatus.SKIPPED_PRECONDITION,
+                    "no free test tenant: every tenant in the pool is leased by a live run "
+                    f"(waited {settings.tenant_wait_seconds:g}s)",
+                    "dependency",
+                )
+            tenant = lease.tenant
         try:
-            halt = control.before_scenario(scenario)
-            if halt is not None:
-                # Named, so what was not run cannot vanish from the result.
-                verdicts.append(halt)
-                continue
-            if options.repeats:
-                scenario = scenario.model_copy(
-                    update={
-                        "execution": scenario.execution.model_copy(
-                            update={"repeats": options.repeats}
-                        )
-                    }
-                )
-            store.save_scenario(run_id, scenario)
-            tracker.started(scenario.id, scenario.execution.repeats)
-            if scenario.is_blocked:
-                verdicts.append(
-                    skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'", "quarantine")
-                )
-                continue
-            blocked_by = _unmet(scenario, health, sim_client is None)
-            if blocked_by is not None:
-                reason, kind = blocked_by
-                verdicts.append(skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, reason, kind))
-                continue
-            if _needs_llm_persona(scenario) and sim_client is None:
-                verdicts.append(
-                    skipped(
-                        scenario,
-                        VerdictStatus.SKIPPED_PRECONDITION,
-                        "needs an LLM persona: set OPSEVAL_SIMULATOR_BASE_URL and "
-                        "OPSEVAL_SIMULATOR_MODEL",
-                        "simulator",
-                    )
-                )
-                continue
-            if scenario.conversation.stop_at == "outcome_committed" and not options.allow_commit:
-                verdicts.append(
-                    skipped(
-                        scenario,
-                        VerdictStatus.SKIPPED_PRECONDITION,
-                        "commit guard: this scenario performs the irreversible outcome; "
-                        "re-run with --allow-commit against a test tenant",
-                        "commit_guard",
-                    )
-                )
-                continue
-            log(f"▶ {scenario.id} · {scenario.name}")
+            where = f" · tenant {tenant.id}" if tenant else ""
+            log(f"▶ {scenario.id} · {scenario.name}{where}")
             attempts = []
             rate_limited = False
             for i in range(scenario.execution.repeats):
@@ -494,7 +584,7 @@ async def launch(
                 driver = Driver(
                     scenario=scenario,
                     profile=profile,
-                    transport=make_transport(profile),
+                    transport=make_transport(profile, tenant),
                     simulator=sim,
                     run_id=run_id,
                     attempt_index=i,
@@ -502,7 +592,8 @@ async def launch(
                     allow_commit=options.allow_commit,
                     simulator_timeout_seconds=settings.simulator_timeout_seconds,
                 )
-                record = await driver.run()
+                async with refreshing(lease):
+                    record = await driver.run()
                 rate_limited = rate_limited or RATE_LIMITED_NOTE in record.notes
                 if trace_source is not None:
                     record = await enrich(record, trace_source, profile)
@@ -517,19 +608,39 @@ async def launch(
                     else ("pass" if verdict.passed else "FAIL")
                 )
                 coverage = " · traces" if record.trace_coverage == "full" else ""
-                log(f"   attempt {i}: {state} ({record.terminal_state.value}{coverage})")
-            if len(attempts) < scenario.execution.repeats:
-                # Cancelled part-way: never a pass from part of the repeats, never a
-                # failure hidden as "not run" (fold_cut_short). Records stay on disk.
-                verdicts.append(fold_cut_short(scenario, attempts))
-                continue
-            verdicts.append(fold_attempts(scenario, attempts))
-            control.after_scenario(scenario, verdicts[-1], rate_limited=rate_limited)
+                # With lanes in flight the lines interleave: say whose attempt it is.
+                whose = f"{scenario.id} " if lanes > 1 else ""
+                log(f"   {whose}attempt {i}: {state} ({record.terminal_state.value}{coverage})")
         finally:
-            # Every way out of an iteration (a skip, the end of its attempts, a stop) has
-            # appended its verdict: record each one.
-            for decided in verdicts[before:]:
-                tracker.ended(decided)
+            if lease is not None:
+                lease.release()
+        if len(attempts) < scenario.execution.repeats:
+            # Cancelled part-way: never a pass from part of the repeats, never a failure
+            # hidden as "not run" (fold_cut_short). Records stay on disk.
+            return fold_cut_short(scenario, attempts)
+        folded = fold_attempts(scenario, attempts)
+        control.after_scenario(scenario, folded, rate_limited=rate_limited)
+        return folded
+
+    async def decided(scenario: Scenario) -> TestVerdict:
+        verdict = await run_one(scenario)
+        tracker.ended(verdict)
+        return verdict
+
+    if lanes <= 1:
+        for scenario in catalogue.scenarios:
+            verdicts.append(await decided(scenario))
+    else:
+        # Bounded by the lane count, which is bounded by the pool, so no two scenarios in
+        # flight want the same tenant. A stop policy stops new scenarios from starting; it
+        # cannot un-start those already running (ADR-0041). Results keep catalogue order.
+        slots = asyncio.Semaphore(lanes)
+
+        async def lane(scenario: Scenario) -> TestVerdict:
+            async with slots:
+                return await decided(scenario)
+
+        verdicts = list(await asyncio.gather(*(lane(sc) for sc in catalogue.scenarios)))
     if control.stopped is not None and not any(t.skip_kind in STOP_KINDS for t in verdicts):
         # The policy fired on the last scenario, or a cancel came after it: nothing was
         # left out, so the run did not stop early.

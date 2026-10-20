@@ -295,6 +295,14 @@ def run(
             show_default="the suite's stop: policy",
         ),
     ] = None,
+    tenants: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option(help="Test-tenant pool YAML. Each scenario leases one tenant exclusively."),
+    ] = None,
+    lanes: Annotated[
+        Optional[int],  # noqa: UP045
+        typer.Option(min=1, help="Scenarios in flight. Never more than the pool has tenants."),
+    ] = None,
     max_wall_clock: Annotated[
         Optional[float],  # noqa: UP045
         typer.Option(
@@ -327,6 +335,10 @@ def run(
     settings = Settings()
     if reports_dir:
         settings.reports_dir = str(reports_dir)
+    if tenants:
+        settings.tenants_file = str(tenants)
+    if lanes is not None:
+        settings.lanes = lanes
     options = RunOptions(
         target=target,
         transport=transport,

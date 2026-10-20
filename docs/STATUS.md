@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-19** (`main` with the GitHub Issues sink, the remaining core scorers and created artifacts).
+**As of 2026-10-20** (`main` with the test-tenant pool and parallel lanes).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 88% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 92% of 69.
+**Overall: 90% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 95% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 52 / 5 / 2 | 92% |
+| v0.1 | 59 | 54 / 5 / 0 | 96% |
 | v0.2 | 15 | 13 / 1 / 1 | 90% |
 | v0.5 | 12 | 8 / 2 / 2 | 75% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 73 / 8 / 7 | **88%** |
+| **All** | 88 | 75 / 8 / 5 | **90%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -64,7 +64,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-RUN-05 | Terminal states | M | v0.1 | Done | `TerminalState` |
 | FR-RUN-06 | Timeouts count against the agent | M | v0.1 | Done | connect/pool timeouts are harness errors; simulator time is off the agent's clock, with its own limit (ADR-0030 update); fault-injection tests for both halves |
 | FR-RUN-07 | Protocol probes | S | v0.2 | Done | `profile.probes` (ADR-0025) |
-| FR-RUN-08 | Tenant pool and locks | M | v0.1 | Missing | runner is sequential; a `feat/tenant-pool` branch exists, unmerged |
+| FR-RUN-08 | Tenant pool and locks | M | v0.1 | Done | `--tenants`/`--lanes`: lanes = min(tenants, requested, `OPSEVAL_LANE_CAP`), exclusive file leases with background heartbeats, works with every stop policy and cancel (ADR-0041); verified with two processes sharing one pool |
 | FR-RUN-09 | Isolated attempts | M | v0.1 | Done | new driver, transport and simulator per attempt |
 | FR-CHK-01 | Checkpoint policies | M | v0.1 | Done | `CheckpointPolicy` |
 | FR-CHK-02 | Resume channel | M | v0.1 | Done | `driver._checkpoint` |
@@ -106,7 +106,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-RPT-07 | JUnit XML | S | v0.2 | Done | `reporting/junit.py` |
 | FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not; only the ones a suite uses are built), every preflight probe (exit 3 when refused), Langfuse, sinks, telemetry (`check_url_allowed`; errors show only scheme and host) |
 | FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes and allowlist errors name only the host |
-| FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Missing | not started (see FR-RUN-08) |
+| FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Done | one exclusive lease per scenario; a lock that cannot be read counts as held; no free tenant is a skip, never a shared account; tokens named, never stored (ADR-0041) |
 | FR-SAF-04 | Committed-outcome guard | M | v0.1 | Done | CLI and console (`serve --allow-commit`, ADR-0031); a `committed_outcome` without a `commit_gate` is a load error (ADR-0008 amendment) |
 | FR-SAF-05 | Artifact cleanup planning | S | v0.5 | Missing | not started |
 | FR-SAF-06 | Retention | M | v0.5 | Done | `opseval prune` (dry run unless `--yes`, `OPSEVAL_RETENTION_DAYS` default 90; never a run that may still be going; ADR-0037) |

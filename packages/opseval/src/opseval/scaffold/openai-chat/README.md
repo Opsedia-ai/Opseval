@@ -21,4 +21,8 @@ Created with `opseval init`. Next steps:
 4. Add your own scenarios under `scenarios/`. Scenarios in `scenarios/llm/` use an
    LLM-played customer and an LLM judge; run them with `suites/full.yaml`.
 
+To run scenarios in parallel without them treading on each other, fill in
+`tenants.yaml` and add `--tenants tenants.yaml`. Each scenario then leases one isolated
+account for its whole attempt.
+
 See `opseval list-scorers` for every available check.

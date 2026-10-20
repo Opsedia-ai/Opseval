@@ -7,9 +7,12 @@ No other module reads environment variables directly.
 from __future__ import annotations
 
 import ipaddress
+import os
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from dotenv import dotenv_values
 from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -110,6 +113,22 @@ class Settings(BaseSettings):
     gate_fail_on_flaky: bool = False
     """Make a flaky pass block the gate, whatever the suite's policy says."""
 
+    # Test-tenant pool (FR-RUN-08, ADR-0041). Tokens live in the environment the pool file
+    # names, never in the file itself.
+    tenants_file: str | None = None
+    """A test-tenant pool YAML: each scenario leases one tenant exclusively (ADR-0041)."""
+    lanes: int | None = None
+    """Requested lanes. Actual = min(tenants, requested, lane_cap)."""
+    lane_cap: int = Field(default=8, ge=1, le=64)
+    """The most lanes any run may use, however many tenants or lanes are asked for."""
+    tenant_lock_dir: str | None = None
+    """Where tenant leases live. Default: a machine-wide directory keyed by the pool's tenant
+    ids, because a path relative to the working directory would let two checkouts of the same
+    pool lease the same account."""
+    tenant_stale_after_seconds: float = Field(default=300.0, gt=0, le=86_400)
+    """A lease whose heartbeat is older than this may be reclaimed. Generous on purpose."""
+    tenant_wait_seconds: float = Field(default=30.0, ge=0, le=3_600)
+    """How long to wait for a free tenant before skipping the scenario."""
     reports_dir: str = "reports"
     """Where run folders are written."""
     retention_days: int = Field(default=90, ge=1)
@@ -122,6 +141,27 @@ class Settings(BaseSettings):
     console_dir: str | None = None
     """The built web console (``packages/console/dist``) for ``opseval serve`` to serve.
     When unset, a source checkout's build is found on its own (ADR-0034)."""
+
+    def secret_named(self, name: str) -> str | None:
+        """A secret named by a *file* rather than by a field: a tenant's ``token_env``.
+
+        This lives here because ``config`` is the only module that reads the environment,
+        and because of a trap: ``.env`` is read into this model but is **never exported to
+        ``os.environ``**. A tenant token set in ``.env``, exactly as ``opseval init`` says,
+        would look unset to anything calling ``os.environ.get``. So both are consulted, with
+        the real environment winning.
+        """
+        from_env = os.environ.get(name)
+        if from_env:
+            return from_env
+        env_file = self.model_config.get("env_file")
+        if not env_file:
+            return None
+        path = Path(str(env_file))
+        if not path.is_file():
+            return None
+        value = dotenv_values(path).get(name)
+        return value or None
 
     def allowlist(self) -> set[str]:
         return {h.strip().lower() for h in self.allowed_hosts.split(",") if h.strip()}

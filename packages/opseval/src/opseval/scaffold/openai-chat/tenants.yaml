@@ -1,0 +1,24 @@
+# Test-tenant pool (optional). Pass it with:
+#
+#     opseval run suites/full.yaml --profile profile.yaml --target ... \
+#         --tenants tenants.yaml --lanes 3
+#
+# Each scenario leases one tenant for the whole attempt and releases it at the end, so
+# two scenarios never share an account and cannot corrupt each other's state. Lanes are
+# capped by the pool: asking for more lanes than there are tenants gives you one lane per
+# tenant. With no pool the run is sequential, exactly as before.
+#
+# Credentials are NEVER in this file - it is meant to be committed. Each tenant names the
+# environment variable that holds its token (set them in .env), and a declared variable
+# that is not set fails the run with exit code 3 rather than authenticating as nobody.
+schema: opseval/v1
+tenants:
+  - id: tenant-a
+    token_env: OPSEVAL_TENANT_A_TOKEN
+    note: First isolated test account.
+  - id: tenant-b
+    token_env: OPSEVAL_TENANT_B_TOKEN
+  # Each tenant may also have its own endpoint, if they are separate deployments:
+  # - id: tenant-c
+  #   token_env: OPSEVAL_TENANT_C_TOKEN
+  #   target: https://tenant-c.example.com/v1
