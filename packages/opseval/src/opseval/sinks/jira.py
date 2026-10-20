@@ -104,24 +104,24 @@ class JiraSink(IssueSink):
             auth = f"Bearer {token}"
         super().__init__(
             project,
+            base_url,
             {"authorization": auth, "accept": "application/json"},
             max_issues=max_issues,
             timeout=timeout,
             client_factory=client_factory,
         )
-        self._url = base_url.rstrip("/")
-        self._project = project
         self._issue_type = issue_type
-
-    @property
-    def _base(self) -> str:
-        return self._url
 
     def _tag(self, result: SuiteResult, t: TestVerdict) -> str:
         return scenario_label(result.suite, t.test_id)
 
     def _jql(self) -> str:
-        return f'project = "{self._project}" AND labels = "{LABEL}" AND statusCategory != Done'
+        # A fixed order, so an issue closed between two pages cannot shift another one
+        # across the page boundary unseen.
+        return (
+            f'project = "{self._where}" AND labels = "{LABEL}" AND statusCategory != Done '
+            "ORDER BY key ASC"
+        )
 
     async def _search_page(
         self, client: httpx.AsyncClient, *, start: int, token: str | None
@@ -153,16 +153,17 @@ class JiraSink(IssueSink):
                     if isinstance(label, str) and label.startswith(f"{LABEL}-"):
                         found.setdefault(label, str(issue["key"]))
             if self._cloud:
-                if data.get("isLast") is True:
-                    return found
                 token = data.get("nextPageToken")
-                if not token:
-                    # Neither "last" nor a way on: the rest cannot be read, so say so rather
-                    # than treat what was read as everything.
+                if token:
+                    continue
+                if data.get("isLast") is False:
+                    # "Not the last page", and no way on: the rest cannot be read, so say so
+                    # rather than treat what was read as everything.
                     raise RuntimeError(
                         "Jira's search said there were more results but gave no page token: "
                         "cannot find every open issue"
                     )
+                return found
             else:
                 # Data Center caps maxResults by an admin setting, so a short page is not the
                 # end: page by what came back, and stop at the total or an empty page.
@@ -193,7 +194,7 @@ class JiraSink(IssueSink):
             "/rest/api/2/issue",
             json={
                 "fields": {
-                    "project": {"key": self._project},
+                    "project": {"key": self._where},
                     "issuetype": {"name": self._issue_type},
                     "summary": f"[opseval] {_summary(t.test_id, 80)} failed: "
                     f"{_summary(t.name, 120)}",
@@ -213,15 +214,23 @@ class JiraSink(IssueSink):
                 f"{t.test_id}: Jira created an issue but its answer had no key "
                 f"({type(exc).__name__}): no further issues are written"
             ) from exc
-        # Read the labels back: an automation rule or workflow step can remove them after the
-        # create, and an issue without its label would be opened again on every run.
-        labels = (
-            await self._call(client, "GET", f"/rest/api/2/issue/{key}", params={"fields": "labels"})
-        ).json().get("fields", {}).get("labels") or []
+        # Read the labels back: a create screen or a post-function on the create transition
+        # can drop them, and an issue without its label would be opened again on every run.
+        # (An automation rule that runs later, asynchronously, is not caught here.)
+        try:
+            answer = await self._call(
+                client, "GET", f"/rest/api/2/issue/{key}", params={"fields": "labels"}
+            )
+            labels = (answer.json().get("fields") or {}).get("labels") or []
+        except Exception as exc:  # noqa: BLE001 - the issue exists: count it, then stop
+            return key, StopWriting(
+                f"issue {key} was created, but its labels could not be read back "
+                f"({type(exc).__name__}: {exc}): no further issues are written"
+            )
         if LABEL not in labels or tag not in labels:
             return key, StopWriting(
-                f"issue {key} lost its '{LABEL}' labels after it was created (an automation "
-                "rule or workflow?): the next run cannot find it and would open a duplicate, "
+                f"issue {key} lost its '{LABEL}' labels when it was created (a create screen "
+                "or post-function?): the next run cannot find it and would open a duplicate, "
                 "so no further issues are written"
             )
         return key, None

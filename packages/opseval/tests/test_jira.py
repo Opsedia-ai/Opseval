@@ -39,7 +39,11 @@ class FakeJira:
         strip_labels: bool = False,
         drop_token: bool = False,
         no_key: bool = False,
+        readback: int = 200,
+        omit_is_last: bool = False,
     ) -> None:
+        self.readback = readback  # status of the label read-back after a create
+        self.omit_is_last = omit_is_last  # a Cloud answer without the isLast field
         self.cloud = cloud
         self.page_cap = page_cap  # Data Center's admin cap on maxResults
         self.strip_labels = strip_labels  # an automation rule removing labels after create
@@ -68,7 +72,10 @@ class FakeJira:
             page = self._open()[start : start + 100]
             nxt = start + 100
             more = nxt < len(self._open())
-            data: dict[str, Any] = {"issues": page, "isLast": not more}
+            assert body["jql"].endswith("ORDER BY key ASC"), "a fixed order for paging"
+            data: dict[str, Any] = {"issues": page}
+            if not self.omit_is_last:
+                data["isLast"] = not more
             if more and not self.drop_token:
                 data["nextPageToken"] = str(nxt)
             return httpx.Response(200, json=data)
@@ -88,6 +95,8 @@ class FakeJira:
             )
         if request.method == "GET" and path.startswith("/rest/api/2/issue/"):
             key = path.rsplit("/", 1)[-1]
+            if self.readback != 200:
+                return httpx.Response(self.readback, json={"errorMessages": ["not yet"]})
             [issue] = [i for i in self.issues if i["key"] == key]
             return httpx.Response(
                 200, json={"key": key, "fields": {"labels": issue["fields"]["labels"]}}
@@ -383,3 +392,32 @@ class TestReviewOf64:
         assert github_issues.failed_serious is issues.failed_serious
         assert issubclass(jira.JiraSink, issues.IssueSink)
         assert issubclass(github_issues.GitHubIssuesSink, issues.IssueSink)
+
+
+class TestReviewOf66:
+    @pytest.mark.parametrize("status", [403, 404, 500])
+    async def test_a_failed_read_back_still_names_the_issue_and_stops(
+        self, jira: FakeJira, status: int
+    ) -> None:
+        jira.readback = status
+        [outcome] = await publish_all([jira.sink()], result(failing("c-1"), failing("c-2")))
+        assert outcome.published is False
+        assert "opened AGENT-100" in outcome.detail, "the issue it created is reported"
+        assert "labels could not be read back" in outcome.detail
+        assert len(jira.issues) == 1, "no further issue is opened"
+
+    async def test_a_last_page_without_is_last_is_still_the_last(self) -> None:
+        jira = FakeJira(cloud=True, omit_is_last=True)
+        jira.issues.append(
+            {
+                "key": "OLD-1",
+                "done": False,
+                "fields": {"labels": ["opseval", scenario_label("smoke", "c-1")]},
+            }
+        )
+        detail = await jira.sink().publish(result(failing("c-1")))
+        assert "commented on OLD-1" in detail
+
+    def test_the_search_has_a_fixed_order(self) -> None:
+        sink = FakeJira().sink()
+        assert sink._jql().endswith("ORDER BY key ASC")

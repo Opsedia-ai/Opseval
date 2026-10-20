@@ -41,6 +41,7 @@ class IssueSink(Sink):
     def __init__(
         self,
         where: str,
+        base_url: str,
         headers: dict[str, str],
         *,
         max_issues: int,
@@ -48,14 +49,12 @@ class IssueSink(Sink):
         client_factory: Callable[[], httpx.AsyncClient] | None,
     ) -> None:
         self._where = where
+        """The repository or project, as named in every outcome."""
+        self._base = base_url.rstrip("/")
         self._headers = headers
         self._max = max_issues
         self._timeout = timeout
         self._client_factory = client_factory
-
-    @property
-    @abstractmethod
-    def _base(self) -> str: ...
 
     async def _call(
         self, client: httpx.AsyncClient, method: str, path: str, **kw: Any

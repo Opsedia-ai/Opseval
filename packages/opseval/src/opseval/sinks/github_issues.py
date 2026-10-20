@@ -94,6 +94,7 @@ class GitHubIssuesSink(IssueSink):
     ) -> None:
         super().__init__(
             repo,
+            api_url,
             {
                 "authorization": f"Bearer {token}",
                 "accept": "application/vnd.github+json",
@@ -103,12 +104,6 @@ class GitHubIssuesSink(IssueSink):
             timeout=timeout,
             client_factory=client_factory,
         )
-        self._repo = repo
-        self._api = api_url.rstrip("/")
-
-    @property
-    def _base(self) -> str:
-        return self._api
 
     def _tag(self, result: SuiteResult, t: TestVerdict) -> str:
         return marker(result.suite, t.test_id)
@@ -122,7 +117,7 @@ class GitHubIssuesSink(IssueSink):
             response = await self._call(
                 client,
                 "GET",
-                f"/repos/{self._repo}/issues",
+                f"/repos/{self._where}/issues",
                 params={"labels": LABEL, "state": "open", "per_page": 100, "page": page},
             )
             items = response.json()
@@ -147,7 +142,7 @@ class GitHubIssuesSink(IssueSink):
         await self._call(
             client,
             "POST",
-            f"/repos/{self._repo}/issues/{ref}/comments",
+            f"/repos/{self._where}/issues/{ref}/comments",
             json={"body": f"Failed again.\n\n{_facts(result, t)}"},
         )
 
@@ -157,7 +152,7 @@ class GitHubIssuesSink(IssueSink):
         response = await self._call(
             client,
             "POST",
-            f"/repos/{self._repo}/issues",
+            f"/repos/{self._where}/issues",
             json={
                 "title": f"[opseval] {_title(t.test_id, 80)} failed: {_title(t.name, 120)}",
                 "labels": [LABEL],

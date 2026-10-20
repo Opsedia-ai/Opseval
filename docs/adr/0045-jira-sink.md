@@ -59,11 +59,15 @@ Each of these could have reopened the same issue on every run:
 - **Data Center paging.** An administrator setting caps `maxResults`, so a page shorter than
   requested is not the last one. Paging now advances by the number of issues returned and
   stops at `total` or an empty page.
-- **Cloud paging.** An answer that is not `isLast` but carries no `nextPageToken` fails closed
-  rather than being taken as everything.
-- **Labels are read back after the create.** An automation rule or workflow step can remove
-  them. If either label is gone, the sink stops, as the GitHub sink does when its label is
-  dropped.
+- **Cloud paging.** An answer that says `isLast: false` but carries no `nextPageToken` fails
+  closed rather than being taken as everything. An answer with neither field is the last page.
+- **A fixed order.** The search ends `ORDER BY key ASC`, so an issue closed between two pages
+  cannot shift another one across the page boundary unseen.
+- **Labels are read back after the create.** A create screen or a post-function on the create
+  transition can drop them. If either label is gone, or the read-back itself fails, the issue is
+  still reported as opened and the sink stops, as the GitHub sink does when its label is
+  dropped. An automation rule that runs *later*, asynchronously, cannot be caught this way:
+  exclude the `opseval` labels from such rules.
 - **A create whose answer has no key stops the sink.** The issue may exist but cannot be
   referred to, so a second failure in the same run would duplicate it.
 - **A blank `OPSEVAL_JIRA_EMAIL` means Data Center**, not Cloud with an empty user.
