@@ -34,6 +34,12 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_GITHUB_TOKEN` | secret | unset (secret) | Token for the issues sink; needs permission to write issues in that repository only. |
 | `OPSEVAL_GITHUB_API_URL` | text | `https://api.github.com` | GitHub API base, for GitHub Enterprise. Its host must be allowlisted. |
 | `OPSEVAL_GITHUB_ISSUES_MAX` | integer | `10` | Most issues opened or commented on per run, so a broken agent cannot flood a tracker. |
+| `OPSEVAL_JIRA_URL` | text | unset | Jira base URL (``https://acme.atlassian.net`` or a Data Center host): open an issue for each failed critical or blocker scenario (ADR-0045). Its host must be allowlisted. |
+| `OPSEVAL_JIRA_PROJECT` | text | unset | Project key the Jira sink writes to, such as ``AGENT``. |
+| `OPSEVAL_JIRA_EMAIL` | text | unset | Account email for Jira Cloud (basic auth with an API token). Unset for Data Center, where the token is a personal access token sent as a bearer. |
+| `OPSEVAL_JIRA_TOKEN` | secret | unset (secret) | Jira API token (Cloud) or personal access token (Data Center). |
+| `OPSEVAL_JIRA_ISSUE_TYPE` | text | `Bug` | Issue type the Jira sink creates. |
+| `OPSEVAL_JIRA_ISSUES_MAX` | integer | `10` | Most Jira issues opened or commented on per run. |
 | `OPSEVAL_SINKS` | text | empty | Plugin sinks to enable, by name (comma-separated). Installing a package never starts publishing on its own: a plugin sink runs only when named here. |
 | `OPSEVAL_LANGFUSE_PUSH_SCORES` | bool | `False` | Publish each finished run's verdicts to Langfuse as scores (ADR-0027). |
 | `OPSEVAL_LANGFUSE_SCORE_NAME` | text | `opseval` | Name prefix for scores pushed to Langfuse. |

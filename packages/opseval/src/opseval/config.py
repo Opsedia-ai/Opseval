@@ -104,6 +104,20 @@ class Settings(BaseSettings):
     """GitHub API base, for GitHub Enterprise. Its host must be allowlisted."""
     github_issues_max: int = Field(default=10, ge=1, le=100)
     """Most issues opened or commented on per run, so a broken agent cannot flood a tracker."""
+    jira_url: str | None = None
+    """Jira base URL (``https://acme.atlassian.net`` or a Data Center host): open an issue for
+    each failed critical or blocker scenario (ADR-0045). Its host must be allowlisted."""
+    jira_project: str | None = None
+    """Project key the Jira sink writes to, such as ``AGENT``."""
+    jira_email: str | None = None
+    """Account email for Jira Cloud (basic auth with an API token). Unset for Data Center,
+    where the token is a personal access token sent as a bearer."""
+    jira_token: SecretStr | None = None
+    """Jira API token (Cloud) or personal access token (Data Center)."""
+    jira_issue_type: str = "Bug"
+    """Issue type the Jira sink creates."""
+    jira_issues_max: int = Field(default=10, ge=1, le=100)
+    """Most Jira issues opened or commented on per run."""
     sinks: str = ""
     """Plugin sinks to enable, by name (comma-separated). Installing a package never starts
     publishing on its own: a plugin sink runs only when named here."""
@@ -185,6 +199,7 @@ SECRET_FIELDS = (
     "serve_token",
     "webhook_url",
     "github_token",
+    "jira_token",
 )
 
 

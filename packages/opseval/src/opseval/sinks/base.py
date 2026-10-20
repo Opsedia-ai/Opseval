@@ -96,6 +96,29 @@ def build_sinks(settings: Settings) -> list[Sink]:
                 max_issues=settings.github_issues_max,
             )
         )
+    if settings.jira_url or settings.jira_project:
+        from opseval.sinks.jira import JiraSink
+
+        if not (settings.jira_url and settings.jira_project):
+            raise ConfigError("the Jira sink needs both OPSEVAL_JIRA_URL and OPSEVAL_JIRA_PROJECT")
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", settings.jira_project):
+            raise ConfigError(
+                f"OPSEVAL_JIRA_PROJECT must be a project key such as AGENT, "
+                f"got {settings.jira_project!r}"
+            )
+        if settings.jira_token is None:
+            raise ConfigError("OPSEVAL_JIRA_URL needs OPSEVAL_JIRA_TOKEN")
+        check_url_allowed(settings.jira_url, settings.allowlist(), secure_schemes=("https",))
+        built.append(
+            JiraSink(
+                settings.jira_url,
+                settings.jira_project,
+                settings.jira_token.get_secret_value(),
+                email=settings.jira_email,
+                issue_type=settings.jira_issue_type,
+                max_issues=settings.jira_issues_max,
+            )
+        )
     if settings.langfuse_push_scores:
         host = settings.langfuse_host
         public, secret = settings.langfuse_public_key, settings.langfuse_secret_key

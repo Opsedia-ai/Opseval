@@ -47,5 +47,8 @@ None open as of 2026-10-20. The last one (I9, no concurrency) closed with the te
 - **Behaviour you may notice:** Ctrl-C exits 130 (never 1). A profile with `committed_outcome`
   but no `commit_gate` no longer loads. A simulator call that takes longer than
   `OPSEVAL_SIMULATOR_TIMEOUT_SECONDS` (300 by default) invalidates the attempt as a harness error.
+- **The issue sinks have only met fakes:** the GitHub (ADR-0040) and Jira (ADR-0045) sinks are
+  tested against mock APIs. Before relying on them, point each at a scratch repository or
+  project once. On Jira, check that the create screen allows labels.
 - **The console is not in the Python package yet**; that is a release-pipeline step for after
   Gate 0 (ADR-0034). It needs the Node versions in `packages/console/package.json` `engines`.
