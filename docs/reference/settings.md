@@ -42,7 +42,7 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_LANES` | integer | unset | Requested lanes. Actual = min(tenants, requested, lane_cap). |
 | `OPSEVAL_LANE_CAP` | integer | `8` | The most lanes any run may use, however many tenants or lanes are asked for. |
 | `OPSEVAL_TENANT_LOCK_DIR` | text | unset | Where tenant leases live. Default: a machine-wide directory keyed by the pool's tenant ids, because a path relative to the working directory would let two checkouts of the same pool lease the same account. |
-| `OPSEVAL_TENANT_STALE_AFTER_SECONDS` | number | `300.0` | A lease whose heartbeat is older than this may be reclaimed. Generous on purpose. |
+| `OPSEVAL_TENANT_STALE_AFTER_SECONDS` | number | `300.0` | A lease whose heartbeat is older than this may be reclaimed. Generous on purpose, and at least three heartbeats (30 s each), or every live lease would look dead. |
 | `OPSEVAL_TENANT_WAIT_SECONDS` | number | `30.0` | How long to wait for a free tenant before skipping the scenario. |
 | `OPSEVAL_REPORTS_DIR` | text | `reports` | Where run folders are written. |
 | `OPSEVAL_RETENTION_DAYS` | integer | `90` | ``opseval prune`` deletes finished runs older than this many days (FR-SAF-06). |
