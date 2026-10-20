@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-20** (`main` with the Jira issue sink).
+**As of 2026-10-20** (`main` with the Jira sink review fixes).
 
 ## Completion
 

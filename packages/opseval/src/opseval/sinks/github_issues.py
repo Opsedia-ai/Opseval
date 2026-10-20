@@ -23,17 +23,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from typing import Any
 from urllib.parse import quote
 
 import httpx
 
-from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
-from opseval.models.scenario import Criticality
-from opseval.sinks.base import Sink
+from opseval.models.results import SuiteResult, TestVerdict
+from opseval.sinks.issues import SERIOUS, IssueSink, StopWriting, failed_serious
 
 LABEL = "opseval"
-SERIOUS = (Criticality.CRITICAL, Criticality.BLOCKER)
 MAX_PAGES = 20
 """Open labelled issues read to find existing ones (100 per page). Beyond this the sink stops
 rather than guess, because a missed issue would be opened again on every run."""
@@ -63,12 +60,6 @@ def _title(text: str, limit: int) -> str:
     return flat[:limit]
 
 
-def failed_serious(result: SuiteResult) -> list[TestVerdict]:
-    return [
-        t for t in result.tests if t.status is VerdictStatus.FAILED and t.criticality in SERIOUS
-    ]
-
-
 def _facts(result: SuiteResult, t: TestVerdict) -> str:
     rate = "not measured" if t.pass_rate is None else f"{t.pass_rate:.0%}"
     return "\n".join(
@@ -83,12 +74,13 @@ def _facts(result: SuiteResult, t: TestVerdict) -> str:
     )
 
 
-class LabelNotApplied(RuntimeError):
+class LabelNotApplied(StopWriting):
     """GitHub created an issue but dropped the label that de-duplication depends on."""
 
 
-class GitHubIssuesSink(Sink):
+class GitHubIssuesSink(IssueSink):
     name = "github-issues"
+    service = "GitHub"
 
     def __init__(
         self,
@@ -100,35 +92,32 @@ class GitHubIssuesSink(Sink):
         timeout: float = 15.0,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
-        self._repo = repo
-        self._api = api_url.rstrip("/")
-        self._headers = {
-            "authorization": f"Bearer {token}",
-            "accept": "application/vnd.github+json",
-            "x-github-api-version": "2022-11-28",
-        }
-        self._max = max_issues
-        self._timeout = timeout
-        self._client_factory = client_factory
-
-    async def _call(
-        self, client: httpx.AsyncClient, method: str, path: str, **kw: Any
-    ) -> httpx.Response:
-        response = await client.request(
-            method, f"{self._api}{path}", headers=self._headers, timeout=self._timeout, **kw
+        super().__init__(
+            repo,
+            api_url,
+            {
+                "authorization": f"Bearer {token}",
+                "accept": "application/vnd.github+json",
+                "x-github-api-version": "2022-11-28",
+            },
+            max_issues=max_issues,
+            timeout=timeout,
+            client_factory=client_factory,
         )
-        if response.status_code >= 400:
-            raise RuntimeError(f"GitHub answered HTTP {response.status_code} to {method} {path}")
-        return response
 
-    async def _open_issues(self, client: httpx.AsyncClient) -> dict[str, int]:
-        """Every open opseval issue, by marker -> issue number. Raises rather than guess."""
-        found: dict[str, int] = {}
+    def _tag(self, result: SuiteResult, t: TestVerdict) -> str:
+        return marker(result.suite, t.test_id)
+
+    def _show(self, ref: str) -> str:
+        return f"#{ref}"
+
+    async def _open_issues(self, client: httpx.AsyncClient) -> dict[str, str]:
+        found: dict[str, str] = {}
         for page in range(1, MAX_PAGES + 1):
             response = await self._call(
                 client,
                 "GET",
-                f"/repos/{self._repo}/issues",
+                f"/repos/{self._where}/issues",
                 params={"labels": LABEL, "state": "open", "per_page": 100, "page": page},
             )
             items = response.json()
@@ -139,7 +128,7 @@ class GitHubIssuesSink(Sink):
                     continue
                 match = MARKER.search(str(item.get("body") or ""))
                 if match:
-                    found.setdefault(match.group(0), int(item["number"]))
+                    found.setdefault(match.group(0), str(int(item["number"])))
             if len(items) < 100:
                 return found
         raise RuntimeError(
@@ -147,85 +136,49 @@ class GitHubIssuesSink(Sink):
             "issues can be found instead of duplicated"
         )
 
-    async def publish(self, result: SuiteResult) -> str:
-        failing = failed_serious(result)
-        if not failing:
-            return "no failed critical or blocker scenario: nothing to report"
-        client = self._client_factory() if self._client_factory else httpx.AsyncClient()
-        opened: list[int] = []
-        commented: list[int] = []
-        errors: list[str] = []
-        try:
-            existing = await self._open_issues(client)
-            for t in failing[: self._max]:
-                try:
-                    await self._report(client, result, t, existing, opened, commented)
-                except LabelNotApplied as exc:
-                    errors.append(str(exc))
-                    break  # every further issue would be a future duplicate too
-                except Exception as exc:  # noqa: BLE001 - one issue must not stop the others
-                    errors.append(f"{t.test_id}: {type(exc).__name__}: {exc}")
-        finally:
-            await client.aclose()
-        parts = []
-        if opened:
-            parts.append(f"opened {', '.join(f'#{n}' for n in opened)}")
-        if commented:
-            parts.append(f"commented on {', '.join(f'#{n}' for n in commented)}")
-        if len(failing) > self._max:
-            parts.append(f"{len(failing) - self._max} more not reported (limit {self._max})")
-        summary = f"{self._repo}: " + "; ".join(parts or ["nothing written"])
-        if errors:
-            # A sink that was asked for and partly failed says so, with what it did manage.
-            raise RuntimeError(f"{summary}; failed for {'; '.join(errors)}")
-        return summary
-
-    async def _report(
-        self,
-        client: httpx.AsyncClient,
-        result: SuiteResult,
-        t: TestVerdict,
-        existing: dict[str, int],
-        opened: list[int],
-        commented: list[int],
+    async def _comment(
+        self, client: httpx.AsyncClient, ref: str, result: SuiteResult, t: TestVerdict
     ) -> None:
-        mark = marker(result.suite, t.test_id)
-        facts = _facts(result, t)
-        number = existing.get(mark)
-        if number is not None:
-            await self._call(
-                client,
-                "POST",
-                f"/repos/{self._repo}/issues/{number}/comments",
-                json={"body": f"Failed again.\n\n{facts}"},
-            )
-            commented.append(number)
-            return
+        await self._call(
+            client,
+            "POST",
+            f"/repos/{self._where}/issues/{ref}/comments",
+            json={"body": f"Failed again.\n\n{_facts(result, t)}"},
+        )
+
+    async def _create(
+        self, client: httpx.AsyncClient, result: SuiteResult, t: TestVerdict, tag: str
+    ) -> tuple[str, StopWriting | None]:
         response = await self._call(
             client,
             "POST",
-            f"/repos/{self._repo}/issues",
+            f"/repos/{self._where}/issues",
             json={
                 "title": f"[opseval] {_title(t.test_id, 80)} failed: {_title(t.name, 120)}",
                 "labels": [LABEL],
                 "body": (
-                    f"{mark}\nOpseval scenario {_code(t.test_id, 120)} "
-                    f"({_code(t.name, 200)}) failed.\n\n{facts}\n\n"
+                    f"{tag}\nOpseval scenario {_code(t.test_id, 120)} "
+                    f"({_code(t.name, 200)}) failed.\n\n{_facts(result, t)}\n\n"
                     "The conversation is in the run's report; it is not copied here."
                 ),
             },
         )
-        created = response.json()
-        number = int(created["number"])
-        opened.append(number)
-        existing[mark] = number  # a second failure of it in this run comments, not duplicates
+        try:
+            created = response.json()
+            number = str(int(created["number"]))
+        except Exception as exc:
+            raise StopWriting(
+                f"{t.test_id}: GitHub created an issue but its answer had no number "
+                f"({type(exc).__name__}): no further issues are written"
+            ) from exc
         labels = {str(label.get("name")) for label in created.get("labels") or []}
         if LABEL not in labels:
-            raise LabelNotApplied(
+            return number, LabelNotApplied(
                 f"issue #{number} was created without the '{LABEL}' label (the token cannot "
                 "apply labels?): without it the next run cannot find it and would open a "
                 "duplicate, so no further issues are written"
             )
+        return number, None
 
 
-__all__ = ["GitHubIssuesSink", "LabelNotApplied", "failed_serious", "marker"]
+__all__ = ["SERIOUS", "GitHubIssuesSink", "LabelNotApplied", "failed_serious", "marker"]
