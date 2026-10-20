@@ -114,7 +114,7 @@ def build_sinks(settings: Settings) -> list[Sink]:
                 settings.jira_url,
                 settings.jira_project,
                 settings.jira_token.get_secret_value(),
-                email=settings.jira_email,
+                email=settings.jira_email or None,
                 issue_type=settings.jira_issue_type,
                 max_issues=settings.jira_issues_max,
             )

@@ -24,14 +24,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 from opseval.models.results import SuiteResult, TestVerdict
-from opseval.sinks.base import Sink
-from opseval.sinks.github_issues import failed_serious
+from opseval.sinks.issues import IssueSink, StopWriting
 
 LABEL = "opseval"
 PAGE = 100
@@ -39,6 +39,9 @@ MAX_PAGES = 20
 """Open labelled issues read to find existing ones. Beyond this the sink stops rather than
 guess, because a missed issue would be opened again on every run."""
 _DIGEST_LEN = 20
+_CLOSER = re.compile(r"\{\s*noformat", re.IGNORECASE)
+"""Any spelling that could end a ``{noformat}`` block: Jira's macro names are not
+case-sensitive, so ``{NOFORMAT}`` closes one too."""
 
 
 def scenario_label(suite: str, test_id: str) -> str:
@@ -51,8 +54,8 @@ def scenario_label(suite: str, test_id: str) -> str:
 
 def _noformat(text: str, limit: int = 300) -> str:
     """Scenario or result text as inert wiki markup: one line inside ``{noformat}``, where Jira
-    renders no mention, link or macro. The closing tag is broken if the text contains it."""
-    flat = " ".join(text.split()).replace("{noformat}", "{no format}")[:limit]
+    renders no mention, link or macro. Any closing tag in the text, in any case, is broken."""
+    flat = _CLOSER.sub("{no format", " ".join(text.split()))[:limit]
     return "{noformat}" + flat + "{noformat}"
 
 
@@ -76,8 +79,9 @@ def _facts(result: SuiteResult, t: TestVerdict) -> str:
     )
 
 
-class JiraSink(Sink):
+class JiraSink(IssueSink):
     name = "jira"
+    service = "Jira"
 
     def __init__(
         self,
@@ -91,128 +95,98 @@ class JiraSink(Sink):
         timeout: float = 15.0,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
-        self._base = base_url.rstrip("/")
-        self._project = project
-        self._cloud = email is not None
-        if email is not None:
-            pair = base64.b64encode(f"{email}:{token}".encode()).decode()
+        # An empty email (a blank line in .env) is "not set": Data Center, not Cloud.
+        self._cloud = bool(email and email.strip())
+        if self._cloud:
+            pair = base64.b64encode(f"{(email or '').strip()}:{token}".encode()).decode()
             auth = f"Basic {pair}"
         else:
             auth = f"Bearer {token}"
-        self._headers = {"authorization": auth, "accept": "application/json"}
-        self._issue_type = issue_type
-        self._max = max_issues
-        self._timeout = timeout
-        self._client_factory = client_factory
-
-    async def _call(
-        self, client: httpx.AsyncClient, method: str, path: str, **kw: Any
-    ) -> httpx.Response:
-        response = await client.request(
-            method, f"{self._base}{path}", headers=self._headers, timeout=self._timeout, **kw
+        super().__init__(
+            project,
+            {"authorization": auth, "accept": "application/json"},
+            max_issues=max_issues,
+            timeout=timeout,
+            client_factory=client_factory,
         )
-        if response.status_code >= 400:
-            raise RuntimeError(f"Jira answered HTTP {response.status_code} to {method} {path}")
-        return response
+        self._url = base_url.rstrip("/")
+        self._project = project
+        self._issue_type = issue_type
+
+    @property
+    def _base(self) -> str:
+        return self._url
+
+    def _tag(self, result: SuiteResult, t: TestVerdict) -> str:
+        return scenario_label(result.suite, t.test_id)
 
     def _jql(self) -> str:
         return f'project = "{self._project}" AND labels = "{LABEL}" AND statusCategory != Done'
 
+    async def _search_page(
+        self, client: httpx.AsyncClient, *, start: int, token: str | None
+    ) -> dict[str, Any]:
+        if self._cloud:
+            body: dict[str, Any] = {"jql": self._jql(), "fields": ["labels"], "maxResults": PAGE}
+            if token:
+                body["nextPageToken"] = token
+            response = await self._call(client, "POST", "/rest/api/3/search/jql", json=body)
+        else:
+            params = {"jql": self._jql(), "fields": "labels", "startAt": start, "maxResults": PAGE}
+            response = await self._call(client, "GET", "/rest/api/2/search", params=params)
+        data = response.json()
+        if not isinstance(data, dict) or not isinstance(data.get("issues"), list):
+            raise RuntimeError("Jira's search answer had no issue list: cannot find open issues")
+        return data
+
     async def _open_issues(self, client: httpx.AsyncClient) -> dict[str, str]:
-        """Every open opseval issue, by scenario label -> issue key. Raises rather than guess."""
         found: dict[str, str] = {}
+        seen = 0
         token: str | None = None
-        for page in range(MAX_PAGES):
-            if self._cloud:
-                body: dict[str, Any] = {
-                    "jql": self._jql(),
-                    "fields": ["labels"],
-                    "maxResults": PAGE,
-                }
-                if token:
-                    body["nextPageToken"] = token
-                data = (
-                    await self._call(client, "POST", "/rest/api/3/search/jql", json=body)
-                ).json()
-            else:
-                params = {
-                    "jql": self._jql(),
-                    "fields": "labels",
-                    "startAt": page * PAGE,
-                    "maxResults": PAGE,
-                }
-                data = (await self._call(client, "GET", "/rest/api/2/search", params=params)).json()
-            issues = data.get("issues") if isinstance(data, dict) else None
-            if not isinstance(issues, list):
-                raise RuntimeError(
-                    "Jira's search answer had no issue list: cannot find open issues"
-                )
+        for _ in range(MAX_PAGES):
+            data = await self._search_page(client, start=seen, token=token)
+            issues: list[Any] = data["issues"]
+            seen += len(issues)
             for issue in issues:
                 labels = (issue.get("fields") or {}).get("labels") or []
                 for label in labels:
                     if isinstance(label, str) and label.startswith(f"{LABEL}-"):
                         found.setdefault(label, str(issue["key"]))
             if self._cloud:
-                token = data.get("nextPageToken")
-                if data.get("isLast") or not token:
+                if data.get("isLast") is True:
                     return found
-            elif len(issues) < PAGE:
-                return found
+                token = data.get("nextPageToken")
+                if not token:
+                    # Neither "last" nor a way on: the rest cannot be read, so say so rather
+                    # than treat what was read as everything.
+                    raise RuntimeError(
+                        "Jira's search said there were more results but gave no page token: "
+                        "cannot find every open issue"
+                    )
+            else:
+                # Data Center caps maxResults by an admin setting, so a short page is not the
+                # end: page by what came back, and stop at the total or an empty page.
+                total = data.get("total")
+                if not issues or (isinstance(total, int) and seen >= total):
+                    return found
         raise RuntimeError(
-            f"more than {MAX_PAGES * PAGE} open '{LABEL}' issues: close some, so existing "
+            f"more than {MAX_PAGES} pages of open '{LABEL}' issues: close some, so existing "
             "issues can be found instead of duplicated"
         )
 
-    async def publish(self, result: SuiteResult) -> str:
-        failing = failed_serious(result)
-        if not failing:
-            return "no failed critical or blocker scenario: nothing to report"
-        client = self._client_factory() if self._client_factory else httpx.AsyncClient()
-        opened: list[str] = []
-        commented: list[str] = []
-        errors: list[str] = []
-        try:
-            existing = await self._open_issues(client)
-            for t in failing[: self._max]:
-                try:
-                    await self._report(client, result, t, existing, opened, commented)
-                except Exception as exc:  # noqa: BLE001 - one issue must not stop the others
-                    errors.append(f"{t.test_id}: {type(exc).__name__}: {exc}")
-        finally:
-            await client.aclose()
-        parts = []
-        if opened:
-            parts.append(f"opened {', '.join(opened)}")
-        if commented:
-            parts.append(f"commented on {', '.join(commented)}")
-        if len(failing) > self._max:
-            parts.append(f"{len(failing) - self._max} more not reported (limit {self._max})")
-        summary = f"{self._project}: " + "; ".join(parts or ["nothing written"])
-        if errors:
-            raise RuntimeError(f"{summary}; failed for {'; '.join(errors)}")
-        return summary
-
-    async def _report(
-        self,
-        client: httpx.AsyncClient,
-        result: SuiteResult,
-        t: TestVerdict,
-        existing: dict[str, str],
-        opened: list[str],
-        commented: list[str],
+    async def _comment(
+        self, client: httpx.AsyncClient, ref: str, result: SuiteResult, t: TestVerdict
     ) -> None:
-        label = scenario_label(result.suite, t.test_id)
-        facts = _facts(result, t)
-        key = existing.get(label)
-        if key is not None:
-            await self._call(
-                client,
-                "POST",
-                f"/rest/api/2/issue/{key}/comment",
-                json={"body": f"Failed again.\n\n{facts}"},
-            )
-            commented.append(key)
-            return
+        await self._call(
+            client,
+            "POST",
+            f"/rest/api/2/issue/{ref}/comment",
+            json={"body": f"Failed again.\n\n{_facts(result, t)}"},
+        )
+
+    async def _create(
+        self, client: httpx.AsyncClient, result: SuiteResult, t: TestVerdict, tag: str
+    ) -> tuple[str, StopWriting | None]:
         response = await self._call(
             client,
             "POST",
@@ -223,18 +197,34 @@ class JiraSink(Sink):
                     "issuetype": {"name": self._issue_type},
                     "summary": f"[opseval] {_summary(t.test_id, 80)} failed: "
                     f"{_summary(t.name, 120)}",
-                    "labels": [LABEL, label],
+                    "labels": [LABEL, tag],
                     "description": (
                         f"Opseval scenario {_noformat(t.test_id, 120)} "
-                        f"({_noformat(t.name, 200)}) failed.\n\n{facts}\n\n"
+                        f"({_noformat(t.name, 200)}) failed.\n\n{_facts(result, t)}\n\n"
                         "The conversation is in the run's report; it is not copied here."
                     ),
                 }
             },
         )
-        key = str(response.json()["key"])
-        opened.append(key)
-        existing[label] = key  # a second failure of it in this run comments, not duplicates
+        try:
+            key = str(response.json()["key"])
+        except Exception as exc:
+            raise StopWriting(
+                f"{t.test_id}: Jira created an issue but its answer had no key "
+                f"({type(exc).__name__}): no further issues are written"
+            ) from exc
+        # Read the labels back: an automation rule or workflow step can remove them after the
+        # create, and an issue without its label would be opened again on every run.
+        labels = (
+            await self._call(client, "GET", f"/rest/api/2/issue/{key}", params={"fields": "labels"})
+        ).json().get("fields", {}).get("labels") or []
+        if LABEL not in labels or tag not in labels:
+            return key, StopWriting(
+                f"issue {key} lost its '{LABEL}' labels after it was created (an automation "
+                "rule or workflow?): the next run cannot find it and would open a duplicate, "
+                "so no further issues are written"
+            )
+        return key, None
 
 
 __all__ = ["JiraSink", "scenario_label"]

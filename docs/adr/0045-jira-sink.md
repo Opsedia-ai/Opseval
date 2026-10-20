@@ -51,3 +51,25 @@ Everything in ADR-0040 applies. In Jira's terms:
 - FR-INT-05 is done for both trackers. Both sinks are tested against fakes of their APIs.
   Neither has been run against a live tracker, which needs a test project and is tracked in
   `docs/ATTENTION.md`.
+
+## Amendment (2026-10-20): review of #64
+
+Each of these could have reopened the same issue on every run:
+
+- **Data Center paging.** An administrator setting caps `maxResults`, so a page shorter than
+  requested is not the last one. Paging now advances by the number of issues returned and
+  stops at `total` or an empty page.
+- **Cloud paging.** An answer that is not `isLast` but carries no `nextPageToken` fails closed
+  rather than being taken as everything.
+- **Labels are read back after the create.** An automation rule or workflow step can remove
+  them. If either label is gone, the sink stops, as the GitHub sink does when its label is
+  dropped.
+- **A create whose answer has no key stops the sink.** The issue may exist but cannot be
+  referred to, so a second failure in the same run would duplicate it.
+- **A blank `OPSEVAL_JIRA_EMAIL` means Data Center**, not Cloud with an empty user.
+- **Any spelling of the closing tag is broken.** Jira macro names are case-insensitive, so
+  `{NOFORMAT}` and `{ noformat` count as closing tags too.
+
+The publish loop, the "which scenarios" rule and partial-failure reporting now live once, in
+`sinks/issues.py` (`IssueSink`). The GitHub and Jira sinks supply only how to find, open and
+comment on an issue.

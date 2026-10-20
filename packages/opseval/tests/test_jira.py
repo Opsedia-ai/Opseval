@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import Any
 
 import httpx
@@ -29,8 +30,21 @@ BASE = "https://acme.atlassian.net"
 
 
 class FakeJira:
-    def __init__(self, *, cloud: bool = True, fail_summaries: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        cloud: bool = True,
+        fail_summaries: tuple[str, ...] = (),
+        page_cap: int = 100,
+        strip_labels: bool = False,
+        drop_token: bool = False,
+        no_key: bool = False,
+    ) -> None:
         self.cloud = cloud
+        self.page_cap = page_cap  # Data Center's admin cap on maxResults
+        self.strip_labels = strip_labels  # an automation rule removing labels after create
+        self.drop_token = drop_token  # Cloud says "not last" but gives no token
+        self.no_key = no_key  # a 201 whose body has no key
         self.issues: list[dict[str, Any]] = []
         self.comments: list[tuple[str, str]] = []
         self.requests: list[httpx.Request] = []
@@ -55,13 +69,29 @@ class FakeJira:
             nxt = start + 100
             more = nxt < len(self._open())
             data: dict[str, Any] = {"issues": page, "isLast": not more}
-            if more:
+            if more and not self.drop_token:
                 data["nextPageToken"] = str(nxt)
             return httpx.Response(200, json=data)
         if path == "/rest/api/2/search":
             assert not self.cloud, "Cloud's /rest/api/2/search is retired"
             start = int(request.url.params["startAt"])
-            return httpx.Response(200, json={"issues": self._open()[start : start + 100]})
+            size = min(int(request.url.params["maxResults"]), self.page_cap)
+            everything = self._open()
+            return httpx.Response(
+                200,
+                json={
+                    "startAt": start,
+                    "maxResults": size,
+                    "total": len(everything),
+                    "issues": everything[start : start + size],
+                },
+            )
+        if request.method == "GET" and path.startswith("/rest/api/2/issue/"):
+            key = path.rsplit("/", 1)[-1]
+            [issue] = [i for i in self.issues if i["key"] == key]
+            return httpx.Response(
+                200, json={"key": key, "fields": {"labels": issue["fields"]["labels"]}}
+            )
         if request.method == "POST" and path.endswith("/comment"):
             key = path.split("/")[-2]
             self.comments.append((key, json.loads(request.content)["body"]))
@@ -71,8 +101,10 @@ class FakeJira:
             if any(s in fields["summary"] for s in self.fail_summaries):
                 return httpx.Response(400, json={"errors": {"labels": "cannot be set"}})
             key = f"AGENT-{100 + len(self.issues)}"
+            if self.strip_labels:
+                fields = {**fields, "labels": []}
             self.issues.append({"key": key, "done": False, "fields": fields})
-            return httpx.Response(201, json={"id": "1", "key": key})
+            return httpx.Response(201, json={"id": "1"} if self.no_key else {"id": "1", "key": key})
         return httpx.Response(404)
 
     def sink(self, **kw: Any) -> JiraSink:
@@ -183,7 +215,7 @@ class TestOnceAndBounded:
             jira.issues.append(
                 {"key": f"OLD-{n}", "done": False, "fields": {"labels": ["opseval"]}}
             )
-        with pytest.raises(RuntimeError, match="more than 2000 open"):
+        with pytest.raises(RuntimeError, match="more than 20 pages"):
             await jira.sink().publish(result(failing("c-1")))
         assert not any(i["key"].startswith("AGENT-") for i in jira.issues)
 
@@ -268,3 +300,86 @@ class TestConfiguration:
             build_sinks(self.settings(allowed_hosts="example.org"))
         with pytest.raises(AllowedHostError):
             build_sinks(self.settings(jira_url="http://acme.atlassian.net"))
+
+
+class TestReviewOf64:
+    async def test_a_capped_data_center_page_is_not_the_last(self) -> None:
+        """Data Center caps maxResults by an admin setting: 50 back is not "the end"."""
+        jira = FakeJira(cloud=False, page_cap=50)
+        for n in range(120):
+            jira.issues.append(
+                {"key": f"OLD-{n}", "done": False, "fields": {"labels": ["opseval"]}}
+            )
+        jira.issues.append(
+            {
+                "key": "OLD-LAST",
+                "done": False,
+                "fields": {"labels": ["opseval", scenario_label("smoke", "c-1")]},
+            }
+        )
+        detail = await jira.sink().publish(result(failing("c-1")))
+        assert "commented on OLD-LAST" in detail
+
+    async def test_cloud_not_last_without_a_token_fails_closed(self) -> None:
+        jira = FakeJira(cloud=True, drop_token=True)
+        for n in range(150):
+            jira.issues.append(
+                {"key": f"OLD-{n}", "done": False, "fields": {"labels": ["opseval"]}}
+            )
+        with pytest.raises(RuntimeError, match="no page token"):
+            await jira.sink().publish(result(failing("c-1")))
+        assert not any(i["key"].startswith("AGENT-") for i in jira.issues)
+
+    async def test_labels_removed_after_create_stop_the_sink(self, jira: FakeJira) -> None:
+        jira.strip_labels = True
+        [outcome] = await publish_all([jira.sink()], result(failing("c-1"), failing("c-2")))
+        assert outcome.published is False
+        assert "opened AGENT-100" in outcome.detail, "the issue it did open is still named"
+        assert "lost its 'opseval' labels" in outcome.detail
+        assert len(jira.issues) == 1, "no further issue is opened"
+
+    async def test_a_created_issue_without_a_key_stops_rather_than_duplicates(
+        self, jira: FakeJira
+    ) -> None:
+        jira.no_key = True
+        [outcome] = await publish_all([jira.sink()], result(failing("c-1"), failing("c-1")))
+        assert outcome.published is False and "had no key" in outcome.detail
+        assert len(jira.issues) == 1
+
+    async def test_a_blank_email_means_data_center(self) -> None:
+        jira = FakeJira(cloud=False)
+        await jira.sink(email="  ").publish(result(failing("c-1")))
+        assert {r.headers["authorization"] for r in jira.requests} == {"Bearer tok"}
+
+    def test_a_blank_email_setting_builds_a_data_center_sink(self) -> None:
+        [sink] = build_sinks(
+            Settings(
+                allowed_hosts="acme.atlassian.net",
+                jira_url=BASE,
+                jira_project="AGENT",
+                jira_token=SecretStr("tok"),
+                jira_email="",
+            )  # type: ignore[call-arg]
+        )
+        assert isinstance(sink, JiraSink) and sink._cloud is False
+
+    @pytest.mark.parametrize("closer", ["{NOFORMAT}", "{NoFormat}", "{ noformat}", "{noformat:x}"])
+    async def test_no_spelling_of_the_closing_tag_survives(self, closer: str) -> None:
+        jira = FakeJira()
+        await jira.sink().publish(result(failing("c-1", name=f"a {closer}[x|https://e.vil]")))
+        plain = FakeJira()
+        await plain.sink().publish(result(failing("c-1", name="a b")))
+        desc = jira.issues[0]["fields"]["description"]
+        tags = re.compile(r"\{\s*noformat", re.IGNORECASE)
+        # Exactly the tags the sink itself wrote: the name added none that could close one.
+        assert len(tags.findall(desc)) == len(
+            tags.findall(plain.issues[0]["fields"]["description"])
+        )
+        assert "[x|https://e.vil]" in desc
+
+    def test_both_sinks_share_one_rule_for_what_is_reported(self) -> None:
+        from opseval.sinks import github_issues, issues, jira
+
+        assert github_issues.failed_serious is issues.failed_serious
+        assert issubclass(jira.JiraSink, issues.IssueSink)
+        assert issubclass(github_issues.GitHubIssuesSink, issues.IssueSink)
