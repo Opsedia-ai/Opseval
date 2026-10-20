@@ -47,5 +47,4 @@ Enterprise; its host must be allowlisted like every destination) and `OPSEVAL_GI
 
 - The token needs permission to write issues in that one repository: a fine-grained token with
   Issues read and write.
-- Jira is not built yet; it would follow the same rules (marker in a label or property, no
-  transcript, bounded). FR-INT-05 stays Partial until it is.
+- Jira followed with the same rules, its marker a label (ADR-0045).

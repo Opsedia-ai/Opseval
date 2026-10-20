@@ -43,5 +43,6 @@
 | [0039](0039-docs-site.md) | The documentation site: MkDocs Material, generated reference pages, strict builds, not deployed before Gate 0 | Proposed |
 | [0040](0040-github-issues-sink.md) | An issue for each failed critical scenario: one per scenario, no conversation content, bounded | Proposed |
 | [0041](0041-test-tenant-pool.md) | Test-tenant pool and parallel lanes: exclusive file leases that err towards not running | Proposed |
+| [0045](0045-jira-sink.md) | An issue for each failed critical scenario in Jira (Cloud and Data Center): the marker is a label | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

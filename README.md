@@ -592,6 +592,12 @@ issue, not a new one. Issues carry which checks failed and the run id, never the
 and at most `OPSEVAL_GITHUB_ISSUES_MAX` (10) are written per run
 ([ADR-0040](docs/adr/0040-github-issues-sink.md)).
 
+Jira works the same way: set `OPSEVAL_JIRA_URL`, `OPSEVAL_JIRA_PROJECT` (a key such as `AGENT`) and
+`OPSEVAL_JIRA_TOKEN`, plus `OPSEVAL_JIRA_EMAIL` on Jira Cloud (API token) or nothing more on Data
+Center (personal access token), and allowlist the Jira host. Each scenario's issue is found again
+by a label, so a repeat failure comments instead of opening another
+([ADR-0045](docs/adr/0045-jira-sink.md)).
+
 Third parties can add a sink over the `opseval.sinks` entry point with
 `async def publish(self, result) -> str`. Installing one publishes nothing until you name it:
 `OPSEVAL_SINKS=acme`, the plugin's entry-point name (comma-separated; a name no installed plugin
