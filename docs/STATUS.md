@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-20** (`main` with the Jira sink review fixes).
+**As of 2026-10-20** (`main` with credential provider plugins).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 90% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 95% of 69.
+**Overall: 91% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 96% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 54 / 5 / 0 | 96% |
+| v0.1 | 59 | 55 / 4 / 0 | 97% |
 | v0.2 | 15 | 13 / 1 / 1 | 90% |
 | v0.5 | 12 | 9 / 1 / 2 | 79% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 76 / 7 / 5 | **90%** |
+| **All** | 88 | 77 / 6 / 5 | **91%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -59,7 +59,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SIM-07 | Persona playground | S | v0.5 | Done | console Simulator page, `POST /simulator/rehearse` |
 | FR-RUN-01 | Pluggable transports | M | v0.1 | Done | websocket, http-json, sse, openai-chat, python (API only) |
 | FR-RUN-02 | SUT profile | M | v0.1 | Done | `models/profile.py` |
-| FR-RUN-03 | Credentials | M | v0.1 | Partial | static and HS256 with refresh (ADR-0012); no custom provider plugin |
+| FR-RUN-03 | Credentials | M | v0.1 | Done | static and HS256 with refresh (ADR-0012), per-tenant tokens (ADR-0041), and `opseval.credentials` provider plugins: fail-closed discovery, every provider failure a harness error (ADR-0046) |
 | FR-RUN-04 | Driver state machine | M | v0.1 | Done | `driver.py`, PROBES state (ADR-0025) |
 | FR-RUN-05 | Terminal states | M | v0.1 | Done | `TerminalState` |
 | FR-RUN-06 | Timeouts count against the agent | M | v0.1 | Done | connect/pool timeouts are harness errors; simulator time is off the agent's clock, with its own limit (ADR-0030 update); fault-injection tests for both halves |

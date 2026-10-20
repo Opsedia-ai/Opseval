@@ -65,6 +65,11 @@ class LLMRateLimited(LLMInfraError, RateLimited):
     """An LLM role kept answering HTTP 429."""
 
 
+class CredentialsError(HarnessError):
+    """A credential provider could not supply a token. The harness's problem, never the
+    agent's: no request reached the agent without credentials."""
+
+
 class TraceUnavailable(HarnessError):
     """The agent's trace could not be read (source down, not ingested yet, no session id)."""
 

@@ -12,6 +12,7 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_ALLOWED_HOSTS` | text | empty | Comma-separated hostnames that may receive credentials or conversations. |
 | `OPSEVAL_STATIC_TOKEN` | secret | unset (secret) | A bearer token sent to the agent as is, when the profile does not mint its own. |
 | `OPSEVAL_TOKEN_SIGNING_KEY` | secret | unset (secret) | The HS256 key for profiles that mint short-lived tokens per attempt (ADR-0012). |
+| `OPSEVAL_CREDENTIALS` | text | empty | A credential provider plugin to supply the agent's tokens, by entry-point name (``opseval.credentials``, ADR-0046). Installing one changes nothing until it is named here. It replaces ``OPSEVAL_STATIC_TOKEN``; a tenant's own ``token_env`` still wins. |
 | `OPSEVAL_SIMULATOR_BASE_URL` | text | unset | OpenAI-compatible endpoint of the LLM that plays the customer (host allowlisted). |
 | `OPSEVAL_SIMULATOR_API_KEY` | secret | unset (secret) | API key for the simulator endpoint, if it needs one. |
 | `OPSEVAL_SIMULATOR_MODEL` | text | unset | Model the simulator uses. Without it, only scripted scenarios run. |

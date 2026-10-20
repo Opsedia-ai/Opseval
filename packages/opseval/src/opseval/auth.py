@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Credentials for the system under test: a static token or short-lived HS256 tokens.
+"""Credentials for the system under test: a static token, short-lived HS256 tokens, or a
+credential provider plugin (``opseval.credentials``, ADR-0046).
 
 HS256 tokens are signed with ``OPSEVAL_TOKEN_SIGNING_KEY`` (standard JWT, no extra
 dependency), minted per attempt and refreshed ``refresh_before_seconds`` before they
@@ -17,9 +18,12 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from opseval.errors import CredentialsError
 
 
 def _b64(data: bytes) -> str:
@@ -118,6 +122,127 @@ class BearerAuth(httpx.Auth):
         yield request
 
 
+@dataclass(frozen=True)
+class CredentialContext:
+    """What a credential provider is told about the attempt it is supplying."""
+
+    profile: str
+    """The SUT profile's name."""
+    target: str
+    """Where the attempt connects."""
+    tenant: str | None
+    """The test tenant's id when the run uses a pool (ADR-0041), else ``None``. A provider
+    used with a pool must return a different identity per tenant, or lanes share state."""
+    value: Callable[[str], str | None]
+    """Reads a named variable from the environment or the ``.env`` file Opseval was started
+    with. Use it for the provider's own settings and secrets, rather than ``os.environ``,
+    which never sees ``.env``."""
+
+
+class CredentialProvider(ABC):
+    """A plugin that supplies the agent's bearer tokens (``opseval.credentials``, ADR-0046).
+
+    Declared in the plugin's own metadata::
+
+        [project.entry-points."opseval.credentials"]
+        acme_sso = "acme_opseval.auth:AcmeSso"
+
+    and used only when named in ``OPSEVAL_CREDENTIALS``. ``token_source`` is called once per
+    attempt; the source's ``current()`` is called whenever a token is needed, on the event
+    loop, so it must return quickly (cache, and refresh ahead of expiry: see
+    :class:`FetchedTokens`). Whatever either raises is a harness error, never the agent's.
+    """
+
+    name: str = "credentials"
+
+    @abstractmethod
+    def token_source(self, context: CredentialContext) -> TokenSource:
+        """A token source for one attempt."""
+
+
+class FetchedTokens(TokenSource):
+    """A helper for providers that fetch tokens from somewhere: implement :meth:`fetch` and
+    the token is cached, and fetched again ``refresh_before_seconds`` before it expires."""
+
+    def __init__(
+        self, *, refresh_before_seconds: float = 30.0, clock: Callable[[], float] = time.time
+    ) -> None:
+        self._before = refresh_before_seconds
+        self._clock = clock
+        self._token: str | None = None
+        self._expires_at: float | None = None
+
+    @abstractmethod
+    def fetch(self) -> tuple[str, float | None]:
+        """A fresh token and its lifetime in seconds (``None``: it does not expire)."""
+
+    def seconds_until_refresh(self) -> float | None:
+        if self._token is None:
+            return 0.0
+        if self._expires_at is None:
+            return None
+        return self._expires_at - self._before - self._clock()
+
+    def current(self) -> str:
+        if self._token is None or self.refresh_due():
+            token, ttl = self.fetch()
+            self._token = token
+            self._expires_at = None if ttl is None else self._clock() + ttl
+        return self._token
+
+
+class GuardedTokens(TokenSource):
+    """A plugin's token source, held to the core rule.
+
+    Anything the provider raises becomes a :class:`CredentialsError`, a harness error. Left
+    alone, a provider's own ``TimeoutError`` (its token endpoint was slow) would reach a
+    transport that reads ``TimeoutError`` as *the agent* not answering, and be scored as an
+    agent failure. The message names the provider and the exception type only: a provider's
+    error text can quote the credential it was handling.
+
+    The provider's source is built on first use, so a failure lands inside the attempt (not
+    judged) rather than stopping the run between attempts.
+    """
+
+    def __init__(self, provider: CredentialProvider, context: CredentialContext) -> None:
+        self._provider = provider
+        self._context = context
+        self._inner: TokenSource | None = None
+
+    def _fail(self, what: str, exc: BaseException | None = None) -> CredentialsError:
+        cause = f": {type(exc).__name__}" if exc is not None else ""
+        return CredentialsError(f"credential provider {self._provider.name!r} {what}{cause}")
+
+    def _source(self) -> TokenSource:
+        if self._inner is None:
+            try:
+                inner = self._provider.token_source(self._context)
+            except Exception as exc:  # noqa: BLE001 - any plugin failure is a harness error
+                raise self._fail("could not start", exc) from None
+            if not isinstance(inner, TokenSource):
+                raise self._fail(f"returned {type(inner).__name__}, not a TokenSource")
+            self._inner = inner
+        return self._inner
+
+    def current(self) -> str:
+        source = self._source()
+        try:
+            token = source.current()
+        except Exception as exc:  # noqa: BLE001 - any plugin failure is a harness error
+            raise self._fail("failed to supply a token", exc) from None
+        if not isinstance(token, str) or not token.strip():
+            raise self._fail("supplied an empty token")
+        return token
+
+    def seconds_until_refresh(self) -> float | None:
+        if self._inner is None:
+            return 0.0
+        try:
+            return self._inner.seconds_until_refresh()
+        except Exception as exc:  # noqa: BLE001 - any plugin failure is a harness error
+            raise self._fail("failed to say when to refresh", exc) from None
+
+
 def as_token_source(token: str | TokenSource | None) -> TokenSource | None:
     if token is None or isinstance(token, TokenSource):
         return token
@@ -126,6 +251,10 @@ def as_token_source(token: str | TokenSource | None) -> TokenSource | None:
 
 __all__ = [
     "BearerAuth",
+    "CredentialContext",
+    "CredentialProvider",
+    "FetchedTokens",
+    "GuardedTokens",
     "HS256Tokens",
     "StaticToken",
     "TokenSource",

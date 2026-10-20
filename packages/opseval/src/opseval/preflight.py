@@ -26,8 +26,9 @@ import httpx
 import websockets
 from websockets.exceptions import InvalidStatus, WebSocketException
 
-from opseval.auth import HS256Tokens
+from opseval.auth import CredentialContext, GuardedTokens, HS256Tokens
 from opseval.config import Settings, check_url_allowed
+from opseval.errors import CredentialsError
 from opseval.models.preflight import CheckStatus, HealthCheck, PreflightReport
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario
@@ -138,7 +139,9 @@ async def probe_target(target: str, transport: str) -> HealthCheck:
     )
 
 
-def check_token(profile: SutProfile, settings: Settings) -> HealthCheck:
+def check_token(profile: SutProfile, settings: Settings, *, target: str = "") -> HealthCheck:
+    if settings.credentials.strip():
+        return _check_provider(profile, settings, target)
     if profile.token is None:
         detail = (
             "static token from OPSEVAL_STATIC_TOKEN"
@@ -288,6 +291,34 @@ async def check_traces(
     )
 
 
+def _check_provider(profile: SutProfile, settings: Settings, target: str) -> HealthCheck:
+    """Ask the credential provider plugin for one token, as an attempt would (ADR-0046).
+
+    A plugin that is missing or broken raises :class:`ConfigError`, as it would at launch.
+    """
+    from opseval.plugins import load_credential_provider
+
+    name = settings.credentials.strip()
+    if profile.token is not None:
+        return HealthCheck(
+            name="token",
+            status=CheckStatus.NOT_CONFIGURED,
+            detail=f"profile {profile.name!r} mints HS256 tokens and OPSEVAL_CREDENTIALS "
+            f"names {name!r}: choose one",
+        )
+    provider = load_credential_provider(name)
+    context = CredentialContext(
+        profile=profile.name, target=target, tenant=None, value=settings.secret_named
+    )
+    try:
+        GuardedTokens(provider, context).current()
+    except CredentialsError as exc:
+        return HealthCheck(name="token", status=CheckStatus.NOT_CONFIGURED, detail=str(exc))
+    return HealthCheck(
+        name="token", status=CheckStatus.OK, detail=f"credential provider {name!r} gave a token"
+    )
+
+
 async def preflight(
     scenarios: Iterable[Scenario],
     profile: SutProfile,
@@ -325,7 +356,9 @@ async def preflight(
         check_llm("judge", settings, needs["llm_scorers"], verify=verify_llm),
         check_traces(profile, settings, needs["traces"], enabled=traces_enabled),
     )
-    return PreflightReport(checks=[sut, check_token(profile, settings), simulator, judge, traces])
+    return PreflightReport(
+        checks=[sut, check_token(profile, settings, target=target), simulator, judge, traces]
+    )
 
 
 __all__ = [

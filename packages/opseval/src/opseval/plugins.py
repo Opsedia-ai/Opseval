@@ -30,6 +30,7 @@ from opseval.scoring.base import REGISTRY, Scorer
 
 SCORER_GROUP = "opseval.scorers"
 SINK_GROUP = "opseval.sinks"
+CREDENTIALS_GROUP = "opseval.credentials"
 VALID_REQUIRES = ("frames", "trace", "llm")
 
 _loaded: set[str] = set()
@@ -37,6 +38,9 @@ _loaded: set[str] = set()
 
 _sinks: dict[str, type[Any]] = {}
 """Sink classes already loaded, by entry-point name."""
+
+_credentials: dict[str, type[Any]] = {}
+"""Credential provider classes already loaded, by entry-point name."""
 
 THIRD_PARTY: dict[str, str] = {}
 """Scorer id -> the distribution that provides it, for ``opseval list-scorers``."""
@@ -172,20 +176,81 @@ def load_sinks(
     return found
 
 
+def check_credentials_contract(obj: Any, *, source: str) -> type[Any]:
+    """Validate one credential provider plugin (ADR-0046). Raises :class:`ConfigError`."""
+    from opseval.auth import CredentialProvider
+
+    if not inspect.isclass(obj) or not issubclass(obj, CredentialProvider):
+        raise ConfigError(
+            f"{source}: a credential provider must be a class deriving from "
+            f"opseval.auth.CredentialProvider, got {obj!r}"
+        )
+    name = getattr(obj, "name", None)
+    if not isinstance(name, str) or not name or name == "credentials":
+        raise ConfigError(
+            f"{source}: provider {obj.__name__} needs its own 'name' (not the default)"
+        )
+    method = getattr(obj, "token_source", None)
+    if not callable(method) or inspect.iscoroutinefunction(method):
+        raise ConfigError(
+            f"{source}: provider {name!r} must define a plain 'def token_source(context)' "
+            "returning a TokenSource (tokens are read synchronously)"
+        )
+    if inspect.isabstract(obj):
+        raise ConfigError(f"{source}: provider {name!r} leaves abstract methods unimplemented")
+    return obj
+
+
+def load_credential_provider(name: str, *, group: str = CREDENTIALS_GROUP) -> Any:
+    """The credential provider named in ``OPSEVAL_CREDENTIALS``, instantiated. Fails closed:
+    a name no installed plugin provides, an import error, a contract violation or a
+    constructor that raises is a :class:`ConfigError` (exit 3), never a fall-back to another
+    credential. A run that quietly used the wrong identity would test the wrong account.
+    Only the named plugin is imported.
+    """
+    if name not in _credentials:
+        entries = {entry.name: entry for entry in _iter_entry_points(group)}
+        if name not in entries:
+            raise ConfigError(
+                f"OPSEVAL_CREDENTIALS names {name!r}, which no installed plugin provides "
+                f"(installed: {', '.join(sorted(entries)) or 'none'})"
+            )
+        entry = entries[name]
+        source = f"credential provider plugin {name!r} ({entry.value})"
+        try:
+            obj = entry.load()
+        except Exception as exc:
+            raise ConfigError(
+                f"{source} could not be imported: {type(exc).__name__}: {exc}. "
+                "Fix or uninstall it; Opseval will not run with a broken credential plugin."
+            ) from exc
+        _credentials[name] = check_credentials_contract(obj, source=source)
+    try:
+        return _credentials[name]()
+    except Exception as exc:
+        raise ConfigError(
+            f"credential provider plugin {name!r} could not be created: {type(exc).__name__}"
+        ) from exc
+
+
 def reset_for_tests() -> None:
     """Forget what discovery has seen (tests only)."""
     _loaded.clear()
     _sinks.clear()
+    _credentials.clear()
     THIRD_PARTY.clear()
 
 
 __all__ = [
+    "CREDENTIALS_GROUP",
     "SCORER_GROUP",
     "SINK_GROUP",
     "THIRD_PARTY",
     "VALID_REQUIRES",
     "check_contract",
+    "check_credentials_contract",
     "check_sink_contract",
+    "load_credential_provider",
     "load_scorers",
     "load_sinks",
     "reset_for_tests",
