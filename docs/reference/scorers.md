@@ -59,6 +59,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 | Scorer | Needs | Version | What it checks |
 |---|---|---|---|
 | `judge.persona_consistency` | llm | 2 | LLM judge on the HARNESS axis: did the simulated customer stay in character? A failure invalidates the attempt instead of failing the agent. |
+| `protocol.replies_read` | frames | 1 | Always on. Invalidates the attempt when the agent sent frames but the profile read nothing from them (no text, checkpoint, result or error): a wrong mapping is not judged. |
 
 ## Invariant bundles
 

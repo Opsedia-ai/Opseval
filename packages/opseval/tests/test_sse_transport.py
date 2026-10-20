@@ -409,4 +409,8 @@ class TestEndToEnd:
         ).run()
         assert any("order shipped" in (text or "") for _who, text in record.transcript())
         scores = await ScoringEngine().score(record, scenario, profile)
-        assert [s.scorer_id for s in scores] == ["conversation.no_errors"]
+        # protocol.replies_read is always on (ADR-0042) and passes because the turn was read.
+        assert [(s.scorer_id, s.status.value) for s in scores] == [
+            ("conversation.no_errors", "passed"),
+            ("protocol.replies_read", "passed"),
+        ]

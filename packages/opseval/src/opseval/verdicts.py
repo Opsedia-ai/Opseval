@@ -12,9 +12,11 @@ import math
 from collections import defaultdict
 
 from opseval.models.gate import PRESETS, ByCriticality, ResolvedGatePolicy, resolve
-from opseval.models.record import RunRecord
+from opseval.models.record import RunRecord, TerminalState
 from opseval.models.results import (
+    UNREAD_REPLIES,
     AttemptVerdict,
+    Axis,
     Gate,
     ScoreResult,
     ScoreStatus,
@@ -41,15 +43,17 @@ def attempt_verdict(
     reason: str | None = None
     agent_facing = [s for s in scores if s.axis.agent_facing]
     measured = [s for s in agent_facing if s.status is not ScoreStatus.INFRA_ERROR]
-    persona = [s for s in scores if s.scorer_id == "judge.persona_consistency"]
+    # A harness-axis check grades Opseval's own side (the persona, reading the replies). Its
+    # failure means the attempt measured nothing trustworthy, never that the agent failed.
+    harness = [s for s in scores if s.axis is Axis.HARNESS and s.status is ScoreStatus.FAILED]
     if record.terminal_state.is_infra:
         reason = f"{record.terminal_state.value}: {record.stop_reason}"
     elif TENANT_LEASE_LOST in record.notes:
         # Another run may have used the same test tenant during this attempt: shared state
         # is the harness's problem, never the agent's verdict (ADR-0041).
         reason = "tenant lease lost: the test tenant may have been shared with another run"
-    elif persona and persona[0].status is ScoreStatus.FAILED:
-        reason = "the simulated customer broke character"
+    elif harness and not _failed_without_reading(record, harness, measured):
+        reason = "; ".join(_harness_reason(s) for s in harness)
     elif scores and all(s.status is ScoreStatus.INFRA_ERROR for s in scores):
         reason = "every scorer returned infra_error"
     elif not measured:
@@ -64,6 +68,43 @@ def attempt_verdict(
         session_id=record.session_id,
         invalid_reason=reason,
     )
+
+
+def _failed_without_reading(
+    record: RunRecord, harness: list[ScoreResult], measured: list[ScoreResult]
+) -> bool:
+    """Unread replies leave the frame checks blind, but not every failure needs them read.
+
+    When that is the only harness failure, an agent failure proven some other way still
+    stands (ADR-0042): a tool check that failed on the agent's own traces, or the agent not
+    answering in time. Calling those "not judged" would hide a real agent failure behind a
+    configuration mistake. A persona breaking character still invalidates outright.
+    """
+    if any(s.scorer_id != UNREAD_REPLIES for s in harness):
+        return False
+    failed = [s for s in measured if s.status is ScoreStatus.FAILED]
+    if failed and record.terminal_state is TerminalState.TIMEOUT:
+        return True
+    return any(s.details.get("source") == "trace" for s in failed)
+
+
+def _harness_only(attempt: AttemptVerdict) -> bool:
+    """The attempt measured nothing because of the harness or its configuration: the session
+    was lost, or the profile read none of the agent's replies. A run made only of these is
+    exit 3. A persona breaking character is not counted: that can happen by chance, and the
+    run says "not judged" (exit 2) as it always has."""
+    if attempt.terminal_state.is_infra:
+        return True
+    return attempt.passed is None and any(
+        s.scorer_id == UNREAD_REPLIES and s.status is ScoreStatus.FAILED for s in attempt.scores
+    )
+
+
+def _harness_reason(score: ScoreResult) -> str:
+    if score.scorer_id == "judge.persona_consistency":
+        return "the simulated customer broke character"
+    explained = score.details.get("reason")
+    return explained if isinstance(explained, str) else f"harness check {score.scorer_id} failed"
 
 
 def _pass_hat_k(n: int, c: int, k: int) -> float | None:
@@ -310,7 +351,7 @@ def exit_code(tests: list[TestVerdict], *, load_errors: int = 0, gate: Gate | No
     go green on a release the gate refused (a flaky or unmeasured block on a passing run).
     """
     attempts = [a for t in tests for a in t.attempts]
-    all_infra = bool(attempts) and all(a.terminal_state.is_infra for a in attempts)
+    all_infra = bool(attempts) and all(_harness_only(a) for a in attempts)
     if gate is not None and gate.policy is not None and gate.policy.exit_code == "gate":
         if all_infra:
             return EXIT_HARNESS

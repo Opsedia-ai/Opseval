@@ -29,6 +29,12 @@ turn_quiet_ms: 400            # ...otherwise this much silence does
 A frame Opseval cannot classify is recorded as `unknown`, verbatim. An `error` frame counts
 against the agent.
 
+If the mapping is wrong, Opseval says so instead of passing. When the agent sends frames and the
+profile reads nothing from any of them (no text at `text_field`, and no kind it maps), the
+always-on check `protocol.replies_read` marks the attempt **not judged** and names the keys the
+replies did have; a run where that happens on every attempt exits 3. An agent that answers with an
+empty text is different: the field was read, the agent said nothing, and that counts against it.
+
 ## Writing frames
 
 ```yaml

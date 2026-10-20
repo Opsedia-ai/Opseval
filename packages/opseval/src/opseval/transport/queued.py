@@ -8,7 +8,9 @@ has nothing more to say this turn).
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -17,7 +19,13 @@ import httpx
 from opseval.auth import BearerAuth, TokenSource, as_token_source
 from opseval.errors import TransportError, TransportTimeout
 from opseval.models.profile import SutProfile
-from opseval.transport.base import NOT_SENT_TIMEOUTS, SYNTHETIC_KIND, Session, Transport
+from opseval.transport.base import (
+    NOT_SENT_TIMEOUTS,
+    SYNTHETIC_KIND,
+    Session,
+    Transport,
+    turn_timeout,
+)
 
 Reply = dict[str, Any] | list[dict[str, Any]] | None
 AgentCallable = Callable[[dict[str, Any]], Reply | Awaitable[Reply]]
@@ -32,6 +40,8 @@ def _as_frames(reply: object) -> list[Any]:
 
 
 class _QueuedSession(Session):
+    replies_in_send = True
+
     def __init__(self, profile: SutProfile) -> None:
         self._profile = profile
         self._queue: list[Any] = []
@@ -64,15 +74,18 @@ class HttpJsonSession(_QueuedSession):
         self._url = url
         self._timeout = timeout
 
-    async def send(self, frame: dict[str, Any]) -> None:
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
+        limit = self._timeout if timeout is None else timeout
         try:
-            resp = await self._client.post(
-                self._url, json=self._stamp(frame), timeout=self._timeout
-            )
+            # httpx bounds each read, not the request: the outer limit bounds the turn.
+            async with asyncio.timeout(limit):
+                resp = await self._client.post(
+                    self._url, json=self._stamp(frame), timeout=turn_timeout(limit)
+                )
         except NOT_SENT_TIMEOUTS as exc:
             raise TransportError(f"could not connect to {self._url}: {exc!r}") from exc
-        except httpx.TimeoutException as exc:
-            raise TransportTimeout(f"agent did not answer within {self._timeout:.1f}s") from exc
+        except (httpx.TimeoutException, TimeoutError) as exc:
+            raise TransportTimeout(f"agent did not answer within {limit:.1f}s") from exc
         except httpx.HTTPError as exc:
             raise TransportError(f"HTTP request to {self._url} failed: {exc}") from exc
         if resp.status_code >= 500:
@@ -128,10 +141,22 @@ class CallableSession(_QueuedSession):
         super().__init__(profile)
         self._fn = fn
 
-    async def send(self, frame: dict[str, Any]) -> None:
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
+        started = time.monotonic()
         result = self._fn(self._stamp(frame))
         if inspect.isawaitable(result):
-            result = await result
+            deadline = asyncio.timeout(timeout)
+            try:
+                async with deadline:
+                    result = await result
+            except TimeoutError as exc:
+                if not deadline.expired():
+                    raise  # the agent's own exception, not the turn running out
+                raise TransportTimeout(f"agent did not answer within {timeout}s") from exc
+        elif timeout is not None and time.monotonic() - started > timeout:
+            # A synchronous agent cannot be interrupted, but an answer that came too late is
+            # still late: the same outcome as an async agent cut off at the limit.
+            raise TransportTimeout(f"agent did not answer within {timeout}s")
         self._absorb(_as_frames(result))
 
 

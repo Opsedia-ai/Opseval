@@ -105,6 +105,17 @@ def _changes(before: list[ScoreResult], after: list[ScoreResult]) -> list[Scorer
             changes.append(
                 ScorerChange(scorer_id=key[0], what=key[1], before=old[key], after=new[key])
             )
+        elif key[1] == "version" and (key in old) != (key in new):
+            # A scorer the original run did not have (an always-on check added since, ADR-0042),
+            # or one it had that is gone: either can move a verdict, so it is named.
+            changes.append(
+                ScorerChange(
+                    scorer_id=key[0],
+                    what="added" if key in new else "removed",
+                    before=old.get(key),
+                    after=new.get(key),
+                )
+            )
     return changes
 
 
@@ -125,7 +136,14 @@ class _Rescorer:
             return scores
         previous = {s.scorer_id: s for s in original.scores}
         specs = {spec.id: spec for spec in effective_specs(scenario)}
-        return [self._reuse(s, previous.get(s.scorer_id), specs[s.scorer_id]) for s in scores]
+        # Always-on harness checks (ALWAYS_ON) have no spec: they are deterministic, so the
+        # fresh score is the one to keep.
+        return [
+            self._reuse(s, previous.get(s.scorer_id), spec)
+            if (spec := specs.get(s.scorer_id)) is not None
+            else s
+            for s in scores
+        ]
 
     def _reuse(self, fresh: ScoreResult, old: ScoreResult | None, spec: ScorerSpec) -> ScoreResult:
         cls = REGISTRY.get(fresh.scorer_id)

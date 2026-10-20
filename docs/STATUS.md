@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-20** (`main` with credential provider plugins).
+**As of 2026-10-20** (`main` with credential provider plugins, and replies read on the agent's clock).
 
 ## Completion
 
@@ -62,7 +62,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-RUN-03 | Credentials | M | v0.1 | Done | static and HS256 with refresh (ADR-0012), per-tenant tokens (ADR-0041), and `opseval.credentials` provider plugins: fail-closed discovery, every provider failure a harness error (ADR-0046) |
 | FR-RUN-04 | Driver state machine | M | v0.1 | Done | `driver.py`, PROBES state (ADR-0025) |
 | FR-RUN-05 | Terminal states | M | v0.1 | Done | `TerminalState` |
-| FR-RUN-06 | Timeouts count against the agent | M | v0.1 | Done | connect/pool timeouts are harness errors; simulator time is off the agent's clock, with its own limit (ADR-0030 update); fault-injection tests for both halves |
+| FR-RUN-06 | Timeouts count against the agent | M | v0.1 | Done | connect/pool timeouts are harness errors; simulator time is off the agent's clock, with its own limit (ADR-0030 update); the scenario's turn timeout bounds request/response turns (http-json, openai-chat, sse, python), and a sent frame is stamped when sending began, so latency is the round trip and a tool run after an approval is placed after it (ADR-0042); fault-injection tests for both halves |
 | FR-RUN-07 | Protocol probes | S | v0.2 | Done | `profile.probes` (ADR-0025) |
 | FR-RUN-08 | Tenant pool and locks | M | v0.1 | Done | `--tenants`/`--lanes`: lanes = min(tenants, requested, `OPSEVAL_LANE_CAP`), exclusive file leases with background heartbeats, works with every stop policy and cancel (ADR-0041); verified with two processes sharing one pool |
 | FR-RUN-09 | Isolated attempts | M | v0.1 | Done | new driver, transport and simulator per attempt |
@@ -87,7 +87,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SCR-09 | Criterion permutation | C | v0.5 | Done | rotated ballots (ADR-0017) |
 | FR-SCR-10 | Scorer plugin API and contract kit | M | v0.2 | Done | `plugins.py`, `opseval.testing.ScorerContract` (ADR-0022) |
 | FR-SCR-11 | Invariants and default pack | M | v0.1 | Done | `phase_order`, `no_errors`, `no_autonomous_commit` (`tools.forbidden_not_called`) and `checkpoint_gating` (adds `flow.checkpoint_gating`), de-duplicated against the default pack |
-| FR-VER-01 | Attempt invalidation | M | v0.1 | Done | `attempt_verdict` |
+| FR-VER-01 | Attempt invalidation | M | v0.1 | Done | `attempt_verdict`: any failed harness-axis score invalidates, including the always-on `protocol.replies_read` (the profile read nothing the agent sent); a run where every attempt was lost or unread exits 3 (ADR-0042) |
 | FR-VER-02 | Fold attempts | M | v0.1 | Done | `fold_attempts` |
 | FR-VER-03 | Flaky detection | M | v0.1 | Done | `TestVerdict.flaky` |
 | FR-VER-04 | Five-state verdicts | M | v0.1 | Done | `VerdictStatus` |
@@ -131,7 +131,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 
 | Area | Status | Evidence |
 |---|---|---|
-| Reliability | Done | fault-injection suite across transports, scorers and trace sources |
+| Reliability | Done | fault-injection suite across transports, scorers and trace sources; a profile that reads none of the agent's replies is never a pass (ADR-0042) |
 | Code quality | Done | `mypy --strict`, ruff, coverage ≥ 85% (≈ 95%), scorer contract kit; console API types generated from the server models with a drift check; console tests (Vitest) in CI; no transport contract kit |
 | Determinism | Done | seeds, prompt and rubric hashes, `opseval rescore` |
 | Security | Partial | bandit, pip-audit, SECURITY.md, console API token auth, actions pinned to SHAs with Dependabot, releases gated on `make check` (Python 3.11–3.13), the demo exit codes and matching versions, plugin sinks imported only when named; no threat model, SBOM or signed images |

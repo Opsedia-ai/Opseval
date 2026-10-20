@@ -165,7 +165,8 @@ class TestOpenAIChat:
         )
         rec = await run_once(s, profile, transport(profile, fake_agent))
         scores = await ScoringEngine().score(rec, s, profile)
-        assert all(x.status.value == "passed" and x.degraded for x in scores), scores
+        tools = [x for x in scores if x.axis.agent_facing]
+        assert len(tools) == 2 and all(x.status.value == "passed" and x.degraded for x in tools)
 
     async def test_5xx_is_an_agent_error(self, oc_profile: SutProfile) -> None:
         s = oc_scenario()

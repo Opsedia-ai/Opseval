@@ -19,7 +19,7 @@ from opseval.errors import ConfigError
 from opseval.llm import ChatClient, model_family
 from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
-from opseval.models.results import Axis, ScoreResult, ScoreStatus
+from opseval.models.results import UNREAD_REPLIES, Axis, ScoreResult, ScoreStatus
 from opseval.models.scenario import Scenario, ScorerSpec
 
 
@@ -126,6 +126,14 @@ DEFAULT_PACK = [
     "output.terminal_state",
     "tools.forbidden_not_called",
 ]
+
+ALWAYS_ON = [UNREAD_REPLIES]
+"""Harness checks the engine runs on every attempt, whatever the scenario lists (ADR-0042).
+A profile that maps nothing of what the agent says would otherwise let an attempt pass on
+checks that read nothing, so this cannot be left to each author to remember. They are not
+in :func:`effective_specs`, which stays what the scenario asked for: a harness check
+measures nothing about the agent, so it must not change which dependencies a scenario
+needs."""
 
 
 def effective_specs(scenario: Scenario) -> list[ScorerSpec]:
@@ -248,7 +256,10 @@ class ScoringEngine:
             judge_independence=self.judge_independence,
             ballot_slots=self._ballot_slots,
         )
-        specs = effective_specs(scenario)
+        # An always-on check runs with its own spec, even if the scenario lists it: a listed
+        # threshold of 0 would otherwise switch off the check that catches a wrong mapping.
+        specs = [s for s in effective_specs(scenario) if s.id not in ALWAYS_ON]
+        specs += [ScorerSpec(id=i) for i in ALWAYS_ON]
         return list(await asyncio.gather(*(self._one(record, spec, ctx) for spec in specs)))
 
     async def _one(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
