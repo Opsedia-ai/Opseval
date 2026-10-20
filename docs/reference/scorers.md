@@ -45,7 +45,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `tools.call_success` | trace | 1 | Share of the agent's tool calls that succeeded (needs traces). |
 | `tools.expected_called` | frames | 1 | Every must_call tool ran (trace-backed; degraded to frame evidence). |
 | `tools.forbidden_not_called` | frames | 1 | No must_not_call tool ran, no forbidden_before tool ran before its checkpoint was approved, and no committing tool ran before the commit gate was approved. |
-| `tools.ordering` | frames | 2 | For each expected_tools.ordering rule, 'before' first ran before 'after'. |
+| `tools.ordering` | frames | 1 | For each expected_tools.ordering rule, 'before' first ran before 'after'. |
 
 ## security
 

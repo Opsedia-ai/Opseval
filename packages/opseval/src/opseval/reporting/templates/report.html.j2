@@ -33,7 +33,7 @@ details{margin:6px 0}summary{cursor:pointer}
 
 {% if result.rescore %}
 <div class="card"><b>Re-scored offline</b> from run <code>{{ result.rescore.of_run_id }}</code> at {{ result.rescore.rescored_at.strftime('%Y-%m-%d %H:%M UTC') }} (scenarios from the {{ result.rescore.scenario_source }}). The agent was not contacted.
-{% if result.rescore.scorer_changes %}<ul>{% for c in result.rescore.scorer_changes %}<li><code>{{ c.scorer_id }}</code> {{ c.what }}: <code>{{ c.before }}</code> → <code>{{ c.after }}</code></li>{% endfor %}</ul>{% else %}<p class="muted" style="margin:4px 0 0">No scorer version or judge prompt changed.</p>{% endif %}
+{% if result.rescore.scorer_changes %}<ul>{% for c in result.rescore.scorer_changes %}<li>{% if c.what in ("added", "removed") %}{{ c.what }} <code>{{ c.scorer_id }}</code>{% else %}<code>{{ c.scorer_id }}</code> {{ c.what }}: <code>{{ c.before }}</code> → <code>{{ c.after }}</code>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="muted" style="margin:4px 0 0">No scorer version or judge prompt changed.</p>{% endif %}
 {% if result.rescore.verdict_changes %}<p style="margin:4px 0 0">Verdicts that moved: {% for v in result.rescore.verdict_changes %}<code>{{ v.test_id }}</code> {{ v.before.value }} → <b>{{ v.after.value }}</b>{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
 {% if result.rescore.reused_judge_scores %}<p class="muted" style="margin:4px 0 0">{{ result.rescore.reused_judge_scores }} judge score(s) reused from the original run (same prompt, no judge configured).</p>{% endif %}
 </div>

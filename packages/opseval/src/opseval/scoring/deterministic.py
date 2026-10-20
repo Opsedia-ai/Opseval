@@ -6,8 +6,8 @@ from __future__ import annotations
 import re
 
 from opseval.models.profile import FrameKind
-from opseval.models.record import InterruptRecord, RunRecord, TerminalState
-from opseval.models.results import Axis, ScoreResult
+from opseval.models.record import FrameRecord, InterruptRecord, RunRecord, TerminalState
+from opseval.models.results import UNREAD_REPLIES, Axis, ScoreResult
 from opseval.models.scenario import RESERVED_STOP_AT, ScorerSpec
 from opseval.paths import dig
 from opseval.redaction import strip_markers
@@ -335,24 +335,45 @@ READ_KINDS = frozenset(
 """Kinds that carry meaning without text: the profile recognised the frame for what it is."""
 
 
+def _shape(payloads: list[object]) -> str:
+    """What the unread replies look like, for the message that says how to fix the mapping."""
+    objects = [p for p in payloads if isinstance(p, dict) and set(p) != {"_raw"}]
+    keyed = [p for p in objects if p]
+    if keyed:
+        keys = sorted(str(k) for k in keyed[0])[:12]
+        return f"the replies have keys {keys}"
+    if objects:
+        return "the replies are empty JSON objects"
+    if any(isinstance(p, dict) for p in payloads):
+        return "the replies are not JSON"  # decode_frame keeps undecodable input as {"_raw"}
+    return "the replies are JSON, but not objects"
+
+
 @register
 class RepliesRead(Scorer):
     """ADR-0042: Opseval read what the agent sent, so the other checks had something to grade.
 
     A profile whose ``kind_field`` or ``text_field`` does not match the agent's replies
-    leaves every frame unreadable: the transcript holds only the customer, judges have
-    nothing to quote, and the frame checks (no error frames, the terminal state, the turn
-    budget) all pass on nothing. That is a harness problem — the mapping is wrong — and
-    left alone it reads as an agent that did nothing wrong. On the harness axis a failure
-    invalidates the attempt, so it is *not judged*; when every attempt is, the run exits 3.
+    leaves the transcript with only the customer in it: judges have nothing to quote, and
+    the frame checks (no error frames, the terminal state, the turn budget) pass on nothing.
+    That is a harness problem, the mapping is wrong, and left alone it reads as an agent that
+    did nothing wrong. On the harness axis a failure invalidates the attempt, so it is *not
+    judged*; when every attempt is, the run exits 3 (``verdicts.exit_code``).
 
-    It fails only when nothing at all was read. A frame is read when it had text at the
-    mapped path (an empty string counts: an agent that answers with nothing is the agent's
-    failure, and hiding it as "not judged" would break the other half of the core rule) or
-    was classified as a checkpoint, result, error or notification.
+    It fails when either holds, counting only the conversation (probe answers are their own
+    check, ``protocol.probes_passed``):
+
+    - the agent sent frames and the profile read nothing from any of them: no frame had the
+      text field, and none was classified as a checkpoint, result, error or notification;
+    - frames were classified as messages, and not one of them had the text field: the kind
+      is mapped, the text is not.
+
+    The text field being *present* is what counts, whatever its value: ``""`` or ``null``
+    means the path matched and the agent said nothing, which is the agent's failure, and
+    hiding it as "not judged" would break the other half of the core rule.
     """
 
-    id = "protocol.replies_read"
+    id = UNREAD_REPLIES
     axis = Axis.HARNESS
     description = (
         "Always on. Invalidates the attempt when the agent sent frames but the profile read "
@@ -360,26 +381,39 @@ class RepliesRead(Scorer):
     )
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
-        frames = [f for f in record.received() if f.kind is not FrameKind.HANDSHAKE]
-        unread = [f for f in frames if f.text is None and f.kind not in READ_KINDS]
-        if not frames or len(unread) < len(frames):
-            return self.result(spec, 1.0, received=len(frames), unread=len(unread))
-        # An undecodable frame is kept as {"_raw": ...} (transport.base.decode_frame).
-        decoded = [f.payload for f in unread if isinstance(f.payload, dict)]
-        sample = next((p for p in decoded if set(p) != {"_raw"}), None)
-        keys = sorted(str(k) for k in sample)[:12] if isinstance(sample, dict) else []
         profile = ctx.profile
-        return self.result(
-            spec,
-            0.0,
-            received=len(frames),
-            unread=len(unread),
-            reply_keys=keys,
-            reason=(
+        probe_replies = {p.received_seq for p in record.probes if p.received_seq is not None}
+        frames = [
+            f
+            for f in record.received()
+            if f.kind is not FrameKind.HANDSHAKE and f.seq not in probe_replies
+        ]
+
+        def has_text(frame: FrameRecord) -> bool:
+            if frame.text is not None:
+                return True
+            return isinstance(frame.payload, dict) and profile.text_field in frame.payload
+
+        unread = [f for f in frames if not has_text(f) and f.kind not in READ_KINDS]
+        messages = [f for f in frames if f.kind is FrameKind.MESSAGE]
+        textless = bool(messages) and not any(has_text(f) for f in messages)
+        received, unread_count = len(frames), len(unread)
+        if not frames or (unread_count < received and not textless):
+            return self.result(spec, 1.0, received=received, unread=unread_count)
+        if textless:
+            shape = _shape([f.payload for f in messages])
+            problem = (
+                f"{len(messages)} frame(s) were classified as messages and none had text at "
+                f"{profile.text_field!r} ({shape}). Fix text_field in the profile."
+            )
+        else:
+            shape = _shape([f.payload for f in unread])
+            problem = (
                 f"{len(frames)} frame(s) arrived from the agent and the profile read nothing "
                 f"from any of them: no text at {profile.text_field!r} and no kind it maps at "
-                f"{profile.kind_field!r}"
-                + (f" (the replies have keys {keys})" if keys else " (the replies are not JSON)")
-                + ". Fix kind_field, kinds or text_field in the profile."
-            ),
+                f"{profile.kind_field!r} ({shape}). Fix kind_field, kinds or text_field in "
+                "the profile."
+            )
+        return self.result(
+            spec, 0.0, received=received, unread=unread_count, shape=shape, reason=problem
         )

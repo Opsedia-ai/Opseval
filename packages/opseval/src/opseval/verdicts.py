@@ -12,8 +12,9 @@ import math
 from collections import defaultdict
 
 from opseval.models.gate import PRESETS, ByCriticality, ResolvedGatePolicy, resolve
-from opseval.models.record import RunRecord
+from opseval.models.record import RunRecord, TerminalState
 from opseval.models.results import (
+    UNREAD_REPLIES,
     AttemptVerdict,
     Axis,
     Gate,
@@ -51,7 +52,7 @@ def attempt_verdict(
         # Another run may have used the same test tenant during this attempt: shared state
         # is the harness's problem, never the agent's verdict (ADR-0041).
         reason = "tenant lease lost: the test tenant may have been shared with another run"
-    elif harness:
+    elif harness and not _failed_without_reading(record, harness, measured):
         reason = "; ".join(_harness_reason(s) for s in harness)
     elif scores and all(s.status is ScoreStatus.INFRA_ERROR for s in scores):
         reason = "every scorer returned infra_error"
@@ -69,8 +70,22 @@ def attempt_verdict(
     )
 
 
-UNREAD_REPLIES = "protocol.replies_read"
-"""The always-on check that the profile read the agent's replies (ADR-0042)."""
+def _failed_without_reading(
+    record: RunRecord, harness: list[ScoreResult], measured: list[ScoreResult]
+) -> bool:
+    """Unread replies leave the frame checks blind, but not every failure needs them read.
+
+    When that is the only harness failure, an agent failure proven some other way still
+    stands (ADR-0042): a tool check that failed on the agent's own traces, or the agent not
+    answering in time. Calling those "not judged" would hide a real agent failure behind a
+    configuration mistake. A persona breaking character still invalidates outright.
+    """
+    if any(s.scorer_id != UNREAD_REPLIES for s in harness):
+        return False
+    failed = [s for s in measured if s.status is ScoreStatus.FAILED]
+    if failed and record.terminal_state is TerminalState.TIMEOUT:
+        return True
+    return any(s.details.get("source") == "trace" for s in failed)
 
 
 def _harness_only(attempt: AttemptVerdict) -> bool:
@@ -80,7 +95,7 @@ def _harness_only(attempt: AttemptVerdict) -> bool:
     run says "not judged" (exit 2) as it always has."""
     if attempt.terminal_state.is_infra:
         return True
-    return any(
+    return attempt.passed is None and any(
         s.scorer_id == UNREAD_REPLIES and s.status is ScoreStatus.FAILED for s in attempt.scores
     )
 

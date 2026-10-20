@@ -12,7 +12,7 @@ import asyncio
 import re
 import time
 from collections import Counter
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
@@ -206,26 +206,38 @@ class Driver:
         text: str | None,
         *,
         timeout: float,
+        then: Callable[[int], None] | None = None,
     ) -> int:
-        """Send a frame, recorded at the moment sending *began*.
+        """Send a frame and record it at the moment it reached the agent (ADR-0042).
 
-        On a request/response transport ``send`` returns only once the agent has answered, so
-        a timestamp taken afterwards would place the frame after everything the agent did in
-        reply: a tool it rightly ran after an approval would look as if it ran before it, and
-        the agent would be failed for the harness's own clock (``tools.approval_gated``,
-        ``flow.checkpoint_gating``). The same start time makes the reply's latency the real
-        round trip.
+        Where ``send`` waits for the answer (``session.replies_in_send``: http-json,
+        openai-chat, sse, python), a timestamp taken afterwards would place the frame after
+        everything the agent did in reply: a tool it rightly ran after an approval would look
+        as if it ran before it, and the agent would be failed for the harness's own clock. So
+        there the frame is stamped when sending began, which also makes the reply's latency
+        the real round trip. A streaming ``send`` (websocket) may first refresh a token or
+        reconnect and resend, so there the frame reached the agent when ``send`` returned.
+
+        ``then`` gets the frame's seq once it is recorded, also when the agent then failed to
+        answer in time or the attempt deadline cut the wait short: the frame was sent, and the
+        record must show what the agent was asked.
         """
-        at = datetime.now(UTC)
-        self._last_sent_at = time.monotonic()
+        before = datetime.now(UTC), time.monotonic()
+
+        def sent() -> int:
+            at, clock = before if session.replies_in_send else (datetime.now(UTC), time.monotonic())
+            self._last_sent_at = clock
+            seq = self._record("sent", frame, kind, text, at=at)
+            if then is not None:
+                then(seq)
+            return seq
+
         try:
             await session.send(frame, timeout=timeout)
-        except TransportTimeout:
-            # The request went out and the agent did not answer in time: the record must
-            # still show what it was asked.
-            self._record("sent", frame, kind, text, at=at)
+        except (TransportTimeout, asyncio.CancelledError):
+            sent()
             raise
-        return self._record("sent", frame, kind, text, at=at)
+        return sent()
 
     async def _send_user(self, session: Session, text: str) -> None:
         if self._user_turns >= self.s.conversation.max_turns:
@@ -233,14 +245,18 @@ class Driver:
         frame = render_frame(
             self.p.user_message_frame, {"text": text, "timezone": self.s.persona.timezone}
         )
+
+        def counted(_seq: int) -> None:
+            self._user_turns += 1
+
         await self._send(
             session,
             frame,
             FrameKind.USER_MESSAGE,
             text,
             timeout=self.s.execution.turn_timeout_seconds,
+            then=counted,
         )
-        self._user_turns += 1
 
     # --- main loop -------------------------------------------------------------------
     async def run(self) -> RunRecord:
@@ -399,12 +415,16 @@ class Driver:
             frame = render_frame(
                 probe.send, {"session_id": session.session_id, "text": None, "timezone": None}
             )
-            # The seq `_send` records the probe under, whether or not it is answered.
-            sent = len(self._frames)
+            seqs: list[int] = []
             try:
                 # On a request/response transport the answer is awaited in `send` itself.
                 await self._send(
-                    session, frame, FrameKind.UNKNOWN, None, timeout=probe.timeout_seconds
+                    session,
+                    frame,
+                    FrameKind.UNKNOWN,
+                    None,
+                    timeout=probe.timeout_seconds,
+                    then=seqs.append,
                 )
                 payload = await session.receive(probe.timeout_seconds)
             except TransportTimeout:
@@ -414,7 +434,7 @@ class Driver:
                         passed=False,
                         answered=False,
                         reason=f"no answer within {probe.timeout_seconds:g}s",
-                        sent_seq=sent,
+                        sent_seq=seqs[0] if seqs else None,
                     )
                 )
                 continue
@@ -429,7 +449,7 @@ class Driver:
                     name=probe.name,
                     passed=problem is None,
                     reason=problem,
-                    sent_seq=sent,
+                    sent_seq=seqs[0],
                     received_seq=received,
                 )
             )
@@ -570,8 +590,18 @@ class Driver:
             frame = render_frame(self.p.resume_frame, values)
             kind = FrameKind.RESUME
             text = decision.feedback
-        sent = await self._send(
-            session, frame, kind, text, timeout=self.s.execution.turn_timeout_seconds
+
+        def answered(sent: int) -> None:
+            # Recorded even when the agent then fails to answer in time: the decision was
+            # sent, and a tool the agent ran on it must be checked against it.
+            self._user_turns += 1
+            interrupt(decision, sent)
+
+        await self._send(
+            session,
+            frame,
+            kind,
+            text,
+            timeout=self.s.execution.turn_timeout_seconds,
+            then=answered,
         )
-        self._user_turns += 1
-        interrupt(decision, sent)

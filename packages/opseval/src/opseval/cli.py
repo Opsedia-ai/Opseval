@@ -481,7 +481,12 @@ def rescore(
     info = outcome.info
     typer.echo(f"Re-scored {info.of_run_id} (scenarios from the {info.scenario_source}).")
     for change in info.scorer_changes:
-        typer.echo(f"  changed {change.scorer_id} {change.what}: {change.before} → {change.after}")
+        if change.what in ("added", "removed"):
+            typer.echo(f"  {change.what} {change.scorer_id}")
+        else:
+            typer.echo(
+                f"  changed {change.scorer_id} {change.what}: {change.before} → {change.after}"
+            )
     if not info.scorer_changes:
         typer.echo("  no scorer version or judge prompt changed")
     if info.reused_judge_scores:

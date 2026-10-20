@@ -26,6 +26,11 @@ class ScoreStatus(StrEnum):
     INFRA_ERROR = "infra_error"
 
 
+UNREAD_REPLIES = "protocol.replies_read"
+"""The always-on harness check that the profile read the agent's replies (ADR-0042). Named
+here, in the models, so the scorer, the engine and the verdict rules share one spelling."""
+
+
 class Axis(StrEnum):
     OUTPUT = "output"
     FLOW = "flow"
@@ -216,7 +221,7 @@ class ScorerChange(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     scorer_id: str
-    what: str  # "version" | "prompt_hash" | "model"
+    what: str  # "version" | "prompt_hash" | "model" | "added" | "removed"
     before: str | None
     after: str | None
 

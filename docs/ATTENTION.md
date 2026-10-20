@@ -28,11 +28,18 @@ settles it.
 
 ## Critical and high issues
 
-None open as of 2026-10-20. The last one (I9, no concurrency) closed with the test-tenant pool
-(ADR-0041). New ones are added here, numbered from I10, when they are found.
+| # | Sev | Issue | Effect | Plan |
+|---|---|---|---|---|
+| I10 | High | An agent that answers every turn with empty text passes the built-in frame checks | The scaffolded smoke suite (`no_errors`, `terminal_state`, `turn_budget`) cannot tell a silent agent from a good one without an LLM judge; a real agent failure goes green. A wrong *mapping* is now caught (ADR-0042); a silent *agent* is not yet. | Next PR: an agent-facing check that every customer turn got a reply, in the default pack and the scaffolds, with profile-aware defaults (ADR-0043) |
+
+I9 (no concurrency) closed with the test-tenant pool (ADR-0041).
 
 ## For your information
 
+- **Behaviour you may notice:** every attempt now has a `protocol.replies_read` score. When the
+  profile reads none of the agent's replies the attempt is not judged, and a run where every
+  attempt is unread exits 3, not 0 (ADR-0042). HTTP-family turns now honour the scenario's
+  `turn_timeout_seconds`, where they were always limited to 120 s.
 - **Behaviour you may notice:** a flaky pass, a skip or an unmeasured check reads "No blocking
   issues, but …" (yellow), never "Safe to release" (ADR-0030, ADR-0032).
 - **Behaviour you may notice:** every host Opseval contacts must be in `OPSEVAL_ALLOWED_HOSTS`,

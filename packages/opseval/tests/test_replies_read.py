@@ -17,6 +17,7 @@ transports:
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ import pytest
 
 from opseval.config import Settings
 from opseval.driver import Driver
+from opseval.errors import TransportTimeout
 from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord, TerminalState, ToolCall
 from opseval.models.results import Axis, ScoreStatus, VerdictStatus
@@ -35,6 +37,7 @@ from opseval.scaffold import scaffold
 from opseval.scoring import ALWAYS_ON, REGISTRY, ScoringContext, ScoringEngine
 from opseval.simulator import ScriptedSimulator
 from opseval.transport import HttpJsonTransport, PythonTransport, Transport
+from opseval.transport.base import Session
 from opseval.verdicts import EXIT_HARNESS, attempt_verdict
 
 from .conftest import make_scenario
@@ -110,7 +113,7 @@ class TestAWrongMappingIsNeverAPass:
         # ...so the always-on harness check is what keeps it from passing.
         read = scores["protocol.replies_read"]
         assert read.axis is Axis.HARNESS and read.status is ScoreStatus.FAILED
-        assert read.details["reply_keys"] == ["reply"]
+        assert read.details["shape"] == "the replies have keys ['reply']"
         assert result.passed is None
         assert "read nothing" in (result.invalid_reason or "")
         assert "'reply'" in (result.invalid_reason or "")
@@ -120,7 +123,7 @@ class TestAWrongMappingIsNeverAPass:
         record = await attempt(scenario, agent_replying({"_raw": "<html>login</html>"}))
         result, scores = await verdict(record, scenario)
         assert scores["protocol.replies_read"].status is ScoreStatus.FAILED
-        assert "not JSON" in scores["protocol.replies_read"].details["reason"]
+        assert scores["protocol.replies_read"].details["shape"] == "the replies are not JSON"
         assert result.passed is None
 
     async def test_it_runs_even_when_the_scenario_lists_its_own_scorers(self) -> None:
@@ -255,7 +258,7 @@ class TestTheTurnIsTimedOnTheAgentsClock:
         scenario = chat_scenario(execution={"repeats": 1, "turn_timeout_seconds": 0.05})
         record = await attempt(scenario, PythonTransport(lambda: agent, CHAT))
         assert record.terminal_state is TerminalState.TIMEOUT
-        assert "0.1s" in (record.stop_reason or "") or "0.0s" in (record.stop_reason or "")
+        assert record.stop_reason == "agent did not answer within 0.05s"
         assert record.transcript() == [("customer", "What are your opening hours?")]
         result, _ = await verdict(record, scenario)
         assert result.passed is False
@@ -340,50 +343,242 @@ class TestAToolRunAfterAnApprovalIsPlacedAfterIt:
         assert gate.status is ScoreStatus.PASSED, gate.details
 
 
-ORDERED = chat_profile(
-    name="ordered",
-    tools={"lookup": {}, "act": {}},
-    traces={"clock_skew_ms": 2000},
-)
-
-
-async def ordering(*calls: tuple[str, float]) -> Any:
-    """Score tools.ordering (lookup before act) on trace spans ``ms`` after a fixed start."""
-    scenario = chat_scenario(
-        expectations={"expected_tools": {"ordering": [{"before": "lookup", "after": "act"}]}},
-        scorers=[{"id": "tools.ordering"}],
-    )
-    record = await attempt(scenario, agent_replying({"type": "message", "text": "ok"}), ORDERED)
-    start = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
-    traced = record.model_copy(
-        update={
-            "trace_coverage": "full",
-            "tool_calls": tuple(
-                ToolCall(name=n, started_at=start + timedelta(milliseconds=ms)) for n, ms in calls
-            ),
-        }
-    )
-    _result, scores = await verdict(traced, scenario, ORDERED)
-    return scores["tools.ordering"]
-
-
-class TestTwoSpansOfTheAgentsTraceShareOneClock:
-    async def test_a_quick_lookup_then_act_is_in_order(self) -> None:
-        # 100 ms apart, well inside the 2 s window meant for Opseval's clock vs the agent's.
-        score = await ordering(("lookup", 0), ("act", 100))
-        assert score.status is ScoreStatus.PASSED, score.reason
-        assert score.scorer_version == "2"
-
-    async def test_acting_before_the_lookup_inside_the_window_is_a_failure(self) -> None:
-        # The agent's own failure, hidden as "not measured" while the window applied.
-        score = await ordering(("act", 0), ("lookup", 100))
-        assert score.status is ScoreStatus.FAILED
-
-    async def test_the_same_instant_cannot_be_ordered(self) -> None:
-        score = await ordering(("lookup", 0), ("act", 0))
-        assert score.status is ScoreStatus.INFRA_ERROR
-
-
 @pytest.mark.parametrize("cls", ["protocol.replies_read"])
 def test_documented_as_always_on(cls: str) -> None:
     assert REGISTRY[cls].description.startswith("Always on.")
+
+
+class TestReviewOf65:
+    """Each case a review of the first version of ADR-0042 found."""
+
+    async def test_a_trace_proven_failure_is_not_hidden_by_unread_replies(self) -> None:
+        # The forbidden tool ran (the agent's own trace says so): unread text changes nothing.
+        profile = chat_profile(tools={"refund": {}}, traces={"clock_skew_ms": 0})
+        scenario = chat_scenario(
+            expectations={"expected_tools": {"must_not_call": ["refund"]}},
+            scorers=[{"id": "tools.forbidden_not_called"}],
+        )
+        record = await attempt(scenario, agent_replying({"reply": "done"}), profile)
+        traced = record.model_copy(
+            update={
+                "trace_coverage": "full",
+                "tool_calls": (ToolCall(name="refund", started_at=datetime.now(UTC)),),
+            }
+        )
+        result, scores = await verdict(traced, scenario, profile)
+        assert scores["protocol.replies_read"].status is ScoreStatus.FAILED
+        assert result.passed is False and result.invalid_reason is None
+
+    async def test_a_timeout_after_unread_replies_stays_the_agents(self) -> None:
+        turns = 0
+
+        async def agent(_frame: dict[str, Any]) -> Any:
+            nonlocal turns
+            turns += 1
+            if turns > 1:
+                await asyncio.sleep(1)
+            return {"reply": "hi"}
+
+        scenario = chat_scenario(
+            conversation={
+                "scripted_turns": ["Hello?", "Are you there?"],
+                "stop_at": "goal_reached",
+                "checkpoint_policy": {},
+            },
+            scorers=[{"id": "output.terminal_state", "params": {"expect": ["goal_reached"]}}],
+            execution={"repeats": 1, "turn_timeout_seconds": 0.05},
+        )
+        record = await attempt(scenario, PythonTransport(lambda: agent, CHAT))
+        assert record.terminal_state is TerminalState.TIMEOUT
+        result, scores = await verdict(record, scenario)
+        assert scores["protocol.replies_read"].status is ScoreStatus.FAILED
+        assert result.passed is False
+
+    async def test_a_probe_answer_is_not_a_conversation_reply(self) -> None:
+        async def agent(frame: dict[str, Any]) -> Any:
+            if frame.get("type") == "ping":
+                return {"op": "pong"}  # the probe's own check grades this
+            await asyncio.sleep(1)  # the conversation is never answered: TIMEOUT
+            return {"type": "message", "text": "late"}
+
+        profile = chat_profile(probes=[{"name": "ping", "send": {"type": "ping"}}])
+        scenario = chat_scenario(execution={"repeats": 1, "turn_timeout_seconds": 0.05})
+        record = await attempt(scenario, PythonTransport(lambda: agent, profile), profile)
+        assert record.terminal_state is TerminalState.TIMEOUT
+        result, scores = await verdict(record, scenario, profile)
+        assert scores["protocol.replies_read"].status is ScoreStatus.PASSED
+        assert result.passed is False
+
+    async def test_a_readable_probe_answer_does_not_mask_unread_replies(self) -> None:
+        def agent(frame: dict[str, Any]) -> Any:
+            if frame.get("type") == "ping":
+                return {"type": "message", "text": "pong"}
+            return {"reply": "hi"}
+
+        profile = chat_profile(probes=[{"name": "ping", "send": {"type": "ping"}}])
+        scenario = chat_scenario()
+        record = await attempt(scenario, PythonTransport(lambda: agent, profile), profile)
+        _result, scores = await verdict(record, scenario, profile)
+        assert scores["protocol.replies_read"].status is ScoreStatus.FAILED
+
+    async def test_a_null_text_was_read(self) -> None:
+        scenario = chat_scenario()
+        record = await attempt(scenario, agent_replying({"type": "message", "text": None}))
+        result, scores = await verdict(record, scenario)
+        assert scores["protocol.replies_read"].status is ScoreStatus.PASSED
+        assert result.passed is not None
+
+    async def test_messages_without_text_fail_even_beside_mapped_frames(self) -> None:
+        profile = chat_profile(kinds={"message": "message", "done": "notification"})
+        scenario = chat_scenario()
+
+        def agent(_frame: dict[str, Any]) -> Any:
+            return [{"type": "message", "content": "We open at 9."}, {"type": "done"}]
+
+        record = await attempt(scenario, PythonTransport(lambda: agent, profile), profile)
+        result, scores = await verdict(record, scenario, profile)
+        read = scores["protocol.replies_read"]
+        assert read.status is ScoreStatus.FAILED
+        assert "classified as messages" in read.details["reason"]
+        assert result.passed is None
+
+    async def test_a_zero_threshold_cannot_switch_it_off(self) -> None:
+        scenario = chat_scenario(scorers=[{"id": "protocol.replies_read", "threshold": 0}])
+        record = await attempt(scenario, agent_replying({"reply": "hi"}))
+        result, scores = await verdict(record, scenario)
+        assert scores["protocol.replies_read"].status is ScoreStatus.FAILED
+        assert scores["protocol.replies_read"].threshold == 1.0
+        assert result.passed is None
+
+    @pytest.mark.parametrize(
+        ("reply", "shape"),
+        [
+            ("We open at 9", "the replies are JSON, but not objects"),
+            ({}, "the replies are empty JSON objects"),
+        ],
+    )
+    async def test_the_message_describes_the_replies(self, reply: Any, shape: str) -> None:
+        scenario = chat_scenario()
+        record = await attempt(scenario, agent_replying(reply))
+        _result, scores = await verdict(record, scenario)
+        assert scores["protocol.replies_read"].details["shape"] == shape
+
+    async def test_the_attempt_deadline_keeps_the_question(self) -> None:
+        async def agent(_frame: dict[str, Any]) -> Any:
+            await asyncio.sleep(5)
+            return {"type": "message", "text": "late"}
+
+        scenario = chat_scenario(
+            execution={"repeats": 1, "turn_timeout_seconds": 5, "attempt_timeout_seconds": 0.1}
+        )
+        record = await attempt(scenario, PythonTransport(lambda: agent, CHAT))
+        assert record.terminal_state is TerminalState.TIMEOUT
+        assert record.transcript() == [("customer", "What are your opening hours?")]
+        assert record.user_turns == 1
+
+    async def test_a_timed_out_decision_is_still_on_the_record(self) -> None:
+        async def agent(frame: dict[str, Any]) -> Any:
+            if frame.get("type") == "resume":
+                await asyncio.sleep(1)  # received the approval, answers too late
+            return {"type": "needs_human", "checkpoint": "approval", "payload": {}}
+
+        scenario = chat_scenario(
+            conversation={
+                "scripted_turns": ["Pay my bill."],
+                "stop_at": "goal_reached",
+                "checkpoint_policy": {"approval": {"action": "approve"}},
+            },
+            execution={"repeats": 1, "turn_timeout_seconds": 0.05},
+        )
+        record = await attempt(scenario, PythonTransport(lambda: agent, GATED), GATED)
+        assert record.terminal_state is TerminalState.TIMEOUT
+        assert [(i.checkpoint, i.action) for i in record.interrupts] == [("approval", "approve")]
+        assert record.interrupts[0].decision_seq == 2
+
+    async def test_a_slow_synchronous_agent_is_late(self) -> None:
+        def agent(_frame: dict[str, Any]) -> Any:
+            time.sleep(0.1)
+            return {"type": "message", "text": "late"}
+
+        scenario = chat_scenario(execution={"repeats": 1, "turn_timeout_seconds": 0.05})
+        record = await attempt(scenario, PythonTransport(lambda: agent, CHAT))
+        assert record.terminal_state is TerminalState.TIMEOUT
+
+    async def test_an_http_body_that_trickles_is_bounded_by_the_turn(self) -> None:
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(5)
+            return httpx.Response(200, json={"type": "message", "text": "late"})
+
+        tr = HttpJsonTransport(
+            "https://agent.example.com/chat",
+            CHAT,
+            client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        scenario = chat_scenario(execution={"repeats": 1, "turn_timeout_seconds": 0.05})
+        record = await attempt(scenario, tr)
+        assert record.terminal_state is TerminalState.TIMEOUT
+        assert record.stop_reason == "agent did not answer within 0.1s"
+
+
+class _StreamSession(Session):
+    """A streaming session whose send takes a while (a token refresh, a reconnect)."""
+
+    def __init__(self) -> None:
+        self.went_out: datetime | None = None
+        self._queue: list[Any] = []
+
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
+        await asyncio.sleep(0.05)
+        self.went_out = datetime.now(UTC)
+        self._queue.append({"type": "message", "text": "hi"})
+
+    async def receive(self, timeout: float) -> Any:
+        if not self._queue:
+            raise TransportTimeout("quiet")
+        return self._queue.pop(0)
+
+    async def close(self) -> None:
+        return None
+
+
+class _StreamTransport(Transport):
+    def __init__(self) -> None:
+        self.session = _StreamSession()
+
+    @property
+    def target(self) -> str:
+        return "stream:test"
+
+    async def connect(self) -> Session:
+        return self.session
+
+
+async def test_a_streamed_frame_is_stamped_when_it_went_out() -> None:
+    # On a websocket, send() may refresh a token or reconnect first: a tool the agent ran in
+    # that gap must not be placed after the approval.
+    assert not _StreamSession.replies_in_send
+    tr = _StreamTransport()
+    record = await attempt(chat_scenario(), tr)
+    assert tr.session.went_out is not None
+    assert record.frames[0].at >= tr.session.went_out
+
+
+def test_rescore_names_a_scorer_the_original_run_did_not_have() -> None:
+    from opseval.models.results import ScoreResult
+    from opseval.rescore import _changes
+
+    def score(scorer_id: str) -> ScoreResult:
+        return ScoreResult(
+            scorer_id=scorer_id,
+            axis=Axis.FLOW,
+            status=ScoreStatus.PASSED,
+            score=1.0,
+            threshold=1.0,
+            scorer_version="1",
+        )
+
+    changes = _changes(
+        [score("conversation.no_errors")],
+        [score("conversation.no_errors"), score("protocol.replies_read")],
+    )
+    assert [(c.scorer_id, c.what) for c in changes] == [("protocol.replies_read", "added")]

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -30,6 +30,20 @@ or Opseval's own connection pool was exhausted. They are subclasses of
 refused connection (a harness error), never as the agent failing to answer (ADR-0030)."""
 
 
+def turn_timeout(turn: float) -> httpx.Timeout:
+    """httpx limits for one request/response turn, with connecting held to a share of it.
+
+    httpx's ``timeout`` bounds each phase (connect, write, every read) separately, not the
+    request, so a transport also bounds the whole turn with ``asyncio.timeout(turn)``. If
+    connecting were allowed as long as that, the outer deadline would fire first on a host
+    that never accepts the connection, and the ``TimeoutError`` would blame the agent. Keeping
+    connect and pool shorter lets them surface as what they are: a request that was never
+    sent (ADR-0030).
+    """
+    setup = min(10.0, turn / 2)
+    return httpx.Timeout(turn, connect=setup, pool=setup)
+
+
 def decode_frame(data: str | bytes) -> Any:
     """Decode one inbound message. Never raises."""
     try:
@@ -41,6 +55,10 @@ def decode_frame(data: str | bytes) -> Any:
 
 class Session(ABC):
     session_id: str | None = None
+    replies_in_send: ClassVar[bool] = False
+    """True where ``send`` returns only once the agent has answered (request/response
+    transports). The driver then stamps a sent frame when sending began, not after the reply:
+    otherwise everything the agent did in reply would be placed before it (ADR-0042)."""
 
     def transport_events(self) -> tuple[TransportEvent, ...]:
         """Drops, resumes and token refreshes seen by this session (recorded as evidence)."""

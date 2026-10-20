@@ -79,7 +79,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SCR-01 | Three-state scores | M | v0.1 | Done | `ScoreResult` validator |
 | FR-SCR-02 | Axes | M | v0.1 | Done | `Axis` |
 | FR-SCR-03 | Deterministic scorers | M | v0.1 | Done | every listed scorer, including `output.required_fields` (present and non-empty payload fields) beside `output.payload_equals` |
-| FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Done | expected/forbidden/ordering/call_success/args_valid, `tools.approval_gated` and `flow.checkpoint_gating` (traces, else degraded frame evidence; `TRACE_UNAVAILABLE` when nothing is visible); the skew window applies only between Opseval's clock and the agent's, so two spans of one trace order exactly (ADR-0042) |
+| FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Done | expected/forbidden/ordering/call_success/args_valid, `tools.approval_gated` and `flow.checkpoint_gating` (traces, else degraded frame evidence; `TRACE_UNAVAILABLE` when nothing is visible) |
 | FR-SCR-05 | LLM judges with quoted ballots | M | v0.1 | Done | `scoring/judges.py`; the conversation is fenced JSON-lines data with harness facts outside (ADR-0036) |
 | FR-SCR-06 | Quality and security judges | M | v0.2 | Done | ADR-0014, ADR-0016 |
 | FR-SCR-07 | Judge audit trail | M | v0.1 | Done | prompt hash, quotes, model; rubric digests (ADR-0017) |

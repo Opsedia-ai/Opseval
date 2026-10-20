@@ -36,22 +36,10 @@ from opseval.transport.base import (
     Session,
     Transport,
     decode_frame,
+    turn_timeout,
 )
 
 SSE_MEDIA_TYPE = "text/event-stream"
-
-
-def _request_timeout(turn: float) -> httpx.Timeout:
-    """httpx limits for one turn, with connecting held to a share of the turn budget.
-
-    ``send`` bounds the whole turn with ``asyncio.timeout(turn)``. If httpx's connect and
-    pool limits were the same length, that outer deadline would fire first on a host that
-    never accepts the connection, and the resulting ``TimeoutError`` would blame the agent.
-    Keeping them shorter lets ``ConnectTimeout``/``PoolTimeout`` surface as what they are:
-    a request that was never sent (ADR-0030).
-    """
-    setup = min(10.0, turn / 2)
-    return httpx.Timeout(turn, connect=setup, pool=setup)
 
 
 class SseEvent:
@@ -120,6 +108,8 @@ def frame_from_event(event: SseEvent, profile: SutProfile) -> Any:
 
 
 class SseSession(Session):
+    replies_in_send = True
+
     def __init__(
         self,
         client: httpx.AsyncClient,
@@ -174,7 +164,7 @@ class SseSession(Session):
                     "POST",
                     self._url,
                     json=payload,
-                    timeout=_request_timeout(turn),
+                    timeout=turn_timeout(turn),
                     headers={"Accept": SSE_MEDIA_TYPE},
                 ) as response,
             ):

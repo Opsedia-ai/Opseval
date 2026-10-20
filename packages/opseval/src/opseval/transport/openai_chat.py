@@ -28,7 +28,13 @@ import httpx
 from opseval.auth import BearerAuth, TokenSource, as_token_source
 from opseval.errors import TransportError, TransportRateLimited, TransportTimeout
 from opseval.models.profile import SutProfile
-from opseval.transport.base import NOT_SENT_TIMEOUTS, SYNTHETIC_KIND, Session, Transport
+from opseval.transport.base import (
+    NOT_SENT_TIMEOUTS,
+    SYNTHETIC_KIND,
+    Session,
+    Transport,
+    turn_timeout,
+)
 
 RATE_LIMIT_RETRIES = 3
 BACKOFF = (1.0, 2.0, 4.0)
@@ -49,6 +55,8 @@ def _tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class OpenAIChatSession(Session):
+    replies_in_send = True
+
     def __init__(
         self,
         client: httpx.AsyncClient,
@@ -113,10 +121,14 @@ class OpenAIChatSession(Session):
     async def _post(self, body: dict[str, Any], timeout: float) -> httpx.Response:
         for attempt in range(RATE_LIMIT_RETRIES + 1):
             try:
-                resp = await self._client.post(self._url, json=body, timeout=timeout)
+                # httpx bounds each read, not the request: the outer limit bounds the turn.
+                async with asyncio.timeout(timeout):
+                    resp = await self._client.post(
+                        self._url, json=body, timeout=turn_timeout(timeout)
+                    )
             except NOT_SENT_TIMEOUTS as exc:
                 raise TransportError(f"could not connect to {self._url}: {exc!r}") from exc
-            except httpx.TimeoutException as exc:
+            except (httpx.TimeoutException, TimeoutError) as exc:
                 raise TransportTimeout(f"agent did not answer within {timeout:.1f}s") from exc
             except httpx.HTTPError as exc:
                 raise TransportError(f"request to {self._url} failed: {exc}") from exc
