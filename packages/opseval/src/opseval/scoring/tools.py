@@ -57,12 +57,21 @@ class Evidence:
         """
         return any(self.verifiable(tool, profile) for tool in profile.tools)
 
-    def compare(self, a: When, b: When) -> Literal["before", "after", "ambiguous"]:
-        """Is ``a`` clearly before ``b``, clearly after, or too close to tell?"""
+    def compare(
+        self, a: When, b: When, *, same_clock: bool = False
+    ) -> Literal["before", "after", "ambiguous"]:
+        """Is ``a`` clearly before ``b``, clearly after, or too close to tell?
+
+        The skew window allows for Opseval's clock and the agent's disagreeing, so it applies
+        only across the two. ``same_clock`` says both times come from the agent's own trace
+        (ADR-0042): two spans of one clock order exactly, and widening the window there turned
+        a lookup followed quickly by an action into "not measured".
+        """
         if isinstance(a, datetime) and isinstance(b, datetime):
-            if a < b - self.skew:
+            skew = timedelta(0) if same_clock else self.skew
+            if a < b - skew:
                 return "before"
-            if a > b + self.skew:
+            if a > b + skew:
                 return "after"
             return "ambiguous"
         if isinstance(a, int) and isinstance(b, int):
@@ -357,6 +366,7 @@ class Ordering(Scorer):
     id = "tools.ordering"
     axis = Axis.TOOLS
     description = "For each expected_tools.ordering rule, 'before' first ran before 'after'."
+    version = "2"  # two trace spans share the agent's clock: no skew window (ADR-0042)
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
         rules = ctx.scenario.expectations.expected_tools.ordering
@@ -376,7 +386,7 @@ class Ordering(Scorer):
             elif first_before is None:
                 result = "violated"  # 'after' ran without 'before'
             else:
-                cmp = ev.compare(first_before, first_after)
+                cmp = ev.compare(first_before, first_after, same_clock=True)
                 result = {"before": "ok", "after": "violated", "ambiguous": "ambiguous"}[cmp]
             checks.append({"rule": f"{rule.before} < {rule.after}", "result": result})
         details = _base_details(ev) | {"checks": checks}

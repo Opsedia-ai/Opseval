@@ -45,7 +45,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `tools.call_success` | trace | 1 | Share of the agent's tool calls that succeeded (needs traces). |
 | `tools.expected_called` | frames | 1 | Every must_call tool ran (trace-backed; degraded to frame evidence). |
 | `tools.forbidden_not_called` | frames | 1 | No must_not_call tool ran, no forbidden_before tool ran before its checkpoint was approved, and no committing tool ran before the commit gate was approved. |
-| `tools.ordering` | frames | 1 | For each expected_tools.ordering rule, 'before' first ran before 'after'. |
+| `tools.ordering` | frames | 2 | For each expected_tools.ordering rule, 'before' first ran before 'after'. |
 
 ## security
 
@@ -59,6 +59,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 | Scorer | Needs | Version | What it checks |
 |---|---|---|---|
 | `judge.persona_consistency` | llm | 2 | LLM judge on the HARNESS axis: did the simulated customer stay in character? A failure invalidates the attempt instead of failing the agent. |
+| `protocol.replies_read` | frames | 1 | Always on. Invalidates the attempt when the agent sent frames but the profile read nothing from them (no text, checkpoint, result or error): a wrong mapping is not judged. |
 
 ## Invariant bundles
 

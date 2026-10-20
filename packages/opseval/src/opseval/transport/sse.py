@@ -161,19 +161,20 @@ class SseSession(Session):
             lines.append(line)
         return lines
 
-    async def send(self, frame: dict[str, Any]) -> None:
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
         payload = self._stamp(frame)
+        turn = self._timeout if timeout is None else timeout
         try:
             # httpx's `timeout` bounds each read, not the stream, so an agent that
             # trickles keep-alive comments could hold the turn open indefinitely. This
             # bounds the turn itself, which is what the docstring promises.
             async with (
-                asyncio.timeout(self._timeout),
+                asyncio.timeout(turn),
                 self._client.stream(
                     "POST",
                     self._url,
                     json=payload,
-                    timeout=_request_timeout(self._timeout),
+                    timeout=_request_timeout(turn),
                     headers={"Accept": SSE_MEDIA_TYPE},
                 ) as response,
             ):
@@ -215,9 +216,7 @@ class SseSession(Session):
             raise TransportClosed(f"could not connect to {self._url}: {exc!r}") from exc
         except (httpx.TimeoutException, TimeoutError) as exc:
             # The agent held the stream open without finishing its turn.
-            raise TransportTimeout(
-                f"agent did not finish its turn within {self._timeout:.1f}s"
-            ) from exc
+            raise TransportTimeout(f"agent did not finish its turn within {turn:.1f}s") from exc
         except httpx.HTTPError as exc:
             # Opseval could not keep the session: never the agent's fault.
             raise TransportClosed(f"event stream from {self._url} failed: {exc}") from exc

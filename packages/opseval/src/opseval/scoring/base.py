@@ -127,6 +127,14 @@ DEFAULT_PACK = [
     "tools.forbidden_not_called",
 ]
 
+ALWAYS_ON = ["protocol.replies_read"]
+"""Harness checks the engine runs on every attempt, whatever the scenario lists (ADR-0042).
+A profile that maps nothing of what the agent says would otherwise let an attempt pass on
+checks that read nothing, so this cannot be left to each author to remember. They are not
+in :func:`effective_specs`, which stays what the scenario asked for: a harness check
+measures nothing about the agent, so it must not change which dependencies a scenario
+needs."""
+
 
 def effective_specs(scenario: Scenario) -> list[ScorerSpec]:
     specs = (
@@ -249,6 +257,8 @@ class ScoringEngine:
             ballot_slots=self._ballot_slots,
         )
         specs = effective_specs(scenario)
+        listed = {spec.id for spec in specs}
+        specs += [ScorerSpec(id=i) for i in ALWAYS_ON if i not in listed]
         return list(await asyncio.gather(*(self._one(record, spec, ctx) for spec in specs)))
 
     async def _one(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:

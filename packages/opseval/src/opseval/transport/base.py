@@ -47,7 +47,15 @@ class Session(ABC):
         return ()
 
     @abstractmethod
-    async def send(self, frame: dict[str, Any]) -> None: ...
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
+        """Send one frame.
+
+        ``timeout`` is how long the agent may take to answer it: the scenario's turn timeout,
+        or a probe's own. It matters where sending waits for the answer (http-json,
+        openai-chat, sse, python), and running past it raises :class:`TransportTimeout`,
+        which counts against the agent. ``None`` keeps the transport's default. Streaming
+        transports (websocket) ignore it, because ``receive`` bounds their wait.
+        """
 
     @abstractmethod
     async def receive(self, timeout: float) -> Any: ...

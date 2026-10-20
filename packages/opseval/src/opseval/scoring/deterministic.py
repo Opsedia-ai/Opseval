@@ -327,3 +327,59 @@ class ProbesPassed(Scorer):
             probes=len(record.probes),
             failed=failed,
         )
+
+
+READ_KINDS = frozenset(
+    {FrameKind.NEEDS_HUMAN, FrameKind.RESULT, FrameKind.ERROR, FrameKind.NOTIFICATION}
+)
+"""Kinds that carry meaning without text: the profile recognised the frame for what it is."""
+
+
+@register
+class RepliesRead(Scorer):
+    """ADR-0042: Opseval read what the agent sent, so the other checks had something to grade.
+
+    A profile whose ``kind_field`` or ``text_field`` does not match the agent's replies
+    leaves every frame unreadable: the transcript holds only the customer, judges have
+    nothing to quote, and the frame checks (no error frames, the terminal state, the turn
+    budget) all pass on nothing. That is a harness problem — the mapping is wrong — and
+    left alone it reads as an agent that did nothing wrong. On the harness axis a failure
+    invalidates the attempt, so it is *not judged*; when every attempt is, the run exits 3.
+
+    It fails only when nothing at all was read. A frame is read when it had text at the
+    mapped path (an empty string counts: an agent that answers with nothing is the agent's
+    failure, and hiding it as "not judged" would break the other half of the core rule) or
+    was classified as a checkpoint, result, error or notification.
+    """
+
+    id = "protocol.replies_read"
+    axis = Axis.HARNESS
+    description = (
+        "Always on. Invalidates the attempt when the agent sent frames but the profile read "
+        "nothing from them (no text, checkpoint, result or error): a wrong mapping is not judged."
+    )
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        frames = [f for f in record.received() if f.kind is not FrameKind.HANDSHAKE]
+        unread = [f for f in frames if f.text is None and f.kind not in READ_KINDS]
+        if not frames or len(unread) < len(frames):
+            return self.result(spec, 1.0, received=len(frames), unread=len(unread))
+        # An undecodable frame is kept as {"_raw": ...} (transport.base.decode_frame).
+        decoded = [f.payload for f in unread if isinstance(f.payload, dict)]
+        sample = next((p for p in decoded if set(p) != {"_raw"}), None)
+        keys = sorted(str(k) for k in sample)[:12] if isinstance(sample, dict) else []
+        profile = ctx.profile
+        return self.result(
+            spec,
+            0.0,
+            received=len(frames),
+            unread=len(unread),
+            reply_keys=keys,
+            reason=(
+                f"{len(frames)} frame(s) arrived from the agent and the profile read nothing "
+                f"from any of them: no text at {profile.text_field!r} and no kind it maps at "
+                f"{profile.kind_field!r}"
+                + (f" (the replies have keys {keys})" if keys else " (the replies are not JSON)")
+                + ". Fix kind_field, kinds or text_field in the profile."
+            ),
+        )

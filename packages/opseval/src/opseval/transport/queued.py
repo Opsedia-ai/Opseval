@@ -8,6 +8,7 @@ has nothing more to say this turn).
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -64,15 +65,14 @@ class HttpJsonSession(_QueuedSession):
         self._url = url
         self._timeout = timeout
 
-    async def send(self, frame: dict[str, Any]) -> None:
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
+        limit = self._timeout if timeout is None else timeout
         try:
-            resp = await self._client.post(
-                self._url, json=self._stamp(frame), timeout=self._timeout
-            )
+            resp = await self._client.post(self._url, json=self._stamp(frame), timeout=limit)
         except NOT_SENT_TIMEOUTS as exc:
             raise TransportError(f"could not connect to {self._url}: {exc!r}") from exc
         except httpx.TimeoutException as exc:
-            raise TransportTimeout(f"agent did not answer within {self._timeout:.1f}s") from exc
+            raise TransportTimeout(f"agent did not answer within {limit:.1f}s") from exc
         except httpx.HTTPError as exc:
             raise TransportError(f"HTTP request to {self._url} failed: {exc}") from exc
         if resp.status_code >= 500:
@@ -128,10 +128,14 @@ class CallableSession(_QueuedSession):
         super().__init__(profile)
         self._fn = fn
 
-    async def send(self, frame: dict[str, Any]) -> None:
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
         result = self._fn(self._stamp(frame))
         if inspect.isawaitable(result):
-            result = await result
+            try:
+                async with asyncio.timeout(timeout):
+                    result = await result
+            except TimeoutError as exc:
+                raise TransportTimeout(f"agent did not answer within {timeout:.1f}s") from exc
         self._absorb(_as_frames(result))
 
 

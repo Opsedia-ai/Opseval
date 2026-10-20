@@ -125,7 +125,14 @@ class _Rescorer:
             return scores
         previous = {s.scorer_id: s for s in original.scores}
         specs = {spec.id: spec for spec in effective_specs(scenario)}
-        return [self._reuse(s, previous.get(s.scorer_id), specs[s.scorer_id]) for s in scores]
+        # Always-on harness checks (ALWAYS_ON) have no spec: they are deterministic, so the
+        # fresh score is the one to keep.
+        return [
+            self._reuse(s, previous.get(s.scorer_id), spec)
+            if (spec := specs.get(s.scorer_id)) is not None
+            else s
+            for s in scores
+        ]
 
     def _reuse(self, fresh: ScoreResult, old: ScoreResult | None, spec: ScorerSpec) -> ScoreResult:
         cls = REGISTRY.get(fresh.scorer_id)

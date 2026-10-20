@@ -71,7 +71,8 @@ class WebSocketSession(Session):
         return decode_frame(data)
 
     # --- conversation I/O (used by the driver) ------------------------------------
-    async def send(self, frame: dict[str, Any]) -> None:
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
+        # Sending never waits for the answer here: `receive` bounds that, so `timeout` is unused.
         await self._refresh_token_if_due()
         try:
             await self._send_raw(self._with_session(frame))

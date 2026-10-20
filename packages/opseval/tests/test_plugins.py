@@ -160,7 +160,7 @@ class TestDiscovery:
         scenario = make_scenario(scorers=[{"id": "acme.greeting"}])
         record = sample_record((("customer", "hello?"), ("agent", "Hi, how can I help?")))
         scores = await ScoringEngine().score(record, scenario, profile)
-        assert [s.scorer_id for s in scores] == ["acme.greeting"]
+        assert [s.scorer_id for s in scores] == ["acme.greeting", "protocol.replies_read"]
         assert scores[0].status is ScoreStatus.PASSED
 
     def test_the_real_entry_point_group_is_queried(self) -> None:

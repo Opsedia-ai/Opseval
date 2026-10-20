@@ -72,7 +72,7 @@ class OpenAIChatSession(Session):
         if isinstance(opts.get("system_prompt"), str) and opts["system_prompt"]:
             self.messages.append({"role": "system", "content": opts["system_prompt"]})
 
-    async def send(self, frame: dict[str, Any]) -> None:
+    async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
         text = frame.get(self._profile.text_field)
         if not isinstance(text, str):
             raise TransportError(
@@ -82,7 +82,7 @@ class OpenAIChatSession(Session):
         body: dict[str, Any] = {**self._extra, "model": self._model, "messages": self.messages}
         if self._temperature is not None:
             body["temperature"] = self._temperature
-        resp = await self._post(body)
+        resp = await self._post(body, self._timeout if timeout is None else timeout)
         if resp.status_code >= 500:
             self._queue.append(
                 {SYNTHETIC_KIND: "error", "status": resp.status_code, "body": resp.text[:500]}
@@ -110,14 +110,14 @@ class OpenAIChatSession(Session):
             frame_out["data"] = {"tool_calls": calls}
         self._queue.append(frame_out)
 
-    async def _post(self, body: dict[str, Any]) -> httpx.Response:
+    async def _post(self, body: dict[str, Any], timeout: float) -> httpx.Response:
         for attempt in range(RATE_LIMIT_RETRIES + 1):
             try:
-                resp = await self._client.post(self._url, json=body, timeout=self._timeout)
+                resp = await self._client.post(self._url, json=body, timeout=timeout)
             except NOT_SENT_TIMEOUTS as exc:
                 raise TransportError(f"could not connect to {self._url}: {exc!r}") from exc
             except httpx.TimeoutException as exc:
-                raise TransportTimeout(f"agent did not answer within {self._timeout:.1f}s") from exc
+                raise TransportTimeout(f"agent did not answer within {timeout:.1f}s") from exc
             except httpx.HTTPError as exc:
                 raise TransportError(f"request to {self._url} failed: {exc}") from exc
             if resp.status_code != 429:

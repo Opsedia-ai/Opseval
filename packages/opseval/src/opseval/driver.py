@@ -155,7 +155,15 @@ class Driver:
         self._redacted: set[str] = set()
 
     # --- recording ------------------------------------------------------------------
-    def _record(self, direction: str, payload: Any, kind: FrameKind, text: str | None) -> int:
+    def _record(
+        self,
+        direction: str,
+        payload: Any,
+        kind: FrameKind,
+        text: str | None,
+        *,
+        at: datetime | None = None,
+    ) -> int:
         latency = None
         if direction == "received" and self._last_sent_at is not None:
             latency = round((time.monotonic() - self._last_sent_at) * 1000, 1)
@@ -172,7 +180,7 @@ class Driver:
         self._frames.append(
             FrameRecord(
                 seq=seq,
-                at=datetime.now(UTC),
+                at=at or datetime.now(UTC),
                 direction="sent" if direction == "sent" else "received",
                 kind=kind,
                 payload=payload_clean,
@@ -191,11 +199,33 @@ class Driver:
         ]
 
     async def _send(
-        self, session: Session, frame: dict[str, Any], kind: FrameKind, text: str | None
+        self,
+        session: Session,
+        frame: dict[str, Any],
+        kind: FrameKind,
+        text: str | None,
+        *,
+        timeout: float,
     ) -> int:
-        await session.send(frame)
+        """Send a frame, recorded at the moment sending *began*.
+
+        On a request/response transport ``send`` returns only once the agent has answered, so
+        a timestamp taken afterwards would place the frame after everything the agent did in
+        reply: a tool it rightly ran after an approval would look as if it ran before it, and
+        the agent would be failed for the harness's own clock (``tools.approval_gated``,
+        ``flow.checkpoint_gating``). The same start time makes the reply's latency the real
+        round trip.
+        """
+        at = datetime.now(UTC)
         self._last_sent_at = time.monotonic()
-        return self._record("sent", frame, kind, text)
+        try:
+            await session.send(frame, timeout=timeout)
+        except TransportTimeout:
+            # The request went out and the agent did not answer in time: the record must
+            # still show what it was asked.
+            self._record("sent", frame, kind, text, at=at)
+            raise
+        return self._record("sent", frame, kind, text, at=at)
 
     async def _send_user(self, session: Session, text: str) -> None:
         if self._user_turns >= self.s.conversation.max_turns:
@@ -203,7 +233,13 @@ class Driver:
         frame = render_frame(
             self.p.user_message_frame, {"text": text, "timezone": self.s.persona.timezone}
         )
-        await self._send(session, frame, FrameKind.USER_MESSAGE, text)
+        await self._send(
+            session,
+            frame,
+            FrameKind.USER_MESSAGE,
+            text,
+            timeout=self.s.execution.turn_timeout_seconds,
+        )
         self._user_turns += 1
 
     # --- main loop -------------------------------------------------------------------
@@ -363,8 +399,13 @@ class Driver:
             frame = render_frame(
                 probe.send, {"session_id": session.session_id, "text": None, "timezone": None}
             )
-            sent = await self._send(session, frame, FrameKind.UNKNOWN, None)
+            # The seq `_send` records the probe under, whether or not it is answered.
+            sent = len(self._frames)
             try:
+                # On a request/response transport the answer is awaited in `send` itself.
+                await self._send(
+                    session, frame, FrameKind.UNKNOWN, None, timeout=probe.timeout_seconds
+                )
                 payload = await session.receive(probe.timeout_seconds)
             except TransportTimeout:
                 self._probes.append(
@@ -529,6 +570,8 @@ class Driver:
             frame = render_frame(self.p.resume_frame, values)
             kind = FrameKind.RESUME
             text = decision.feedback
-        sent = await self._send(session, frame, kind, text)
+        sent = await self._send(
+            session, frame, kind, text, timeout=self.s.execution.turn_timeout_seconds
+        )
         self._user_turns += 1
         interrupt(decision, sent)
