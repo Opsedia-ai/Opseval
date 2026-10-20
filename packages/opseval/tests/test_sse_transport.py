@@ -335,7 +335,7 @@ class TestWiring:
         factory = build_transport_factory(
             RunOptions(target="https://agent.example.com/sse", transport="sse"), settings
         )
-        assert isinstance(factory(sse_profile()), SseTransport)
+        assert isinstance(factory(sse_profile(), None), SseTransport)
 
     def test_an_unknown_transport_names_sse(self) -> None:
         from opseval.config import Settings

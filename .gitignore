@@ -34,3 +34,6 @@ packages/console/dist/
 *.tsbuildinfo
 # Brand assets stay in Drive, not under Apache-2.0 (doc 06).
 docs/Design system.pdf
+
+# Tenant leases, when OPSEVAL_TENANT_LOCK_DIR points inside the repo.
+.opseval/

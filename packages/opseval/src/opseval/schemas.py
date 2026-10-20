@@ -24,6 +24,7 @@ from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
 from opseval.models.scenario import SCHEMA_VERSION, Scenario, Suite
+from opseval.models.tenant import TenantPool
 
 SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 BASE_URI = "https://opsedia.ai/schemas/v1"
@@ -33,6 +34,7 @@ PUBLISHED: dict[str, type[BaseModel]] = {
     "scenario": Scenario,
     "suite": Suite,
     "profile": SutProfile,
+    "tenants": TenantPool,
     "record": RunRecord,
     "result": SuiteResult,
 }

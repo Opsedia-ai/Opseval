@@ -192,6 +192,37 @@ strict one. Some things are not up to the policy:
 
 See [ADR-0032](docs/adr/0032-gate-policy.md).
 
+### Run scenarios in parallel, safely
+
+A suite that takes twenty minutes does not get run on every pull request. Running scenarios at the same time fixes that, but not against a shared account: two attempts refunding from the same order list see each other's state, and the mess gets recorded as the agent misbehaving. So parallelism is opt-in *through* the isolation it needs. Declare a pool of test tenants:
+
+```yaml
+# tenants.yaml
+schema: opseval/v1
+tenants:
+  - id: tenant-a
+    token_env: OPSEVAL_TENANT_A_TOKEN   # the variable's NAME, never the token
+  - id: tenant-b
+    token_env: OPSEVAL_TENANT_B_TOKEN
+  - id: tenant-c
+    token_env: OPSEVAL_TENANT_C_TOKEN
+    target: https://tenant-c.example.com/v1    # optional, if tenants are separate deployments
+```
+
+```bash
+opseval run suites/full.yaml -p profile.yaml -t wss://… --tenants tenants.yaml --lanes 3
+```
+
+Each scenario leases one tenant for its whole attempt and releases it at the end, so no two scenarios ever share an account. Lanes are capped by the pool: `--lanes 9` against three tenants runs three. With no `--tenants`, the run is sequential exactly as before.
+
+The lock errs towards not running. A scenario that cannot get a tenant waits briefly (`OPSEVAL_TENANT_WAIT_SECONDS`, 30 s) and is then *skipped* — a harness problem, not an agent failure. A lease whose file cannot be read counts as held rather than free, because guessing "free" is how two runs end up on one account, and one is reclaimed only once its heartbeat is provably stale (five minutes; the holder refreshes it in the background every thirty seconds, so a long conversation keeps its tenant). If every tenant is busy the whole suite comes back *not judged* at exit 2, never a pass ([ADR-0041](docs/adr/0041-test-tenant-pool.md)).
+
+Leases are files in a machine-wide directory named after the pool's tenant ids, printed at the start of the run. Two checkouts of the same pool therefore interlock; two runners with **separate disks** do not, so point `OPSEVAL_TENANT_LOCK_DIR` at shared storage if that is your setup.
+
+Because the pool file is meant to be committed, tokens stay out of it: each tenant names the environment variable holding its own (in `.env` or the environment), and a declared variable that is unset stops the run with exit 3 rather than authenticating as nobody. If your profile mints its own tokens, give every tenant a `token_env` anyway — a minted token carries the profile's claims and cannot tell one tenant from another, so Opseval refuses the combination instead of letting three lanes authenticate as one account.
+
+With lanes, a stop policy or a cancel stops new scenarios from starting; scenarios already running finish, and whatever did not start is reported as skipped with the reason.
+
 ### Stop a run early, or cancel it
 
 A suite can say when a run should stop rather than finish:

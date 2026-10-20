@@ -11,6 +11,7 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [{ name = "Opsedia" }]
 dependencies = [
+  "python-dotenv>=1.0",   # Settings.secret_named: a .env value reaches Settings, never os.environ
   "pydantic>=2.7",
   "pydantic-settings>=2.2",
   "typer>=0.15",  # 0.15 exits 130 on Ctrl-C; older Typer exits 1, "the agent failed"
