@@ -27,8 +27,8 @@ import os
 import tempfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager, suppress
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,11 +38,10 @@ from opseval.models.tenant import Tenant, TenantPool
 if TYPE_CHECKING:
     from opseval.config import Settings
 
-STALE_AFTER_SECONDS = 300.0
-"""A lease whose heartbeat is older than this may be reclaimed. Deliberately generous:
-reclaiming a live lease is the failure this whole module exists to prevent."""
-
 HEARTBEAT_SECONDS = 30.0
+"""How often a held lease is refreshed, for as long as it is held."""
+MIN_STALE_AFTER = 3 * HEARTBEAT_SECONDS
+"""A stale threshold shorter than a few heartbeats would make every live lease look dead."""
 
 
 def load_pool(path: str | Path) -> TenantPool:
@@ -99,13 +98,34 @@ def token_for(tenant: Tenant, settings: Settings) -> str | None:
     return value
 
 
-def _write_lease(path: Path, holder: str) -> None:
+def _body(holder: str, lease_id: str) -> str:
+    return json.dumps({"holder": holder, "lease_id": lease_id, "heartbeat_at": time.time()})
+
+
+def _read(path: Path) -> dict[str, Any] | None:
+    """A lease's content, or None when it is missing or cannot be read."""
+    try:
+        held = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return held if isinstance(held, dict) else None
+
+
+def _identity(path: Path) -> tuple[int, int, int, int] | None:
+    """Which file this is (device, inode, size, mtime), or None when it cannot be seen. Two
+    different leases differ here even when both are still empty."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _write_lease(path: Path, holder: str, lease_id: str) -> None:
     """Replace ``path`` atomically, so an interrupted write cannot leave it empty."""
     tmp = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
     try:
-        tmp.write_text(
-            json.dumps({"holder": holder, "heartbeat_at": time.time()}), encoding="utf-8"
-        )
+        tmp.write_text(_body(holder, lease_id), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         with suppress(OSError):
@@ -114,38 +134,59 @@ def _write_lease(path: Path, holder: str) -> None:
 
 
 class Lease:
-    """An exclusive hold on one tenant."""
+    """An exclusive hold on one tenant, identified by its own ``lease_id``.
 
-    def __init__(self, tenant: Tenant, path: Path, holder: str) -> None:
+    The id, not the holder name, is what proves a lease file is still this one: a holder can
+    take the same tenant again later, and only the id tells two of its leases apart.
+    """
+
+    def __init__(self, tenant: Tenant, path: Path, holder: str, lease_id: str) -> None:
         self.tenant = tenant
         self.path = path
         self.holder = holder
+        self.lease_id = lease_id
+        self.lost = False
+        """Set when the lease file turned out to be someone else's (or gone) while held: the
+        tenant may have been shared, so attempts run under it are not judged (ADR-0041)."""
+        self.released = False
+
+    def _ours(self) -> bool:
+        held = _read(self.path)
+        return held is not None and held.get("lease_id") == self.lease_id
+
+    def check(self) -> bool:
+        """Is the lease still this one? Sets ``lost`` when it is not. Called by the runner
+        right after each conversation, not only by the background heartbeat."""
+        if not self.released and not self._ours():
+            self.lost = True
+        return not self.lost
 
     def heartbeat(self) -> None:
         """Refresh the lease so a live holder is never mistaken for a dead one.
 
-        Written to a temporary file and ``os.replace``d into place, because a truncating
-        write that is interrupted leaves an **empty** lease: unreadable, therefore held,
-        therefore a tenant nobody can ever use again.
+        Only while the file is still this lease. A missing file during the hold, or someone
+        else's lease in its place, means this one was taken: ``lost`` is set, and the runner
+        turns that into a harness error, never a verdict. A heartbeat never re-creates or
+        overwrites a lease.
 
-        A failed write does not release the lease; the worst case is that it looks stale
-        later, which only matters if this process has already died.
+        Known limit: the ownership check and the write are two steps. Another run can only
+        reclaim this lease once it looks stale, which means this process stalled for longer
+        than ``stale_after``; if it does, the other run's ownership check catches the overlap.
+
+        Written to a temporary file and ``os.replace``d into place, because a truncating
+        write that is interrupted leaves an **empty** lease.
         """
-        if not self.path.exists():
-            return  # released (or reclaimed): a heartbeat must never re-create a lease
+        if self.released or not self.check():
+            return
         with suppress(OSError):
-            _write_lease(self.path, self.holder)
+            _write_lease(self.path, self.holder, self.lease_id)
 
     def release(self) -> None:
-        try:
-            held = json.loads(self.path.read_text("utf-8"))
-        except (OSError, ValueError):
-            return
-        if held.get("holder") != self.holder:
-            # Someone else holds it now. Deleting it would release *their* lease.
-            return
-        with suppress(OSError):
-            self.path.unlink()
+        if self._ours():
+            # Only our own lease: deleting someone else's would release theirs.
+            with suppress(OSError):
+                self.path.unlink()
+        self.released = True
 
 
 class TenantLeases:
@@ -157,8 +198,13 @@ class TenantLeases:
         lock_dir: str | Path,
         *,
         holder: str,
-        stale_after: float = STALE_AFTER_SECONDS,
+        stale_after: float,
     ) -> None:
+        if stale_after < MIN_STALE_AFTER:
+            raise ConfigError(
+                f"a tenant lease may only go stale after at least {MIN_STALE_AFTER:g}s (three "
+                f"heartbeats); {stale_after:g}s would make every live lease look dead"
+            )
         self.pool = pool
         self.dir = Path(lock_dir)
         self.holder = holder
@@ -201,13 +247,15 @@ class TenantLeases:
 
     def _try_take(self, tenant: Tenant) -> Lease | None:
         path = self._path(tenant.id)
+        lease_id = uuid.uuid4().hex
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            if self._held_by_other(path):
+            judged = _identity(path)
+            if judged is None or self._held_by_other(path):
                 return None
-            if not self._steal(path):
+            if not self._steal(path, judged):
                 return None
             try:
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -219,24 +267,37 @@ class TenantLeases:
             # problem (exit 3), never an agent failure.
             raise ConfigError(f"cannot create tenant leases in {self.dir}: {exc}") from exc
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump({"holder": self.holder, "heartbeat_at": time.time()}, handle)
-        return Lease(tenant, path, self.holder)
+            handle.write(_body(self.holder, lease_id))
+        return Lease(tenant, path, self.holder, lease_id)
 
-    def _steal(self, path: Path) -> bool:
-        """Clear a provably stale lease, atomically.
+    def _steal(self, path: Path, judged: tuple[int, int, int, int]) -> bool:
+        """Clear a provably stale lease, atomically, and only that one.
 
         Unlinking and re-creating is **not** safe: two processes can both see the same
-        stale lease, both unlink, and both succeed at ``O_EXCL`` - the double-hold this
-        module exists to prevent. ``os.rename`` to a unique name is the atomic step
-        instead: exactly one process can move a given file, so exactly one process gets
-        to clear it. The winner still has to win ``O_EXCL`` afterwards, so a third
-        process creating the lease in the gap costs us the tenant rather than the lock.
+        stale lease, both unlink, and both succeed at ``O_EXCL``. ``os.rename`` to a unique
+        name is the atomic step instead: exactly one process can move a given file.
+
+        Renaming moves whatever is at the path *now*, which may already be a fresh lease
+        another reclaimer took a moment ago, possibly still empty. So the moved file's
+        identity (device, inode, size, modification time) is checked against the one judged
+        stale; if it is not that file, it is put back with a no-clobber link and the steal is
+        abandoned. Moving a live lease away is the double-hold this module exists to prevent.
         """
         victim = path.with_name(f"{path.name}.stale.{uuid.uuid4().hex}")
         try:
             os.rename(path, victim)
         except OSError:
             return False  # Lost the race, or it vanished. Either way, not ours to clear.
+        if _identity(victim) != judged:
+            try:
+                os.link(victim, path)  # restore; fails if the path was re-created meanwhile
+            except OSError:
+                # Leave it where it is rather than delete a live lease: its owner's next
+                # ownership check finds the path is not theirs and stops judging.
+                return False
+            with suppress(OSError):
+                victim.unlink()
+            return False
         with suppress(OSError):
             victim.unlink()
         return True
@@ -264,20 +325,9 @@ class TenantLeases:
                 return lease
             await asyncio.sleep(min(poll, max(0.0, deadline - time.monotonic())))
 
-    @contextmanager
-    def hold(self) -> Iterator[Lease | None]:
-        lease = self.acquire()
-        try:
-            yield lease
-        finally:
-            if lease is not None:
-                lease.release()
-
 
 @asynccontextmanager
-async def refreshing(
-    lease: Lease | None, *, every: float = HEARTBEAT_SECONDS
-) -> AsyncIterator[None]:
+async def refreshing(lease: Lease | None, *, every: float | None = None) -> AsyncIterator[None]:
     """Keep ``lease``'s heartbeat fresh for as long as the block runs.
 
     Without this a scenario that takes longer than ``stale_after`` has its tenant
@@ -288,6 +338,7 @@ async def refreshing(
     if lease is None:
         yield
         return
+    interval = HEARTBEAT_SECONDS if every is None else every
 
     # The write runs in a thread, and cancelling a task does not stop a thread: a heartbeat
     # already under way would land after the block, even after release() deleted the lease,
@@ -298,7 +349,7 @@ async def refreshing(
     async def beat() -> None:
         nonlocal inflight
         while True:
-            await asyncio.sleep(every)
+            await asyncio.sleep(interval)
             inflight = asyncio.ensure_future(asyncio.to_thread(lease.heartbeat))
             await asyncio.shield(inflight)
 
@@ -315,7 +366,7 @@ async def refreshing(
 
 __all__ = [
     "HEARTBEAT_SECONDS",
-    "STALE_AFTER_SECONDS",
+    "MIN_STALE_AFTER",
     "Lease",
     "TenantLeases",
     "default_lock_dir",

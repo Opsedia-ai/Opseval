@@ -27,6 +27,10 @@ from opseval.models.scenario import Criticality, Scenario
 EXIT_PASS, EXIT_FAIL, EXIT_NOT_JUDGED, EXIT_HARNESS = 0, 1, 2, 3
 
 
+TENANT_LEASE_LOST = "tenant_lease_lost"
+"""Noted on a record whose tenant lease was taken by another run while the attempt held it."""
+
+
 def attempt_verdict(
     record: RunRecord, scores: list[ScoreResult], record_path: str
 ) -> AttemptVerdict:
@@ -40,6 +44,10 @@ def attempt_verdict(
     persona = [s for s in scores if s.scorer_id == "judge.persona_consistency"]
     if record.terminal_state.is_infra:
         reason = f"{record.terminal_state.value}: {record.stop_reason}"
+    elif TENANT_LEASE_LOST in record.notes:
+        # Another run may have used the same test tenant during this attempt: shared state
+        # is the harness's problem, never the agent's verdict (ADR-0041).
+        reason = "tenant lease lost: the test tenant may have been shared with another run"
     elif persona and persona[0].status is ScoreStatus.FAILED:
         reason = "the simulated customer broke character"
     elif scores and all(s.status is ScoreStatus.INFRA_ERROR for s in scores):

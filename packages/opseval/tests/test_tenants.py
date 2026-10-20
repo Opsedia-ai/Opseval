@@ -30,7 +30,15 @@ from opseval.demo.refund_agent import run_agent
 from opseval.errors import ConfigError
 from opseval.models.tenant import Tenant, TenantPool, lane_count
 from opseval.runner import RunOptions, build_transport_factory, launch
-from opseval.tenants import TenantLeases, load_pool, token_for
+from opseval.tenants import TenantLeases, _identity, _read, load_pool, token_for
+
+
+@pytest.fixture(autouse=True)
+def _fast_stale(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Most lock mechanics are tested with sub-second stale windows to stay fast. The real
+    floor (three heartbeats) has its own test, which keeps it."""
+    if "keeps_the_real_floor" not in request.node.name:
+        monkeypatch.setattr("opseval.tenants.MIN_STALE_AFTER", 0.0)
 
 
 def pool(*ids: str, **kw: Any) -> TenantPool:
@@ -38,6 +46,7 @@ def pool(*ids: str, **kw: Any) -> TenantPool:
 
 
 def leases(tmp_path: Path, p: TenantPool, holder: str = "run-1", **kw: Any) -> TenantLeases:
+    kw.setdefault("stale_after", 300.0)
     return TenantLeases(p, tmp_path / "locks", holder=holder, **kw)
 
 
@@ -223,13 +232,6 @@ class TestExclusivity:
         first.release()
         assert leases(tmp_path, p, holder="run-2").acquire() is not None
 
-    def test_hold_releases_even_when_the_body_raises(self, tmp_path: Path) -> None:
-        p = pool("a")
-        with pytest.raises(RuntimeError), leases(tmp_path, p).hold() as lease:
-            assert lease is not None
-            raise RuntimeError("boom")
-        assert leases(tmp_path, p, holder="run-2").acquire() is not None
-
     def test_release_does_not_free_someone_elses_lease(self, tmp_path: Path) -> None:
         """A stale object releasing a reclaimed lease would hand the tenant to a third."""
         p = pool("a")
@@ -320,7 +322,7 @@ class TestStaleRecovery:
 class TestLockDirectory:
     def test_it_is_created_on_demand(self, tmp_path: Path) -> None:
         target = tmp_path / "deep" / "locks"
-        TenantLeases(pool("a"), target, holder="run-1").acquire()
+        TenantLeases(pool("a"), target, holder="run-1", stale_after=300).acquire()
         assert (target / "a.lease").is_file()
 
     def test_an_unwritable_location_is_a_config_error(self, tmp_path: Path) -> None:
@@ -330,7 +332,9 @@ class TestLockDirectory:
         blocker = tmp_path / "locks"
         blocker.write_text("not a directory", encoding="utf-8")
         with pytest.raises(ConfigError, match="cannot create tenant leases"):
-            TenantLeases(pool("a"), blocker / "under-a-file", holder="run-1").acquire()
+            TenantLeases(
+                pool("a"), blocker / "under-a-file", holder="run-1", stale_after=300
+            ).acquire()
 
     def test_the_lease_file_is_not_world_readable(self, tmp_path: Path) -> None:
         """It names the holder, not a secret, but there is no reason to publish it."""
@@ -465,8 +469,10 @@ class TestTheStealIsAtomic:
         assert a._held_by_other(lease_file(tmp_path)) is False
         assert b._held_by_other(lease_file(tmp_path)) is False
 
-        first = a._steal(lease_file(tmp_path))
-        second = b._steal(lease_file(tmp_path))
+        judged = _identity(lease_file(tmp_path))
+        assert judged is not None
+        first = a._steal(lease_file(tmp_path), judged)
+        second = b._steal(lease_file(tmp_path), judged)
         # Exactly one process gets to clear it. os.rename is the atomic step.
         assert [first, second] == [True, False]
 
@@ -578,10 +584,10 @@ class TestTheHeartbeatIsActuallyPeriodic:
         started = threading.Event()
         real = tenants._write_lease
 
-        def slow(path: Path, holder: str) -> None:
+        def slow(path: Path, holder: str, lease_id: str) -> None:
             started.set()
             time.sleep(0.2)
-            real(path, holder)
+            real(path, holder, lease_id)
 
         monkeypatch.setattr(tenants, "_write_lease", slow)
         async with refreshing(lease, every=0.01):
@@ -809,3 +815,326 @@ class TestLanesAndRunControl:
         assert [t.test_id for t in result.tests] == ["rf-001", "rf-002", "rf-003"]
         assert result.stopped is not None and result.exit_code == 1
         assert list((tmp_path / "locks").glob("*")) == [], "every lease was released"
+
+
+class TestReviewOf62:
+    """The holes found in review: each could let two runs share one tenant, or let a run
+    misreport what happened."""
+
+    def test_a_steal_never_moves_a_fresh_lease_away(self, tmp_path: Path) -> None:
+        path = stale(lease_file(tmp_path, "x"), age=10_000)
+        judged = _identity(path)
+        assert judged is not None
+        # Between our staleness check and our rename, another reclaimer took the tenant.
+        fresh = leases(tmp_path, pool("x"), holder="run-b")
+        path.unlink()
+        theirs = fresh.acquire()
+        assert theirs is not None
+        mine = leases(tmp_path, pool("x"), holder="run-a")
+        assert mine._steal(path, judged) is False
+        assert _read(path)["lease_id"] == theirs.lease_id, "their lease was put back"
+        assert list(path.parent.glob("*.stale.*")) == []
+
+    def test_a_heartbeat_never_stamps_over_another_runs_lease(self, tmp_path: Path) -> None:
+        a = leases(tmp_path, pool("x"), holder="run-a").acquire()
+        assert a is not None
+        a.path.unlink()  # reclaimed (as stale) ...
+        b = leases(tmp_path, pool("x"), holder="run-b").acquire()  # ... and taken by run b
+        assert b is not None
+        a.heartbeat()
+        assert a.lost is True
+        assert _read(a.path)["lease_id"] == b.lease_id, "b's lease is untouched"
+        a.release()
+        assert a.path.exists(), "a cannot release b's lease"
+
+    def test_keeps_the_real_floor_on_stale_after(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="at least 90s"):
+            leases(tmp_path, pool("x"), stale_after=20)
+
+    def test_progress_shows_every_running_scenario(self, tmp_path: Path) -> None:
+        from opseval.models.results import TestVerdict, VerdictStatus
+        from opseval.models.scenario import Criticality
+        from opseval.progress import ProgressLog
+        from opseval.storage import FileStore
+
+        store = FileStore(tmp_path)
+        log = ProgressLog(store, "r", ["a", "b"])
+        log.started("a", 1)
+        log.started("b", 1)
+        log.ended(
+            TestVerdict(
+                test_id="b", name="b", criticality=Criticality.NORMAL, status=VerdictStatus.PASSED
+            )
+        )
+        progress = store.load_progress("r")
+        assert progress is not None and progress.current == "a", "a is still running"
+
+    def test_secret_named_reads_the_env_file_this_settings_was_built_with(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.config import Settings
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("T_X", raising=False)
+        (tmp_path / ".env").write_text("T_X=from-default\n", encoding="utf-8")
+        (tmp_path / "ci.env").write_text("T_X=from-ci\n", encoding="utf-8")
+        assert Settings(_env_file="ci.env").secret_named("T_X") == "from-ci"  # type: ignore[call-arg]
+        assert Settings(_env_file=None).secret_named("T_X") is None  # type: ignore[call-arg]
+        assert Settings().secret_named("T_X") == "from-default"
+
+
+class TestTheRunnerWithAPoolAfterReview:
+    def settings(self, tmp_path: Path, file: Path, **kw: Any) -> Any:
+        from opseval.config import Settings
+
+        return Settings(
+            reports_dir=str(tmp_path / "r"),
+            allowed_hosts="127.0.0.1",
+            tenants_file=str(file),
+            tenant_lock_dir=str(tmp_path / "locks"),
+            **kw,
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "tenants:\n  - id: a\n  - id: b\n",
+            "tenants:\n  - id: a\n    token_env: T\n  - id: b\n    token_env: T\n",
+        ],
+        ids=["no-identity", "same-identity"],
+    )
+    async def test_tenants_that_are_one_account_are_refused(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+    ) -> None:
+        from opseval.runner import RunOptions, launch
+
+        monkeypatch.setenv("T", "t")
+        file = write_pool(tmp_path, body)
+        opts = RunOptions(target="ws://127.0.0.1:9", profile=cat_dir / "profile.yaml", repeats=1)
+        with pytest.raises(ConfigError, match="not isolated|one account under two names"):
+            await launch(cat_dir / "suites" / "smoke.yaml", opts, self.settings(tmp_path, file))
+
+    async def test_an_unreachable_tenant_target_stops_the_run(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.demo.refund_agent import run_agent
+        from opseval.runner import RunOptions, launch
+
+        monkeypatch.setenv("T_A", "a")
+        monkeypatch.setenv("T_B", "b")
+        file = write_pool(
+            tmp_path,
+            "tenants:\n  - id: a\n    token_env: T_A\n"
+            "  - id: b\n    token_env: T_B\n    target: ws://127.0.0.1:9\n",
+        )
+        async with run_agent() as url:
+            opts = RunOptions(target=url, profile=cat_dir / "profile.yaml", repeats=1)
+            with pytest.raises(
+                ConfigError, match="tenant target ws://127.0.0.1:9 is not reachable"
+            ):
+                await launch(cat_dir / "suites" / "smoke.yaml", opts, self.settings(tmp_path, file))
+
+    async def test_one_failing_lane_stops_the_others_and_frees_every_lease(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.demo.refund_agent import run_agent
+        from opseval.runner import RunOptions, launch
+        from opseval.storage import FileStore
+
+        monkeypatch.setenv("T_A", "a")
+        monkeypatch.setenv("T_B", "b")
+        file = write_pool(
+            tmp_path, "tenants:\n  - id: a\n    token_env: T_A\n  - id: b\n    token_env: T_B\n"
+        )
+        real = FileStore.save_record
+
+        def broken_disk(self: FileStore, record: Any) -> Path:
+            if record.test_id == "rf-001":
+                raise OSError(28, "No space left on device")
+            return real(self, record)
+
+        monkeypatch.setattr(FileStore, "save_record", broken_disk)
+        async with run_agent() as url:
+            opts = RunOptions(target=url, profile=cat_dir / "profile.yaml", repeats=1)
+            with pytest.raises(OSError, match="No space left"):
+                await launch(
+                    cat_dir / "suites" / "smoke.yaml", opts, self.settings(tmp_path, file, lanes=2)
+                )
+        assert list((tmp_path / "locks").glob("*.lease")) == [], "every lease was released"
+
+    async def test_the_lease_is_refreshed_while_scoring_too(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not only during the conversation: scoring between attempts can take minutes."""
+        from opseval.demo.refund_agent import run_agent
+        from opseval.runner import RunOptions, launch
+        from opseval.scoring import ScoringEngine
+        from opseval.tenants import Lease
+
+        monkeypatch.setattr("opseval.tenants.HEARTBEAT_SECONDS", 0.02)
+        monkeypatch.setenv("T_A", "a")
+        file = write_pool(tmp_path, "tenants:\n  - id: a\n    token_env: T_A\n")
+        scoring = {"now": False, "beats": 0}
+        real_score = ScoringEngine.score
+        real_beat = Lease.heartbeat
+
+        async def slow_score(self: Any, *args: Any, **kw: Any) -> Any:
+            scoring["now"] = True
+            await asyncio.sleep(0.2)
+            scoring["now"] = False
+            return await real_score(self, *args, **kw)
+
+        def counted(self: Lease) -> None:
+            if scoring["now"]:
+                scoring["beats"] += 1
+            real_beat(self)
+
+        monkeypatch.setattr(ScoringEngine, "score", slow_score)
+        monkeypatch.setattr(Lease, "heartbeat", counted)
+        async with run_agent() as url:
+            opts = RunOptions(
+                target=url, profile=cat_dir / "profile.yaml", repeats=1, only_ids=["rf-001"]
+            )
+            await launch(cat_dir / "suites" / "smoke.yaml", opts, self.settings(tmp_path, file))
+        assert scoring["beats"] > 0
+
+
+class TestReviewOf63:
+    """The second review: each hole could let a lease be shared, or a lost one be judged."""
+
+    def test_an_empty_fresh_lease_is_not_the_empty_stale_one(self, tmp_path: Path) -> None:
+        """Two unreadable files used to compare equal (both None), so a steal could move a
+        lease another reclaimer had just created and not yet written."""
+        path = lease_file(tmp_path, "x")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+        os.utime(path, (time.time() - 10_000, time.time() - 10_000))
+        judged = _identity(path)
+        assert judged is not None
+        path.unlink()
+        path.write_text("", encoding="utf-8")  # someone else's, created a moment ago
+        mine = leases(tmp_path, pool("x"), holder="run-a")
+        assert mine._steal(path, judged) is False
+        assert path.exists(), "their lease was put back"
+        assert list(path.parent.glob("*.stale.*")) == []
+
+    def test_a_failed_restore_never_deletes_a_live_lease(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = stale(lease_file(tmp_path, "x"), age=10_000)
+        judged = _identity(path)
+        assert judged is not None
+        os.utime(path, None)  # it changed after we judged it
+
+        def no_link(src: Any, dst: Any) -> None:
+            raise OSError("link failed")
+
+        monkeypatch.setattr(os, "link", no_link)
+        mine = leases(tmp_path, pool("x"), holder="run-a")
+        assert mine._steal(path, judged) is False
+        assert len(list(path.parent.glob("*.stale.*"))) == 1, "kept, not deleted"
+
+    def test_a_lease_that_vanished_mid_hold_is_lost(self, tmp_path: Path) -> None:
+        a = leases(tmp_path, pool("x"), holder="run-a").acquire()
+        assert a is not None
+        a.path.unlink()  # stolen, and not (yet) re-created
+        a.heartbeat()
+        assert a.lost is True
+        assert not a.path.exists(), "a heartbeat never re-creates a lease"
+
+    def test_a_released_lease_is_not_lost(self, tmp_path: Path) -> None:
+        a = leases(tmp_path, pool("x"), holder="run-a").acquire()
+        assert a is not None
+        a.release()
+        a.heartbeat()
+        assert (a.lost, a.check()) == (False, True)
+        assert not a.path.exists()
+
+    def test_check_sees_a_steal_the_heartbeat_has_not(self, tmp_path: Path) -> None:
+        a = leases(tmp_path, pool("x"), holder="run-a").acquire()
+        assert a is not None
+        assert a.check() is True
+        a.path.unlink()
+        leases(tmp_path, pool("x"), holder="run-b").acquire()
+        assert a.check() is False and a.lost is True
+
+    def test_rescore_applies_the_lost_lease_rule(self) -> None:
+        """The rule lives in attempt_verdict, so a re-scored record is not judged either."""
+        from datetime import UTC, datetime
+
+        from opseval.models.record import RunRecord, TerminalState
+        from opseval.models.results import Axis, ScoreResult, ScoreStatus
+        from opseval.verdicts import TENANT_LEASE_LOST, attempt_verdict
+
+        now = datetime(2026, 10, 20, tzinfo=UTC)
+        rec = RunRecord(
+            run_id="r",
+            test_id="t",
+            attempt_index=0,
+            seed=1,
+            target="ws://127.0.0.1:1",
+            started_at=now,
+            ended_at=now,
+            terminal_state=TerminalState.STOPPED_AT_CHECKPOINT,
+            notes=(TENANT_LEASE_LOST,),
+        )
+        passing = ScoreResult(
+            scorer_id="s", axis=Axis.OUTPUT, status=ScoreStatus.PASSED, score=1.0, threshold=1.0
+        )
+        verdict = attempt_verdict(rec, [passing], "a.json")
+        assert verdict.passed is None
+        assert "tenant lease lost" in (verdict.invalid_reason or "")
+
+    def test_targets_are_published_without_credentials(self) -> None:
+        from opseval.runner import _shown
+
+        assert _shown("wss://user:pw@agent.example:8443/ws?token=abc") == (
+            "wss://agent.example:8443/ws"
+        )
+        assert _shown("http://127.0.0.1:9000") == "http://127.0.0.1:9000"
+
+    def test_pool_targets_fall_back_to_the_default(self) -> None:
+        from opseval.runner import _tenant_targets
+
+        p = TenantPool.model_validate(
+            {
+                "tenants": [
+                    {"id": "a", "token_env": "A"},
+                    {"id": "b", "token_env": "B", "target": "ws://127.0.0.1:2"},
+                ]
+            }
+        )
+        assert _tenant_targets(p, "ws://127.0.0.1:1") == {"ws://127.0.0.1:1", "ws://127.0.0.1:2"}
+        assert _tenant_targets(None, "ws://x") == set()
+
+    async def test_a_scenario_stops_on_a_lost_lease_and_is_not_judged(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.models.results import VerdictStatus
+        from opseval.tenants import Lease
+
+        def taken(self: Lease) -> bool:
+            self.lost = True
+            return False
+
+        monkeypatch.setattr(Lease, "check", taken)
+        monkeypatch.setenv("T_A", "a")
+        file = write_pool(tmp_path, "tenants:\n  - id: a\n    token_env: T_A\n")
+        settings = Settings(
+            reports_dir=str(tmp_path / "r"),
+            allowed_hosts="127.0.0.1",
+            tenants_file=str(file),
+            tenant_lock_dir=str(tmp_path / "locks"),
+        )
+        async with run_agent() as url:
+            result = await launch(
+                cat_dir / "suites" / "smoke.yaml",
+                RunOptions(target=url, profile=cat_dir / "profile.yaml", repeats=3),
+                settings,
+            )
+        for t in result.tests:
+            assert len(t.attempts) == 1, "no more attempts on a tenant another run holds"
+            assert (t.status, t.skip_kind) == (VerdictStatus.SKIPPED_PRECONDITION, "dependency")
+            assert "tenant lease lost after 1 of 3" in (t.reason or "")
+            assert t.attempts[0].passed is None
+        assert result.exit_code != 0

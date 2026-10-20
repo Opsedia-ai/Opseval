@@ -187,3 +187,54 @@ order, which is the only order lanes have.
   against the reference agent. Both runs passed, one tenant served three scenarios in strict
   sequence across the two processes with no overlap, and every lease was released.
 
+## Amendment (2026-10-20): what the port's review closed
+
+Review of the port (#62) found three ways two runs could still end up on one tenant. Each is closed
+and tested:
+
+- **A reclaimer could move a fresh lease.** `os.rename` moves whatever is at the path *now*, which
+  may already be the lease another reclaimer just took. Every lease file now carries its own
+  `lease_id`. After renaming, the reclaimer checks it moved the stale lease it judged; if not, it
+  puts the file back with a no-clobber `os.link` and gives up.
+- **The heartbeat only ran during the conversation**, not during enrichment, scoring or judging, and
+  short attempts never refreshed at all. The refresher now covers the whole hold, from acquiring
+  the lease to releasing it.
+- **A late heartbeat could stamp itself over another run's lease.** A heartbeat now writes only while
+  the file still carries its own `lease_id`. Otherwise the lease is marked **lost**, and an attempt
+  run under a lost lease is recorded with a harness error and is *not judged*, never a verdict.
+
+Also:
+
+- `stale_after` must be at least three heartbeats (90 s), or every live lease would look dead.
+- Lanes run in a `TaskGroup`: if one fails, the others are cancelled and release their leases, and
+  the first error is re-raised as itself (a `ConfigError` stays exit 3).
+- Tenants that are one account under two names are refused: neither `token_env` nor `target`, or
+  the same of both.
+- Every distinct tenant target is preflighted, and the result's `target` names the hosts attempts
+  actually reached.
+- Progress tracks every running scenario. A scenario still waiting for a tenant is not shown as
+  running.
+- Tenant tokens are read from the `.env` file the `Settings` instance was actually built with
+  (`_env_file`), parsed once.
+
+
+## Amendment 3 (2026-10-20): second review
+
+- **Two empty files compared equal.** A reclaimer compared `lease_id`s, and an unreadable lease has
+  none, so a fresh lease another reclaimer had created but not yet written looked like the stale
+  one. A steal now compares the file's identity (device, inode, size, modification time) instead.
+  If the restoring link fails, the moved file is kept, never deleted.
+- **A missing file during the hold is a lost lease**, not just someone else's file. A heartbeat
+  never re-creates a lease.
+- **Ownership is checked right after each conversation**, not only by the background heartbeat.
+  Once a lease is lost the scenario runs no more attempts on that tenant. It is folded like a
+  cut-short scenario (`fold_cut_short`): failed only if it had already failed for certain,
+  otherwise skipped with `skip_kind: dependency`.
+- **The rule lives in `attempt_verdict`**: a record noted `tenant_lease_lost` is not judged, so
+  `opseval rescore` agrees with the run.
+- The identity check compares each tenant's *effective* target (its own, else `--target`). When
+  every tenant has its own target, preflight no longer probes `--target`. Targets in the result
+  show scheme, host, port and path only, never credentials or a query string.
+- Known limit: a heartbeat's ownership check and its write are two steps. Another run can only
+  reclaim the lease once it looks stale, that is after this process stalled for longer than
+  `stale_after`, and that run's own ownership check then sees the overlap.

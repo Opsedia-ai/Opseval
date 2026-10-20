@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from opseval import __version__
 from opseval.auth import HS256Tokens, TokenSource
@@ -39,7 +40,7 @@ from opseval.models.stop import StopPolicy
 from opseval.models.telemetry import TelemetryEvent
 from opseval.models.tenant import Tenant, TenantPool, lane_count
 from opseval.plugins import load_scorers
-from opseval.preflight import llm_roles_needed, preflight
+from opseval.preflight import llm_roles_needed, preflight, probe_target
 from opseval.progress import ProgressLog
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
@@ -49,7 +50,14 @@ from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attemp
 from opseval.sinks import build_sinks, publish_all
 from opseval.storage import FileStore
 from opseval.telemetry import report as report_telemetry
-from opseval.tenants import TenantLeases, default_lock_dir, load_pool, refreshing, token_for
+from opseval.tenants import (
+    Lease,
+    TenantLeases,
+    default_lock_dir,
+    load_pool,
+    refreshing,
+    token_for,
+)
 from opseval.traces import TraceSource, enrich
 from opseval.traces.langfuse import LangfuseTraceSource
 from opseval.traces.otlp import OtlpFileTraceSource
@@ -61,6 +69,7 @@ from opseval.transport import (
     WebSocketTransport,
 )
 from opseval.verdicts import (
+    TENANT_LEASE_LOST,
     attempt_verdict,
     exit_code,
     failure_blocks,
@@ -179,6 +188,22 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTr
     return build
 
 
+def _tenant_targets(pool: TenantPool | None, default: str | None) -> set[str]:
+    """Every host the pool's attempts will reach (a tenant's own target, else --target)."""
+    if pool is None:
+        return set()
+    return {t.target or default or "" for t in pool.tenants} - {""}
+
+
+def _shown(url: str) -> str:
+    """A target as it may be published: scheme, host, port and path, never credentials or a
+    query string (a target URL can carry a token)."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}{parts.path}" if parts.scheme else url
+
+
 def _check_pool(
     pool: TenantPool, profile: SutProfile, options: RunOptions, settings: Settings
 ) -> None:
@@ -205,6 +230,24 @@ def _check_pool(
             )
         if tenant.target:
             check_url_allowed(tenant.target, settings.allowlist(), secure_schemes=secure)
+    if len(pool.tenants) > 1:
+        # Isolation means each tenant is a different account: its own token or its own
+        # deployment. Two tenants with neither (or the same of both) are one account
+        # under two names, and lanes on it would share state (review of #62).
+        identities: dict[tuple[str | None, str | None], str] = {}
+        for tenant in pool.tenants:
+            if tenant.token_env is None and tenant.target is None:
+                raise ConfigError(
+                    f"tenant {tenant.id!r} declares neither token_env nor target, so it is "
+                    "not isolated from the other tenants: give each its own token or target"
+                )
+            key = (tenant.token_env, tenant.target or options.target)
+            if key in identities:
+                raise ConfigError(
+                    f"tenants {identities[key]!r} and {tenant.id!r} have the same token_env "
+                    "and target: they are one account under two names"
+                )
+            identities[key] = tenant.id
 
 
 def build_trace_source(
@@ -440,17 +483,20 @@ async def launch(
     )
     store = FileStore(settings.reports_dir)
 
+    default_where = make_transport(profile, None).target
     health = PreflightReport()
     if options.preflight:
         health = await preflight(
             catalogue.scenarios,
             profile,
             settings,
-            target=make_transport(profile, None).target,
+            target=default_where,
             transport=options.transport,
             traces_enabled=options.traces and profile.traces is not None,
             verify_llm=options.verify_llm,
-            probe_target_host=options.transport_factory is None,
+            # With every tenant on its own deployment, no attempt goes to --target.
+            probe_target_host=options.transport_factory is None
+            and (pool is None or default_where in _tenant_targets(pool, options.target)),
         )
         sut = health.get("sut")
         if sut is not None and sut.blocking:
@@ -464,10 +510,20 @@ async def launch(
             )
         for check in health.blocking():
             log(f"preflight: {check.name} unavailable — {check.detail}")
+        # Tenants with their own deployment are probed too: the attempts go there, not to
+        # --target (review of #62).
+        for where in _tenant_targets(pool, options.target) - {default_where}:
+            probe = await probe_target(where, options.transport)
+            if probe.blocking:
+                raise ConfigError(
+                    f"tenant target {where} is not reachable: {probe.detail}. Nothing was run."
+                )
 
     started = datetime.now(UTC)
     run_id = options.run_id or new_run_id(started)
-    target_label = make_transport(profile, None).target
+    # The hosts attempts actually went to: with per-tenant targets, --target may not be one.
+    used = sorted(_tenant_targets(pool, options.target)) if pool else [default_where]
+    target_label = ", ".join(_shown(u) for u in used) if pool else default_where
     store.write_manifest(
         run_id,
         {
@@ -529,7 +585,6 @@ async def launch(
                 }
             )
         store.save_scenario(run_id, scenario)
-        tracker.started(scenario.id, scenario.execution.repeats)
         if scenario.is_blocked:
             return skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'", "quarantine")
         blocked_by = _unmet(scenario, health, sim_client is None)
@@ -567,53 +622,88 @@ async def launch(
                     "dependency",
                 )
             tenant = lease.tenant
+        # Started only now: a scenario still waiting for a tenant is not running.
+        tracker.started(scenario.id, scenario.execution.repeats)
         try:
-            where = f" · tenant {tenant.id}" if tenant else ""
-            log(f"▶ {scenario.id} · {scenario.name}{where}")
-            attempts = []
-            rate_limited = False
-            for i in range(scenario.execution.repeats):
-                if control.cancel_requested(scenario, done=i):
-                    break
-                seed = attempt_seed(scenario.id, i)
-                sim: Simulator = (
-                    ScriptedSimulator(scenario, seed)
-                    if scenario.conversation.scripted_turns or sim_client is None
-                    else LLMSimulator(scenario, seed, sim_client)
-                )
-                driver = Driver(
-                    scenario=scenario,
-                    profile=profile,
-                    transport=make_transport(profile, tenant),
-                    simulator=sim,
-                    run_id=run_id,
-                    attempt_index=i,
-                    seed=seed,
-                    allow_commit=options.allow_commit,
-                    simulator_timeout_seconds=settings.simulator_timeout_seconds,
-                )
-                async with refreshing(lease):
-                    record = await driver.run()
-                rate_limited = rate_limited or RATE_LIMITED_NOTE in record.notes
-                if trace_source is not None:
-                    record = await enrich(record, trace_source, profile)
-                path = store.save_record(record)
-                tracker.attempt(scenario.id)
-                scores = await engine.score(record, scenario, profile)
-                verdict = attempt_verdict(record, scores, str(path))
-                attempts.append(verdict)
-                state = (
-                    "not judged"
-                    if verdict.passed is None
-                    else ("pass" if verdict.passed else "FAIL")
-                )
-                coverage = " · traces" if record.trace_coverage == "full" else ""
-                # With lanes in flight the lines interleave: say whose attempt it is.
-                whose = f"{scenario.id} " if lanes > 1 else ""
-                log(f"   {whose}attempt {i}: {state} ({record.terminal_state.value}{coverage})")
+            async with refreshing(lease):
+                return await attempts_of(scenario, tenant, lease)
         finally:
             if lease is not None:
                 lease.release()
+
+    async def attempts_of(
+        scenario: Scenario, tenant: Tenant | None, lease: Lease | None
+    ) -> TestVerdict:
+        """The scenario's attempts, under its lease for the whole time (conversation,
+        enrichment and scoring), so a long scenario never looks abandoned."""
+        where = f" · tenant {tenant.id}" if tenant else ""
+        log(f"▶ {scenario.id} · {scenario.name}{where}")
+        attempts = []
+        rate_limited = False
+        for i in range(scenario.execution.repeats):
+            if control.cancel_requested(scenario, done=i):
+                break
+            seed = attempt_seed(scenario.id, i)
+            sim: Simulator = (
+                ScriptedSimulator(scenario, seed)
+                if scenario.conversation.scripted_turns or sim_client is None
+                else LLMSimulator(scenario, seed, sim_client)
+            )
+            driver = Driver(
+                scenario=scenario,
+                profile=profile,
+                transport=make_transport(profile, tenant),
+                simulator=sim,
+                run_id=run_id,
+                attempt_index=i,
+                seed=seed,
+                allow_commit=options.allow_commit,
+                simulator_timeout_seconds=settings.simulator_timeout_seconds,
+            )
+            record = await driver.run()
+            if lease is not None and not lease.check():
+                # Another run holds this tenant's lease now: the attempt may have shared
+                # the account, so it is the harness's problem, never a verdict.
+                record = record.model_copy(
+                    update={
+                        "infra_errors": (
+                            *record.infra_errors,
+                            f"tenant lease lost: {lease.tenant.id} may have been shared",
+                        ),
+                        "notes": (*record.notes, TENANT_LEASE_LOST),
+                    }
+                )
+            rate_limited = rate_limited or RATE_LIMITED_NOTE in record.notes
+            if trace_source is not None:
+                record = await enrich(record, trace_source, profile)
+            path = store.save_record(record)
+            tracker.attempt(scenario.id)
+            scores = await engine.score(record, scenario, profile)
+            verdict = attempt_verdict(record, scores, str(path))
+            attempts.append(verdict)
+            state = (
+                "not judged" if verdict.passed is None else ("pass" if verdict.passed else "FAIL")
+            )
+            coverage = " · traces" if record.trace_coverage == "full" else ""
+            # With lanes in flight the lines interleave: say whose attempt it is.
+            whose = f"{scenario.id} " if lanes > 1 else ""
+            log(f"   {whose}attempt {i}: {state} ({record.terminal_state.value}{coverage})")
+            if lease is not None and lease.lost:
+                # Another run holds this tenant now: running more attempts on it would
+                # disturb that run's agent conversations. Stop here.
+                log(f"   {scenario.id}: tenant {lease.tenant.id} was taken by another run")
+                break
+        if lease is not None and lease.lost:
+            cut = fold_cut_short(scenario, attempts)
+            if cut.status is VerdictStatus.SKIPPED_PRECONDITION:
+                cut = cut.model_copy(
+                    update={
+                        "skip_kind": "dependency",
+                        "reason": f"tenant lease lost after {len(attempts)} of "
+                        f"{scenario.execution.repeats} attempts: another run took the tenant",
+                    }
+                )
+            return cut
         if len(attempts) < scenario.execution.repeats:
             # Cancelled part-way: never a pass from part of the repeats, never a failure
             # hidden as "not run" (fold_cut_short). Records stay on disk.
@@ -640,7 +730,16 @@ async def launch(
             async with slots:
                 return await decided(scenario)
 
-        verdicts = list(await asyncio.gather(*(lane(sc) for sc in catalogue.scenarios)))
+        # A TaskGroup, not gather: if one lane fails, the others are cancelled (and their
+        # leases released) instead of driving the agent for a run already reported failed.
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(lane(sc)) for sc in catalogue.scenarios]
+        except ExceptionGroup as failed:
+            # Every other lane has been cancelled and its lease released by now. Re-raise
+            # the first error itself, so a ConfigError stays a clean exit 3.
+            raise failed.exceptions[0] from failed
+        verdicts = [t.result() for t in tasks]
     if control.stopped is not None and not any(t.skip_kind in STOP_KINDS for t in verdicts):
         # The policy fired on the last scenario, or a cancel came after it: nothing was
         # left out, so the run did not stop early.
