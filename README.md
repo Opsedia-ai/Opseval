@@ -671,6 +671,34 @@ with exit 3 rather than being skipped — a silently missing scorer would let a 
 check gone. Note that plugins run in-process with no sandbox: installing one is a trust decision
 like any dependency. See [ADR-0022](docs/adr/0022-scorer-plugin-api.md).
 
+### Your own credentials (SSO, OAuth, a vault)
+
+When the agent's tokens come from somewhere Opseval does not know, write a credential provider.
+Declare it under `[project.entry-points."opseval.credentials"]`. Opseval uses it only when you
+name it in `OPSEVAL_CREDENTIALS`:
+
+```python
+from opseval.auth import CredentialProvider, FetchedTokens
+
+
+class AcmeSso(CredentialProvider):
+    name = "acme-sso"
+
+    def token_source(self, context):
+        client_id = context.value("ACME_CLIENT_ID")  # reads .env too
+
+        class Tokens(FetchedTokens):
+            def fetch(self):
+                return fetch_from_acme(client_id, tenant=context.tenant), 3600  # token, ttl
+
+        return Tokens()
+```
+
+Anything the provider raises makes that attempt *not judged*, never an agent failure, and the
+error names only the provider and the exception type. With a tenant pool, the provider is told
+each attempt's tenant and must issue a different identity per tenant. A missing or broken
+provider stops the run with exit 3 ([ADR-0046](docs/adr/0046-credential-provider-plugins.md)).
+
 ## How Opseval fits with other tools
 
 | Tool type | Examples | Relationship |

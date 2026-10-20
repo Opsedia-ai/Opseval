@@ -16,7 +16,13 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from opseval import __version__
-from opseval.auth import HS256Tokens, TokenSource
+from opseval.auth import (
+    CredentialContext,
+    CredentialProvider,
+    GuardedTokens,
+    HS256Tokens,
+    TokenSource,
+)
 from opseval.catalogue import load_catalogue, load_profile
 from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.demo import catalogue_dir as demo_catalogue_dir
@@ -39,7 +45,7 @@ from opseval.models.scenario import Criticality, Scenario
 from opseval.models.stop import StopPolicy
 from opseval.models.telemetry import TelemetryEvent
 from opseval.models.tenant import Tenant, TenantPool, lane_count
-from opseval.plugins import load_scorers
+from opseval.plugins import load_credential_provider, load_scorers
 from opseval.preflight import llm_roles_needed, preflight, probe_target
 from opseval.progress import ProgressLog
 from opseval.reporting import render_html
@@ -150,16 +156,29 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTr
     default_target = options.target
     token = settings.static_token.get_secret_value() if settings.static_token else None
     signing_key = settings.token_signing_key
+    provider = credential_provider(settings)
 
-    def credentials(profile: SutProfile, tenant: Tenant | None) -> str | TokenSource | None:
-        """A fresh token source per attempt: HS256 when the profile asks for it.
+    def credentials(
+        profile: SutProfile, tenant: Tenant | None, where: str
+    ) -> str | TokenSource | None:
+        """A fresh token source per attempt: a provider plugin's, or HS256 when the profile
+        asks for it.
 
-        A tenant's own token wins over OPSEVAL_STATIC_TOKEN, because the whole point of
-        the pool is that each tenant authenticates as itself.
+        A tenant's own token wins over everything else, because the whole point of the pool
+        is that each tenant authenticates as itself.
         """
         own = token_for(tenant, settings) if tenant else None
         if own:
             return own
+        if provider is not None:
+            _no_two_minters(profile, settings)
+            context = CredentialContext(
+                profile=profile.name,
+                target=where,
+                tenant=tenant.id if tenant else None,
+                value=settings.secret_named,
+            )
+            return GuardedTokens(provider, context)
         if profile.token is None:
             return token
         if signing_key is None:
@@ -183,7 +202,7 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTr
 
     def build(profile: SutProfile, tenant: Tenant | None) -> Transport:
         where = tenant.target if tenant and tenant.target else default_target
-        return cls(where, profile, token=credentials(profile, tenant))
+        return cls(where, profile, token=credentials(profile, tenant, where))
 
     return build
 
@@ -202,6 +221,25 @@ def _shown(url: str) -> str:
     host = parts.hostname or ""
     port = f":{parts.port}" if parts.port else ""
     return f"{parts.scheme}://{host}{port}{parts.path}" if parts.scheme else url
+
+
+def credential_provider(settings: Settings) -> CredentialProvider | None:
+    """The provider plugin named in ``OPSEVAL_CREDENTIALS``, if any (ADR-0046). Loaded before
+    the run: a missing or broken plugin is a configuration error, exit 3."""
+    name = settings.credentials.strip()
+    if not name:
+        return None
+    provider: CredentialProvider = load_credential_provider(name)
+    return provider
+
+
+def _no_two_minters(profile: SutProfile, settings: Settings) -> None:
+    if settings.credentials.strip() and profile.token is not None:
+        raise ConfigError(
+            f"profile {profile.name!r} mints HS256 tokens and OPSEVAL_CREDENTIALS names a "
+            f"credential provider ({settings.credentials.strip()!r}): choose one, so it is "
+            "clear which identity the agent sees"
+        )
 
 
 def _check_pool(
@@ -230,18 +268,22 @@ def _check_pool(
             )
         if tenant.target:
             check_url_allowed(tenant.target, settings.allowlist(), secure_schemes=secure)
+    # A provider is told each attempt's tenant, so a tenant needs no token_env or target to
+    # be a distinct identity; issuing one per tenant is then the provider's job (ADR-0046).
+    provided = bool(settings.credentials.strip())
     if len(pool.tenants) > 1:
         # Isolation means each tenant is a different account: its own token or its own
         # deployment. Two tenants with neither (or the same of both) are one account
         # under two names, and lanes on it would share state (review of #62).
         identities: dict[tuple[str | None, str | None], str] = {}
         for tenant in pool.tenants:
-            if tenant.token_env is None and tenant.target is None:
+            if tenant.token_env is None and tenant.target is None and not provided:
                 raise ConfigError(
                     f"tenant {tenant.id!r} declares neither token_env nor target, so it is "
                     "not isolated from the other tenants: give each its own token or target"
                 )
-            key = (tenant.token_env, tenant.target or options.target)
+            who = tenant.token_env or (f"credentials:{tenant.id}" if provided else None)
+            key = (who, tenant.target or options.target)
             if key in identities:
                 raise ConfigError(
                     f"tenants {identities[key]!r} and {tenant.id!r} have the same token_env "
@@ -456,6 +498,7 @@ async def launch(
             "once you have said which isolated accounts they may use"
         )
     lanes = lane_count(len(pool.tenants), settings.lanes, settings.lane_cap) if pool else 1
+    _no_two_minters(profile, settings)
     if pool:
         _check_pool(pool, profile, options, settings)
     # Built before the run: a destination that is not allowlisted is a configuration

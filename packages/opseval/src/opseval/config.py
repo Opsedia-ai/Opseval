@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     """A bearer token sent to the agent as is, when the profile does not mint its own."""
     token_signing_key: SecretStr | None = None
     """The HS256 key for profiles that mint short-lived tokens per attempt (ADR-0012)."""
+    credentials: str = ""
+    """A credential provider plugin to supply the agent's tokens, by entry-point name
+    (``opseval.credentials``, ADR-0046). Installing one changes nothing until it is named
+    here. It replaces ``OPSEVAL_STATIC_TOKEN``; a tenant's own ``token_env`` still wins."""
 
     # LLM roles (OpenAI-compatible endpoints)
     simulator_base_url: str | None = None

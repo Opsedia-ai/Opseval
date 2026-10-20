@@ -44,5 +44,6 @@
 | [0040](0040-github-issues-sink.md) | An issue for each failed critical scenario: one per scenario, no conversation content, bounded | Proposed |
 | [0041](0041-test-tenant-pool.md) | Test-tenant pool and parallel lanes: exclusive file leases that err towards not running | Proposed |
 | [0045](0045-jira-sink.md) | An issue for each failed critical scenario in Jira (Cloud and Data Center): the marker is a label | Proposed |
+| [0046](0046-credential-provider-plugins.md) | Credential provider plugins: named to be used, fail closed, every failure a harness error | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

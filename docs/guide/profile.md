@@ -76,6 +76,8 @@ artifact is still listed, with its id marked as redacted.
 
 - A static bearer token comes from `OPSEVAL_STATIC_TOKEN`. A `token:` block mints short-lived
   HS256 tokens per attempt instead, signed with `OPSEVAL_TOKEN_SIGNING_KEY`.
+  `OPSEVAL_CREDENTIALS` names a credential provider plugin instead, for tokens from single
+  sign-on, OAuth or a vault. It cannot be combined with a `token:` block.
 - `reconnect:` resumes a dropped WebSocket session.
 - `probes:` sends raw protocol frames once per attempt, before the conversation, and checks the
   answers.
