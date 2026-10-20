@@ -217,3 +217,24 @@ Also:
 - Tenant tokens are read from the `.env` file the `Settings` instance was actually built with
   (`_env_file`), parsed once.
 
+
+## Amendment 3 (2026-10-20): second review
+
+- **Two empty files compared equal.** A reclaimer compared `lease_id`s, and an unreadable lease has
+  none, so a fresh lease another reclaimer had created but not yet written looked like the stale
+  one. A steal now compares the file's identity (device, inode, size, modification time) instead.
+  If the restoring link fails, the moved file is kept, never deleted.
+- **A missing file during the hold is a lost lease**, not just someone else's file. A heartbeat
+  never re-creates a lease.
+- **Ownership is checked right after each conversation**, not only by the background heartbeat.
+  Once a lease is lost the scenario runs no more attempts on that tenant. It is folded like a
+  cut-short scenario (`fold_cut_short`): failed only if it had already failed for certain,
+  otherwise skipped with `skip_kind: dependency`.
+- **The rule lives in `attempt_verdict`**: a record noted `tenant_lease_lost` is not judged, so
+  `opseval rescore` agrees with the run.
+- The identity check compares each tenant's *effective* target (its own, else `--target`). When
+  every tenant has its own target, preflight no longer probes `--target`. Targets in the result
+  show scheme, host, port and path only, never credentials or a query string.
+- Known limit: a heartbeat's ownership check and its write are two steps. Another run can only
+  reclaim the lease once it looks stale, that is after this process stalled for longer than
+  `stale_after`, and that run's own ownership check then sees the overlap.

@@ -111,6 +111,16 @@ def _read(path: Path) -> dict[str, Any] | None:
     return held if isinstance(held, dict) else None
 
 
+def _identity(path: Path) -> tuple[int, int, int, int] | None:
+    """Which file this is (device, inode, size, mtime), or None when it cannot be seen. Two
+    different leases differ here even when both are still empty."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def _write_lease(path: Path, holder: str, lease_id: str) -> None:
     """Replace ``path`` atomically, so an interrupted write cannot leave it empty."""
     tmp = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
@@ -136,39 +146,47 @@ class Lease:
         self.holder = holder
         self.lease_id = lease_id
         self.lost = False
-        """Set when the lease file turned out to be someone else's: the tenant may have been
-        shared, so attempts run under it are not judged (ADR-0041)."""
+        """Set when the lease file turned out to be someone else's (or gone) while held: the
+        tenant may have been shared, so attempts run under it are not judged (ADR-0041)."""
+        self.released = False
 
     def _ours(self) -> bool:
         held = _read(self.path)
         return held is not None and held.get("lease_id") == self.lease_id
 
+    def check(self) -> bool:
+        """Is the lease still this one? Sets ``lost`` when it is not. Called by the runner
+        right after each conversation, not only by the background heartbeat."""
+        if not self.released and not self._ours():
+            self.lost = True
+        return not self.lost
+
     def heartbeat(self) -> None:
         """Refresh the lease so a live holder is never mistaken for a dead one.
 
-        Only while the file is still this lease: a heartbeat must never re-create a released
-        lease, nor stamp itself over another run's. Finding someone else's lease there means
-        this one was lost, which the runner turns into a harness error, never a verdict.
+        Only while the file is still this lease. A missing file during the hold, or someone
+        else's lease in its place, means this one was taken: ``lost`` is set, and the runner
+        turns that into a harness error, never a verdict. A heartbeat never re-creates or
+        overwrites a lease.
+
+        Known limit: the ownership check and the write are two steps. Another run can only
+        reclaim this lease once it looks stale, which means this process stalled for longer
+        than ``stale_after``; if it does, the other run's ownership check catches the overlap.
 
         Written to a temporary file and ``os.replace``d into place, because a truncating
-        write that is interrupted leaves an **empty** lease: unreadable, therefore held,
-        therefore a tenant nobody can ever use again. A failed write does not release the
-        lease; the worst case is that it looks stale later.
+        write that is interrupted leaves an **empty** lease.
         """
-        if not self.path.exists():
-            return  # released: nothing to refresh
-        if not self._ours():
-            self.lost = True
+        if self.released or not self.check():
             return
         with suppress(OSError):
             _write_lease(self.path, self.holder, self.lease_id)
 
     def release(self) -> None:
-        if not self._ours():
-            # Someone else holds it now (or it is gone). Deleting it would release theirs.
-            return
-        with suppress(OSError):
-            self.path.unlink()
+        if self._ours():
+            # Only our own lease: deleting someone else's would release theirs.
+            with suppress(OSError):
+                self.path.unlink()
+        self.released = True
 
 
 class TenantLeases:
@@ -234,8 +252,8 @@ class TenantLeases:
             self.dir.mkdir(parents=True, exist_ok=True)
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            judged = _read(path)
-            if self._held_by_other(path):
+            judged = _identity(path)
+            if judged is None or self._held_by_other(path):
                 return None
             if not self._steal(path, judged):
                 return None
@@ -252,7 +270,7 @@ class TenantLeases:
             handle.write(_body(self.holder, lease_id))
         return Lease(tenant, path, self.holder, lease_id)
 
-    def _steal(self, path: Path, judged: dict[str, Any] | None) -> bool:
+    def _steal(self, path: Path, judged: tuple[int, int, int, int]) -> bool:
         """Clear a provably stale lease, atomically, and only that one.
 
         Unlinking and re-creating is **not** safe: two processes can both see the same
@@ -260,25 +278,23 @@ class TenantLeases:
         name is the atomic step instead: exactly one process can move a given file.
 
         Renaming moves whatever is at the path *now*, which may already be a fresh lease
-        another reclaimer took a moment ago. So the moved file is checked against the one
-        judged stale; if it is not that one, it is put back with a no-clobber link and the
-        steal is abandoned. Moving a live lease away is the double-hold this module exists
-        to prevent.
+        another reclaimer took a moment ago, possibly still empty. So the moved file's
+        identity (device, inode, size, modification time) is checked against the one judged
+        stale; if it is not that file, it is put back with a no-clobber link and the steal is
+        abandoned. Moving a live lease away is the double-hold this module exists to prevent.
         """
         victim = path.with_name(f"{path.name}.stale.{uuid.uuid4().hex}")
         try:
             os.rename(path, victim)
         except OSError:
             return False  # Lost the race, or it vanished. Either way, not ours to clear.
-        moved = _read(victim)
-        same = judged is None and moved is None
-        if judged is not None and moved is not None:
-            same = moved.get("lease_id") == judged.get("lease_id") and moved.get(
-                "heartbeat_at"
-            ) == judged.get("heartbeat_at")
-        if not same:
-            with suppress(OSError):
+        if _identity(victim) != judged:
+            try:
                 os.link(victim, path)  # restore; fails if the path was re-created meanwhile
+            except OSError:
+                # Leave it where it is rather than delete a live lease: its owner's next
+                # ownership check finds the path is not theirs and stops judging.
+                return False
             with suppress(OSError):
                 victim.unlink()
             return False

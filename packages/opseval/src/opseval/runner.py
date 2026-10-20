@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from opseval import __version__
 from opseval.auth import HS256Tokens, TokenSource
@@ -68,6 +69,7 @@ from opseval.transport import (
     WebSocketTransport,
 )
 from opseval.verdicts import (
+    TENANT_LEASE_LOST,
     attempt_verdict,
     exit_code,
     failure_blocks,
@@ -186,13 +188,20 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTr
     return build
 
 
-def _tenant_targets(
-    pool: TenantPool | None, profile: SutProfile, make_transport: TenantTransportFactory
-) -> set[str]:
+def _tenant_targets(pool: TenantPool | None, default: str | None) -> set[str]:
     """Every host the pool's attempts will reach (a tenant's own target, else --target)."""
     if pool is None:
         return set()
-    return {make_transport(profile, tenant).target for tenant in pool.tenants}
+    return {t.target or default or "" for t in pool.tenants} - {""}
+
+
+def _shown(url: str) -> str:
+    """A target as it may be published: scheme, host, port and path, never credentials or a
+    query string (a target URL can carry a token)."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}{parts.path}" if parts.scheme else url
 
 
 def _check_pool(
@@ -232,7 +241,7 @@ def _check_pool(
                     f"tenant {tenant.id!r} declares neither token_env nor target, so it is "
                     "not isolated from the other tenants: give each its own token or target"
                 )
-            key = (tenant.token_env, tenant.target)
+            key = (tenant.token_env, tenant.target or options.target)
             if key in identities:
                 raise ConfigError(
                     f"tenants {identities[key]!r} and {tenant.id!r} have the same token_env "
@@ -481,11 +490,13 @@ async def launch(
             catalogue.scenarios,
             profile,
             settings,
-            target=make_transport(profile, None).target,
+            target=default_where,
             transport=options.transport,
             traces_enabled=options.traces and profile.traces is not None,
             verify_llm=options.verify_llm,
-            probe_target_host=options.transport_factory is None,
+            # With every tenant on its own deployment, no attempt goes to --target.
+            probe_target_host=options.transport_factory is None
+            and (pool is None or default_where in _tenant_targets(pool, options.target)),
         )
         sut = health.get("sut")
         if sut is not None and sut.blocking:
@@ -501,7 +512,7 @@ async def launch(
             log(f"preflight: {check.name} unavailable — {check.detail}")
         # Tenants with their own deployment are probed too: the attempts go there, not to
         # --target (review of #62).
-        for where in _tenant_targets(pool, profile, make_transport) - {default_where}:
+        for where in _tenant_targets(pool, options.target) - {default_where}:
             probe = await probe_target(where, options.transport)
             if probe.blocking:
                 raise ConfigError(
@@ -511,8 +522,8 @@ async def launch(
     started = datetime.now(UTC)
     run_id = options.run_id or new_run_id(started)
     # The hosts attempts actually went to: with per-tenant targets, --target may not be one.
-    used = sorted(_tenant_targets(pool, profile, make_transport)) if pool else [default_where]
-    target_label = ", ".join(used)
+    used = sorted(_tenant_targets(pool, options.target)) if pool else [default_where]
+    target_label = ", ".join(_shown(u) for u in used) if pool else default_where
     store.write_manifest(
         run_id,
         {
@@ -650,7 +661,7 @@ async def launch(
                 simulator_timeout_seconds=settings.simulator_timeout_seconds,
             )
             record = await driver.run()
-            if lease is not None and lease.lost:
+            if lease is not None and not lease.check():
                 # Another run holds this tenant's lease now: the attempt may have shared
                 # the account, so it is the harness's problem, never a verdict.
                 record = record.model_copy(
@@ -659,7 +670,7 @@ async def launch(
                             *record.infra_errors,
                             f"tenant lease lost: {lease.tenant.id} may have been shared",
                         ),
-                        "notes": (*record.notes, "tenant_lease_lost"),
+                        "notes": (*record.notes, TENANT_LEASE_LOST),
                     }
                 )
             rate_limited = rate_limited or RATE_LIMITED_NOTE in record.notes
@@ -669,10 +680,6 @@ async def launch(
             tracker.attempt(scenario.id)
             scores = await engine.score(record, scenario, profile)
             verdict = attempt_verdict(record, scores, str(path))
-            if "tenant_lease_lost" in record.notes:
-                verdict = verdict.model_copy(
-                    update={"passed": None, "invalid_reason": "tenant lease lost"}
-                )
             attempts.append(verdict)
             state = (
                 "not judged" if verdict.passed is None else ("pass" if verdict.passed else "FAIL")
@@ -681,6 +688,22 @@ async def launch(
             # With lanes in flight the lines interleave: say whose attempt it is.
             whose = f"{scenario.id} " if lanes > 1 else ""
             log(f"   {whose}attempt {i}: {state} ({record.terminal_state.value}{coverage})")
+            if lease is not None and lease.lost:
+                # Another run holds this tenant now: running more attempts on it would
+                # disturb that run's agent conversations. Stop here.
+                log(f"   {scenario.id}: tenant {lease.tenant.id} was taken by another run")
+                break
+        if lease is not None and lease.lost:
+            cut = fold_cut_short(scenario, attempts)
+            if cut.status is VerdictStatus.SKIPPED_PRECONDITION:
+                cut = cut.model_copy(
+                    update={
+                        "skip_kind": "dependency",
+                        "reason": f"tenant lease lost after {len(attempts)} of "
+                        f"{scenario.execution.repeats} attempts: another run took the tenant",
+                    }
+                )
+            return cut
         if len(attempts) < scenario.execution.repeats:
             # Cancelled part-way: never a pass from part of the repeats, never a failure
             # hidden as "not run" (fold_cut_short). Records stay on disk.
