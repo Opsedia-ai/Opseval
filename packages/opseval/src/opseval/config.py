@@ -13,7 +13,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from dotenv import dotenv_values
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, PrivateAttr, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from opseval.errors import AllowedHostError
@@ -24,6 +24,9 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 class Settings(BaseSettings):
     """All ``OPSEVAL_*`` settings. Importing needs no environment."""
+
+    _env_file_used: str | None = PrivateAttr(default=None)
+    _dotenv: dict[str, str | None] | None = PrivateAttr(default=None)
 
     model_config = SettingsConfigDict(
         env_prefix="OPSEVAL_", env_file=".env", extra="ignore", use_attribute_docstrings=True
@@ -125,8 +128,9 @@ class Settings(BaseSettings):
     """Where tenant leases live. Default: a machine-wide directory keyed by the pool's tenant
     ids, because a path relative to the working directory would let two checkouts of the same
     pool lease the same account."""
-    tenant_stale_after_seconds: float = Field(default=300.0, gt=0, le=86_400)
-    """A lease whose heartbeat is older than this may be reclaimed. Generous on purpose."""
+    tenant_stale_after_seconds: float = Field(default=300.0, ge=90, le=86_400)
+    """A lease whose heartbeat is older than this may be reclaimed. Generous on purpose, and
+    at least three heartbeats (30 s each), or every live lease would look dead."""
     tenant_wait_seconds: float = Field(default=30.0, ge=0, le=3_600)
     """How long to wait for a free tenant before skipping the scenario."""
     reports_dir: str = "reports"
@@ -142,6 +146,14 @@ class Settings(BaseSettings):
     """The built web console (``packages/console/dist``) for ``opseval serve`` to serve.
     When unset, a source checkout's build is found on its own (ADR-0034)."""
 
+    def __init__(self, **values: Any) -> None:
+        super().__init__(**values)
+        # The .env this instance was actually built from: an explicit ``_env_file`` (None
+        # included) wins over the class default, so secret_named reads the same file.
+        chosen = values.get("_env_file", self.model_config.get("env_file"))
+        self._env_file_used = str(chosen) if isinstance(chosen, str | Path) else None
+        self._dotenv: dict[str, str | None] | None = None
+
     def secret_named(self, name: str) -> str | None:
         """A secret named by a *file* rather than by a field: a tenant's ``token_env``.
 
@@ -149,19 +161,16 @@ class Settings(BaseSettings):
         and because of a trap: ``.env`` is read into this model but is **never exported to
         ``os.environ``**. A tenant token set in ``.env``, exactly as ``opseval init`` says,
         would look unset to anything calling ``os.environ.get``. So both are consulted, with
-        the real environment winning.
+        the real environment winning. The ``.env`` read is the one this instance was built
+        from, parsed once.
         """
         from_env = os.environ.get(name)
         if from_env:
             return from_env
-        env_file = self.model_config.get("env_file")
-        if not env_file:
-            return None
-        path = Path(str(env_file))
-        if not path.is_file():
-            return None
-        value = dotenv_values(path).get(name)
-        return value or None
+        if self._dotenv is None:
+            path = Path(self._env_file_used) if self._env_file_used else None
+            self._dotenv = dotenv_values(path) if path is not None and path.is_file() else {}
+        return self._dotenv.get(name) or None
 
     def allowlist(self) -> set[str]:
         return {h.strip().lower() for h in self.allowed_hosts.split(",") if h.strip()}

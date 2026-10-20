@@ -16,12 +16,12 @@ class ProgressLog:
         self._rows = {sid: ScenarioProgress(id=sid) for sid in planned}
         self._order = list(planned)
         self._stage: str = "running"
-        self._current: str | None = None
+        self._running: list[str] = []  # in the order they started; lanes run several
         self._write()
 
     def started(self, sid: str, repeats: int) -> None:
         self._update(sid, state="running", repeats=repeats)
-        self._current = sid
+        self._running.append(sid)
         self._write()
 
     def attempt(self, sid: str) -> None:
@@ -33,12 +33,13 @@ class ProgressLog:
         """A scenario has its verdict: scored and folded, or skipped."""
         state = "skipped" if verdict.status in SKIPS else "done"
         self._update(verdict.test_id, state=state)
-        if self._current == verdict.test_id:
-            self._current = None
+        if verdict.test_id in self._running:
+            self._running.remove(verdict.test_id)
         self._write()
 
     def finishing(self) -> None:
-        self._stage, self._current = "finishing", None
+        self._stage = "finishing"
+        self._running = []
         self._write()
 
     def _update(self, sid: str, **changes: object) -> None:
@@ -50,7 +51,9 @@ class ProgressLog:
             RunProgress.model_validate(
                 {
                     "stage": self._stage,
-                    "current": self._current,
+                    # The most recently started of those still running. With lanes, every
+                    # running scenario is also marked so in its own row.
+                    "current": self._running[-1] if self._running else None,
                     "scenarios": [self._rows[sid].model_dump() for sid in self._order],
                 }
             ),
