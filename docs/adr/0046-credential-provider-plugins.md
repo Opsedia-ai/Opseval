@@ -48,23 +48,33 @@ cached and fetched again before it expires.
   because a provider's error text can quote the credential it was handling. The source is
   built on first use, so a failure lands inside the attempt rather than between attempts.
 - **Precedence.** A tenant's own `token_env` wins. Otherwise the provider supplies the token,
-  in place of `OPSEVAL_STATIC_TOKEN`. A profile that mints HS256 tokens and a named provider
-  together are refused at launch ("choose one"), so it is always clear which identity the
-  agent sees.
+  in place of `OPSEVAL_STATIC_TOKEN`. With a provider, a profile's `token:` block may declare
+  only `refresh_frame`: how a new token is sent on an open WebSocket connection. A block that
+  mints (a TTL, claims or `refresh_before_seconds`) is refused at launch ("choose one"), so it
+  is always clear which identity the agent sees.
 - **Pools.** The provider is told each attempt's tenant. A tenant then needs neither
   `token_env` nor `target` to count as a distinct identity, and issuing one identity per
   tenant becomes the provider's job.
-- **Preflight** asks the provider for one token, as an attempt would. A failure is reported as
-  not configured.
+- **Preflight** asks the provider for one token, as an attempt would, for the first tenant it
+  will serve. With a pool where every tenant has its own token, the provider is not asked. A
+  failure stops the run with exit 3 before the first frame: every attempt would otherwise be a
+  harness error, and the identity provider would be asked once per attempt for a suite that
+  can judge nothing.
+- **An injected transport with a provider is refused.** It takes no credentials, so the
+  provider would silently do nothing.
 
 ## Consequences
 
 - `current()` is synchronous and is called on the event loop, so a provider must cache. A slow
-  first fetch blocks the loop once per token lifetime; `FetchedTokens` keeps that to one call.
-- On WebSocket, a provider's token is sent in `auth_frame` when a connection opens. Refreshing
-  it *on an open connection* needs a profile `token.refresh_frame`, which belongs to HS256
-  minting. A provider's new token is therefore used on the next connection. HTTP transports
-  ask for a token on every request.
+  fetch blocks the loop once per token lifetime. `FetchedTokens` keeps that to one call, and
+  re-fetches at most half a lifetime early, so a short-lived token is not fetched on every use.
+- On WebSocket, a provider's token is sent in `auth_frame` when a connection opens. Without a
+  `token: {refresh_frame: …}` block it is only replaced on the next connection: an agent that
+  rejects an expired token in-band would then be scored on that rejection. Declare
+  `refresh_frame` whenever tokens outlive less than an attempt. HTTP transports ask for a
+  token on every request.
+- One provider instance per process, so a provider that opens a session in its constructor
+  opens one.
 - A profile that never asks for a token (no `auth_frame` on WebSocket) never consults the
   provider.
 - Plugins run in-process with no sandbox, like scorer and sink plugins (ADR-0022, ADR-0027).

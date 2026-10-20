@@ -42,6 +42,9 @@ _sinks: dict[str, type[Any]] = {}
 _credentials: dict[str, type[Any]] = {}
 """Credential provider classes already loaded, by entry-point name."""
 
+_providers: dict[str, Any] = {}
+"""Credential provider instances, by entry-point name: one per process."""
+
 THIRD_PARTY: dict[str, str] = {}
 """Scorer id -> the distribution that provides it, for ``opseval list-scorers``."""
 
@@ -138,6 +141,37 @@ def check_sink_contract(obj: Any, *, source: str) -> type[Any]:
     return obj
 
 
+def _load_entry(
+    entries: dict[str, EntryPoint],
+    name: str,
+    *,
+    kind: str,
+    check: Any,
+    cache: dict[str, type[Any]],
+) -> type[Any]:
+    """Import one named plugin and check its contract, once. Fails closed: an import error
+    or a contract violation is a :class:`ConfigError` (exit 3), never a skip."""
+    if name not in cache:
+        entry = entries[name]
+        source = f"{kind} plugin {name!r} ({entry.value})"
+        try:
+            obj = entry.load()
+        except Exception as exc:
+            raise ConfigError(
+                f"{source} could not be imported: {type(exc).__name__}: {exc}. "
+                f"Fix or uninstall it; Opseval will not run with a broken {kind} plugin."
+            ) from exc
+        cache[name] = check(obj, source=source)
+    return cache[name]
+
+
+def _not_installed(setting: str, missing: list[str], entries: dict[str, EntryPoint]) -> ConfigError:
+    return ConfigError(
+        f"{setting} names {', '.join(missing)}, which no installed plugin provides "
+        f"(installed: {', '.join(sorted(entries)) or 'none'})"
+    )
+
+
 def load_sinks(
     names: Iterable[str] | None = None, *, group: str = SINK_GROUP
 ) -> dict[str, type[Any]]:
@@ -155,25 +189,11 @@ def load_sinks(
     wanted = list(dict.fromkeys(names)) if names is not None else sorted(entries)
     missing = [name for name in wanted if name not in entries and name not in _sinks]
     if missing:
-        raise ConfigError(
-            f"OPSEVAL_SINKS names {', '.join(missing)}, which no installed plugin provides "
-            f"(installed: {', '.join(sorted(entries)) or 'none'})"
-        )
-    found: dict[str, type[Any]] = {}
-    for name in wanted:
-        if name not in _sinks:
-            entry = entries[name]
-            source = f"sink plugin {name!r} ({entry.value})"
-            try:
-                obj = entry.load()
-            except Exception as exc:
-                raise ConfigError(
-                    f"{source} could not be imported: {type(exc).__name__}: {exc}. "
-                    "Fix or uninstall it; Opseval will not run with a broken sink plugin."
-                ) from exc
-            _sinks[name] = check_sink_contract(obj, source=source)
-        found[name] = _sinks[name]
-    return found
+        raise _not_installed("OPSEVAL_SINKS", missing, entries)
+    return {
+        name: _load_entry(entries, name, kind="sink", check=check_sink_contract, cache=_sinks)
+        for name in wanted
+    }
 
 
 def check_credentials_contract(obj: Any, *, source: str) -> type[Any]:
@@ -202,35 +222,31 @@ def check_credentials_contract(obj: Any, *, source: str) -> type[Any]:
 
 
 def load_credential_provider(name: str, *, group: str = CREDENTIALS_GROUP) -> Any:
-    """The credential provider named in ``OPSEVAL_CREDENTIALS``, instantiated. Fails closed:
-    a name no installed plugin provides, an import error, a contract violation or a
-    constructor that raises is a :class:`ConfigError` (exit 3), never a fall-back to another
-    credential. A run that quietly used the wrong identity would test the wrong account.
-    Only the named plugin is imported.
+    """The credential provider named in ``OPSEVAL_CREDENTIALS``, instantiated once per process
+    (a provider that opens a session in its constructor gets one). Fails closed: a name no
+    installed plugin provides, an import error, a contract violation or a constructor that
+    raises is a :class:`ConfigError` (exit 3), never a fall-back to another credential. A run
+    that quietly used another identity would test the wrong account. Only the named plugin
+    is imported.
     """
-    if name not in _credentials:
+    if name not in _providers:
         entries = {entry.name: entry for entry in _iter_entry_points(group)}
-        if name not in entries:
-            raise ConfigError(
-                f"OPSEVAL_CREDENTIALS names {name!r}, which no installed plugin provides "
-                f"(installed: {', '.join(sorted(entries)) or 'none'})"
-            )
-        entry = entries[name]
-        source = f"credential provider plugin {name!r} ({entry.value})"
+        if name not in entries and name not in _credentials:
+            raise _not_installed("OPSEVAL_CREDENTIALS", [repr(name)], entries)
+        cls = _load_entry(
+            entries,
+            name,
+            kind="credential provider",
+            check=check_credentials_contract,
+            cache=_credentials,
+        )
         try:
-            obj = entry.load()
+            _providers[name] = cls()
         except Exception as exc:
             raise ConfigError(
-                f"{source} could not be imported: {type(exc).__name__}: {exc}. "
-                "Fix or uninstall it; Opseval will not run with a broken credential plugin."
+                f"credential provider plugin {name!r} could not be created: {type(exc).__name__}"
             ) from exc
-        _credentials[name] = check_credentials_contract(obj, source=source)
-    try:
-        return _credentials[name]()
-    except Exception as exc:
-        raise ConfigError(
-            f"credential provider plugin {name!r} could not be created: {type(exc).__name__}"
-        ) from exc
+    return _providers[name]
 
 
 def reset_for_tests() -> None:
@@ -238,6 +254,7 @@ def reset_for_tests() -> None:
     _loaded.clear()
     _sinks.clear()
     _credentials.clear()
+    _providers.clear()
     THIRD_PARTY.clear()
 
 

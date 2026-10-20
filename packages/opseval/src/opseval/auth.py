@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from opseval.errors import CredentialsError
+from opseval.models.profile import SutProfile, TokenConfig
 
 
 def _b64(data: bytes) -> str:
@@ -149,8 +150,12 @@ class CredentialProvider(ABC):
 
     and used only when named in ``OPSEVAL_CREDENTIALS``. ``token_source`` is called once per
     attempt; the source's ``current()`` is called whenever a token is needed, on the event
-    loop, so it must return quickly (cache, and refresh ahead of expiry: see
-    :class:`FetchedTokens`). Whatever either raises is a harness error, never the agent's.
+    loop, so it must return quickly (cache it: see :class:`FetchedTokens`). Whatever either
+    raises is a harness error, never the agent's.
+
+    HTTP transports ask for a token on every request. On WebSocket the token is sent when a
+    connection opens; to replace it on an open connection, the profile declares a ``token:``
+    block with only a ``refresh_frame``, sent when ``seconds_until_refresh`` runs out.
     """
 
     name: str = "credentials"
@@ -162,7 +167,8 @@ class CredentialProvider(ABC):
 
 class FetchedTokens(TokenSource):
     """A helper for providers that fetch tokens from somewhere: implement :meth:`fetch` and
-    the token is cached, and fetched again ``refresh_before_seconds`` before it expires."""
+    the token is cached, and fetched again ``refresh_before_seconds`` before it expires
+    (at most half its lifetime early, so a short-lived token is not fetched on every use)."""
 
     def __init__(
         self, *, refresh_before_seconds: float = 30.0, clock: Callable[[], float] = time.time
@@ -171,6 +177,7 @@ class FetchedTokens(TokenSource):
         self._clock = clock
         self._token: str | None = None
         self._expires_at: float | None = None
+        self._early = refresh_before_seconds
 
     @abstractmethod
     def fetch(self) -> tuple[str, float | None]:
@@ -181,13 +188,14 @@ class FetchedTokens(TokenSource):
             return 0.0
         if self._expires_at is None:
             return None
-        return self._expires_at - self._before - self._clock()
+        return self._expires_at - self._early - self._clock()
 
     def current(self) -> str:
         if self._token is None or self.refresh_due():
             token, ttl = self.fetch()
             self._token = token
             self._expires_at = None if ttl is None else self._clock() + ttl
+            self._early = self._before if ttl is None else min(self._before, ttl / 2)
         return self._token
 
 
@@ -243,6 +251,24 @@ class GuardedTokens(TokenSource):
             raise self._fail("failed to say when to refresh", exc) from None
 
 
+def token_block_problem(profile: SutProfile, provider: str) -> str | None:
+    """Why the profile's ``token:`` block cannot be used with a credential provider, if it
+    cannot. With a provider, the block may declare only ``refresh_frame`` (how a new token is
+    sent on an open WebSocket connection): the token and its lifetime are the provider's, so
+    a TTL or claims there would be silently ignored."""
+    block = profile.token
+    if block is None:
+        return None
+    if block == TokenConfig(refresh_frame=block.refresh_frame):
+        return None
+    return (
+        f"profile {profile.name!r} has a token: block that mints HS256 tokens (ttl, claims or "
+        f"refresh_before_seconds), and OPSEVAL_CREDENTIALS names {provider!r}: with a provider, "
+        "the token: block may only declare refresh_frame. Choose one, so it is clear which "
+        "identity the agent sees"
+    )
+
+
 def as_token_source(token: str | TokenSource | None) -> TokenSource | None:
     if token is None or isinstance(token, TokenSource):
         return token
@@ -259,5 +285,6 @@ __all__ = [
     "StaticToken",
     "TokenSource",
     "as_token_source",
+    "token_block_problem",
     "mint_hs256",
 ]

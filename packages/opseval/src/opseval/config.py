@@ -13,7 +13,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from dotenv import dotenv_values
-from pydantic import AliasChoices, Field, PrivateAttr, SecretStr
+from pydantic import AliasChoices, Field, PrivateAttr, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from opseval.errors import AllowedHostError
@@ -171,6 +171,12 @@ class Settings(BaseSettings):
         chosen = values.get("_env_file", self.model_config.get("env_file"))
         self._env_file_used = str(chosen) if isinstance(chosen, str | Path) else None
         self._dotenv: dict[str, str | None] | None = None
+
+    @field_validator("credentials")
+    @classmethod
+    def _one_provider_name(cls, value: str) -> str:
+        # Stripped once here, so no caller can mistake whitespace for a provider's name.
+        return value.strip()
 
     def secret_named(self, name: str) -> str | None:
         """A secret named by a *file* rather than by a field: a tenant's ``token_env``.

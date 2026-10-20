@@ -26,7 +26,7 @@ import httpx
 import websockets
 from websockets.exceptions import InvalidStatus, WebSocketException
 
-from opseval.auth import CredentialContext, GuardedTokens, HS256Tokens
+from opseval.auth import CredentialContext, GuardedTokens, HS256Tokens, token_block_problem
 from opseval.config import Settings, check_url_allowed
 from opseval.errors import CredentialsError
 from opseval.models.preflight import CheckStatus, HealthCheck, PreflightReport
@@ -139,9 +139,24 @@ async def probe_target(target: str, transport: str) -> HealthCheck:
     )
 
 
-def check_token(profile: SutProfile, settings: Settings, *, target: str = "") -> HealthCheck:
-    if settings.credentials.strip():
-        return _check_provider(profile, settings, target)
+def check_token(
+    profile: SutProfile,
+    settings: Settings,
+    *,
+    target: str = "",
+    credentials_tenant: str | None | bool = None,
+) -> HealthCheck:
+    """``credentials_tenant``: the tenant a provider is asked about (``None``: no pool), or
+    ``False`` when every tenant has its own token, so the provider serves no attempt."""
+    if settings.credentials:
+        if credentials_tenant is False:
+            return HealthCheck(
+                name="token",
+                status=CheckStatus.NOT_NEEDED,
+                detail=f"every tenant has its own token: {settings.credentials!r} is not asked",
+            )
+        tenant = credentials_tenant if isinstance(credentials_tenant, str) else None
+        return _check_provider(profile, settings, target, tenant)
     if profile.token is None:
         detail = (
             "static token from OPSEVAL_STATIC_TOKEN"
@@ -291,31 +306,33 @@ async def check_traces(
     )
 
 
-def _check_provider(profile: SutProfile, settings: Settings, target: str) -> HealthCheck:
-    """Ask the credential provider plugin for one token, as an attempt would (ADR-0046).
+def _check_provider(
+    profile: SutProfile, settings: Settings, target: str, tenant: str | None
+) -> HealthCheck:
+    """Ask the credential provider plugin for one token, as an attempt would (ADR-0046),
+    for the tenant the first such attempt would use.
 
     A plugin that is missing or broken raises :class:`ConfigError`, as it would at launch.
     """
     from opseval.plugins import load_credential_provider
 
-    name = settings.credentials.strip()
-    if profile.token is not None:
-        return HealthCheck(
-            name="token",
-            status=CheckStatus.NOT_CONFIGURED,
-            detail=f"profile {profile.name!r} mints HS256 tokens and OPSEVAL_CREDENTIALS "
-            f"names {name!r}: choose one",
-        )
+    name = settings.credentials
+    problem = token_block_problem(profile, name)
+    if problem:
+        return HealthCheck(name="token", status=CheckStatus.NOT_CONFIGURED, detail=problem)
     provider = load_credential_provider(name)
     context = CredentialContext(
-        profile=profile.name, target=target, tenant=None, value=settings.secret_named
+        profile=profile.name, target=target, tenant=tenant, value=settings.secret_named
     )
     try:
         GuardedTokens(provider, context).current()
     except CredentialsError as exc:
         return HealthCheck(name="token", status=CheckStatus.NOT_CONFIGURED, detail=str(exc))
+    whom = f" for tenant {tenant!r}" if tenant else ""
     return HealthCheck(
-        name="token", status=CheckStatus.OK, detail=f"credential provider {name!r} gave a token"
+        name="token",
+        status=CheckStatus.OK,
+        detail=f"credential provider {name!r} gave a token{whom}",
     )
 
 
@@ -329,6 +346,7 @@ async def preflight(
     traces_enabled: bool = True,
     verify_llm: bool = False,
     probe_target_host: bool = True,
+    credentials_tenant: str | None | bool = None,
 ) -> PreflightReport:
     """Check everything this suite depends on, concurrently.
 
@@ -357,7 +375,13 @@ async def preflight(
         check_traces(profile, settings, needs["traces"], enabled=traces_enabled),
     )
     return PreflightReport(
-        checks=[sut, check_token(profile, settings, target=target), simulator, judge, traces]
+        checks=[
+            sut,
+            check_token(profile, settings, target=target, credentials_tenant=credentials_tenant),
+            simulator,
+            judge,
+            traces,
+        ]
     )
 
 

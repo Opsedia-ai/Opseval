@@ -697,7 +697,10 @@ class AcmeSso(CredentialProvider):
 Anything the provider raises makes that attempt *not judged*, never an agent failure, and the
 error names only the provider and the exception type. With a tenant pool, the provider is told
 each attempt's tenant and must issue a different identity per tenant. A missing or broken
-provider stops the run with exit 3 ([ADR-0046](docs/adr/0046-credential-provider-plugins.md)).
+provider stops the run with exit 3, and so does one that fails preflight. On WebSocket, add
+`token: {refresh_frame: {type: auth_refresh, token: "{token}"}}` to the profile if a token can
+expire during an attempt. With a provider, that block may declare nothing else
+([ADR-0046](docs/adr/0046-credential-provider-plugins.md)).
 
 ## How Opseval fits with other tools
 

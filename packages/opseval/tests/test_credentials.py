@@ -274,8 +274,8 @@ class TestARun:
         install(monkeypatch, FakeEntryPoint("acme", Acme))
         prof = (cat_dir / "profile.yaml").read_text(encoding="utf-8")
         minted = tmp_path / "profile.yaml"
-        minted.write_text(prof + "\ntoken:\n  ttl_seconds: 300\n", encoding="utf-8")
-        with pytest.raises(ConfigError, match="choose one"):
+        minted.write_text(prof + "\ntoken:\n  ttl_seconds: 120\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="Choose one"):
             await launch(
                 cat_dir / "suites" / "smoke.yaml",
                 RunOptions(target="ws://127.0.0.1:9", profile=minted, repeats=1),
@@ -388,3 +388,127 @@ class TestPreflight:
         settings = Settings(_env_file=str(env), credentials="reads")  # type: ignore[call-arg]
         check_token(profile, settings)
         assert got == ["from-dotenv"], ".env is read, though it is never in os.environ"
+
+
+class TestReviewOf67:
+    def test_a_refresh_only_token_block_refreshes_the_providers_token_on_websocket(
+        self, profile: SutProfile, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """With a provider, `token: {refresh_frame}` is how a new token reaches an open
+        connection; without it an expired token would be rejected in-band (review of #67)."""
+        from opseval.runner import build_transport_factory
+
+        class Short(CredentialProvider):
+            name = "short"
+
+            def token_source(self, context: CredentialContext) -> TokenSource:
+                class Tokens(FetchedTokens):
+                    def fetch(self) -> tuple[str, float | None]:
+                        return "t", 60.0
+
+                return Tokens(refresh_before_seconds=10)
+
+        install(monkeypatch, FakeEntryPoint("short", Short))
+        data = profile.model_dump()
+        data["auth_frame"] = {"type": "auth", "token": "{token}"}
+        data["token"] = {"refresh_frame": {"type": "auth_refresh", "token": "{token}"}}
+        refreshing = SutProfile.model_validate(data)
+        factory = build_transport_factory(
+            RunOptions(target="ws://127.0.0.1:9", profile=tmp_path / "p.yaml"),
+            settings_for(tmp_path, credentials="short"),
+        )
+        transport = factory(refreshing, None)
+        assert transport.token_or_none() == "t"  # type: ignore[attr-defined]
+        due = transport.seconds_until_refresh()  # type: ignore[attr-defined]
+        assert due is not None and 45 < due <= 50, "the provider's lifetime drives refresh"
+
+    @pytest.mark.parametrize(
+        "block", [{"ttl_seconds": 120}, {"claims": {"aud": "x"}}, {"refresh_before_seconds": 5}]
+    )
+    def test_a_minting_token_block_with_a_provider_is_refused(
+        self, profile: SutProfile, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, block: Any
+    ) -> None:
+        install(monkeypatch, FakeEntryPoint("acme", Acme))
+        data = profile.model_dump()
+        data["token"] = block
+        check = check_token(
+            SutProfile.model_validate(data), settings_for(tmp_path, credentials="acme")
+        )
+        assert (
+            check.status.value == "not_configured" and "only declare refresh_frame" in check.detail
+        )
+
+    def test_an_injected_transport_with_a_provider_is_refused(self, tmp_path: Path) -> None:
+        from opseval.runner import build_transport_factory
+
+        with pytest.raises(ConfigError, match="injected transport"):
+            build_transport_factory(
+                RunOptions(profile=tmp_path / "p.yaml", transport_factory=lambda p: None),  # type: ignore[arg-type,return-value]
+                settings_for(tmp_path, credentials="acme"),
+            )
+
+    async def test_a_provider_failing_preflight_stops_the_run(
+        self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install(monkeypatch, FakeEntryPoint("slow", SlowEndpoint))
+        async with run_agent() as url:
+            with pytest.raises(ConfigError, match="Nothing was run"):
+                await launch(
+                    cat_dir / "suites" / "smoke.yaml",
+                    RunOptions(target=url, profile=authed(cat_dir, tmp_path), repeats=1),
+                    settings_for(tmp_path, credentials="slow"),
+                )
+
+    def test_preflight_asks_about_a_tenant_the_provider_will_serve(
+        self, profile: SutProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.models.tenant import TenantPool
+        from opseval.runner import _credentials_tenant
+
+        install(monkeypatch, FakeEntryPoint("acme", Acme))
+        settings = settings_for(tmp_path, credentials="acme")
+        pool = TenantPool.model_validate(
+            {"tenants": [{"id": "own", "token_env": "X"}, {"id": "served"}]}
+        )
+        assert _credentials_tenant(pool, settings) == "served"
+        check_token(profile, settings, credentials_tenant="served")
+        assert SEEN[-1].tenant == "served"
+        everyone_own = TenantPool.model_validate({"tenants": [{"id": "a", "token_env": "X"}]})
+        assert _credentials_tenant(everyone_own, settings) is False
+        unused = check_token(profile, settings, credentials_tenant=False)
+        assert unused.status.value == "not_needed"
+
+    def test_one_provider_instance_per_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        made: list[int] = []
+
+        class Counted(Acme):
+            name = "counted"
+
+            def __init__(self) -> None:
+                made.append(1)
+
+        install(monkeypatch, FakeEntryPoint("counted", Counted))
+        assert load_credential_provider("counted") is load_credential_provider("counted")
+        assert len(made) == 1
+
+    def test_a_short_lived_token_is_not_fetched_on_every_use(self) -> None:
+        now = [0.0]
+
+        class Brief(FetchedTokens):
+            calls = 0
+
+            def fetch(self) -> tuple[str, float | None]:
+                Brief.calls += 1
+                return "t", 20.0  # shorter than the default 30s refresh margin
+
+        tokens = Brief(clock=lambda: now[0])
+        for _ in range(5):
+            tokens.current()
+        assert Brief.calls == 1
+        now[0] += 11
+        tokens.current()
+        assert Brief.calls == 2, "re-fetched at half its lifetime"
+
+    def test_whitespace_is_not_a_provider_name(self, tmp_path: Path) -> None:
+        assert settings_for(tmp_path, credentials="  ").credentials == ""
+        assert settings_for(tmp_path, credentials=" acme ").credentials == "acme"

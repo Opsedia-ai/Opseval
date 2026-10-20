@@ -22,6 +22,7 @@ from opseval.auth import (
     GuardedTokens,
     HS256Tokens,
     TokenSource,
+    token_block_problem,
 )
 from opseval.catalogue import load_catalogue, load_profile
 from opseval.config import Settings, check_url_allowed, config_digest
@@ -149,6 +150,13 @@ credentials (ADR-0041)."""
 
 def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTransportFactory:
     if options.transport_factory is not None:
+        if settings.credentials:
+            # Fail closed: an injected transport never asks for a token, so the provider
+            # would silently do nothing (review of #67).
+            raise ConfigError(
+                f"OPSEVAL_CREDENTIALS names {settings.credentials!r}, but this run uses an "
+                "injected transport, which takes no credentials: unset it for this run"
+            )
         injected = options.transport_factory
         return lambda profile, _tenant: injected(profile)
     if not options.target:
@@ -171,7 +179,6 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTr
         if own:
             return own
         if provider is not None:
-            _no_two_minters(profile, settings)
             context = CredentialContext(
                 profile=profile.name,
                 target=where,
@@ -179,7 +186,8 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTr
                 value=settings.secret_named,
             )
             return GuardedTokens(provider, context)
-        if profile.token is None:
+        block = profile.token  # no provider here, so a token: block means minting
+        if block is None:
             return token
         if signing_key is None:
             raise ConfigError(
@@ -187,9 +195,9 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTr
             )
         return HS256Tokens(
             signing_key.get_secret_value(),
-            ttl_seconds=profile.token.ttl_seconds,
-            refresh_before_seconds=profile.token.refresh_before_seconds,
-            claims=profile.token.claims,
+            ttl_seconds=block.ttl_seconds,
+            refresh_before_seconds=block.refresh_before_seconds,
+            claims=block.claims,
         )
 
     try:
@@ -226,20 +234,33 @@ def _shown(url: str) -> str:
 def credential_provider(settings: Settings) -> CredentialProvider | None:
     """The provider plugin named in ``OPSEVAL_CREDENTIALS``, if any (ADR-0046). Loaded before
     the run: a missing or broken plugin is a configuration error, exit 3."""
-    name = settings.credentials.strip()
-    if not name:
+    if not settings.credentials:
         return None
-    provider: CredentialProvider = load_credential_provider(name)
+    provider: CredentialProvider = load_credential_provider(settings.credentials)
     return provider
 
 
-def _no_two_minters(profile: SutProfile, settings: Settings) -> None:
-    if settings.credentials.strip() and profile.token is not None:
-        raise ConfigError(
-            f"profile {profile.name!r} mints HS256 tokens and OPSEVAL_CREDENTIALS names a "
-            f"credential provider ({settings.credentials.strip()!r}): choose one, so it is "
-            "clear which identity the agent sees"
-        )
+def _credentials_tenant(pool: TenantPool | None, settings: Settings) -> str | None | bool:
+    """Which tenant preflight asks the provider about: the first one it will serve (``None``
+    without a pool), or ``False`` when every tenant has its own token and it serves none."""
+    if not settings.credentials or pool is None:
+        return None
+    for tenant in pool.tenants:
+        if tenant.token_env is None:
+            return tenant.id
+    return False
+
+
+def minting(profile: SutProfile, settings: Settings) -> bool:
+    """Does this run mint HS256 tokens? Not when a provider supplies them: then a ``token:``
+    block only says how a new token is sent on an open connection (ADR-0046)."""
+    return profile.token is not None and not settings.credentials
+
+
+def _check_token_block(profile: SutProfile, settings: Settings) -> None:
+    problem = token_block_problem(profile, settings.credentials) if settings.credentials else None
+    if problem:
+        raise ConfigError(problem)
 
 
 def _check_pool(
@@ -256,7 +277,7 @@ def _check_pool(
             "a tenant pool needs a network transport: an injected transport has no tenant "
             "identity to apply, so every lane would share one"
         )
-    minted = profile.token is not None
+    minted = minting(profile, settings)
     secure = TRANSPORTS.get(options.transport, (None, ("https",)))[1]
     for tenant in pool.tenants:
         own = token_for(tenant, settings)
@@ -270,7 +291,7 @@ def _check_pool(
             check_url_allowed(tenant.target, settings.allowlist(), secure_schemes=secure)
     # A provider is told each attempt's tenant, so a tenant needs no token_env or target to
     # be a distinct identity; issuing one per tenant is then the provider's job (ADR-0046).
-    provided = bool(settings.credentials.strip())
+    provided = bool(settings.credentials)
     if len(pool.tenants) > 1:
         # Isolation means each tenant is a different account: its own token or its own
         # deployment. Two tenants with neither (or the same of both) are one account
@@ -498,7 +519,7 @@ async def launch(
             "once you have said which isolated accounts they may use"
         )
     lanes = lane_count(len(pool.tenants), settings.lanes, settings.lane_cap) if pool else 1
-    _no_two_minters(profile, settings)
+    _check_token_block(profile, settings)
     if pool:
         _check_pool(pool, profile, options, settings)
     # Built before the run: a destination that is not allowlisted is a configuration
@@ -537,6 +558,7 @@ async def launch(
             transport=options.transport,
             traces_enabled=options.traces and profile.traces is not None,
             verify_llm=options.verify_llm,
+            credentials_tenant=_credentials_tenant(pool, settings),
             # With every tenant on its own deployment, no attempt goes to --target.
             probe_target_host=options.transport_factory is None
             and (pool is None or default_where in _tenant_targets(pool, options.target)),
@@ -551,6 +573,11 @@ async def launch(
                 f"{sut.detail}. Nothing was run. Check the target and the network, or "
                 "pass --no-preflight to try anyway."
             )
+        token_check = health.get("token")
+        if settings.credentials and token_check is not None and token_check.blocking:
+            # Every attempt would be a harness error, and the identity provider would be
+            # asked once per attempt for a suite that can judge nothing (review of #67).
+            raise ConfigError(f"{token_check.detail}. Nothing was run.")
         for check in health.blocking():
             log(f"preflight: {check.name} unavailable — {check.detail}")
         # Tenants with their own deployment are probed too: the attempts go there, not to
