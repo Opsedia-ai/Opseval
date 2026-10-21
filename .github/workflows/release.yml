@@ -10,6 +10,21 @@ jobs:
   # Every supported Python, as CI does, so a release never ships what CI would have caught.
   verify:
     runs-on: ubuntu-latest
+    # Server mode's tests need Postgres (ADR-0047); without OPSEVAL_TEST_DATABASE_URL they
+    # fail in CI rather than skip, so this service is what makes them run.
+    services:
+      postgres:
+        image: postgres@sha256:cf2a05fe40887b721e4b3dbac8fd32673c08292dcc8ba6b62b52b7f640433bd0 # 16
+        env:
+          POSTGRES_USER: opseval
+          POSTGRES_PASSWORD: opseval
+          POSTGRES_DB: opseval
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U opseval" --health-interval 2s --health-timeout 5s
+          --health-retries 30
+    env:
+      OPSEVAL_TEST_DATABASE_URL: postgresql://opseval:opseval@127.0.0.1:5432/opseval
     strategy:
       matrix:
         python: ["3.11", "3.12", "3.13"]

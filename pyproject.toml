@@ -19,7 +19,7 @@ pytest-opseval = { workspace = true }
 # The wheel's build backend, locked with hashes for the container image (ADR-0038).
 build = ["hatchling>=1.24"]
 dev = [
-  "opseval[serve]",
+  "opseval[server]",
   "pytest-opseval",
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
@@ -119,6 +119,25 @@ name = "Calibration is offline and read-only: no transports, driver, simulator o
 type = "forbidden"
 source_modules = ["opseval.calibrate"]
 forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
+
+[[tool.importlinter.contracts]]
+name = "Local mode never needs the database: the run path imports no server-mode code (ADR-0047)"
+type = "forbidden"
+source_modules = [
+  "opseval.runner",
+  "opseval.driver",
+  "opseval.transport",
+  "opseval.simulator",
+  "opseval.scoring",
+  "opseval.catalogue",
+  "opseval.storage",
+  "opseval.verdicts",
+  "opseval.models",
+  "opseval.reporting",
+  "opseval.rescore",
+  "opseval.calibrate",
+]
+forbidden_modules = ["opseval.db", "sqlalchemy", "asyncpg", "alembic"]
 
 [tool.bandit]
 # opseval/testing.py is the plugin contract test kit: its assertions are its product,

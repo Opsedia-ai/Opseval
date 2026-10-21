@@ -19,6 +19,7 @@ import typer
 from opseval import __version__
 from opseval.catalogue import builtin_profiles, load_catalogue, load_profile
 from opseval.config import Settings
+from opseval.db.cli import catalogue_app, db_app
 from opseval.errors import ConfigError
 from opseval.models.gate import Preset
 from opseval.models.results import SuiteResult
@@ -523,6 +524,8 @@ telemetry_app = typer.Typer(
     help="See, enable or disable the anonymous usage counts (ADR-0010).", no_args_is_help=True
 )
 app.add_typer(telemetry_app, name="telemetry")
+app.add_typer(db_app, name="db")
+app.add_typer(catalogue_app, name="catalogue")
 
 
 def _sample_result() -> SuiteResult:

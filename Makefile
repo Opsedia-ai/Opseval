@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test check audit demo schemas status reference docs console-types console console-check
+.PHONY: install lint typecheck test check audit demo schemas status reference docs console-types console console-check db-up db-down
 
 # Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
 ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
@@ -23,8 +23,12 @@ check: lint typecheck test schemas status reference docs
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
 	@mkdir -p build/audit
+	uv export --frozen --package opseval --extra server --no-dev --no-emit-workspace --no-hashes \
+		--format requirements-txt -q -o build/audit/requirements-core.txt
 	uv export --frozen --package pytest-opseval --no-dev --no-emit-workspace --no-hashes \
-		--format requirements-txt -q -o build/audit/requirements.txt
+		--format requirements-txt -q -o build/audit/requirements-pytest.txt
+	sort -u build/audit/requirements-core.txt build/audit/requirements-pytest.txt | grep -v '^[[:space:]]*#' \
+		> build/audit/requirements.txt
 	uv run pip-audit --disable-pip --no-deps -r build/audit/requirements.txt
 	uv venv -q --allow-existing build/audit/venv
 	uv pip install -q --python build/audit/venv/bin/python -r build/audit/requirements.txt
@@ -63,3 +67,13 @@ console-check:
 
 console:
 	cd packages/console && npm run dev
+
+# Server mode (ADR-0047): a local Postgres for `opseval db` and the database tests, on
+# 127.0.0.1 only. Without OPSEVAL_TEST_DATABASE_URL those tests skip locally (never in CI).
+db-up:
+	docker compose up -d --wait postgres
+	@echo "export OPSEVAL_TEST_DATABASE_URL=postgresql://opseval:opseval@127.0.0.1:$${OPSEVAL_PG_PORT:-5433}/opseval"
+	@echo "export OPSEVAL_DATABASE_URL=postgresql://opseval:opseval@127.0.0.1:$${OPSEVAL_PG_PORT:-5433}/opseval"
+
+db-down:
+	docker compose down

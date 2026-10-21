@@ -10,7 +10,7 @@ import ipaddress
 import os
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import dotenv_values
 from pydantic import AliasChoices, Field, PrivateAttr, SecretStr
@@ -164,6 +164,12 @@ class Settings(BaseSettings):
     """The built web console (``packages/console/dist``) for ``opseval serve`` to serve.
     When unset, a source checkout's build is found on its own (ADR-0034)."""
 
+    # Server mode on Postgres, the Langfuse model (ADR-0047).
+    database_url: SecretStr | None = None
+    """Postgres for server mode: ``postgresql://user:password@host:5432/opseval``. It carries
+    a password, so it is a secret. Its host must be allowlisted, and a host other than
+    localhost needs TLS (``?ssl=require``, ``verify-ca`` or ``verify-full``)."""
+
     def __init__(self, **values: Any) -> None:
         super().__init__(**values)
         # The .env this instance was actually built from: an explicit ``_env_file`` (None
@@ -204,6 +210,7 @@ SECRET_FIELDS = (
     "webhook_url",
     "github_token",
     "jira_token",
+    "database_url",
 )
 
 
@@ -249,4 +256,42 @@ def check_url_allowed(url: str, allowlist: set[str], *, secure_schemes: tuple[st
         raise AllowedHostError(
             f"{parsed.scheme}://{host} must use one of {secure_schemes} "
             "(plain schemes are allowed only on localhost)"
+        )
+
+
+DATABASE_SCHEMES = ("postgresql", "postgres", "postgresql+asyncpg")
+TLS_MODES = ("require", "verify-ca", "verify-full")
+"""``ssl``/``sslmode`` values that guarantee an encrypted connection. ``prefer`` and ``allow``
+fall back to plain text when the server offers no TLS, so they are not enough."""
+
+
+def check_database_url_allowed(url: str, allowlist: set[str]) -> None:
+    """Raise :class:`AllowedHostError` unless the database at ``url`` may receive data.
+
+    The same rule as every other destination (``check_url_allowed``): the host must be
+    allowlisted, and anything but loopback must be encrypted. Postgres has no TLS-only URL
+    scheme, so TLS is read from the ``ssl`` (or libpq's ``sslmode``) query parameter. Only the
+    scheme and host are ever repeated: the URL carries a password.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in DATABASE_SCHEMES:
+        raise AllowedHostError(
+            f"database URL scheme {parsed.scheme or 'missing'!r} is not supported; "
+            "use postgresql://user:password@host:5432/db"
+        )
+    if not host:
+        raise AllowedHostError("database URL has no host; use postgresql://…@host:5432/db")
+    if host not in allowlist:
+        raise AllowedHostError(
+            f"database host {host!r} is not in OPSEVAL_ALLOWED_HOSTS; add it explicitly to allow it"
+        )
+    if _is_local(host):
+        return
+    query = parse_qs(parsed.query)
+    modes = query.get("ssl", []) + query.get("sslmode", [])
+    if not modes or any(m not in TLS_MODES for m in modes):
+        raise AllowedHostError(
+            f"postgresql://{host} must use TLS: add ?ssl=require (or verify-ca, verify-full); "
+            "plain connections are allowed only on localhost"
         )

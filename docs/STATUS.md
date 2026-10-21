@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-21** (`main` with credential provider plugins, and replies read on the agent's clock).
+**As of 2026-10-21** (`main` with server mode's first step: the catalogue versioned in Postgres).
 
 ## Completion
 
@@ -125,7 +125,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
 | FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Done | all five stop policies (suite `stop:`, `run` flags, console launch form and suite editor) and cancel before any attempt (`opseval cancel`, console Cancel run; ADR-0035); rescore, calibrate, preflight |
 | FR-AUT | Authoring workbench | M | v0.5 | Partial | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground; a warnings tier beside errors (`advice.scenario_warnings`: what a valid scenario will not measure, in the editor and `opseval validate`, never blocking); but the suite editor cannot select scenarios in subfolders, where the console saves them (ATTENTION I20), and both import and a new file in the editor accept `.yml` names the loader never reads |
-| FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API, serving the built console same-origin (ADR-0034) with run detail down to each attempt's conversation and live progress for runs in flight, token auth (ADR-0029, ADR-0031); no Postgres, workers, accounts, OIDC or live events; console not yet in the wheel |
+| FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API, serving the built console same-origin (ADR-0034) with run detail down to each attempt's conversation and live progress for runs in flight, token auth (ADR-0029, ADR-0031); Postgres foundation with migrations, organisations and projects, and the catalogue versioned with labels in the database, pushed from and pulled back to folders (`opseval db`, `opseval catalogue`, ADR-0047); no runs in the database, workers, accounts, OIDC or live events yet; console not yet in the wheel |
 
 ## Non-functional requirements
 

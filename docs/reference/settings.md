@@ -55,3 +55,4 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_RETENTION_DAYS` | integer | `90` | ``opseval prune`` deletes finished runs older than this many days (FR-SAF-06). |
 | `OPSEVAL_SERVE_TOKEN` | secret | unset (secret) | The console API token. Random on every `opseval serve` start when unset (ADR-0031). |
 | `OPSEVAL_CONSOLE_DIR` | text | unset | The built web console (``packages/console/dist``) for ``opseval serve`` to serve. When unset, a source checkout's build is found on its own (ADR-0034). |
+| `OPSEVAL_DATABASE_URL` | secret | unset (secret) | Postgres for server mode: ``postgresql://user:password@host:5432/opseval``. It carries a password, so it is a secret. Its host must be allowlisted, and a host other than localhost needs TLS (``?ssl=require``, ``verify-ca`` or ``verify-full``). |
