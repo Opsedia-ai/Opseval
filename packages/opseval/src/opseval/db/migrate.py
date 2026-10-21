@@ -14,6 +14,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -36,7 +37,13 @@ def head() -> str:
     return revision
 
 
+UPGRADE_LOCK = 0x0B5E7A1  # any constant; one per application sharing the database
+
+
 def _upgrade(connection: Connection, revision: str) -> None:
+    # A web and a worker container started together both upgrade: the second waits here,
+    # then finds the schema current, instead of failing on CREATE TABLE.
+    connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": UPGRADE_LOCK})
     command.upgrade(config(connection), revision)
 
 

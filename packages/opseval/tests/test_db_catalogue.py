@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 
 from opseval.catalogue import load_catalogue, load_profile
 from opseval.cli import app
-from opseval.config import Settings, check_database_url_allowed, config_digest
+from opseval.config import Settings, config_digest
 from opseval.db import migrate
 from opseval.db.catalogue_store import (
     LATEST,
@@ -36,7 +36,7 @@ from opseval.db.catalogue_store import (
     resolve,
     set_label,
 )
-from opseval.db.engine import async_url, make_engine, sessions
+from opseval.db.engine import checked_url, make_engine, sessions
 from opseval.db.schema import Base, CatalogueItem, CatalogueVersion
 from opseval.demo import catalogue_dir
 from opseval.demo.refund_agent import run_agent
@@ -59,6 +59,20 @@ def read(path: Path):  # type: ignore[no-untyped-def]
     return read_folder(path, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS))
 
 
+def _without_persona(path: Path) -> str:
+    """The scenario file with its ``persona`` block removed."""
+    out, skipping = [], False
+    for line in path.read_text("utf-8").splitlines(keepends=True):
+        if line.startswith("persona:"):
+            skipping = True
+            continue
+        if skipping and line.startswith((" ", "\t")):
+            continue
+        skipping = False
+        out.append(line)
+    return "".join(out)
+
+
 @pytest.fixture
 async def engine(pg_url: str) -> AsyncIterator[AsyncEngine]:
     engine = make_engine(Settings(_env_file=None, allowed_hosts="127.0.0.1", database_url=pg_url))
@@ -73,42 +87,70 @@ async def engine(pg_url: str) -> AsyncIterator[AsyncEngine]:
 
 
 class TestTheDatabaseUrlRule:
+    """The host and TLS are checked as the driver will connect, not as a URL looks."""
+
     def test_loopback_without_tls_is_fine(self) -> None:
-        check_database_url_allowed("postgresql://u:p@127.0.0.1:5432/db", {"127.0.0.1"})
+        url, tls = checked_url("postgresql://u:p@127.0.0.1:5432/db", {"127.0.0.1"})
+        assert url.drivername == "postgresql+asyncpg" and url.host == "127.0.0.1" and tls is None
 
     def test_the_host_must_be_allowlisted(self) -> None:
         with pytest.raises(AllowedHostError, match="not in OPSEVAL_ALLOWED_HOSTS"):
-            check_database_url_allowed("postgresql://u:p@db.example.com/db", set())
+            checked_url("postgresql://u:p@db.example.com/db?ssl=verify-full", set())
 
-    @pytest.mark.parametrize("query", ["", "?ssl=prefer", "?sslmode=allow", "?ssl=disable"])
-    def test_a_remote_host_needs_tls(self, query: str) -> None:
-        with pytest.raises(AllowedHostError, match="must use TLS"):
-            check_database_url_allowed(
-                f"postgresql://u:p@db.example.com/db{query}", {"db.example.com"}
-            )
+    @pytest.mark.parametrize("query", ["", "?ssl=require", "?ssl=prefer", "?sslmode=allow"])
+    def test_a_remote_host_needs_verified_tls(self, query: str) -> None:
+        with pytest.raises(AllowedHostError, match="must use verified TLS"):
+            checked_url(f"postgresql://u:p@db.example.com/db{query}", {"db.example.com"})
 
-    @pytest.mark.parametrize("query", ["?ssl=require", "?sslmode=verify-full"])
-    def test_tls_modes_that_guarantee_encryption(self, query: str) -> None:
-        check_database_url_allowed(f"postgresql://u:p@db.example.com/db{query}", {"db.example.com"})
+    def test_verify_full_checks_the_certificate_and_the_name(self) -> None:
+        import ssl
+
+        url, tls = checked_url(
+            "postgresql://u:p@db.example.com/db?sslmode=verify-full", {"db.example.com"}
+        )
+        assert isinstance(tls, ssl.SSLContext) and tls.check_hostname
+        assert tls.verify_mode is ssl.CERT_REQUIRED and dict(url.query) == {}
+
+    def test_a_private_ca_is_read_from_sslrootcert(self) -> None:
+        import certifi
+
+        _url, tls = checked_url(
+            f"postgresql://u:p@db.example.com/db?ssl=verify-ca&sslrootcert={certifi.where()}",
+            {"db.example.com"},
+        )
+        assert not isinstance(tls, str | None) and not tls.check_hostname
+
+    def test_a_host_parameter_cannot_redirect_the_connection(self) -> None:
+        # asyncpg reads every query key as a connection argument: ?host= would win over the
+        # host the allowlist checked, and send the password there in plain text.
+        with pytest.raises(AllowedHostError, match="not supported"):
+            checked_url("postgresql://u:p@localhost/db?host=evil.example.com", {"localhost"})
+
+    def test_a_url_two_parsers_read_differently_is_refused(self) -> None:
+        with pytest.raises(AllowedHostError, match="ambiguous"):
+            checked_url("postgresql://localhost:pw/@evil.example.com/db", {"localhost"})
 
     def test_other_schemes_are_refused_without_echoing_the_password(self) -> None:
         with pytest.raises(AllowedHostError) as caught:
-            check_database_url_allowed("mysql://u:hunter2@127.0.0.1/db", {"127.0.0.1"})
+            checked_url("mysql://u:hunter2@127.0.0.1/db", {"127.0.0.1"})
         assert "hunter2" not in str(caught.value)
-
-    def test_the_driver_and_sslmode_are_normalised(self) -> None:
-        assert async_url("postgresql://u:p@h:5432/db?sslmode=require") == (
-            "postgresql+asyncpg://u:p@h:5432/db?ssl=require"
-        )
 
     def test_the_url_is_a_secret(self) -> None:
         digest = config_digest(Settings(_env_file=None, database_url="postgresql://u:pw@h/db"))
-        assert digest["database_url"] != "postgresql://u:pw@h/db"
         assert "pw" not in str(digest["database_url"])
 
     def test_no_url_is_a_configuration_error(self) -> None:
         with pytest.raises(ConfigError, match="OPSEVAL_DATABASE_URL"):
             make_engine(Settings(_env_file=None))
+
+    def test_a_missing_ca_file_is_a_configuration_error(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            allowed_hosts="db.example.com",
+            database_url="postgresql://u:p@db.example.com/db?ssl=verify-full&sslrootcert=/no/ca.pem",
+        )
+        with pytest.raises(ConfigError, match="sslrootcert"):
+            make_engine(settings)
 
 
 class TestProjectReferences:
@@ -143,13 +185,58 @@ class TestReadingAFolder:
             read(cat)
 
     def test_a_scenario_is_checked_with_its_suites_defaults(self, tmp_path: Path) -> None:
-        # Valid only with the suite's default stop_at: checked through the suite, it passes.
+        # rf-002 without a persona is invalid on its own, and valid in a suite that supplies one.
         cat = folder(tmp_path)
+        path = cat / "scenarios" / "rf-002-reject-then-approve.yaml"
+        path.write_text(_without_persona(path), encoding="utf-8")
+        with pytest.raises(ConfigError, match="persona"):
+            read(cat)  # the suites include it without defaults: refused
+        for suite in ("smoke.yaml", "full.yaml"):
+            (cat / "suites" / suite).write_text(
+                (cat / "suites" / suite).read_text("utf-8")
+                + "defaults:\n  persona: {role: customer, language: en}\n",
+                encoding="utf-8",
+            )
+        assert read(cat)
+
+    def test_a_scenario_a_suite_filters_out_keeps_the_suites_defaults(self, tmp_path: Path) -> None:
+        cat = folder(tmp_path)
+        path = cat / "scenarios" / "rf-002-reject-then-approve.yaml"
+        path.write_text(_without_persona(path), encoding="utf-8")
+        (cat / "suites" / "full.yaml").unlink()
         smoke = cat / "suites" / "smoke.yaml"
         smoke.write_text(
-            smoke.read_text("utf-8") + "defaults:\n  execution: {repeats: 2}\n", encoding="utf-8"
+            smoke.read_text("utf-8")
+            + "filters: [tag=happy-path]\ndefaults:\n  persona: {role: customer, language: en}\n",
+            encoding="utf-8",
         )
+        (cat / "scenarios" / "llm").rename(tmp_path / "llm-aside")
         assert read(cat)
+
+    def test_a_file_a_suite_runs_must_be_a_file_the_push_stores(self, tmp_path: Path) -> None:
+        cat = folder(tmp_path)
+        (cat / "extra").mkdir()
+        shutil.move(
+            cat / "scenarios" / "rf-003-egyptian-arabic.yaml", cat / "extra" / "rf-003.yaml"
+        )
+        smoke = cat / "suites" / "smoke.yaml"
+        smoke.write_text(
+            smoke.read_text("utf-8").replace(
+                'include: ["scenarios/*.yaml"]', 'include: ["scenarios/*.yaml", "extra/*.yaml"]'
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="includes files a push does not store"):
+            read(cat)
+
+    def test_a_link_inside_the_folder_is_stored_where_it_sits(self, tmp_path: Path) -> None:
+        cat = folder(tmp_path)
+        (cat / "shared").mkdir()
+        target = cat / "shared" / "rf-002.yaml"
+        shutil.move(cat / "scenarios" / "rf-002-reject-then-approve.yaml", target)
+        (cat / "scenarios" / "rf-002-reject-then-approve.yaml").symlink_to(target)
+        paths = {f.name: f.path for f in read(cat) if f.kind == "scenario"}
+        assert paths["rf-002"] == "scenarios/rf-002-reject-then-approve.yaml"
 
     def test_an_alias_is_refused_even_in_a_valid_scenario(self, tmp_path: Path) -> None:
         cat = folder(tmp_path)
@@ -169,11 +256,18 @@ class TestReadingAFolder:
         with pytest.raises(ConfigError, match="anchors and aliases are not allowed"):
             read(cat)
 
-    def test_an_alias_bomb_never_expands(self, tmp_path: Path) -> None:
+    def test_an_alias_bomb_in_a_valid_scenario_never_expands(self, tmp_path: Path) -> None:
+        # Scorer params accept any value, so the loader itself accepts this file.
         cat = folder(tmp_path)
-        bomb = "a: &a [1, 1]\nb: &b [*a, *a]\nc: &c [*b, *b]\n"
-        (cat / "scenarios" / "bomb.yaml").write_text(bomb, encoding="utf-8")
-        with pytest.raises(ConfigError):
+        (cat / "scenarios" / "bomb.yaml").write_text(
+            "id: bomb\nname: bomb\ngoal: g\npersona: {role: customer}\n"
+            "conversation:\n  scripted_turns: [hi]\n  stop_at: supervisor_review\n"
+            "  checkpoint_policy: {proposal_approval: {action: approve}}\n"
+            "scorers:\n  - id: output.terminal_state\n"
+            "    params: {a: &a [1, 1], b: &b [*a, *a], c: [*b, *b]}\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="anchors and aliases are not allowed"):
             read(cat)
 
     def test_a_huge_file_is_refused(self, tmp_path: Path) -> None:
@@ -218,6 +312,18 @@ class TestSchema:
         await migrate.upgrade(engine)
         assert await migrate.current(engine) == "0001"
 
+    async def test_two_upgrades_at_once_both_succeed(self, pg_url: str) -> None:
+        import asyncio
+
+        settings = Settings(_env_file=None, allowed_hosts="127.0.0.1", database_url=pg_url)
+        engines = [make_engine(settings), make_engine(settings)]
+        try:
+            await asyncio.gather(*(migrate.upgrade(e) for e in engines))
+            assert await migrate.current(engines[0]) == migrate.head()
+        finally:
+            for e in engines:
+                await e.dispose()
+
 
 class TestTheCatalogue:
     async def test_push_versions_labels_and_pull(self, engine: AsyncEngine, tmp_path: Path) -> None:
@@ -255,7 +361,7 @@ class TestTheCatalogue:
         ]
         assert versions[1].message == "first"
         assert items[("scenario", "rf-003")].labels == {}
-        assert items[("scenario", "rf-001")].labels == {"production": 1, "staging": 2}
+        assert items[("scenario", "rf-001")].labels == {"latest": 2, "production": 1, "staging": 2}
 
         out = tmp_path / "pulled"
         async with sessions(engine)() as s, s.begin():
@@ -286,6 +392,53 @@ class TestTheCatalogue:
             chosen = await resolve(s, project, LATEST)
             assert len(chosen) == 7
             assert await resolve(s, project, "production") == []
+
+    async def test_latest_is_the_last_push_never_a_deleted_item(
+        self, engine: AsyncEngine, tmp_path: Path
+    ) -> None:
+        cat = folder(tmp_path)
+        async with sessions(engine)() as s, s.begin():
+            project = await ensure_project(s, PROJECT)
+            await push(s, project, read(cat))
+        # Delete one scenario and rename another (same file, new id): neither the deleted one
+        # nor the old name may come back under latest, and the pull must not collide.
+        (cat / "scenarios" / "rf-003-egyptian-arabic.yaml").unlink()
+        path = cat / "scenarios" / "rf-001-happy-path.yaml"
+        path.write_text(path.read_text("utf-8").replace("id: rf-001", "id: rf-001b", 1), "utf-8")
+        async with sessions(engine)() as s, s.begin():
+            project = await get_project(s, PROJECT)
+            await push(s, project, read(cat))
+            names = {item.name for item, _v in await resolve(s, project, LATEST)}
+            await materialize(s, project, LATEST, tmp_path / "latest")
+        assert "rf-003" not in names and "rf-001" not in names and "rf-001b" in names
+
+    async def test_a_pull_waits_for_a_push_in_progress(
+        self, engine: AsyncEngine, tmp_path: Path
+    ) -> None:
+        import asyncio
+
+        cat = folder(tmp_path)
+        async with sessions(engine)() as s, s.begin():
+            project = await ensure_project(s, PROJECT)
+            await push(s, project, read(cat), label="production")
+        path = cat / "scenarios" / "rf-001-happy-path.yaml"
+        path.write_text(path.read_text("utf-8").replace("name:", "name: (v2)", 1), "utf-8")
+        edited = read(cat)
+
+        async with sessions(engine)() as pusher:
+            await pusher.begin()
+            await push(pusher, await get_project(pusher, PROJECT), edited, label="production")
+
+            async def pull() -> list[int]:
+                async with sessions(engine)() as s, s.begin():
+                    chosen = await resolve(s, await get_project(s, PROJECT), "production")
+                    return [v.version for i, v in chosen if i.name == "rf-001"]
+
+            reader = asyncio.create_task(pull())
+            await asyncio.sleep(0.3)
+            assert not reader.done()  # it waits rather than read half of the push
+            await pusher.commit()
+        assert await reader == [2]
 
     async def test_labels_are_checked(self, engine: AsyncEngine, tmp_path: Path) -> None:
         async with sessions(engine)() as s, s.begin():
@@ -434,24 +587,31 @@ class TestCommandLine:
         res = runner.invoke(app, ["db", "status"])
         assert res.exit_code == 3 and "cannot reach the database" in res.output
 
-    def test_without_the_server_extra(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import builtins
+    def test_a_wrong_password_is_named_not_a_crash(self, env: str, tmp_path: Path) -> None:
+        import os
 
-        real = builtins.__import__
-
-        def no_sqlalchemy(name: str, *args, **kwargs):  # type: ignore[no-untyped-def]
-            if name.startswith("opseval.db.engine") or (
-                name == "opseval.db" and args and args[2] and "engine" in args[2]
-            ):
-                raise ImportError("No module named 'sqlalchemy'")
-            return real(name, *args, **kwargs)
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(builtins, "__import__", no_sqlalchemy)
+        os.environ["OPSEVAL_DATABASE_URL"] = env.replace("opseval:opseval@", "opseval:wrong@")
         res = runner.invoke(app, ["db", "status"])
-        assert res.exit_code == 3 and "opseval[server]" in res.output
+        assert res.exit_code == 3 and "the database refused" in res.output
+        assert "wrong" not in res.output and "Traceback" not in res.output
+
+    def test_a_file_error_is_not_called_a_database_error(self, env: str, tmp_path: Path) -> None:
+        assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
+        assert runner.invoke(app, ["db", "init", "--project", PROJECT]).exit_code == 0
+        assert (
+            runner.invoke(
+                app,
+                ["catalogue", "push", str(folder(tmp_path)), "--project", PROJECT, "-m", "x"],
+            ).exit_code
+            == 0
+        )
+        blocked = tmp_path / "blocked"
+        blocked.write_text("a file, not a folder", encoding="utf-8")
+        res = runner.invoke(
+            app,
+            ["catalogue", "pull", str(blocked / "out"), "--project", PROJECT, "--label", "latest"],
+        )
+        assert res.exit_code == 3 and "cannot reach the database" not in res.output
 
 
 async def test_a_pulled_label_runs_like_any_folder(
@@ -469,3 +629,42 @@ async def test_a_pulled_label_runs_like_any_folder(
             settings,
         )
     assert result.exit_code == 0, result.gate.summary
+
+
+BASE_INSTALL = """
+import sys
+for name in ("sqlalchemy", "asyncpg", "alembic"):
+    sys.modules[name] = None  # an install without the server extra
+from typer.testing import CliRunner
+from opseval.cli import app
+runner = CliRunner()
+assert runner.invoke(app, ["--version"]).exit_code == 0
+for args in (
+    ["db", "upgrade"], ["db", "status"], ["db", "init", "--project", "p"],
+    ["catalogue", "push", ".", "--project", "p"], ["catalogue", "pull", "x", "--project", "p"],
+    ["catalogue", "list", "--project", "p"],
+    ["catalogue", "history", "suite", "smoke", "--project", "p"],
+    ["catalogue", "label", "suite", "smoke", "1", "x", "--project", "p"],
+):
+    res = runner.invoke(app, args)
+    assert res.exit_code == 3, (args, res.output)
+    assert "opseval[server]" in res.output, (args, res.output)
+print("ok")
+"""
+
+
+def test_without_the_server_extra_every_command_says_what_to_install(tmp_path: Path) -> None:
+    """The whole CLI, local mode included, must import and run with no SQLAlchemy, asyncpg or
+    Alembic; each server-mode command says what to install instead of crashing."""
+    import subprocess
+    import sys
+
+    done = subprocess.run(
+        [sys.executable, "-c", BASE_INSTALL],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0 and done.stdout.strip() == "ok", done.stdout + done.stderr

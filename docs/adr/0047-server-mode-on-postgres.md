@@ -54,11 +54,20 @@ fixes how that is built, and in what order.
   upgrade` migrates an installed Opseval's database without a checkout or an `alembic.ini`. The
   version table is `opseval_schema_version`, so the database can be shared. A test compares the
   migrations with the models, so they cannot drift (as `opseval schemas --check` does for the
-  JSON Schemas).
+  JSON Schemas). An upgrade holds a Postgres advisory lock, so a web and a worker container
+  starting together cannot both create the tables.
 - **`OPSEVAL_DATABASE_URL` is a secret, and its host is allowlisted** like every other
-  destination (FR-SAF-01). Postgres has no TLS-only URL scheme, so a host other than localhost
-  needs `ssl=require`, `verify-ca` or `verify-full`; `prefer` and `allow` can fall back to plain
-  text, so they are refused. Errors name only the scheme and host.
+  destination (FR-SAF-01).
+  - **Verified TLS off loopback.** Postgres has no TLS-only URL scheme, so a host other than
+    localhost needs `ssl=verify-full` or `verify-ca`, with `sslrootcert` for a private CA, as a
+    cloud provider's is. That is the guarantee HTTPS gives every other destination. `require`
+    encrypts but accepts any certificate, so anyone on the path could answer in the database's
+    place; it is refused, like `prefer` and `allow`.
+  - **The host is checked as the driver will connect.** asyncpg reads every URL query key as a
+    connection argument, so `?host=` would override the host the allowlist saw. Only `ssl`,
+    `sslmode` and `sslrootcert` are accepted. A URL whose host reads differently to SQLAlchemy and
+    to `urlparse` is refused rather than guessed at.
+  - Errors name only the scheme and the host.
 - **The catalogue is stored the way Langfuse stores prompts.**
   - `opseval catalogue push FOLDER --project org/project [--label L]` checks the folder with
     the loader's own code, exactly as `opseval validate` does. A scenario a suite includes is
@@ -67,8 +76,16 @@ fixes how that is built, and in what order.
     included. Pushes to one project are serialised, so version numbers never collide.
   - A push with `--label` moves the label to every pushed item, and takes it off items the folder
     no longer has, so a label always names one consistent catalogue.
-  - `catalogue label` promotes one version, `history` and `list` show where each label points,
-    and `latest` cannot be set by hand.
+  - Every push does the same with `latest`, which only Opseval sets. `latest` is therefore the
+    catalogue as last pushed, not each item's newest version: a scenario deleted from the folder,
+    or one whose id was renamed, never comes back with it.
+  - Every file a suite selects must be one the push stores (`scenarios/**/*.yaml`). A file stored
+    is kept at the path it has in the folder, a link included, because that is where the suite's
+    globs look for it.
+  - Pushes and label moves take the project row `FOR UPDATE`; pulls take it `FOR SHARE`. A pull
+    therefore waits for a push in progress, and never mixes two pushes into a catalogue nobody
+    pushed.
+  - `catalogue label` promotes one version, and `history` and `list` show where each label points.
 - **The database adds storage and history, never a second loader.**
   - `opseval catalogue pull FOLDER --label production` writes a label back out as an ordinary
     folder, which `opseval run` and `opseval validate` take as they take any other.

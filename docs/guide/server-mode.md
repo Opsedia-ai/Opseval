@@ -25,8 +25,10 @@ opseval db init --project acme/support-bot
 ```
 
 The database URL is a secret, and its host must be allowlisted like every other destination. A
-database host other than localhost must use TLS: add `?ssl=require`, or `verify-ca` /
-`verify-full`. `prefer` is refused, because it falls back to plain text.
+database host other than localhost must use verified TLS: add `?ssl=verify-full`, and
+`&sslrootcert=/path/ca.pem` when the server's certificate comes from a private CA (as most cloud
+providers' do). `require` is refused, because it accepts any certificate. Only the `ssl`,
+`sslmode` and `sslrootcert` parameters are accepted.
 
 ## Push, label, pull
 
@@ -49,7 +51,8 @@ opseval run ./release/suites/smoke.yaml --profile ./release/profile.yaml --targe
 |---|---|
 | An unchanged file adds no version | Pushing the same folder twice changes nothing |
 | `--label` moves to every pushed item, and leaves items the folder no longer has | A label always names one consistent catalogue |
-| `latest` is always the newest version and cannot be set | It can never be stale |
+| `latest` is the catalogue as last pushed, and only a push moves it | A scenario deleted from the folder never comes back with it |
+| Every file a suite selects must be under `scenarios/` with a `.yaml` name | Otherwise a pulled suite would run fewer scenarios than `validate` saw |
 | `pull` writes only into a new or empty folder | A stale file left there would otherwise run as part of the label |
 | YAML anchors and aliases are refused | A few hundred bytes of aliases can expand to gigabytes |
 

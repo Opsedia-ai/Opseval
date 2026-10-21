@@ -9,6 +9,7 @@ import.
 from __future__ import annotations
 
 import asyncio
+import socket
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Optional, TypeVar
@@ -68,12 +69,24 @@ def _with_engine(go: Callable[[AsyncEngine], Awaitable[T]]) -> T:
         finally:
             await engine.dispose()
 
+    from alembic.util import CommandError
+    from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+
     try:
         return asyncio.run(main())
     except ConfigError as exc:
         raise _fail(exc) from exc
-    except OSError as exc:  # refused, unreachable, DNS: the database, never the agent
+    except (ConnectionError, TimeoutError, socket.gaierror) as exc:
         raise _fail(ConfigError(f"cannot reach the database: {exc}")) from exc
+    except DBAPIError as exc:
+        # Wrong password, no such database, no permission. The driver's own message only:
+        # the statement and its parameters can carry catalogue content.
+        reason = str(exc.orig).splitlines()[0] if exc.orig is not None else type(exc).__name__
+        raise _fail(ConfigError(f"the database refused: {reason}")) from exc
+    except (SQLAlchemyError, CommandError) as exc:
+        raise _fail(ConfigError(f"database error ({type(exc).__name__}): {exc}")) from exc
+    except OSError as exc:  # a file the command reads or writes, never the database
+        raise _fail(ConfigError(f"{exc.strerror or exc}: {exc.filename}")) from exc
 
 
 def _run(work: Callable[[AsyncSession], Awaitable[T]]) -> T:
@@ -132,6 +145,7 @@ def db_init(
     ] = None,
 ) -> None:
     """Create an organisation and project if they do not exist (headless initialisation)."""
+    _modules()
     from opseval.db.catalogue_store import ensure_project
 
     async def work(session: AsyncSession) -> None:
@@ -151,7 +165,7 @@ def catalogue_push(
     ] = None,
     message: Annotated[
         Optional[str],  # noqa: UP045
-        typer.Option(help="Why; kept with each new version."),
+        typer.Option("--message", "-m", help="Why; kept with each new version."),
     ] = None,
 ) -> None:
     """Check a folder exactly like `opseval validate`, then store what changed as new versions.
@@ -191,6 +205,7 @@ def catalogue_pull(
     label: Annotated[str, typer.Option(help="Which label to pull, or latest.")] = "production",
 ) -> None:
     """Write the catalogue under a label to a folder, ready for `opseval run`."""
+    _modules()
     from opseval.db.catalogue_store import get_project, materialize
 
     async def work(session: AsyncSession) -> int:
@@ -204,6 +219,7 @@ def catalogue_pull(
 @catalogue_app.command("list")
 def catalogue_list(project: ProjectOpt) -> None:
     """Every item, its newest version and where each label points."""
+    _modules()
     from opseval.db.catalogue_store import get_project, list_items
 
     async def work(session: AsyncSession) -> list[ItemSummary]:
@@ -220,6 +236,7 @@ def catalogue_list(project: ProjectOpt) -> None:
 @catalogue_app.command("history")
 def catalogue_history(kind: KindArg, name: str, project: ProjectOpt) -> None:
     """Every version of one item, newest first, with its labels."""
+    _modules()
     from opseval.db.catalogue_store import get_project, history
 
     async def work(session: AsyncSession) -> list[VersionInfo]:
@@ -236,6 +253,7 @@ def catalogue_label(
     kind: KindArg, name: str, version: int, label: str, project: ProjectOpt
 ) -> None:
     """Point a label at one version of one item (promote staging to production)."""
+    _modules()
     from opseval.db.catalogue_store import get_project, set_label
 
     async def work(session: AsyncSession) -> None:

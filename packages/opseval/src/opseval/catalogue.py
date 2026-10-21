@@ -244,6 +244,23 @@ def _match_filter(scenario: Scenario, flt: str) -> bool:
     raise ConfigError(f"unknown filter key {key!r}; use tag, id or criticality")
 
 
+def suite_files(path: Path, suite: Suite) -> list[Path]:
+    """The scenario files a suite file selects, before its filters: what ``include`` matches
+    under the catalogue root, less ``exclude``, never outside the root or in ``suites/``."""
+    root = path.parent.parent if path.parent.name == "suites" else path.parent
+    root = root.resolve()
+    chosen: set[Path] = set()
+    for pattern in suite.include:
+        for f in root.glob(pattern):
+            resolved = f.resolve()
+            if resolved.is_file() and resolved.is_relative_to(root):
+                chosen.add(resolved)
+    for pattern in suite.exclude:
+        chosen -= {f.resolve() for f in root.glob(pattern)}
+    suites_dir = (root / "suites").resolve()
+    return sorted(f for f in chosen if not f.is_relative_to(suites_dir))
+
+
 def load_catalogue(
     target: str | Path,
     profile: SutProfile,
@@ -277,18 +294,7 @@ def load_catalogue(
         suite_gate = suite.gate
         suite_stop = suite.stop
         all_filters += suite.filters
-        root = path.parent.parent if path.parent.name == "suites" else path.parent
-        root = root.resolve()
-        chosen: set[Path] = set()
-        for pattern in suite.include:
-            for f in root.glob(pattern):
-                resolved = f.resolve()
-                if resolved.is_file() and resolved.is_relative_to(root):
-                    chosen.add(resolved)
-        for pattern in suite.exclude:
-            chosen -= {f.resolve() for f in root.glob(pattern)}
-        suites_dir = (root / "suites").resolve()
-        files = sorted(f for f in chosen if not f.is_relative_to(suites_dir))
+        files = suite_files(path, suite)
     elif path.is_dir():
         files = sorted(p for p in path.rglob("*.yaml") if "suites" not in p.parts)
     else:

@@ -10,7 +10,7 @@ import ipaddress
 import os
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 from pydantic import AliasChoices, Field, PrivateAttr, SecretStr
@@ -259,27 +259,22 @@ def check_url_allowed(url: str, allowlist: set[str], *, secure_schemes: tuple[st
         )
 
 
-DATABASE_SCHEMES = ("postgresql", "postgres", "postgresql+asyncpg")
-TLS_MODES = ("require", "verify-ca", "verify-full")
-"""``ssl``/``sslmode`` values that guarantee an encrypted connection. ``prefer`` and ``allow``
-fall back to plain text when the server offers no TLS, so they are not enough."""
+TLS_VERIFIED = ("verify-ca", "verify-full")
+"""``ssl`` modes that check the server's certificate, as HTTPS does for every other destination.
+``require`` encrypts but accepts any certificate, so anyone on the path can answer in the
+database's place; ``prefer`` and ``allow`` can fall back to plain text."""
 
 
-def check_database_url_allowed(url: str, allowlist: set[str]) -> None:
-    """Raise :class:`AllowedHostError` unless the database at ``url`` may receive data.
+def check_database_host(host: str, ssl_modes: list[str], allowlist: set[str]) -> None:
+    """Raise :class:`AllowedHostError` unless a database at ``host`` may receive data.
 
-    The same rule as every other destination (``check_url_allowed``): the host must be
-    allowlisted, and anything but loopback must be encrypted. Postgres has no TLS-only URL
-    scheme, so TLS is read from the ``ssl`` (or libpq's ``sslmode``) query parameter. Only the
-    scheme and host are ever repeated: the URL carries a password.
+    The rule every destination follows (``check_url_allowed``): the host is allowlisted, and
+    anything but loopback is encrypted *and authenticated*. Postgres has no TLS-only URL scheme,
+    so TLS is read from the ``ssl`` modes the connection will use. The URL itself, which
+    carries a password, is never repeated. ``opseval.db.engine`` decides the host and modes from
+    the URL exactly as the driver will, so this cannot be shown one host and connect to another.
     """
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if parsed.scheme not in DATABASE_SCHEMES:
-        raise AllowedHostError(
-            f"database URL scheme {parsed.scheme or 'missing'!r} is not supported; "
-            "use postgresql://user:password@host:5432/db"
-        )
+    host = host.lower()
     if not host:
         raise AllowedHostError("database URL has no host; use postgresql://…@host:5432/db")
     if host not in allowlist:
@@ -288,10 +283,9 @@ def check_database_url_allowed(url: str, allowlist: set[str]) -> None:
         )
     if _is_local(host):
         return
-    query = parse_qs(parsed.query)
-    modes = query.get("ssl", []) + query.get("sslmode", [])
-    if not modes or any(m not in TLS_MODES for m in modes):
+    if not ssl_modes or any(m not in TLS_VERIFIED for m in ssl_modes):
         raise AllowedHostError(
-            f"postgresql://{host} must use TLS: add ?ssl=require (or verify-ca, verify-full); "
-            "plain connections are allowed only on localhost"
+            f"postgresql://{host} must use verified TLS: add ?ssl=verify-full (and "
+            "&sslrootcert=/path/ca.pem for a private CA, such as a cloud provider's); "
+            "plain or unverified connections are allowed only on localhost"
         )

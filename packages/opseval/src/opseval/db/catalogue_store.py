@@ -6,8 +6,9 @@
   changed becomes a new numbered version; an unchanged one adds nothing.
 - **Label** versions (``production``, ``staging``, anything). Pushing with a label moves it to
   every pushed item's current version, and takes it off items the folder no longer has, so a
-  label always names one consistent catalogue. ``latest`` is never stored: it is always the
-  newest version.
+  label always names one consistent catalogue. Every push does the same with ``latest``, which
+  only Opseval sets: it is always the catalogue as last pushed, so a scenario deleted from the
+  folder never comes back with it.
 - **Pull** a label back out as a folder, which ``opseval run`` and ``opseval validate`` take
   exactly as they take any other: the loader, its checks and its fail-closed rules are the same
   code, so the database adds storage and history, never a second way to read a scenario.
@@ -27,11 +28,11 @@ from typing import Any
 
 import yaml
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from opseval.catalogue import load_catalogue, load_profile
+from opseval.catalogue import load_catalogue, load_profile, suite_files
 from opseval.db.schema import (
     CatalogueItem,
     CatalogueLabel,
@@ -43,7 +44,7 @@ from opseval.errors import ConfigError
 from opseval.models.scenario import Suite
 
 LATEST = "latest"
-"""Always the newest version of each item. Never stored, so it can never be stale."""
+"""The catalogue as last pushed. Every push moves it, nobody else can, so it is never stale."""
 DEFAULT_LABEL = "production"
 """What a pull or a run fetches when it names no label, as in Langfuse."""
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,35}$")
@@ -101,8 +102,9 @@ class VersionInfo:
 
 
 def check_label(label: str) -> str:
+    """A label a person may set. ``latest`` is Opseval's own (every push moves it)."""
     if label == LATEST:
-        raise ConfigError("'latest' is kept by Opseval itself (the newest version); pick another")
+        raise ConfigError("'latest' is kept by Opseval itself (the last push); pick another")
     if not LABEL_RE.match(label):
         raise ConfigError(
             f"label {label!r}: use lowercase letters, digits, '.', '_' or '-' (at most 36)"
@@ -168,10 +170,27 @@ def read_folder(
 
     # A scenario a suite includes is checked through that suite, with its defaults and
     # overrides applied, exactly as it runs; one no suite includes is checked on its own.
+    stored = {str(path.resolve()) for _kind, path in found}
     covered: set[str] = set()
     for kind, path in found:
-        if kind == "suite":
-            covered |= check(path)
+        if kind != "suite":
+            continue
+        check(path)
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        try:
+            selected = {str(f) for f in suite_files(path, Suite.model_validate(raw))}
+        except ValidationError:
+            continue  # the loader reported it above
+        # A file the suite runs must be a file the push stores, or the pulled suite would run
+        # fewer scenarios than validate saw, and nothing would say so.
+        missing = sorted(selected - stored)
+        if missing:
+            listed = ", ".join(Path(m).relative_to(root).as_posix() for m in missing)
+            problems.append(
+                f"{path.relative_to(root).as_posix()}: includes files a push does not store "
+                f"({listed}); keep scenarios under scenarios/ with a .yaml name"
+            )
+        covered |= selected
     for kind, path in found:
         if kind == "scenario" and str(path.resolve()) not in covered:
             check(path)
@@ -182,7 +201,9 @@ def read_folder(
     out: list[CatalogueFile] = []
     seen: dict[tuple[str, str], str] = {}
     for kind, path in found:
-        rel = path.resolve().relative_to(root).as_posix()
+        # Where the file sits in the folder, not where a link points: that is where the
+        # suite's globs look for it, and where a pull must put it back.
+        rel = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8")
         _refuse_aliases(text, rel)
         data = yaml.safe_load(text)
@@ -257,14 +278,41 @@ async def get_project(session: AsyncSession, ref: str) -> Project:
 # --- writing ----------------------------------------------------------------------------
 
 
-async def _latest(session: AsyncSession, item_id: uuid.UUID) -> CatalogueVersion | None:
-    result: CatalogueVersion | None = await session.scalar(
-        select(CatalogueVersion)
-        .where(CatalogueVersion.item_id == item_id)
-        .order_by(CatalogueVersion.version.desc())
-        .limit(1)
+async def _lock(session: AsyncSession, project: Project, *, write: bool) -> None:
+    """Serialise catalogue changes per project, and let reads see one whole push.
+
+    A push (or a label move) holds the project row ``FOR UPDATE`` until it commits; a pull
+    holds it ``FOR SHARE``. So a pull waits for a push in progress, then no push can start
+    until the pull has read everything: it never mixes two pushes into a catalogue nobody
+    pushed, which a series of reads under READ COMMITTED otherwise could.
+    """
+    clause = select(Project.id).where(Project.id == project.id)
+    await session.execute(clause.with_for_update(read=not write))
+
+
+async def _latest_versions(
+    session: AsyncSession, item_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, CatalogueVersion]:
+    """The newest version of each item, in one query."""
+    ids = list(item_ids)
+    if not ids:
+        return {}
+    newest = (
+        select(CatalogueVersion.item_id, func.max(CatalogueVersion.version).label("version"))
+        .where(CatalogueVersion.item_id.in_(ids))
+        .group_by(CatalogueVersion.item_id)
+        .subquery()
     )
-    return result
+    rows = await session.scalars(
+        select(CatalogueVersion).join(
+            newest,
+            and_(
+                CatalogueVersion.item_id == newest.c.item_id,
+                CatalogueVersion.version == newest.c.version,
+            ),
+        )
+    )
+    return {v.item_id: v for v in rows}
 
 
 async def _set_label(
@@ -279,6 +327,27 @@ async def _set_label(
     )
 
 
+async def _move_label(
+    session: AsyncSession,
+    label: str,
+    current: dict[uuid.UUID, uuid.UUID],
+    others: list[CatalogueItem],
+) -> list[tuple[str, str]]:
+    """Point ``label`` at ``current`` (item → version) and take it off every other item."""
+    for item_id, version_id in current.items():
+        await _set_label(session, item_id, label, version_id)
+    gone = [i.id for i in others]
+    if not gone:
+        return []
+    removed = await session.scalars(
+        delete(CatalogueLabel)
+        .where(CatalogueLabel.item_id.in_(gone), CatalogueLabel.label == label)
+        .returning(CatalogueLabel.item_id)
+    )
+    by_id = {i.id: i for i in others}
+    return sorted((by_id[i].kind, by_id[i].name) for i in removed)
+
+
 async def push(
     session: AsyncSession,
     project: Project,
@@ -291,14 +360,14 @@ async def push(
     """Store a checked folder as new versions, in the caller's transaction."""
     if label is not None:
         check_label(label)
-    # One push at a time per project: the version numbers and the label move together.
-    await session.execute(select(Project.id).where(Project.id == project.id).with_for_update())
+    await _lock(session, project, write=True)
     items = {
         (i.kind, i.name): i
         for i in await session.scalars(
             select(CatalogueItem).where(CatalogueItem.project_id == project.id)
         )
     }
+    latest = await _latest_versions(session, (i.id for i in items.values()))
     report = PushReport(label=label)
     current: dict[uuid.UUID, uuid.UUID] = {}
     for f in files:
@@ -308,14 +377,14 @@ async def push(
             session.add(item)
             await session.flush()
             items[(f.kind, f.name)] = item
-        latest = await _latest(session, item.id)
-        if latest is not None and latest.content_hash == f.content_hash:
-            report.unchanged.append((f.kind, f.name, latest.version))
-            current[item.id] = latest.id
+        newest = latest.get(item.id)
+        if newest is not None and newest.content_hash == f.content_hash:
+            report.unchanged.append((f.kind, f.name, newest.version))
+            current[item.id] = newest.id
             continue
         version = CatalogueVersion(
             item_id=item.id,
-            version=(latest.version + 1) if latest else 1,
+            version=(newest.version + 1) if newest else 1,
             path=f.path,
             source=f.source,
             content=f.content,
@@ -327,18 +396,10 @@ async def push(
         await session.flush()
         report.added.append((f.kind, f.name, version.version))
         current[item.id] = version.id
+    others = [i for i in items.values() if i.id not in current]
+    await _move_label(session, LATEST, current, others)
     if label is not None:
-        for item_id, version_id in current.items():
-            await _set_label(session, item_id, label, version_id)
-        gone = [i for i in items.values() if i.id not in current]
-        for item in gone:
-            removed = await session.execute(
-                delete(CatalogueLabel)
-                .where(CatalogueLabel.item_id == item.id, CatalogueLabel.label == label)
-                .returning(CatalogueLabel.item_id)
-            )
-            if removed.first() is not None:
-                report.unlabelled.append((item.kind, item.name))
+        report.unlabelled = await _move_label(session, label, current, others)
     return report
 
 
@@ -347,6 +408,7 @@ async def set_label(
 ) -> None:
     """Point ``label`` at one version of one item (promote ``staging`` to ``production``)."""
     check_label(label)
+    await _lock(session, project, write=True)
     item = await _item(session, project, kind, name)
     target = await session.scalar(
         select(CatalogueVersion).where(
@@ -375,25 +437,29 @@ async def _item(session: AsyncSession, project: Project, kind: str, name: str) -
 
 
 async def list_items(session: AsyncSession, project: Project) -> list[ItemSummary]:
-    out = []
-    items = await session.scalars(
-        select(CatalogueItem)
-        .where(CatalogueItem.project_id == project.id)
-        .order_by(CatalogueItem.kind, CatalogueItem.name)
-    )
-    for item in items:
-        latest = await _latest(session, item.id)
-        if latest is None:  # pragma: no cover - an item is only ever created with a version
-            continue
-        rows = await session.execute(
-            select(CatalogueLabel.label, CatalogueVersion.version)
-            .join(CatalogueVersion, CatalogueVersion.id == CatalogueLabel.version_id)
-            .where(CatalogueLabel.item_id == item.id)
-            .order_by(CatalogueLabel.label)
+    items = list(
+        await session.scalars(
+            select(CatalogueItem)
+            .where(CatalogueItem.project_id == project.id)
+            .order_by(CatalogueItem.kind, CatalogueItem.name)
         )
-        labels = {str(label): int(version) for label, version in rows}
-        out.append(ItemSummary(item.kind, item.name, latest.version, latest.path, labels))
-    return out
+    )
+    latest = await _latest_versions(session, (i.id for i in items))
+    labels: dict[uuid.UUID, dict[str, int]] = {}
+    rows = await session.execute(
+        select(CatalogueLabel.item_id, CatalogueLabel.label, CatalogueVersion.version)
+        .join(CatalogueVersion, CatalogueVersion.id == CatalogueLabel.version_id)
+        .join(CatalogueItem, CatalogueItem.id == CatalogueLabel.item_id)
+        .where(CatalogueItem.project_id == project.id)
+        .order_by(CatalogueLabel.label)
+    )
+    for item_id, label, version in rows:
+        labels.setdefault(item_id, {})[str(label)] = int(version)
+    return [
+        ItemSummary(i.kind, i.name, latest[i.id].version, latest[i.id].path, labels.get(i.id, {}))
+        for i in items
+        if i.id in latest
+    ]
 
 
 async def history(
@@ -412,42 +478,33 @@ async def history(
         .where(CatalogueVersion.item_id == item.id)
         .order_by(CatalogueVersion.version.desc())
     )
-    newest = True
-    out = []
-    for v in versions:
-        named = sorted(labels.get(v.id, [])) + ([LATEST] if newest else [])
-        newest = False
-        out.append(VersionInfo(v.version, v.path, v.created_at, v.created_by, v.message, named))
-    return out
+    return [
+        VersionInfo(v.version, v.path, v.created_at, v.created_by, v.message, _ordered(labels, v))
+        for v in versions
+    ]
+
+
+def _ordered(labels: dict[uuid.UUID, list[str]], version: CatalogueVersion) -> list[str]:
+    names = labels.get(version.id, [])
+    return sorted(n for n in names if n != LATEST) + ([LATEST] if LATEST in names else [])
 
 
 async def resolve(
     session: AsyncSession, project: Project, label: str
 ) -> list[tuple[CatalogueItem, CatalogueVersion]]:
-    """Every item's version under ``label`` (``latest``: its newest). Items without the label
+    """Every item's version under ``label``, read as one push left it. Items without the label
     are left out, as Langfuse serves no prompt for a label it does not carry."""
     if label != LATEST:
         check_label(label)
-    items = list(
-        await session.scalars(
-            select(CatalogueItem)
-            .where(CatalogueItem.project_id == project.id)
-            .order_by(CatalogueItem.kind, CatalogueItem.name)
-        )
+    await _lock(session, project, write=False)
+    rows = await session.execute(
+        select(CatalogueItem, CatalogueVersion)
+        .join(CatalogueLabel, CatalogueLabel.item_id == CatalogueItem.id)
+        .join(CatalogueVersion, CatalogueVersion.id == CatalogueLabel.version_id)
+        .where(CatalogueItem.project_id == project.id, CatalogueLabel.label == label)
+        .order_by(CatalogueItem.kind, CatalogueItem.name)
     )
-    out = []
-    for item in items:
-        if label == LATEST:
-            version = await _latest(session, item.id)
-        else:
-            version = await session.scalar(
-                select(CatalogueVersion)
-                .join(CatalogueLabel, CatalogueLabel.version_id == CatalogueVersion.id)
-                .where(CatalogueLabel.item_id == item.id, CatalogueLabel.label == label)
-            )
-        if version is not None:
-            out.append((item, version))
-    return out
+    return [(item, version) for item, version in rows]
 
 
 def _safe_target(dest: Path, path: str) -> Path:
