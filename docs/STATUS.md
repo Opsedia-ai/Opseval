@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-20** (`main` with credential provider plugins, and replies read on the agent's clock).
+**As of 2026-10-21** (`main` with credential provider plugins, and replies read on the agent's clock).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 91% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 96% of 69.
+**Overall: 87% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 91% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 55 / 4 / 0 | 97% |
-| v0.2 | 15 | 13 / 1 / 1 | 90% |
-| v0.5 | 12 | 9 / 1 / 2 | 79% |
+| v0.1 | 59 | 51 / 8 / 0 | 93% |
+| v0.2 | 15 | 12 / 2 / 1 | 87% |
+| v0.5 | 12 | 7 / 3 / 2 | 71% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 77 / 6 / 5 | **91%** |
+| **All** | 88 | 70 / 13 / 5 | **87%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -42,10 +42,10 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-CAT-02 | Identity fields and criticality | M | v0.1 | Done | `models/scenario.py` |
 | FR-CAT-03 | Persona fields, timezone checked | M | v0.1 | Done | `Persona`, `check_references` |
 | FR-CAT-04 | Conversation spec | M | v0.1 | Done | Diverged by decision: `stop_at` defaults to `commit_gate` (ADR-0008); probes live in the profile (ADR-0025) |
-| FR-CAT-05 | Expectations | M | v0.1 | Done | `Expectations`, `ExpectedTools` |
+| FR-CAT-05 | Expectations | M | v0.1 | Partial | `Expectations`, `ExpectedTools`; `kind: refusal` is accepted but nothing reads it (ATTENTION I15) |
 | FR-CAT-06 | Scorer list or default pack | M | v0.1 | Done | `ScorerSpec` |
 | FR-CAT-07 | Execution: repeats, threshold, timeouts | M | v0.1 | Done | `ExecutionSpec` |
-| FR-CAT-08 | Fail closed on authoring mistakes | M | v0.1 | Done | `extra="forbid"`, `check_references` |
+| FR-CAT-08 | Fail closed on authoring mistakes | M | v0.1 | Partial | `extra="forbid"`, `check_references`; scorer `params` are not checked at load time, so a typo or a bad value surfaces only at run time as *not measured* (ATTENTION I15) |
 | FR-CAT-09 | Suites and precedence | M | v0.1 | Done | `_load_scenario` deep merge |
 | FR-CAT-10 | Filters and `blocked` | S | v0.1 | Done | `_match_filter`, `is_blocked` |
 | FR-CAT-11 | Published JSON Schemas | S | v0.2 | Done | `schemas/v1`, `opseval schemas --check` (ADR-0026) |
@@ -75,7 +75,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-REC-02 | Persist as you go | M | v0.1 | Done | `FileStore`, `result.json` last, `error.json` on failure (ADR-0031) |
 | FR-REC-03 | Redaction | M | v0.1 | Partial | key names, plus credential *values* in text and payloads (ADR-0033); PII is deliberately kept, and unrecognised token formats pass through |
 | FR-REC-04 | Trace enrichment | M | v0.2 | Partial | Langfuse and OTLP tool calls; no SUT scores or release tag |
-| FR-REC-05 | Layout contract | M | v0.1 | Done | versioned layout (`opseval-runs/1` in every manifest; unknown layouts refused by every reader, shown as errors in the console, never pruned) and the `storage.RunStore` protocol `FileStore` meets (ADR-0005 amendment) |
+| FR-REC-05 | Layout contract | M | v0.1 | Done | versioned layout (`opseval-runs/2` in every manifest, `opseval-runs/1` still read; unknown layouts refused by every reader, shown as errors in the console, never pruned) and the `storage.RunStore` protocol `FileStore` meets (ADR-0005 amendment) |
 | FR-SCR-01 | Three-state scores | M | v0.1 | Done | `ScoreResult` validator |
 | FR-SCR-02 | Axes | M | v0.1 | Done | `Axis` |
 | FR-SCR-03 | Deterministic scorers | M | v0.1 | Done | every listed scorer, including `output.required_fields` (present and non-empty payload fields) beside `output.payload_equals` |
@@ -93,16 +93,16 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-VER-04 | Five-state verdicts | M | v0.1 | Done | `VerdictStatus` |
 | FR-VER-05 | pass^k | S | v0.2 | Done | `_pass_hat_k` |
 | FR-GATE-01 | Exit codes 0/1/2/3 | M | v0.1 | Done | `exit_code`, CI demo checks 0/1/1/3 |
-| FR-GATE-02 | Criticality-aware gate | M | v0.1 | Done | `release_gate`; per-suite gate policy with presets, recorded in every result (ADR-0032); "Safe to release" only when nothing blocks or warns (ADR-0030) |
+| FR-GATE-02 | Criticality-aware gate | M | v0.1 | Partial | `release_gate`; per-suite gate policy with presets, recorded in every result (ADR-0032); "Safe to release" only when nothing blocks or warns (ADR-0030); but a policy that ignores unmeasured checks or flakiness can still say "Safe to release" (ATTENTION I27) |
 | FR-GATE-03 | GitHub Action | M | v0.2 | Done | `action.yml`, dogfooded in CI |
-| FR-GATE-04 | pytest plugin | S | v0.2 | Done | `packages/pytest-opseval` |
+| FR-GATE-04 | pytest plugin | S | v0.2 | Partial | `packages/pytest-opseval`; ignores the release gate, so a run that judged nothing is green under pytest (ATTENTION I22) |
 | FR-GATE-05 | Other CI templates | S | v0.5 | Missing | only `opseval summary` |
 | FR-RPT-01 | Offline, RTL-aware HTML report | M | v0.1 | Done | `report.html.j2`; no automated no-network or Arabic rendering test |
 | FR-RPT-02 | `result.json` and its schema | M | v0.1 | Done | `schemas/v1/result.json` |
 | FR-RPT-03 | Plain-language verdict sentence | M | v0.1 | Done | `Gate.summary` |
 | FR-RPT-04 | Usage and cost, "no rate" not $0 | M | v0.1 | Done | report usage table |
 | FR-RPT-05 | Flow map | S | v0.2 | Done | ADR-0023 |
-| FR-RPT-06 | Compare and trend | M | v0.5 | Done | compare, per-run trend, and a per-scenario trend grid (`GET /api/v1/trend/scenarios`: verdict per run, absent distinct from not judged, server-counted flips) |
+| FR-RPT-06 | Compare and trend | M | v0.5 | Partial | per-run trend and a per-scenario trend grid (`GET /api/v1/trend/scenarios`: verdict per run, absent distinct from not judged, server-counted flips); compare lists regressions and recoveries but not scenarios added or removed, and its "nothing regressed" headline is decided in the browser, so a candidate that judged nothing reads green (ATTENTION I18) |
 | FR-RPT-07 | JUnit XML | S | v0.2 | Done | `reporting/junit.py` |
 | FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not; only the ones a suite uses are built), every preflight probe (exit 3 when refused), Langfuse, sinks, telemetry (`check_url_allowed`; errors show only scheme and host) |
 | FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes and allowlist errors name only the host |
@@ -119,12 +119,12 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-INT-06 | PyRIT adapter | S | v0.8 | Missing | not started (not due) |
 | FR-INT-07 | Webhooks | S | v0.5 | Done | sinks (ADR-0027) |
 | FR-DX-01 | `pip install` and a container image | M | v0.1 | Partial | CLI image from the lock (`Dockerfile`, digest-pinned, hash-checked, non-root; built and demo-checked in CI; ADR-0038); nothing published yet: PyPI name reserved, image and wheel wait for Gate 0 |
-| FR-DX-02 | Interactive `init` | M | v0.1 | Done | asks for template, agent URL, name and model in a terminal (flags otherwise, never prompts in CI); fills the profile, allowlist and run command; validates the result |
+| FR-DX-02 | Interactive `init` | M | v0.1 | Partial | asks for template, agent URL, name and model in a terminal (flags otherwise, never prompts in CI); fills the profile, allowlist and run command; validates the result; but only one real template (OpenAI-compatible): the PRD's journey UJ-02 asks it to offer HTTP, SSE, WebSocket and OpenAI-compatible and to write `opseval.yaml` (ATTENTION D12 step 5) |
 | FR-DX-03 | Demo | M | v0.1 | Done | `opseval demo`, exit codes 0/1/1/3 |
 | FR-DX-04 | Docs site | M | v0.1 | Partial | MkDocs Material site with quickstart, concepts, SUT profile guide, cookbook, ADRs, and a scorer and settings reference generated from the code (drift fails CI); built strictly in CI (ADR-0039); not deployed before Gate 0 |
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
 | FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Done | all five stop policies (suite `stop:`, `run` flags, console launch form and suite editor) and cancel before any attempt (`opseval cancel`, console Cancel run; ADR-0035); rescore, calibrate, preflight |
-| FR-AUT | Authoring workbench | M | v0.5 | Done | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground.; a warnings tier beside errors (`advice.scenario_warnings`: what a valid scenario will not measure, in the editor and `opseval validate`, never blocking) |
+| FR-AUT | Authoring workbench | M | v0.5 | Partial | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground; a warnings tier beside errors (`advice.scenario_warnings`: what a valid scenario will not measure, in the editor and `opseval validate`, never blocking); but the suite editor cannot select scenarios in subfolders, where the console saves them (ATTENTION I20), and both import and a new file in the editor accept `.yml` names the loader never reads |
 | FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API, serving the built console same-origin (ADR-0034) with run detail down to each attempt's conversation and live progress for runs in flight, token auth (ADR-0029, ADR-0031); no Postgres, workers, accounts, OIDC or live events; console not yet in the wheel |
 
 ## Non-functional requirements
@@ -138,6 +138,6 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | Privacy | Partial | content-free telemetry; credential values redacted (ADR-0033); console loads nothing from another origin (fonts bundled) |
 | Scalability | Missing | attempts run one after another (≥ 20 concurrent is the target) |
 | Performance | Missing | no overhead benchmark |
-| Portability | Partial | CI on Linux only; Windows/macOS untested |
+| Portability | Partial | CI on Linux only; Windows/macOS untested; on Windows a CI run exits 3 on output encoding and the Action cannot install (ATTENTION I23) |
 | Accessibility | Partial | console uses text with every colour; no WCAG audit |
 | i18n | Partial | RTL report; UI strings not externalised |
