@@ -437,11 +437,12 @@ def test_a_simulator_outage_is_tagged_simulator_not_dependency() -> None:
     from opseval.models.preflight import HealthCheck, PreflightReport
     from opseval.runner import _unmet
 
+    profile = load_profile(catalogue_dir() / "profile.yaml")
     scenario = next(
         sc
         for sc in load_catalogue(
             catalogue_dir() / "scenarios",
-            load_profile(catalogue_dir() / "profile.yaml"),
+            profile,
             known_scorers=REGISTRY.keys(),
             known_invariants=set(INVARIANTS),
         )[0].scenarios
@@ -450,7 +451,7 @@ def test_a_simulator_outage_is_tagged_simulator_not_dependency() -> None:
     health = PreflightReport(
         checks=[HealthCheck(name="simulator", status="unavailable", detail="down")]
     )
-    found = _unmet(scenario, health, no_simulator=False)
+    found = _unmet(scenario, profile, health, no_simulator=False)
     assert found is not None and found[1] == "simulator"
 
 

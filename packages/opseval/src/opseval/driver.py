@@ -25,6 +25,7 @@ from opseval.errors import (
 )
 from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
 from opseval.models.record import (
+    SCRIPT_EXHAUSTED,
     CreatedArtifact,
     FrameRecord,
     InterruptRecord,
@@ -466,6 +467,9 @@ class Driver:
                 continue
             turn = await self._simulate(self.sim.next_turn(self.transcript()))
             self._injections += turn.injections
+            if turn.script_exhausted:
+                self._notes.append(SCRIPT_EXHAUSTED)
+                raise _Stop(TerminalState.GOAL_REACHED, "the scripted turns ran out")
             if turn.goal_reached:
                 raise _Stop(TerminalState.GOAL_REACHED, "the customer considers the goal reached")
             await self._send_user(session, turn.text)

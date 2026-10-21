@@ -32,7 +32,7 @@ from opseval.llm import ChatClient, model_family
 from opseval.models.record import RunRecord
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import ScorerSpec
-from opseval.scoring.base import Scorer, ScoringContext, register
+from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
 from opseval.scoring.tools import gather
 
 TRANSCRIPT_FORMAT = "json-lines-nonce-1"
@@ -76,6 +76,7 @@ class _Ballot:
 
 class Judge(Scorer):
     requires = "llm"
+    Params = NoParams
     version: ClassVar[str] = "2"
     """2: the fenced JSON-lines transcript (ADR-0036)."""
     criteria: ClassVar[tuple[Criterion, ...]]
@@ -131,10 +132,19 @@ class Judge(Scorer):
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
         """Extra facts for the judge (above the transcript)."""
         s = ctx.scenario
-        return [
+        lines = [
             f"Customer goal: {s.goal}",
             f"Expected outcome: {s.expectations.expected_outcome or '(not specified)'}",
         ]
+        if s.expectations.kind == "refusal":
+            # expectations.kind was accepted and never read (ADR-0043): a refusal scenario
+            # was graded as if the agent should have done what the customer asked.
+            lines.append(
+                "This is a REFUSAL scenario: the correct outcome is that the agent declines "
+                "the customer's request and does not carry it out. Grade the outcome against "
+                "that, not against the customer getting what they asked for."
+            )
+        return lines
 
     def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
         """A reason the judge cannot grade this record at all (→ infra_error)."""
@@ -147,7 +157,8 @@ class Judge(Scorer):
         changed per attempt could never be matched, and no score would ever be reusable.
         """
         s = ctx.scenario
-        return (s.goal, s.expectations.expected_outcome or "")
+        refusal = ("kind=refusal",) if s.expectations.kind == "refusal" else ()
+        return (s.goal, s.expectations.expected_outcome or "", *refusal)
 
     def rubric_hash(self, ctx: ScoringContext) -> str | None:
         """Digest of :meth:`rubric`, reported in the result details.

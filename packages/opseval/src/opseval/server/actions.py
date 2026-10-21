@@ -93,7 +93,7 @@ def scenario_root(catalogue: Path) -> Path:
 
 def _load(target: Path, profile: SutProfile) -> list[Scenario]:
     cat, _ = load_catalogue(
-        target, profile, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+        target, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
     )
     return cat.scenarios
 
@@ -451,7 +451,7 @@ def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
             f.text,
             f.name,
             profile,
-            known_scorers=REGISTRY.keys(),
+            known_scorers=REGISTRY,
             known_invariants=set(INVARIANTS),
         )
         problems.extend(_problem(p.path, p.field, p.message) for p in found_problems)
@@ -507,7 +507,7 @@ def _id_index(ctx: ServerContext) -> dict[str, Path]:
     if cached is not None and cached[0] == signature:
         return cached[1]
     cat, _ = load_catalogue(
-        folder, profile, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+        folder, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
     )
     index = {sid: Path(src).resolve() for sid, src in cat.sources.items()}
     _INDEX[folder] = (signature, index)
@@ -572,7 +572,7 @@ def check_scenario(ctx: ServerContext, body: s.ScenarioTextIn) -> s.ScenarioChec
     root, profile = ctx.need_catalogue()
     where = body.file or (f"{body.family}/{body.file_name}" if body.file_name else "(new)")
     sc, problems = check_scenario_text(
-        body.text, where, profile, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+        body.text, where, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
     )
     out = [_problem(p.path, p.field, p.message) for p in problems]
     editing = _scenario_file(ctx, body.file)[1] if body.file else None

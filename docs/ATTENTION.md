@@ -39,12 +39,10 @@ kept in `docs-internal/review-2026-10-20-any-team-adoption.md` because it covers
 
 | # | Sev | Issue | Effect | Plan |
 |---|---|---|---|---|
-| I10 | High | An agent that answers every turn with empty text passes the built-in frame checks | The scaffolded smoke suite (`no_errors`, `terminal_state`, `turn_budget`) cannot tell a silent agent from a good one without an LLM judge; a real agent failure goes green. A wrong *mapping* is now caught (ADR-0042); a silent *agent* is not yet. | D12 step 1: an agent-facing check that every customer turn got a reply, in the default pack and the scaffolds, with profile-aware defaults (ADR-0043) |
 | I11 | High | Without traces, a tool the agent ran on its own server counts as never called | A correct agent fails `tools.expected_called` and the gate blocks: the harness could not see the tool, and the agent is blamed. | D12 step 2, with D11 |
 | I12 | High | A notification before the reply ends the agent's turn early | Over WebSocket, a "typing" frame starts the 400 ms quiet timer, so the customer replies before the agent has answered. The late answer is then recorded as the reply to the *next* customer turn, shifting every turn after it, or lost if the attempt ends first; the run can still pass. | D12 step 2: a notification or unrecognised frame does not end the wait for the first reply |
 | I13 | High | Every HTTP 4xx from an agent is a harness error on http-json and sse | An agent's own refusal (400, 422) is hidden as *not judged*, and a 429 is not marked as a rate limit, so `stop_on_rate_limit` never fires there (openai-chat already handles 429). | D12 step 2: one HTTP status policy for every HTTP transport, 429 retried and marked, agent statuses declarable in the profile |
 | I14 | High | A persona language Opseval has no pack for becomes English | The simulated customer writes English for `fr` or `de`; the persona judge can then invalidate attempts until the scenario is inconclusive, so the harness blocks a release. `validate` says nothing. | D12 step 6; until then, a `validate` warning |
-| I15 | High | Two authoring mistakes pass validation silently | Scorer `params` are never checked (a typo is ignored, a bad value becomes *not measured* at run time), and `expectations.kind: refusal` is accepted but never read. | D12 step 1: params checked at load time; `kind: refusal` wired into the goal judge or refused |
 | I16 | High | A team's own HTTP API often cannot be mapped by configuration | Reply fields must be top-level keys; there are no custom headers (no API-key header), no `"Bearer {token}"`-style templates, no per-attempt ids, no streaming joined into one turn. In the review, one of four agent shapes onboarded by configuration alone; one had to change its API in four ways. | D12 step 3 (ADR-0044) |
 | I17 | High | The console serves whatever build is on disk, however old | A build from before today's run states draws a blocked or a safe run as *not judged*. Nothing checks that the console and the API agree. | Stamp the build with a hash of the API types; the server refuses a build that does not match |
 | I18 | High | Compare can say "nothing regressed" when it should not | A newer run that judged nothing, or whose new scenarios fail, reads green; a scenario dropped from the suite is invisible. The headline is decided in the browser. | Added and removed scenarios in the comparison, and a server-decided result: regressed, no regression, or not comparable |
@@ -61,10 +59,16 @@ kept in `docs-internal/review-2026-10-20-any-team-adoption.md` because it covers
 | I29 | High (security) | A credential in the agent's URL is written to reports | A token in `--target` (a `?token=` query) lands in the manifest, the result, the record, `report.html`, JUnit and the webhook payload. | Store and show the target without query and user info, as the tenant pool already does; redact the tokens Opseval itself holds by their value |
 | I30 | High (security) | A package name the docs tell people to install is not registered | Anyone can claim it on PyPI, and every reader who follows the README would install their code once the repository is public. | Reserve every name the docs install, with D4, before going public |
 
-I9 (no concurrency) closed with the test-tenant pool (ADR-0041).
+I9 (no concurrency) closed with the test-tenant pool (ADR-0041). I10 (a silent agent passed) and I15
+(params and `kind: refusal` unchecked) closed with ADR-0043.
 
 ## For your information
 
+- **Behaviour you may notice (ADR-0043):** `scorers: default` now follows the profile (no
+  `flow.phase_order` without phases; a declared `must_call` or `ordering` is checked), and every
+  scaffolded scenario has `conversation.agent_replied`, which fails a turn answered with nothing.
+  A misspelt or invalid scorer `params` now fails `opseval validate`. Leaving `stop_at` out on a
+  profile without a commit gate means running to the goal.
 - **The whole review is in `docs-internal/`** (`review-2026-10-20-any-team-adoption.md`): what
   already works for any team, the gaps behind I10–I16, and edits proposed to the planning
   documents, and the reviews of the console and its API (I17–I21), CI, packaging and

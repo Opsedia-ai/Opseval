@@ -27,6 +27,9 @@ def attempt_seed(test_id: str, attempt_index: int) -> int:
 class SimTurn:
     text: str
     goal_reached: bool = False
+    script_exhausted: bool = False
+    """A scripted customer ran out of turns: it ends the chat, but says nothing about whether
+    the goal was met (ADR-0043)."""
     injections: list[str] = field(default_factory=list)
 
 
@@ -76,7 +79,7 @@ class ScriptedSimulator(Simulator):
     async def next_turn(self, transcript: list[tuple[str, str]]) -> SimTurn:
         turns = self.scenario.conversation.scripted_turns
         if self._index >= len(turns):
-            return SimTurn(text="", goal_reached=True)
+            return SimTurn(text="", goal_reached=True, script_exhausted=True)
         text = turns[self._index]
         self._index += 1
         return self._finish(text)

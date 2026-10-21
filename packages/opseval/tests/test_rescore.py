@@ -108,10 +108,11 @@ class TestRescore:
         self, cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         run = await demo_run(cat_dir, tmp_path)
-        monkeypatch.setattr(REGISTRY["output.terminal_state"], "version", "2")
+        before = REGISTRY["output.terminal_state"].version
+        monkeypatch.setattr(REGISTRY["output.terminal_state"], "version", f"{before}-next")
         outcome = await rescore_run(run, settings_for(tmp_path))
         changes = {(c.scorer_id, c.what, c.before, c.after) for c in outcome.info.scorer_changes}
-        assert ("output.terminal_state", "version", "1", "2") in changes
+        assert ("output.terminal_state", "version", before, f"{before}-next") in changes
         html = (outcome.out_dir / "report.html").read_text("utf-8")
         assert "output.terminal_state" in html and "version" in html
 

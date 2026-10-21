@@ -79,7 +79,7 @@ def _scenarios(
         raise ConfigError("pass both --catalogue and --profile, or neither (use the snapshot)")
     profile = load_profile(profile_path)
     cat, _ = load_catalogue(
-        catalogue, profile, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+        catalogue, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
     )
     if cat.problems:
         raise ConfigError("the catalogue has problems: " + "; ".join(str(p) for p in cat.problems))
@@ -135,7 +135,7 @@ class _Rescorer:
         if self.judge_configured:
             return scores
         previous = {s.scorer_id: s for s in original.scores}
-        specs = {spec.id: spec for spec in effective_specs(scenario)}
+        specs = {spec.id: spec for spec in effective_specs(scenario, profile)}
         # Always-on harness checks (ALWAYS_ON) have no spec: they are deterministic, so the
         # fresh score is the one to keep.
         return [

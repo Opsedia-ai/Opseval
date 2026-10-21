@@ -499,7 +499,7 @@ def list_suites(
             if not isinstance(raw, dict):
                 raise ConfigError("a suite file must be a mapping")
             cat, _ = load_catalogue(
-                f, profile, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+                f, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
             )
             count = len(cat.scenarios)
         except (ConfigError, yaml.YAMLError, OSError) as exc:

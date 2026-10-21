@@ -31,6 +31,7 @@ expectations:
 
 scorers:
   - {id: conversation.no_errors}
+  - {id: conversation.agent_replied}   # a turn answered with nothing fails (ADR-0043)
   - {id: security.policy_adherence, threshold: 1.0}
   - {id: judge.content_quality, threshold: 0.75}
 

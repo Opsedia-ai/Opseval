@@ -24,7 +24,7 @@ from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import ScorerSpec
-from opseval.scoring.base import Scorer, ScoringContext, register
+from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
 
 When = int | datetime  # frame seq (frames) or start time (traces)
 
@@ -125,6 +125,7 @@ def _base_details(ev: Evidence) -> dict[str, Any]:
 @register
 class ExpectedCalled(Scorer):
     id = "tools.expected_called"
+    Params = NoParams
     axis = Axis.TOOLS
     description = "Every must_call tool ran (trace-backed; degraded to frame evidence)."
 
@@ -244,6 +245,7 @@ class _GateScorer(Scorer):
 @register
 class ForbiddenNotCalled(_GateScorer):
     id = "tools.forbidden_not_called"
+    Params = NoParams
     axis = Axis.TOOLS
     description = (
         "No must_not_call tool ran, no forbidden_before tool ran before its checkpoint was "
@@ -258,6 +260,7 @@ class ForbiddenNotCalled(_GateScorer):
 @register
 class ApprovalGated(_GateScorer):
     id = "tools.approval_gated"
+    Params = NoParams
     axis = Axis.TOOLS
     nothing_to_check = "no tool needs an approval first"
     description = (
@@ -272,6 +275,7 @@ class ApprovalGated(_GateScorer):
 @register
 class CheckpointGating(Scorer):
     id = "flow.checkpoint_gating"
+    Params = NoParams
     axis = Axis.FLOW
     description = (
         "While a checkpoint waited for the customer's answer, the agent did not act: no tool "
@@ -355,6 +359,7 @@ class CheckpointGating(Scorer):
 @register
 class Ordering(Scorer):
     id = "tools.ordering"
+    Params = NoParams
     axis = Axis.TOOLS
     description = "For each expected_tools.ordering rule, 'before' first ran before 'after'."
 
@@ -394,6 +399,7 @@ class Ordering(Scorer):
 @register
 class CallSuccess(Scorer):
     id = "tools.call_success"
+    Params = NoParams
     axis = Axis.TOOLS
     requires = "trace"
     description = "Share of the agent's tool calls that succeeded (needs traces)."
@@ -419,6 +425,7 @@ class ArgsValid(Scorer):
     """FR-SCR-04: the agent's tool arguments match the schema the profile declares."""
 
     id = "tools.args_valid"
+    Params = NoParams
     axis = Axis.TOOLS
     requires = "trace"
     description = (

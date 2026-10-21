@@ -4,19 +4,66 @@
 from __future__ import annotations
 
 import re
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
 
 from opseval.models.profile import FrameKind
-from opseval.models.record import FrameRecord, InterruptRecord, RunRecord, TerminalState
+from opseval.models.record import (
+    SCRIPT_EXHAUSTED,
+    FrameRecord,
+    InterruptRecord,
+    RunRecord,
+    TerminalState,
+)
 from opseval.models.results import UNREAD_REPLIES, Axis, ScoreResult
 from opseval.models.scenario import RESERVED_STOP_AT, ScorerSpec
 from opseval.paths import dig
 from opseval.redaction import strip_markers
-from opseval.scoring.base import Scorer, ScoringContext, register
+from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
+
+
+# The params each scorer takes, checked when a scenario loads (ADR-0043). Strict, so YAML's
+# "false" is refused rather than read as a truthy string at run time.
+class ConnectionStableParams(NoParams):
+    ignore_codes: list[int] = Field(default_factory=list)
+    """Close codes to tolerate."""
+
+
+class TurnBudgetParams(NoParams):
+    budget: int | None = Field(default=None, ge=1)
+    """Customer turns allowed; the scenario's max_turns when unset."""
+
+
+class PhaseOrderParams(NoParams):
+    allow_gaps: bool = False
+    """Allow phases to be skipped, as long as the order holds."""
+
+
+class PayloadEqualsParams(NoParams):
+    checkpoint: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    """Dotted path into the checkpoint payload (a number indexes a list)."""
+    equals: Any
+    """The value it must have (any JSON value, null included)."""
+
+
+class RequiredFieldsParams(NoParams):
+    checkpoint: str = Field(min_length=1)
+    fields: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+    """Dotted paths that must be present and not empty."""
+
+
+class LanguageScriptParams(NoParams):
+    script: Literal["arabic", "latin"] = "arabic"
+    min_fraction: float | None = Field(default=None, ge=0, le=1)
+    """Share of agent messages that must be in the script; the threshold when unset."""
 
 
 @register
 class NoErrors(Scorer):
     id = "conversation.no_errors"
+    Params = NoParams
     axis = Axis.FLOW
     description = "Fails if the agent sent any error frame."
 
@@ -25,9 +72,53 @@ class NoErrors(Scorer):
         return self.result(spec, 0.0 if errors else 1.0, error_frames=errors)
 
 
+ANSWER_KINDS = frozenset({FrameKind.NEEDS_HUMAN, FrameKind.RESULT, FrameKind.ERROR})
+"""Frames that answer a turn without words: a checkpoint, a result, an error."""
+
+
+@register
+class AgentReplied(Scorer):
+    """ADR-0043: the agent answered every customer turn.
+
+    Agent-facing, unlike ``protocol.replies_read``: the profile read the agent's replies, and
+    a turn that got nothing back (no text, or only whitespace, and no checkpoint, result or
+    error) is the agent saying nothing. Without this, a silent agent passed every frame check
+    a scripted smoke suite had (ATTENTION I10).
+    """
+
+    id = "conversation.agent_replied"
+    Params = NoParams
+    axis = Axis.FLOW
+    description = (
+        "Every customer turn got an answer: words, a checkpoint, a result or an error. "
+        "A turn answered with nothing, or with only blank text, fails."
+    )
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        turns: list[int] = []
+        answered: list[bool] = []
+        for frame in record.frames:
+            if frame.direction == "sent" and frame.kind in (
+                FrameKind.USER_MESSAGE,
+                FrameKind.RESUME,
+            ):
+                turns.append(frame.seq)
+                answered.append(False)
+            elif frame.direction == "received" and turns and not answered[-1]:
+                worded = frame.text is not None and bool(strip_markers(frame.text).strip())
+                answered[-1] = worded or frame.kind in ANSWER_KINDS
+        if not turns:
+            return self.result(spec, 1.0, vacuous=True, note="no customer turn was sent")
+        silent = [n for n, ok in enumerate(answered, start=1) if not ok]
+        return self.result(
+            spec, (len(turns) - len(silent)) / len(turns), turns=len(turns), unanswered=silent
+        )
+
+
 @register
 class ConnectionStable(Scorer):
     id = "conversation.connection_stable"
+    Params = ConnectionStableParams
     axis = Axis.FLOW
     description = (
         "Fails if the agent dropped the connection, even when the session was resumed "
@@ -50,6 +141,7 @@ class ConnectionStable(Scorer):
 @register
 class TurnBudget(Scorer):
     id = "conversation.turn_budget"
+    Params = TurnBudgetParams
     axis = Axis.FLOW
     description = "Customer turns used versus a budget (params.budget, default max_turns)."
 
@@ -66,6 +158,7 @@ class TurnBudget(Scorer):
 @register
 class PhaseOrder(Scorer):
     id = "flow.phase_order"
+    Params = PhaseOrderParams
     axis = Axis.FLOW
     description = "Phases first appear in profile order without skipping (params.allow_gaps)."
 
@@ -94,6 +187,7 @@ class PhaseOrder(Scorer):
 @register
 class RejectionRouting(Scorer):
     id = "flow.rejection_routing"
+    Params = NoParams
     axis = Axis.FLOW
     description = "After each rejection, the agent returns to the expected target phase."
 
@@ -125,13 +219,17 @@ class RejectionRouting(Scorer):
 @register
 class TerminalStateScorer(Scorer):
     id = "output.terminal_state"
+    Params = NoParams
+    version = "2"  # 2: the default stop_at with no commit gate expects goal_reached (ADR-0043)
     axis = Axis.OUTPUT
     description = "The conversation ended where the scenario's stop_at says it should."
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
         stop_at = ctx.scenario.conversation.stop_at
         if stop_at == "commit_gate":
-            stop_at = ctx.profile.commit_gate or stop_at
+            # Stop before the irreversible step, if there is one; with no commit gate the
+            # conversation runs to its goal (ADR-0043).
+            stop_at = ctx.profile.commit_gate or "goal_reached"
         observed = record.terminal_state
         last_checkpoint = record.interrupts[-1].checkpoint if record.interrupts else None
         if stop_at == "outcome_committed":
@@ -148,7 +246,7 @@ class TerminalStateScorer(Scorer):
                 "COMMIT_GUARD: Opseval refused to answer the commit gate, so the intended "
                 "end state could not be reached",
             )
-        return self.result(
+        result = self.result(
             spec,
             1.0 if ok else 0.0,
             expected=stop_at,
@@ -156,6 +254,13 @@ class TerminalStateScorer(Scorer):
             last_checkpoint=last_checkpoint,
             stop_reason=record.stop_reason,
         )
+        if SCRIPT_EXHAUSTED not in record.notes:
+            return result
+        note = (
+            "the scripted turns ran out: this shows the conversation ran to its end without an "
+            "error, a timeout or a stop, not that the customer's goal was met"
+        )
+        return result.model_copy(update={"details": {**result.details, "note": note}})
 
 
 _dig = dig  # objects by key, lists by index (opseval.paths)
@@ -164,6 +269,7 @@ _dig = dig  # objects by key, lists by index (opseval.paths)
 @register
 class PayloadEquals(Scorer):
     id = "output.payload_equals"
+    Params = PayloadEqualsParams
     axis = Axis.OUTPUT
     # 2: a checkpoint the profile does not declare is BAD_PARAMS, not a failure.
     # 3: a numeric path step indexes a list (opseval.paths.dig).
@@ -222,6 +328,7 @@ def _unknown_checkpoint(checkpoint: str, ctx: ScoringContext) -> str | None:
 @register
 class RequiredFields(Scorer):
     id = "output.required_fields"
+    Params = RequiredFieldsParams
     axis = Axis.OUTPUT
     version = "2"  # 2: a numeric path step indexes a list (opseval.paths.dig)
     description = (
@@ -269,6 +376,7 @@ LATIN = re.compile(r"[A-Za-z]")
 @register
 class LanguageScript(Scorer):
     id = "output.language_script"
+    Params = LanguageScriptParams
     axis = Axis.OUTPUT
     description = "Share of agent messages written mainly in the expected script (arabic|latin)."
 
@@ -300,6 +408,7 @@ class ProbesPassed(Scorer):
     """FR-RUN-07: the agent answered the raw protocol probes as the profile declares."""
 
     id = "protocol.probes_passed"
+    Params = NoParams
     axis = Axis.OUTPUT
     description = "Every protocol probe the profile declares got the answer it expects."
 
@@ -374,6 +483,7 @@ class RepliesRead(Scorer):
     """
 
     id = UNREAD_REPLIES
+    Params = NoParams
     axis = Axis.HARNESS
     description = (
         "Always on. Invalidates the attempt when the agent sent frames but the profile read "
