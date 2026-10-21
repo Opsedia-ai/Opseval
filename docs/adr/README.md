@@ -46,5 +46,6 @@
 | [0042](0042-read-the-reply-on-the-agents-clock.md) | Read the agent's reply, on the agent's clock: an always-on harness check that a profile read anything, and request/response turns timed from when sending began | Proposed |
 | [0045](0045-jira-sink.md) | An issue for each failed critical scenario in Jira (Cloud and Data Center): the marker is a label | Proposed |
 | [0046](0046-credential-provider-plugins.md) | Credential provider plugins: named to be used, fail closed, every failure a harness error | Proposed |
+| [0047](0047-server-mode-on-postgres.md) | Server mode on Postgres, the Langfuse model: a versioned catalogue first, then runs, accounts and workers | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

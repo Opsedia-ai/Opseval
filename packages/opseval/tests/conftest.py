@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import os
+import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import pytest
 
@@ -50,3 +54,34 @@ def make_scenario(**overrides: Any) -> Scenario:
         else:
             base[key] = value
     return Scenario.model_validate(base)
+
+
+@pytest.fixture
+async def pg_url() -> AsyncIterator[str]:
+    """A fresh, empty Postgres database for one test (server mode, ADR-0047).
+
+    ``OPSEVAL_TEST_DATABASE_URL`` names a server the tests may create databases on (``make
+    db-up`` starts one). Without it the test is skipped on a laptop, but in CI it fails: the
+    database tests must never be skipped silently where they are the only proof.
+    """
+    admin = os.environ.get("OPSEVAL_TEST_DATABASE_URL")
+    if not admin:
+        if os.environ.get("CI"):
+            pytest.fail("OPSEVAL_TEST_DATABASE_URL is not set: CI must run the database tests")
+        pytest.skip("no OPSEVAL_TEST_DATABASE_URL: start one with `make db-up`")
+    import asyncpg
+
+    name = f"opseval_t_{uuid.uuid4().hex[:12]}"
+    conn = await asyncpg.connect(admin)
+    try:
+        await conn.execute(f'CREATE DATABASE "{name}"')
+    finally:
+        await conn.close()
+    try:
+        yield urlunparse(urlparse(admin)._replace(path=f"/{name}"))
+    finally:
+        conn = await asyncpg.connect(admin)
+        try:
+            await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        finally:
+            await conn.close()

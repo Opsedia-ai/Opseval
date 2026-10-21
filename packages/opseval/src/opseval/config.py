@@ -164,6 +164,12 @@ class Settings(BaseSettings):
     """The built web console (``packages/console/dist``) for ``opseval serve`` to serve.
     When unset, a source checkout's build is found on its own (ADR-0034)."""
 
+    # Server mode on Postgres, the Langfuse model (ADR-0047).
+    database_url: SecretStr | None = None
+    """Postgres for server mode: ``postgresql://user:password@host:5432/opseval``. It carries
+    a password, so it is a secret. Its host must be allowlisted, and a host other than
+    localhost needs TLS (``?ssl=require``, ``verify-ca`` or ``verify-full``)."""
+
     def __init__(self, **values: Any) -> None:
         super().__init__(**values)
         # The .env this instance was actually built from: an explicit ``_env_file`` (None
@@ -204,6 +210,7 @@ SECRET_FIELDS = (
     "webhook_url",
     "github_token",
     "jira_token",
+    "database_url",
 )
 
 
@@ -249,4 +256,36 @@ def check_url_allowed(url: str, allowlist: set[str], *, secure_schemes: tuple[st
         raise AllowedHostError(
             f"{parsed.scheme}://{host} must use one of {secure_schemes} "
             "(plain schemes are allowed only on localhost)"
+        )
+
+
+TLS_VERIFIED = ("verify-ca", "verify-full")
+"""``ssl`` modes that check the server's certificate, as HTTPS does for every other destination.
+``require`` encrypts but accepts any certificate, so anyone on the path can answer in the
+database's place; ``prefer`` and ``allow`` can fall back to plain text."""
+
+
+def check_database_host(host: str, ssl_modes: list[str], allowlist: set[str]) -> None:
+    """Raise :class:`AllowedHostError` unless a database at ``host`` may receive data.
+
+    The rule every destination follows (``check_url_allowed``): the host is allowlisted, and
+    anything but loopback is encrypted *and authenticated*. Postgres has no TLS-only URL scheme,
+    so TLS is read from the ``ssl`` modes the connection will use. The URL itself, which
+    carries a password, is never repeated. ``opseval.db.engine`` decides the host and modes from
+    the URL exactly as the driver will, so this cannot be shown one host and connect to another.
+    """
+    host = host.lower()
+    if not host:
+        raise AllowedHostError("database URL has no host; use postgresql://…@host:5432/db")
+    if host not in allowlist:
+        raise AllowedHostError(
+            f"database host {host!r} is not in OPSEVAL_ALLOWED_HOSTS; add it explicitly to allow it"
+        )
+    if _is_local(host):
+        return
+    if not ssl_modes or any(m not in TLS_VERIFIED for m in ssl_modes):
+        raise AllowedHostError(
+            f"postgresql://{host} must use verified TLS: add ?ssl=verify-full (and "
+            "&sslrootcert=/path/ca.pem for a private CA, such as a cloud provider's); "
+            "plain or unverified connections are allowed only on localhost"
         )

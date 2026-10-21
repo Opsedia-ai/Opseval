@@ -564,6 +564,24 @@ CLI started it; a run that stopped early says why, and what it did not run is li
 only when valid and never over a newer version of the file; new ones start from a template. See
 [ADR-0029](docs/adr/0029-console-api.md).
 
+## Server mode (preview)
+
+The catalogue can live in Postgres, versioned the way Langfuse versions prompts (ADR-0047):
+numbered versions of every scenario, suite and profile, and labels such as `production` that
+point at one version each.
+
+```bash
+pip install 'opseval[server]' && make db-up
+export OPSEVAL_DATABASE_URL=postgresql://opseval:opseval@127.0.0.1:5433/opseval OPSEVAL_ALLOWED_HOSTS=127.0.0.1
+opseval db upgrade && opseval db init --project acme/support-bot
+opseval catalogue push ./my-catalogue --project acme/support-bot --label production
+opseval catalogue pull ./release --project acme/support-bot --label production
+```
+
+A push is checked exactly like `opseval validate`, and one problem stores nothing. A pull is an
+ordinary folder for `opseval run`. The console, runs, accounts and workers move to the
+database next; see [the server mode guide](docs/guide/server-mode.md).
+
 ## Publish a finished run
 
 ```bash

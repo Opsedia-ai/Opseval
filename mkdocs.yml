@@ -24,6 +24,7 @@ nav:
       - Concepts: guide/concepts.md
       - SUT profile guide: guide/profile.md
       - Cookbook: guide/cookbook.md
+      - Server mode (preview): guide/server-mode.md
   - Reference:
       - Scorers: reference/scorers.md
       - Settings: reference/settings.md

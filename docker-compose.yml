@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Opseval server mode (ADR-0047), the Langfuse model: one web container (UI and API), one
+# worker, Postgres for everything transactional, S3-compatible storage for run records.
+# Today this file runs the Postgres that `opseval db`, `opseval catalogue` and the database
+# tests use; the web and worker services join it as server mode lands.
+#
+#   make db-up      start it (listens on 127.0.0.1 only)
+#   make db-down    stop it (the data volume is kept)
+name: opseval
+services:
+  postgres:
+    image: postgres@sha256:cf2a05fe40887b721e4b3dbac8fd32673c08292dcc8ba6b62b52b7f640433bd0 # 16
+    environment:
+      POSTGRES_USER: opseval
+      POSTGRES_PASSWORD: ${OPSEVAL_PG_PASSWORD:-opseval}
+      POSTGRES_DB: opseval
+    ports:
+      - "127.0.0.1:${OPSEVAL_PG_PORT:-5433}:5432"
+    volumes:
+      - opseval_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opseval"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+volumes:
+  opseval_pg:

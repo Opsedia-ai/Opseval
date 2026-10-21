@@ -45,6 +45,8 @@ packages/opseval/src/opseval/
   sinks/         publish a finished run: webhook, Langfuse scores (ADR-0027), GitHub/Jira issues (issues.py base)
   testing.py     public contract test kit for plugin authors (ADR-0022)
   reporting/     self-contained HTML report, console summary, JUnit XML, Markdown gate summary
+  db/            server mode on Postgres (ADR-0047, `server` extra): schema, Alembic migrations, the
+                 versioned catalogue (push/label/pull), `opseval db` and `opseval catalogue` commands
   server/        `opseval serve`: HTTP API for the console — schemas (wire), views (pure reads),
                  actions (the writes), app (routes). No evaluation logic (ADR-0029)
   scaffold/      `opseval init` templates
@@ -69,6 +71,7 @@ uv run opseval demo --bug skip-approval   # → exit 1   (also: forget-method �
 uv run opseval init /tmp/x && uv run opseval validate /tmp/x/suites/full.yaml --profile /tmp/x/profile.yaml
 
 uv run opseval serve --target ws://127.0.0.1:8765   # API on :8000 (loopback only, no auth yet)
+make db-up                   # Postgres for server mode and its tests (127.0.0.1:5433); prints the env to export
 make console                 # the web console on :5173, proxying /api to :8000 (needs Node 22.22+ or 24.15+)
 make console-check           # typecheck + build the console (runs in CI)
 docker build -t opseval . && docker run --rm opseval demo   # the CLI image (ADR-0038)
@@ -138,6 +141,8 @@ Definition of done for any change: `make check` is green (which now includes `op
 - v0.2 started: Langfuse trace reader and trace-backed tool scorers (`tools.expected_called`, `tools.forbidden_not_called`, `tools.ordering`, `tools.call_success`). The reader is verified against a real self-hosted Langfuse 4.44 (`scripts/langfuse_smoke.py`, ADR-0011); not yet against Langfuse Cloud.
 - CI: `.github/workflows/ci.yml` runs lint, import-linter contracts (core never imports `ee/`; models are a leaf; scorers never touch transports), bandit, `mypy --strict`, pytest (`--cov-fail-under=85`) and the demo exit-code checks (0/1/1/3) on Python 3.11–3.13, plus an `audit` job (pip-audit, licence allowlist) and a `console` job on Node 22 (`npm ci && npm test && npm run build`; Vitest pins the one rule as the console draws it). `release.yml` publishes on `v*` tags (do not tag until Gate 0 is closed). `uv.lock` is committed; run `uv lock` after changing dependencies.
 - PyPI: the name `opseval` is reserved (0.0.1 placeholder). Real releases should publish from `release.yml` via a PyPI Trusted Publisher (environment `pypi`).
+
+- Server mode on Postgres, the Langfuse model (ADR-0047), first step: `opseval.db` (SQLAlchemy 2 async + asyncpg, never psycopg: LGPL) behind the optional `server` extra; an import contract keeps the run path free of it. Alembic migrations ship in the package (`opseval db upgrade|status`, version table `opseval_schema_version`); a test fails if migrations and models drift. `OPSEVAL_DATABASE_URL` is a secret, allowlisted as the driver will connect (`db.engine.checked_url`: only `ssl`/`sslmode`/`sslrootcert` parameters, parser-ambiguous hosts refused), verified TLS (`verify-ca|verify-full`, `sslrootcert` for a private CA; `require` refused) off loopback; upgrades hold an advisory lock. Catalogue items (scenario/suite/profile) have immutable versions and labels like Langfuse prompts: `catalogue push` validates a folder with the loader (suite defaults applied; all or nothing; aliases, >256 KB, out-of-folder links refused), every file a suite selects must be stored (`catalogue.suite_files`), stored paths are where the file sits (links too), an unchanged file adds no version, `--label` moves to every pushed item and leaves the rest, and every push moves `latest` the same way (the last push; never set by hand); pushes/label moves lock the project `FOR UPDATE`, pulls `FOR SHARE`; `catalogue pull` writes a label into a new/empty folder for `opseval run`. Every `opseval db`/`catalogue` command works, with an install hint, in a base install without SQLAlchemy (subprocess test). DB tests use `conftest.pg_url` (a fresh database each; `OPSEVAL_TEST_DATABASE_URL`, skipped locally, **failing in CI** where a pinned Postgres service runs). Next: the console on the DB catalogue and the guided scenario form (D14), then runs, accounts/API keys, workers.
 
 ## Next up (suggested order)
 

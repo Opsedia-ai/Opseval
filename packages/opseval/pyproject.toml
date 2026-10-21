@@ -30,6 +30,14 @@ serve = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
 ]
+# Server mode on Postgres, the Langfuse model (ADR-0047). asyncpg rather than psycopg:
+# psycopg is LGPL, which the dependency licence allowlist does not admit.
+server = [
+    "opseval[serve]",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+]
 
 [tool.hatch.version]
 path = "src/opseval/__init__.py"
