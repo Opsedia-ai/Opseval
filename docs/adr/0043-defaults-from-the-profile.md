@@ -123,6 +123,52 @@ the agent declines and does not carry out the request, and `rubric()` gains `kin
 What a scripted scenario cannot show, `conversation.agent_replied` and the content checks still
 to come will.
 
+### What the review of the first version changed
+
+A silent-agent check is only as fair as the harness's idea of an answer, so these are part of
+this decision:
+
+- **One rule for an answer, `SutProfile.answers`, used by the driver and the check.** An answer
+  is any of:
+  - words: blank text is not, but a redaction marker is, because it stands for words the agent
+    did say;
+  - a checkpoint, a result or an error;
+  - tool calls the agent asked the client to run.
+
+  A handshake or a notification is not an answer, even with text ("typing…").
+- **The driver waits for an answer (closes I12).** On a streaming transport the turn's own deadline
+  applies until an answer arrives. Before, any first frame, a typing notification included,
+  started the quiet timer: the customer replied first, and the agent's answer was filed under the
+  next turn, which `agent_replied` would have failed. On request/response transports the whole
+  reply is already there, so nothing changes.
+- **Frames prove a tool ran, never that it did not (D11 as recommended; closes I11).**
+  - **Not measured, not failed.** Without traces, a `must_call` tool missing from the frames is
+    *not measured*, and an `ordering` rule whose first tool never appears is unverifiable. The
+    agent may run tools on its own server.
+  - **Opting in.** A profile sets `tool_calls_complete: true` when its frames report every call.
+    The reference agent does, so its profile says so and the demo's results are unchanged.
+  - `tools.expected_called` and `tools.ordering` are version 2.
+- **A committing tool needs a commit gate.** A profile with `commits: true` on a tool and no
+  `commit_gate` no longer loads, as a `committed_outcome` without one already did (ADR-0008
+  amendment). With `stop_at` left out such a profile would otherwise run straight to the
+  irreversible step.
+- **Params refer to the profile too.** `Scorer.check_params(params, profile)` lets
+  `output.payload_equals` and `output.required_fields` refuse, at load, a checkpoint the profile
+  does not declare. An explicit `null` param means "left out" at run time as it does at load.
+- **Plugins.**
+  - **Not a model:** a `Params` that is not a Pydantic model is a contract error.
+  - **Inherited:** a plugin that inherits a built-in base's `Params` (a `Judge` subclass) is
+    treated as declaring none, so its params stay unchecked as before.
+  - **The pytest plugin** now checks params at collection too.
+- **Refusal is the goal judge's alone.**
+  - `judge.goal_achievement` (version 3) adds the refusal line and `kind=refusal`. Other judges'
+    prompts and rubrics are unchanged.
+  - `opseval rescore` now compares rubric digests against the run's own snapshot too, whenever the
+    old score has one. A refusal graded the old way is therefore never reused, while every
+    completion scenario's digest, and so its score, is unchanged.
+- **The console's persona playground** says the script ran out (`scriptExhausted`) instead of
+  "goal reached".
+
 ## Consequences
 
 - A chatbot on `scorers: default` can read "Safe to release". A scenario's tool expectations are

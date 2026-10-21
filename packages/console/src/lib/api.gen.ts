@@ -351,6 +351,7 @@ export interface RehearseIn {
 export interface RehearseOut {
   turn: Turn;
   goalReached: boolean;
+  scriptExhausted: boolean;
   model: string | null;
 }
 

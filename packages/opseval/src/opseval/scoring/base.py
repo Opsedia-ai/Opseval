@@ -63,6 +63,12 @@ class Scorer(ABC):
     declares one (:class:`NoParams` when it takes none); a plugin that does not is unchecked,
     and ``validate`` says so."""
 
+    @classmethod
+    def check_params(cls, params: BaseModel, profile: SutProfile) -> list[str]:
+        """Problems with valid ``params`` against the profile, found when a scenario loads
+        (``field: message``, the field relative to ``params``). Default: none."""
+        return []
+
     @abstractmethod
     async def score(
         self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext
@@ -114,9 +120,10 @@ def infra_error(
 def describe_params(cls: type[Scorer]) -> str | None:
     """The params a scorer takes, ``name*`` when required; ``""`` for none; ``None`` when it
     does not say (a plugin without a ``Params`` model, whose params go unchecked)."""
-    if cls.Params is None:
+    model = cls.Params
+    if not (isinstance(model, type) and issubclass(model, BaseModel)):
         return None
-    fields = cls.Params.model_fields.items()
+    fields = model.model_fields.items()
     return ", ".join(f"{name}{'*' if info.is_required() else ''}" for name, info in fields)
 
 

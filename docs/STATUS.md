@@ -56,7 +56,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SIM-04 | Planted injections | M | v0.2 | Done | `conversation.injections` (ADR-0014) |
 | FR-SIM-05 | Checkpoint decisions | M | v0.1 | Done | `Simulator.decide` |
 | FR-SIM-06 | Simulator fault is a harness error | M | v0.1 | Done | fault-injection suite |
-| FR-SIM-07 | Persona playground | S | v0.5 | Done | console Simulator page, `POST /simulator/rehearse` |
+| FR-SIM-07 | Persona playground | S | v0.5 | Done | console Simulator page, `POST /simulator/rehearse`; a scripted persona that runs out says so (`scriptExhausted`), never "goal reached" (ADR-0043) |
 | FR-RUN-01 | Pluggable transports | M | v0.1 | Done | websocket, http-json, sse, openai-chat, python (API only) |
 | FR-RUN-02 | SUT profile | M | v0.1 | Done | `models/profile.py` |
 | FR-RUN-03 | Credentials | M | v0.1 | Done | static and HS256 with refresh (ADR-0012), per-tenant tokens (ADR-0041), and `opseval.credentials` provider plugins: fail-closed discovery, every provider failure a harness error (ADR-0046) |
@@ -79,7 +79,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SCR-01 | Three-state scores | M | v0.1 | Done | `ScoreResult` validator |
 | FR-SCR-02 | Axes | M | v0.1 | Done | `Axis` |
 | FR-SCR-03 | Deterministic scorers | M | v0.1 | Done | every listed scorer, including `output.required_fields` (present and non-empty payload fields) beside `output.payload_equals`; `conversation.agent_replied`: a turn the agent leaves unanswered, or answers with blank text, fails (ADR-0043) |
-| FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Done | expected/forbidden/ordering/call_success/args_valid, `tools.approval_gated` and `flow.checkpoint_gating` (traces, else degraded frame evidence; `TRACE_UNAVAILABLE` when nothing is visible) |
+| FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Done | expected/forbidden/ordering/call_success/args_valid, `tools.approval_gated` and `flow.checkpoint_gating` (traces, else degraded frame evidence; `TRACE_UNAVAILABLE` when nothing is visible); from frames alone a tool missing is *not measured* unless the profile sets `tool_calls_complete` (ADR-0043) |
 | FR-SCR-05 | LLM judges with quoted ballots | M | v0.1 | Done | `scoring/judges.py`; the conversation is fenced JSON-lines data with harness facts outside (ADR-0036) |
 | FR-SCR-06 | Quality and security judges | M | v0.2 | Done | ADR-0014, ADR-0016 |
 | FR-SCR-07 | Judge audit trail | M | v0.1 | Done | prompt hash, quotes, model; rubric digests (ADR-0017) |
@@ -107,7 +107,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not; only the ones a suite uses are built), every preflight probe (exit 3 when refused), Langfuse, sinks, telemetry (`check_url_allowed`; errors show only scheme and host) |
 | FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes and allowlist errors name only the host |
 | FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Done | one exclusive lease per scenario; a lock that cannot be read counts as held; no free tenant is a skip, never a shared account; tokens named, never stored (ADR-0041) |
-| FR-SAF-04 | Committed-outcome guard | M | v0.1 | Done | CLI and console (`serve --allow-commit`, ADR-0031); a `committed_outcome` without a `commit_gate` is a load error (ADR-0008 amendment) |
+| FR-SAF-04 | Committed-outcome guard | M | v0.1 | Done | CLI and console (`serve --allow-commit`, ADR-0031); a `committed_outcome` without a `commit_gate` is a load error (ADR-0008 amendment); a tool with `commits: true` needs a `commit_gate` too (ADR-0043) |
 | FR-SAF-05 | Artifact cleanup planning | S | v0.5 | Missing | not started |
 | FR-SAF-06 | Retention | M | v0.5 | Done | `opseval prune` (dry run unless `--yes`, `OPSEVAL_RETENTION_DAYS` default 90; never a run that may still be going; ADR-0037) |
 | FR-SAF-07 | Content-free telemetry | M | v0.1 | Done | implemented, ships dark (ADR-0021) |

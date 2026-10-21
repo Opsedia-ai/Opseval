@@ -157,21 +157,26 @@ class _Rescorer:
         # prompt_hash is a class property, so it cannot see scenario-supplied criteria
         # (the goal, the persona language, the policy rules). The rubric digest does.
         #
-        # Only worth checking when the scenarios came from --catalogue. Against the run's
-        # own snapshot the scenario *is* the one that produced the score, so the rubric
-        # cannot have changed, and comparing digests there can only refuse a score for a
-        # harness-version reason - which would drop every pre-upgrade judge out of the
-        # measured set and let a mixed suite report green with its judges gone.
-        if self.scenario_source == "catalogue":
-            old_rubric = old.details.get("rubric_hash")
-            if old_rubric != fresh.details.get("rubric_hash"):
+        # Against --catalogue, a different digest means the scenario changed. Against the
+        # run's own snapshot the scenario is the one that was graded, but how a judge reads it
+        # can still change (a refusal scenario is graded as one since ADR-0043), so a score
+        # with a digest is compared there too. One from before digests existed is reused
+        # against its own snapshot: refusing it would only say the harness is newer, and an
+        # unmeasured judge would no longer let the run read "Safe to release" anyway.
+        old_rubric = old.details.get("rubric_hash")
+        if (self.scenario_source == "catalogue" or old_rubric is not None) and (
+            old_rubric != fresh.details.get("rubric_hash")
+        ):
+            if old_rubric is None:
                 why = (
                     "it predates rubric digests, so the scenario it was graded against "
                     "cannot be verified"
-                    if old_rubric is None
-                    else "the scenario data it grades against changed"
                 )
-                return self._unavailable(fresh, spec, cls, why)
+            elif self.scenario_source == "catalogue":
+                why = "the scenario data it grades against changed"
+            else:
+                why = "how the judge reads this scenario changed since the run"
+            return self._unavailable(fresh, spec, cls, why)
         self.reused += 1
         return old.model_copy(update={"details": {**old.details, "reused": True}})
 

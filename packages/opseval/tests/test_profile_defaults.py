@@ -376,3 +376,310 @@ class TestRunningOutOfScriptedTurns:
         terminal = (await score(record, scenario))["output.terminal_state"]
         assert terminal.status is ScoreStatus.PASSED
         assert "not that the customer's goal was met" in terminal.details["note"]
+
+
+# --- review of #71 ------------------------------------------------------------------------
+
+
+class _Streaming:
+    """A streaming session (replies_in_send False) whose agent answers late after a typing frame."""
+
+    def __init__(self, script: list[list[tuple[float, dict[str, Any]]]]) -> None:
+        import asyncio
+
+        from opseval.transport.base import Session
+
+        self.script = list(script)
+        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        outer = self
+
+        class S(Session):
+            async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
+                for delay, out in outer.script.pop(0) if outer.script else []:
+                    asyncio.get_running_loop().call_later(delay, outer.queue.put_nowait, out)
+
+            async def receive(self, timeout: float) -> Any:
+                from opseval.errors import TransportTimeout
+
+                try:
+                    return await asyncio.wait_for(outer.queue.get(), timeout)
+                except TimeoutError as exc:
+                    raise TransportTimeout("quiet") from exc
+
+            async def close(self) -> None:
+                return None
+
+        self.session = S()
+
+    @property
+    def target(self) -> str:
+        return "stream:test"
+
+    async def connect(self) -> Any:
+        return self.session
+
+
+TYPING = SutProfile.model_validate(
+    {
+        "name": "ws",
+        "kinds": {"message": "message", "typing": "notification"},
+        "phase_field": None,
+        "turn_quiet_ms": 100,
+    }
+)
+
+
+async def drive_stream(scenario: Scenario, transport: Any, profile: SutProfile = TYPING) -> Any:
+    record = await Driver(
+        scenario=scenario,
+        profile=profile,
+        transport=transport,
+        simulator=ScriptedSimulator(scenario, 1),
+        run_id="r",
+        attempt_index=0,
+        seed=1,
+    ).run()
+    return record, await score(record, scenario, profile)
+
+
+class TestReviewOf71:
+    async def test_a_reply_after_a_typing_frame_is_the_turns_answer(self) -> None:
+        # I12: the quiet timer (100 ms) used to end the turn at the typing frame, so the
+        # reply 300 ms later was filed under the next turn and agent_replied failed turn 1.
+        typing = {"type": "typing", "text": "…"}
+        transport = _Streaming(
+            [
+                [(0.0, typing), (0.3, {"type": "message", "text": "We open at 9."})],
+                [(0.0, typing), (0.3, {"type": "message", "text": "Sundays too."})],
+            ]
+        )
+        record, scores = await drive_stream(chat_scenario(), transport)
+        assert scores["conversation.agent_replied"].status is ScoreStatus.PASSED
+        order = [(f.direction, f.text) for f in record.frames if f.text and f.text != "…"]
+        assert order == [
+            ("sent", "When are you open?"),
+            ("received", "We open at 9."),
+            ("sent", "And on Sundays?"),
+            ("received", "Sundays too."),
+        ]
+
+    async def test_a_typing_frame_alone_is_not_an_answer(self) -> None:
+        # Streaming: the driver waits for an answer until the turn's deadline (TIMEOUT).
+        transport = _Streaming([[(0.0, {"type": "typing", "text": "Agent is thinking..."})]])
+        scenario = chat_scenario(execution={"repeats": 1, "turn_timeout_seconds": 0.3})
+        record, scores = await drive_stream(scenario, transport)
+        assert record.terminal_state is TerminalState.TIMEOUT
+        assert scores["conversation.agent_replied"].status is ScoreStatus.FAILED
+
+    async def test_a_notification_with_text_does_not_answer_on_http_either(self) -> None:
+        scenario = chat_scenario()
+        record = await attempt(scenario, say({"type": "typing", "text": "thinking..."}), TYPING)
+        replied = (await score(record, scenario, TYPING))["conversation.agent_replied"]
+        assert replied.status is ScoreStatus.FAILED
+
+    async def test_a_reply_that_is_only_a_credential_was_an_answer(self) -> None:
+        scenario = chat_scenario(conversation={"scripted_turns": ["My new key?"]})
+        record = await attempt(
+            scenario, say({"type": "message", "text": "sk-proj-abcdefghij1234567890"})
+        )
+        assert record.frames[1].text == "[redacted:openai_key]"
+        replied = (await score(record, scenario))["conversation.agent_replied"]
+        assert replied.status is ScoreStatus.PASSED
+
+    async def test_a_reply_of_only_tool_calls_was_an_answer(self) -> None:
+        profile = SutProfile.model_validate(
+            {**CHAT.model_dump(), "tool_calls_field": "tool_calls", "tools": {"lookup": {}}}
+        )
+        scenario = chat_scenario(conversation={"scripted_turns": ["Find order 1"]})
+        reply = {"type": "message", "text": "", "data": {"tool_calls": [{"name": "lookup"}]}}
+        record = await attempt(scenario, say(reply), profile)
+        replied = (await score(record, scenario, profile))["conversation.agent_replied"]
+        assert replied.status is ScoreStatus.PASSED
+
+    def test_a_committing_tool_needs_a_commit_gate(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="commit an irreversible outcome"):
+            SutProfile.model_validate({**CHAT.model_dump(), "tools": {"pay": {"commits": True}}})
+
+    async def test_a_null_param_means_left_out_at_run_time_too(self) -> None:
+        scenario = chat_scenario(
+            scorers=[
+                {"id": "conversation.turn_budget", "params": {"budget": None}},
+                {
+                    "id": "output.language_script",
+                    "params": {"script": "latin", "min_fraction": None},
+                },
+            ]
+        )
+        assert check_references(scenario, CHAT, REGISTRY, set(INVARIANTS)) == []
+        record = await attempt(scenario, say({"type": "message", "text": "We open at nine."}))
+        scores = await score(record, scenario)
+        assert scores["conversation.turn_budget"].status is ScoreStatus.PASSED
+        assert scores["output.language_script"].status is ScoreStatus.PASSED
+
+    def test_a_checkpoint_named_in_params_must_exist(self, profile: SutProfile) -> None:
+        scenario = make_scenario(
+            scorers=[
+                {
+                    "id": "output.payload_equals",
+                    "params": {"checkpoint": "proposal_aproval", "path": "x", "equals": 1},
+                }
+            ]
+        )
+        errors = check_references(scenario, profile, REGISTRY, set(INVARIANTS))
+        assert any(
+            e.startswith("scorers.0.params.checkpoint: output.payload_equals:") for e in errors
+        )
+
+    async def test_a_tool_missing_from_frames_is_not_measured(self) -> None:
+        profile = SutProfile.model_validate(
+            {
+                **CHAT.model_dump(),
+                "tool_calls_field": "tool_calls",
+                "tools": {"search": {}, "b": {}},
+            }
+        )
+        scenario = chat_scenario(
+            expectations={
+                "expected_tools": {
+                    "must_call": ["search"],
+                    "ordering": [{"before": "search", "after": "b"}],
+                }
+            }
+        )
+        reply = {"type": "message", "text": "Here.", "data": {"tool_calls": [{"name": "b"}]}}
+        record = await attempt(scenario, say(reply, reply), profile)
+        scores = await score(record, scenario, profile)
+        # The agent may have searched on its own server: absence in frames is not proof.
+        assert scores["tools.expected_called"].status is ScoreStatus.INFRA_ERROR
+        assert scores["tools.ordering"].status is ScoreStatus.INFRA_ERROR
+        complete = SutProfile.model_validate({**profile.model_dump(), "tool_calls_complete": True})
+        scores = await score(record, scenario, complete)
+        assert scores["tools.expected_called"].status is ScoreStatus.FAILED
+        assert scores["tools.ordering"].status is ScoreStatus.FAILED
+
+    def test_a_plugin_params_that_is_not_a_model_is_refused(self) -> None:
+        from opseval.errors import ConfigError
+        from opseval.plugins import check_contract
+
+        class Odd(Scorer):
+            id = "acme.odd"
+            axis = REGISTRY["conversation.no_errors"].axis
+
+            class Params:  # not a pydantic model
+                pass
+
+            async def score(self, record: Any, spec: Any, ctx: Any) -> Any:  # pragma: no cover
+                raise NotImplementedError
+
+        with pytest.raises(ConfigError, match="must be a pydantic model"):
+            check_contract(Odd, source="acme")
+
+    def test_a_plugin_judge_keeps_its_own_params(self) -> None:
+        from opseval.plugins import check_contract
+        from opseval.scoring.judges import Judge
+
+        class MyJudge(Judge):
+            id = "acme.judge"
+            axis = REGISTRY["judge.goal_achievement"].axis
+            instructions = "x"
+            criteria = ()
+
+        assert check_contract(MyJudge, source="acme").Params is None  # unchecked, as before
+
+    def test_only_the_goal_judge_reads_refusal(self) -> None:
+        from opseval.scoring.judges import Efficiency
+
+        refusal = ScoringContext(
+            scenario=chat_scenario(expectations={"kind": "refusal"}), profile=CHAT
+        )
+        completion = ScoringContext(scenario=chat_scenario(), profile=CHAT)
+        assert Efficiency().rubric(refusal) == Efficiency().rubric(completion)
+        assert GoalAchievement.version == "3"
+
+    def test_rescore_never_reuses_a_refusal_graded_the_old_way(self) -> None:
+        from opseval.models.results import Axis, ScoreResult
+        from opseval.models.scenario import ScorerSpec
+        from opseval.rescore import _Rescorer
+
+        judge = GoalAchievement()
+        spec = ScorerSpec(id=judge.id)
+
+        def graded(rubric: str | None) -> ScoreResult:
+            details: dict[str, Any] = {"prompt_hash": judge.prompt_hash()}
+            if rubric:
+                details["rubric_hash"] = rubric
+            return ScoreResult(
+                scorer_id=judge.id,
+                axis=Axis.OUTPUT,
+                status=ScoreStatus.PASSED,
+                score=1.0,
+                threshold=0.75,
+                details=details,
+            )
+
+        def fresh(ctx: ScoringContext) -> ScoreResult:
+            return ScoreResult(
+                scorer_id=judge.id,
+                axis=Axis.OUTPUT,
+                status=ScoreStatus.INFRA_ERROR,
+                score=None,
+                threshold=0.75,
+                reason="JUDGE_UNAVAILABLE: x",
+                details={"rubric_hash": judge.rubric_hash(ctx)},
+            )
+
+        refusal = ScoringContext(
+            scenario=chat_scenario(expectations={"kind": "refusal"}), profile=CHAT
+        )
+        completion = ScoringContext(scenario=chat_scenario(), profile=CHAT)
+        old_digest = judge.rubric_hash(completion)  # what a refusal scenario got before
+        rescorer = _Rescorer(ScoringEngine(), judge_configured=False, scenario_source="snapshot")
+        kept = rescorer._reuse(fresh(completion), graded(old_digest), spec)
+        refused = rescorer._reuse(fresh(refusal), graded(old_digest), spec)
+        assert kept.status is ScoreStatus.PASSED and kept.details.get("reused") is True
+        assert refused.status is ScoreStatus.INFRA_ERROR
+        assert "how the judge reads this scenario changed" in (refused.reason or "")
+
+    def test_rehearsing_past_the_script_says_it_ran_out(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        from opseval.demo import catalogue_dir
+        from opseval.server.app import create_app
+
+        from .test_server import AUTH, BASE, TOKEN
+
+        settings = Settings(_env_file=None, reports_dir=str(tmp_path))
+        app = create_app(
+            settings=settings,
+            catalogue=catalogue_dir(),
+            profile=catalogue_dir() / "profile.yaml",
+            token=TOKEN,
+            read_only=True,
+        )
+        client = TestClient(app, base_url=BASE, headers=AUTH)
+        turns = [{"who": "customer", "text": "hi"}]
+        for _ in range(10):
+            turns.append({"who": "agent", "text": "ok"})
+            out = client.post(
+                "/api/v1/simulator/rehearse", json={"scenarioId": "rf-001", "transcript": turns}
+            ).json()
+            if out.get("scriptExhausted"):
+                break
+            turns.append(out["turn"])
+        assert out["scriptExhausted"] is True and out["goalReached"] is False
+
+    async def test_a_wrong_mapping_on_the_default_pack_is_not_judged(self) -> None:
+        # Fault injection, the harness half: the profile reads nothing, so agent_replied also
+        # fails, but the attempt is invalidated (protocol.replies_read), never failed.
+        from opseval.verdicts import attempt_verdict
+
+        scenario = chat_scenario()
+        record = await attempt(scenario, say({"reply": "We open at 9."}, {"reply": "Yes."}))
+        scores = list((await score(record, scenario)).values())
+        verdict = attempt_verdict(record, scores, "x")
+        assert {s.scorer_id: s.status for s in scores}["conversation.agent_replied"] is (
+            ScoreStatus.FAILED
+        )
+        assert verdict.passed is None

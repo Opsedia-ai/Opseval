@@ -6,9 +6,9 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from opseval.models.profile import FrameKind
+from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import (
     SCRIPT_EXHAUSTED,
     FrameRecord,
@@ -72,26 +72,27 @@ class NoErrors(Scorer):
         return self.result(spec, 0.0 if errors else 1.0, error_frames=errors)
 
 
-ANSWER_KINDS = frozenset({FrameKind.NEEDS_HUMAN, FrameKind.RESULT, FrameKind.ERROR})
-"""Frames that answer a turn without words: a checkpoint, a result, an error."""
-
-
 @register
 class AgentReplied(Scorer):
     """ADR-0043: the agent answered every customer turn.
 
     Agent-facing, unlike ``protocol.replies_read``: the profile read the agent's replies, and
-    a turn that got nothing back (no text, or only whitespace, and no checkpoint, result or
-    error) is the agent saying nothing. Without this, a silent agent passed every frame check
-    a scripted smoke suite had (ATTENTION I10).
+    a turn that got nothing back is the agent saying nothing. Without this, a silent agent
+    passed every frame check a scripted smoke suite had (ATTENTION I10).
+
+    What answers a turn is ``SutProfile.answers``, the rule the driver waits on: words, a
+    checkpoint, a result, an error, or tool calls the agent asked the client to run. A
+    notification ("typing…") is not an answer, even with text. A redaction marker is: it
+    stands for words the agent did say, and calling them silence would blame the agent for the
+    harness's own edit.
     """
 
     id = "conversation.agent_replied"
     Params = NoParams
     axis = Axis.FLOW
     description = (
-        "Every customer turn got an answer: words, a checkpoint, a result or an error. "
-        "A turn answered with nothing, or with only blank text, fails."
+        "Every customer turn got an answer: words, a checkpoint, a result, an error or a tool "
+        "call. A turn answered with nothing, blank text or only a notification fails."
     )
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
@@ -105,8 +106,7 @@ class AgentReplied(Scorer):
                 turns.append(frame.seq)
                 answered.append(False)
             elif frame.direction == "received" and turns and not answered[-1]:
-                worded = frame.text is not None and bool(strip_markers(frame.text).strip())
-                answered[-1] = worded or frame.kind in ANSWER_KINDS
+                answered[-1] = ctx.profile.answers(frame.kind, frame.text, frame.payload)
         if not turns:
             return self.result(spec, 1.0, vacuous=True, note="no customer turn was sent")
         silent = [n for n, ok in enumerate(answered, start=1) if not ok]
@@ -146,7 +146,9 @@ class TurnBudget(Scorer):
     description = "Customer turns used versus a budget (params.budget, default max_turns)."
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
-        budget = spec.params.get("budget", ctx.scenario.conversation.max_turns)
+        budget = spec.params.get("budget")
+        if budget is None:  # left out or null: the scenario's max_turns, as Params documents
+            budget = ctx.scenario.conversation.max_turns
         if not isinstance(budget, int) or budget < 1:
             return self.infra(spec, "BAD_PARAMS: budget must be a positive integer")
         used = max(record.user_turns, 1)
@@ -279,6 +281,10 @@ class PayloadEquals(Scorer):
         "checks the approved occurrence, else the last one)."
     )
 
+    @classmethod
+    def check_params(cls, params: BaseModel, profile: SutProfile) -> list[str]:
+        return _declared_checkpoint(params, profile)
+
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
         checkpoint, path = spec.params.get("checkpoint"), spec.params.get("path")
         if (
@@ -316,6 +322,16 @@ def _occurrence(record: RunRecord, checkpoint: str) -> InterruptRecord | None:
     return approved[-1] if approved else (hits[-1] if hits else None)
 
 
+def _declared_checkpoint(params: BaseModel, profile: SutProfile) -> list[str]:
+    """``params.checkpoint`` must be one the profile declares: checked at load (ADR-0043), so a
+    misspelt name fails ``validate`` instead of being *not measured* on every run."""
+    checkpoint = getattr(params, "checkpoint", None)
+    if profile.checkpoints and checkpoint not in profile.checkpoints:
+        known = ", ".join(sorted(profile.checkpoints))
+        return [f"checkpoint: the profile declares no checkpoint {checkpoint!r} (known: {known})"]
+    return []
+
+
 def _unknown_checkpoint(checkpoint: str, ctx: ScoringContext) -> str | None:
     """A checkpoint name the profile does not declare is an authoring mistake: not measured,
     never the agent's failure for not raising it."""
@@ -335,6 +351,10 @@ class RequiredFields(Scorer):
         "A checkpoint payload carries every listed field, present and not empty (params: "
         "checkpoint, fields; checks the approved occurrence, else the last one)."
     )
+
+    @classmethod
+    def check_params(cls, params: BaseModel, profile: SutProfile) -> list[str]:
+        return _declared_checkpoint(params, profile)
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
         checkpoint, fields = spec.params.get("checkpoint"), spec.params.get("fields")
@@ -382,7 +402,9 @@ class LanguageScript(Scorer):
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
         script = spec.params.get("script", "arabic")
-        minimum = spec.params.get("min_fraction", spec.threshold)
+        minimum = spec.params.get("min_fraction")
+        if minimum is None:  # left out or null: the threshold, as Params documents
+            minimum = spec.threshold
         if script not in ("arabic", "latin") or not isinstance(minimum, int | float):
             return self.infra(spec, "BAD_PARAMS: script must be arabic|latin")
         # Markers are the harness's own edit (FR-REC-03), and they are Latin script. Left

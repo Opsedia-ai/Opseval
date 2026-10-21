@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from opseval.errors import ConfigError
 from opseval.models.gate import GatePolicy
@@ -170,15 +170,20 @@ def check_references(
                 errors.append(
                     f"scorers: unknown scorer id {spec.id!r} (see `opseval list-scorers`)"
                 )
-            model = getattr(classes.get(spec.id), "Params", None)
-            if model is not None:
+            cls = classes.get(spec.id)
+            model = getattr(cls, "Params", None)
+            if cls is not None and isinstance(model, type) and issubclass(model, BaseModel):
                 try:
-                    model.model_validate(spec.params)
+                    params = model.model_validate(spec.params)
                 except ValidationError as exc:
                     for err in exc.errors():
                         where = ".".join(str(part) for part in err["loc"])
                         field = f"scorers.{index}.params" + (f".{where}" if where else "")
                         errors.append(f"{field}: {spec.id}: {err['msg']}")
+                else:
+                    for problem in cls.check_params(params, profile):
+                        where, _, message = problem.partition(": ")
+                        errors.append(f"scorers.{index}.params.{where}: {spec.id}: {message}")
             if spec.id == "security.policy_adherence" and not scenario.expectations.policy:
                 errors.append(
                     "scorers: 'security.policy_adherence' grades the agent against "

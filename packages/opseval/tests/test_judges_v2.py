@@ -430,5 +430,8 @@ class TestTheTranscriptFence:
         from opseval.scoring.judges import TRANSCRIPT_FORMAT, Judge
 
         judges = [cls for cls in REGISTRY.values() if issubclass(cls, Judge)]
-        assert judges and all(cls.version == "2" for cls in judges)
+        # Every judge is at least the fenced-transcript version (2); the goal judge is 3 since
+        # it grades refusal scenarios as refusals (ADR-0043).
+        assert judges and all(int(cls.version) >= 2 for cls in judges)
+        assert REGISTRY["judge.goal_achievement"].version == "3"
         assert TRANSCRIPT_FORMAT == "json-lines-nonce-1"

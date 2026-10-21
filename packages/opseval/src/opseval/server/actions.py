@@ -164,7 +164,10 @@ async def rehearse(ctx: ServerContext, body: s.RehearseIn) -> s.RehearseOut:
     except OpsevalError as exc:
         raise ApiError(502, "SIMULATOR_FAILED", str(exc)) from exc
     return s.RehearseOut(
-        turn=s.Turn(who="customer", text=turn.text), goal_reached=turn.goal_reached, model=model
+        turn=s.Turn(who="customer", text=turn.text),
+        goal_reached=turn.goal_reached and not turn.script_exhausted,
+        script_exhausted=turn.script_exhausted,
+        model=model,
     )
 
 

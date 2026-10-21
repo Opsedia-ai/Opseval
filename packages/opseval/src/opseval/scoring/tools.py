@@ -49,6 +49,13 @@ class Evidence:
             return tool in profile.tools
         return profile.frame_verifiable(tool)
 
+    def proves_absence(self, profile: SutProfile) -> bool:
+        """Can a tool missing from this evidence be taken as not called? A trace sees every
+        call; frames show only what the agent reports, unless the profile says they report
+        everything (``tool_calls_complete``, ADR-0043). An agent that runs a tool on its own
+        server and reports none would otherwise be failed for the harness's blind spot."""
+        return self.source == "trace" or profile.tool_calls_complete
+
     def verifiable_at_all(self, profile: SutProfile) -> bool:
         """Could this evidence show a tool call at all, for any declared tool?
 
@@ -127,7 +134,11 @@ class ExpectedCalled(Scorer):
     id = "tools.expected_called"
     Params = NoParams
     axis = Axis.TOOLS
-    description = "Every must_call tool ran (trace-backed; degraded to frame evidence)."
+    version = "2"  # 2: from frames, a missing tool is not measured unless tool_calls_complete
+    description = (
+        "Every must_call tool ran (trace-backed; degraded to frame evidence, where a tool "
+        "missing is not measured unless the profile sets tool_calls_complete)."
+    )
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
         must = ctx.scenario.expectations.expected_tools.must_call
@@ -143,6 +154,16 @@ class ExpectedCalled(Scorer):
                 unverifiable=unverifiable,
             )
         missing = [t for t in verifiable if ev.first(t) is None]
+        if missing and not ev.proves_absence(ctx.profile):
+            return self.infra(
+                spec,
+                f"NOT_MEASURABLE: {', '.join(missing)} did not appear in the agent's frames, which "
+                "show only the tool calls it reports; set tool_calls_complete: true in the "
+                "profile if it reports every one, or read traces",
+                missing=missing,
+                unverifiable=unverifiable,
+                **_base_details(ev),
+            )
         return self.result(
             spec,
             (len(verifiable) - len(missing)) / len(verifiable),
@@ -361,6 +382,7 @@ class Ordering(Scorer):
     id = "tools.ordering"
     Params = NoParams
     axis = Axis.TOOLS
+    version = "2"  # 2: from frames, a 'before' never seen is unverifiable unless complete
     description = "For each expected_tools.ordering rule, 'before' first ran before 'after'."
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
@@ -379,7 +401,8 @@ class Ordering(Scorer):
             if first_after is None:
                 result = "not_applicable"  # 'after' never ran: nothing to order
             elif first_before is None:
-                result = "violated"  # 'after' ran without 'before'
+                # 'after' ran without 'before', unless frames could have missed 'before'.
+                result = "violated" if ev.proves_absence(ctx.profile) else "unverifiable"
             else:
                 cmp = ev.compare(first_before, first_after)
                 result = {"before": "ok", "after": "violated", "ambiguous": "ambiguous"}[cmp]

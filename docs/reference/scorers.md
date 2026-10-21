@@ -18,7 +18,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 | Scorer | Needs | Version | Params | What it checks |
 |---|---|---|---|---|
 | `judge.content_quality` | llm | 2 | none | LLM judge: was the agent's writing clear, grounded and appropriate? (quoted) |
-| `judge.goal_achievement` | llm | 2 | none | LLM judge: did the conversation achieve the customer's goal? (quoted, weighted) |
+| `judge.goal_achievement` | llm | 3 | none | LLM judge: did the conversation achieve the customer's goal? (quoted, weighted) |
 | `judge.language_consistency` | llm | 2 | none | LLM judge: did the agent answer in the customer's language and dialect? (quoted) |
 | `output.language_script` | frames | 1 | `script, min_fraction` | Share of agent messages written mainly in the expected script (arabic\|latin). |
 | `output.payload_equals` | frames | 3 | `checkpoint*, path*, equals*` | A checkpoint payload field has the expected value (params: checkpoint, path, equals; checks the approved occurrence, else the last one). |
@@ -30,7 +30,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 
 | Scorer | Needs | Version | Params | What it checks |
 |---|---|---|---|---|
-| `conversation.agent_replied` | frames | 1 | none | Every customer turn got an answer: words, a checkpoint, a result or an error. A turn answered with nothing, or with only blank text, fails. |
+| `conversation.agent_replied` | frames | 1 | none | Every customer turn got an answer: words, a checkpoint, a result, an error or a tool call. A turn answered with nothing, blank text or only a notification fails. |
 | `conversation.connection_stable` | frames | 1 | `ignore_codes` | Fails if the agent dropped the connection, even when the session was resumed (opt-in; params.ignore_codes lists close codes to tolerate). |
 | `conversation.no_errors` | frames | 1 | none | Fails if the agent sent any error frame. |
 | `conversation.turn_budget` | frames | 1 | `budget` | Customer turns used versus a budget (params.budget, default max_turns). |
@@ -46,9 +46,9 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `tools.approval_gated` | frames | 1 | none | Every tool that needs an approval ran only after it: committing tools after the commit gate, forbidden_before tools after their checkpoint (traces, else frame evidence). |
 | `tools.args_valid` | trace | 1 | none | Every observed call to a tool with an args_schema sent arguments matching it (needs traces; arguments are not in frames). |
 | `tools.call_success` | trace | 1 | none | Share of the agent's tool calls that succeeded (needs traces). |
-| `tools.expected_called` | frames | 1 | none | Every must_call tool ran (trace-backed; degraded to frame evidence). |
+| `tools.expected_called` | frames | 2 | none | Every must_call tool ran (trace-backed; degraded to frame evidence, where a tool missing is not measured unless the profile sets tool_calls_complete). |
 | `tools.forbidden_not_called` | frames | 1 | none | No must_not_call tool ran, no forbidden_before tool ran before its checkpoint was approved, and no committing tool ran before the commit gate was approved. |
-| `tools.ordering` | frames | 1 | none | For each expected_tools.ordering rule, 'before' first ran before 'after'. |
+| `tools.ordering` | frames | 2 | none | For each expected_tools.ordering rule, 'before' first ran before 'after'. |
 
 ## security
 

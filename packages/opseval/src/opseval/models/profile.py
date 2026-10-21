@@ -165,6 +165,11 @@ class SutProfile(BaseModel):
     """Otherwise the agent's turn ends after this much silence."""
     tool_calls_field: str | None = None
     """Key inside ``data_field`` holding a list of ``{name, arguments}`` tool calls."""
+    tool_calls_complete: bool = False
+    """Frames list *every* tool call the agent makes (a raw model endpoint, whose client runs
+    the tools). Without it, frames can prove that a tool ran but never that it did not: an
+    agent may run tools on its own server and report none of them, so a ``must_call`` tool
+    missing from the frames is *not measured* rather than failed (ADR-0043)."""
 
     # --- outbound templates ("{name}" string values are substituted) ------------------
     auth_frame: dict[str, Any] | None = None
@@ -208,6 +213,15 @@ class SutProfile(BaseModel):
     def _check(self) -> SutProfile:
         if self.commit_gate is not None and self.commit_gate not in self.checkpoints:
             raise ValueError(f"commit_gate {self.commit_gate!r} is not a declared checkpoint")
+        committing = sorted(name for name, tool in self.tools.items() if tool.commits)
+        if committing and self.commit_gate is None:
+            # A committing tool with no gate in front of it: nothing for the commit guard
+            # (ADR-0008) to stop at, so a run could perform the irreversible step unasked.
+            raise ValueError(
+                f"tools {committing} commit an irreversible outcome but the profile declares no "
+                "commit_gate: name the checkpoint whose approval leads to it, so Opseval stops "
+                "there unless the scenario has allow_commit: true and the run --allow-commit"
+            )
         if self.committed_outcome is not None and self.commit_gate is None:
             # The commit guard (ADR-0008) stops at the gate *before* the outcome. Without a
             # gate there is nothing to stop at, and a run would reach the irreversible
@@ -242,6 +256,26 @@ class SutProfile(BaseModel):
         if not isinstance(raw, str):
             return FrameKind.UNKNOWN
         return self.kinds.get(raw, FrameKind.UNKNOWN)
+
+    def answers(self, kind: FrameKind, text: str | None, payload: object) -> bool:
+        """Whether a received frame answers a customer turn (ADR-0043).
+
+        Words, a checkpoint, a result, an error, or tool calls the agent asked the client to
+        run. A handshake or a notification does not, even with text ("typing…"), and neither
+        does a frame with no words. The driver keeps waiting for an answer (I12) and
+        ``conversation.agent_replied`` grades on the same rule, so they cannot disagree.
+        """
+        if kind in (FrameKind.NEEDS_HUMAN, FrameKind.RESULT, FrameKind.ERROR):
+            return True
+        if kind in (FrameKind.HANDSHAKE, FrameKind.NOTIFICATION):
+            return False
+        if text is not None and text.strip():
+            return True
+        if self.tool_calls_field and self.data_field and isinstance(payload, dict):
+            data = payload.get(self.data_field)
+            calls = data.get(self.tool_calls_field) if isinstance(data, dict) else None
+            return isinstance(calls, list) and bool(calls)
+        return False
 
     def evidence_keys(self) -> dict[str, str]:
         """Map evidence key -> tool name, for tools that declare one."""

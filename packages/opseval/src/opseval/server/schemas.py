@@ -397,6 +397,9 @@ class RehearseIn(ApiIn):
 class RehearseOut(Api):
     turn: Turn
     goal_reached: bool
+    script_exhausted: bool = False
+    """A scripted persona has no turns left: the rehearsal ends, which says nothing about
+    whether the goal was met (ADR-0043). ``goal_reached`` is never true when this is."""
     model: str | None  # None = scripted, no model involved
 
 

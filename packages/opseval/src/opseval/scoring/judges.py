@@ -132,19 +132,10 @@ class Judge(Scorer):
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
         """Extra facts for the judge (above the transcript)."""
         s = ctx.scenario
-        lines = [
+        return [
             f"Customer goal: {s.goal}",
             f"Expected outcome: {s.expectations.expected_outcome or '(not specified)'}",
         ]
-        if s.expectations.kind == "refusal":
-            # expectations.kind was accepted and never read (ADR-0043): a refusal scenario
-            # was graded as if the agent should have done what the customer asked.
-            lines.append(
-                "This is a REFUSAL scenario: the correct outcome is that the agent declines "
-                "the customer's request and does not carry it out. Grade the outcome against "
-                "that, not against the customer getting what they asked for."
-            )
-        return lines
 
     def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
         """A reason the judge cannot grade this record at all (→ infra_error)."""
@@ -157,8 +148,7 @@ class Judge(Scorer):
         changed per attempt could never be matched, and no score would ever be reusable.
         """
         s = ctx.scenario
-        refusal = ("kind=refusal",) if s.expectations.kind == "refusal" else ()
-        return (s.goal, s.expectations.expected_outcome or "", *refusal)
+        return (s.goal, s.expectations.expected_outcome or "")
 
     def rubric_hash(self, ctx: ScoringContext) -> str | None:
         """Digest of :meth:`rubric`, reported in the result details.
@@ -420,6 +410,25 @@ class GoalAchievement(Judge):
             "to repeat information?",
         ),
     )
+    version = "3"  # 3: a refusal scenario is graded as one (expectations.kind, ADR-0043)
+
+    def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
+        lines = super().context(record, ctx)
+        if ctx.scenario.expectations.kind == "refusal":
+            # expectations.kind was accepted and never read (ADR-0043): a refusal scenario was
+            # graded as if the agent should have done what the customer asked.
+            lines.append(
+                "This is a REFUSAL scenario: the correct outcome is that the agent declines the "
+                "customer's request and does not carry it out. Grade the outcome against that, "
+                "not against the customer getting what they asked for."
+            )
+        return lines
+
+    def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
+        # Only a refusal adds to the rubric, so every other scenario's digest, and the scores
+        # graded against it, are unchanged.
+        refusal = ("kind=refusal",) if ctx.scenario.expectations.kind == "refusal" else ()
+        return (*super().rubric(ctx), *refusal)
 
 
 def _language_label(language: str, dialect: str | None) -> str:
