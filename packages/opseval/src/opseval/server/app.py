@@ -339,6 +339,14 @@ def create_app(
     def config() -> list[s.SettingRow]:
         return views.settings_rows(settings)
 
+    @app.get(f"{API}/scenarios/form")
+    def scenario_form() -> s.FormOut:
+        return actions.scenario_form(ctx)
+
+    @app.post(f"{API}/scenarios/draft")
+    def draft_scenario(body: s.ScenarioDraftIn) -> s.DraftOut:
+        return actions.draft(ctx, body)
+
     @app.get(f"{API}/scenarios/source")
     def scenario_file(file: str) -> s.ScenarioSourceOut:
         return actions.scenario_source(ctx, file)

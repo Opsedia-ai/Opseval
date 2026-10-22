@@ -34,14 +34,16 @@ from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario, Suite
 from opseval.models.stop import StopPolicy
 from opseval.runner import RunOptions, launch, new_run_id
-from opseval.scoring import INVARIANTS, REGISTRY
+from opseval.scoring import INVARIANTS, REGISTRY, default_pack
+from opseval.server import forms
 from opseval.server import schemas as s
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 from opseval.storage import FileStore
 from opseval.verdicts import EXIT_HARNESS
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.ya?ml$")
+# Only .yaml: the loader reads `*.yaml`, so a new .yml file would be saved and never run.
+SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.yaml$")
 
 log = logging.getLogger("opseval.server")
 
@@ -618,6 +620,34 @@ def check_scenario(ctx: ServerContext, body: s.ScenarioTextIn) -> s.ScenarioChec
         title=sc.name if sc else None,
         problems=out,
         warnings=warnings,
+    )
+
+
+def scenario_form(ctx: ServerContext) -> s.FormOut:
+    """What the guided form offers for this catalogue's profile (ADR-0048)."""
+    _root, profile = ctx.need_catalogue()
+    return forms.form(profile, read_only=ctx.read_only)
+
+
+def draft(ctx: ServerContext, body: s.ScenarioDraftIn) -> s.DraftOut:
+    """The YAML a filled-in form becomes, and the loader's verdict on it (ADR-0048).
+
+    Nothing is written: the console saves the YAML through ``import_scenarios``, the same
+    all-or-nothing, never-overwrite path as every other new scenario.
+    """
+    _root, profile = ctx.need_catalogue()
+    text = forms.render(body)
+    name = forms.file_name(body)
+    check = check_scenario(ctx, s.ScenarioTextIn(text=text, family=body.family, file_name=name))
+    parsed, _ = check_scenario_text(
+        text, name, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+    )
+    return s.DraftOut(
+        yaml=text,
+        family=body.family,
+        file_name=name,
+        check=check,
+        default_checks=default_pack(parsed or forms.blank(), profile),
     )
 
 

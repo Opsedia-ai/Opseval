@@ -59,6 +59,9 @@ export const api = {
   usage: () => call<T.RunUsage[]>("/usage"),
   scenarios: () => call<T.Catalogue>("/scenarios"),
   persona: (id: string) => call<T.Persona>(`/scenarios/${encodeURIComponent(id)}/persona`),
+  scenarioById: (id: string) => call<T.ScenarioSource>(`/scenarios/${encodeURIComponent(id)}/source`),
+  scenarioForm: () => call<T.ScenarioForm>("/scenarios/form"),
+  draftScenario: (body: T.DraftBody) => post<T.Drafted>("/scenarios/draft", body),
   scenarioFile: (file: string) => call<T.ScenarioSource>(`/scenarios/source?file=${encodeURIComponent(file)}`),
   saveScenarioFile: (file: string, text: string, etag: string) =>
     call<T.ScenarioSource>(`/scenarios/source?file=${encodeURIComponent(file)}`, { method: "PUT", body: JSON.stringify({ text, etag }) }),

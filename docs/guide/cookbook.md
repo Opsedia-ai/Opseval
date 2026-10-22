@@ -92,6 +92,6 @@ cd packages/console && npm ci && npm run build && cd -
 opseval serve --catalogue ./my-catalogue --target ws://127.0.0.1:8765
 ```
 
-Open the printed link. The console lists runs down to each attempt's conversation, edits
-scenarios and suites (with the gate and stop policy), starts and cancels runs, and rehearses a
-persona without an agent.
+Open the printed link. The console lists runs down to each attempt's conversation, adds
+scenarios with a guided form or as YAML, edits scenarios and suites (with the gate and stop
+policy), starts and cancels runs, and rehearses a persona without an agent.
