@@ -70,8 +70,11 @@ export default function ScenarioEditor() {
     try {
       if (isNew) {
         const out = await api.importScenarios(family, [{ name, text }]);
-        if (out.imported.length !== 1) throw new ApiError(422, "NOT_IMPORTED", "nothing was written; check the folder and file name");
-        nav(`/scenarios/edit?file=${encodeURIComponent(`scenarios/${family}/${name}`)}`);
+        const id = out.imported[0];
+        if (out.imported.length !== 1 || !id) throw new ApiError(422, "NOT_IMPORTED", "nothing was written; check the folder and file name");
+        // Where it was written is the server's to say: a flat catalogue has no scenarios/ folder.
+        const src = await api.scenarioById(id);
+        nav(`/scenarios/edit?file=${encodeURIComponent(src.file)}`);
       } else {
         const out = await api.saveScenarioFile(file, text, etag);
         setEtag(out.etag); setSaved(`Saved ${out.file}.`);
