@@ -181,3 +181,6 @@ this decision:
 - The demo's exit codes are unchanged (0 / 1 / 1 / 3). Its scenarios list their scorers, and its
   profile has a commit gate.
 - Next: the console API serves each check's `Params` JSON Schema to the guided scenario form (D14).
+- **Amended by ADR-0048.** `scorers: default` also adds the judge a declared expectation needs:
+  `judge.goal_achievement` for a refusal and `security.policy_adherence` for policy rules. A
+  tool in both `must_call` and `must_not_call` is a load error.

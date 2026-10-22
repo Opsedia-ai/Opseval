@@ -611,12 +611,27 @@ export interface FormTemplate {
   draft: ScenarioDraftOut;
 }
 
+export interface FormChoice {
+  value: string;
+  label: string;
+  help: string | null;
+}
+
+/** An answer the customer can give at a checkpoint, and the modes it works in. */
+export interface FormAction {
+  value: "approve" | "reject" | "script";
+  label: string;
+  modes: ("scripted" | "simulated")[];
+}
+
 /** Everything the guided form may offer, decided by the server. */
 export interface FormOut {
   profile: FormProfile;
   languages: FormLanguage[];
   checks: FormCheck[];
   templates: FormTemplate[];
+  stopAt: FormChoice[];
+  answerActions: FormAction[];
   defaultChecks: string[];
   readOnly: boolean;
 }

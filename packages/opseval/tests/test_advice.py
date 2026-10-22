@@ -70,7 +70,7 @@ def test_trace_checks_without_a_trace_source(profile: SutProfile) -> None:
 
 
 def test_this_machine_is_checked_only_when_asked(profile: SutProfile) -> None:
-    judge = [{"id": "judge.goal_achievement"}]
+    judge = [{"id": "judge.goal_achievement"}, {"id": "tools.expected_called"}]
     persona = {"scripted_turns": [], "flow": "ask for a refund"}
     assert fields(profile, Configured(judge=False, simulator=True), scorers=judge) == {"scorers"}
     assert "conversation" in fields(

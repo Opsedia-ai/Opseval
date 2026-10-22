@@ -49,11 +49,28 @@ form builds on both.
   - what `scorers: default` would run for this scenario on this profile.
 
   It writes nothing, so it works on a read-only catalogue too.
+- **Where a run may stop, and how a customer may answer, are the server's choices** too
+  (`FormOut.stop_at`, `FormOut.answer_actions`):
+  - Stop choices never include the irreversible outcome.
+  - "decides from what is proposed" is offered only for a simulated customer, because the
+    loader refuses it for a scripted one.
+- **Every limit is said at a field, never as a bare 500.**
+  - A request body the API's models refuse is a 422 `INVALID_REQUEST`, with a problem per
+    field. This holds for every route, and the value sent is never echoed.
+  - A check's settings are bounded to 8 levels and 20 KB before the YAML is written.
+  - YAML over the editor's 200,000 characters is a problem in the verdict.
+- **A folder the loader would never read is refused**, by the draft and by import alike:
+  - an empty folder name;
+  - `suites`, in any case. The loader skips it, and in a flat catalogue it is the suites
+    folder itself.
 - **Saving** sends the server's YAML, byte for byte, through `POST /scenarios/import`. That is
   the all-or-nothing path every new file already takes, and it never overwrites a file. The
   console then asks `GET /scenarios/{id}/source` where the file went, rather than assuming
-  `scenarios/<folder>/`: a flat catalogue has no `scenarios/` folder. The YAML editor had the
-  same assumption, and now asks the same way.
+  `scenarios/<folder>/`: a flat catalogue has no `scenarios/` folder.
+  - The YAML editor had the same assumption. Both now share one helper
+    (`api.saveNewScenario`), which says so if a file was written but cannot be found by its id.
+  - A file named after a long id is shortened with a hash of the id, so two long ids never
+    share a file.
 
 ### The YAML is ordinary, and the loader alone judges it
 
@@ -67,6 +84,9 @@ form builds on both.
   push` refuses anchors and aliases (ADR-0047), so the form must never write one. Text the user
   types comes back exactly as typed, whatever YAML it resembles (`key: value`, `!!python/…`,
   `yes`, `0123`).
+- **What is saved is what was typed.** The YAML is read back and compared with what the form
+  sent, and any field that differs is a problem at that field. YAML folds U+0085 (NEL) into a
+  space, so a goal pasted with one would reach the judges changed.
 - The file starts with the `yaml-language-server` schema hint, as `opseval init` writes it.
 - **The draft model has no `allow_commit`.** A scenario that performs the irreversible outcome
   (ADR-0008) is written on purpose, in YAML. `stop_at: outcome_committed` in a draft is therefore
@@ -87,10 +107,42 @@ form builds on both.
   field's docstring, as it is for settings (ADR-0039).
 - **A check without a `Params` model** gets `null`, never an empty list. A plugin that never
   declared its settings is "settings not described, set them in YAML", not "takes none".
+- **A default the form cannot show** is shown as none: for example, a plugin factory that needs
+  the other fields, or a value JSON cannot carry. A plugin model that cannot be read at all is
+  "not described". Neither can take the form down, and the check still applies its own
+  default.
 
 The browser only decodes what was typed into a field: a number, a list, or JSON. An entry it
 cannot decode is left out and marked under the field. Unquoted text in a JSON field is never
 taken silently as a string. Whether a value is valid is the loader's answer.
+
+### What is declared is graded
+
+A form makes it easy to write down an expectation, so it must not make it easy to leave one
+ungraded. A refusal or a rule that nothing reads looks checked, and an agent that breaks it
+passes: a real failure hidden as a pass.
+
+- **The default checks cover every declaration.** `scorers: default` now adds
+  `judge.goal_achievement` for `expectations.kind: refusal` and `security.policy_adherence` for
+  `expectations.policy` (`scoring.judged_expectations`). This amends ADR-0043, which already
+  added a tool check for each tool rule.
+  - These judges are added with or without a profile, so preflight's count of the LLM roles
+    a suite needs includes them.
+  - With no judge configured they are *not measured*, and named as such: a gap, never a
+    silent pass.
+  - A completion scenario without policy rules is unchanged and still runs in CI for free.
+- **An explicit list that misses one is warned about.** `advice.scenario_warnings` names each
+  declared expectation that no listed check grades: `must_call`, `must_not_call`,
+  `forbidden_before`, `ordering`, a refusal, policy rules, and an `expected_outcome` with no
+  judge. The warning shows in the form, the YAML editor and `opseval validate`. It is a
+  warning, not an error, because a hand-written list is a deliberate choice.
+- **Default checks plus others.** With the default checks on, a check the user adds is
+  written out together with the pack for this draft. An added check's settings replace the
+  pack's entry for it. Every template keeps the defaults and adds only what it is about, so a
+  tool rule added to any template is graded.
+- **A contradiction does not load.** A tool in both `must_call` and `must_not_call` fails
+  whatever the agent does, so it is now a load error (`ExpectedTools`), wherever the scenario
+  comes from.
 
 ### Templates are shapes, not content
 
@@ -110,8 +162,16 @@ question, goal and rules. Clean-room policy: no scenario content is copied from 
 ### Save is enabled only by the verdict on what is in the form now
 
 The form keeps each verdict with the exact draft it judged, as the YAML editor does with its
-text. A late or out-of-order reply can therefore never vouch for different content, and Save
-needs `ok` on the current draft and a writable catalogue.
+text. A late or out-of-order reply can therefore never vouch for different content.
+
+Save needs three things:
+
+- `ok` on the current draft;
+- a writable catalogue;
+- no field the browser could not decode.
+
+A cleared number field keeps what was typed and holds Save until it reads as a number. Before,
+it snapped to 1, so typing 5 gave 15.
 
 ### Where it sits in the console
 

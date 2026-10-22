@@ -4,6 +4,7 @@ declare, it writes ordinary YAML, the loader alone judges it, and it writes noth
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 from typing import Any, ClassVar
@@ -25,6 +26,7 @@ from .test_server import BASE, TOKEN, app_for, connect
 
 FORM = "/api/v1/scenarios/form"
 DRAFT = "/api/v1/scenarios/draft"
+DEMO = load_profile(catalogue_dir() / "profile.yaml")
 
 
 def _files(root: Path) -> dict[str, bytes]:
@@ -114,8 +116,8 @@ def test_the_draft_defaults_are_the_scenario_models_defaults() -> None:
     blank = s.ScenarioDraftIn()
     assert blank.max_turns == ConversationSpec.model_fields["max_turns"].default
     assert blank.repeats == ExecutionSpec.model_fields["repeats"].default
-    assert "max_turns" not in forms.mapping(blank)["conversation"]
-    assert "execution" not in forms.mapping(blank)
+    assert "max_turns" not in forms.mapping(blank, DEMO)["conversation"]
+    assert "execution" not in forms.mapping(blank, DEMO)
 
 
 # --- each check's settings ----------------------------------------------------------------
@@ -193,7 +195,7 @@ def test_a_draft_becomes_the_yaml_a_person_would_write() -> None:
             stopAt="goal_reached",
         )
     )
-    text = forms.render(draft)
+    text = forms.render(draft, DEMO)[0]
     assert text.startswith("# yaml-language-server: $schema=")
     sc = _parsed(text)
     assert (sc.id, sc.criticality.value, sc.tags) == ("form-001", "critical", ["smoke"])
@@ -217,7 +219,7 @@ def test_a_draft_becomes_the_yaml_a_person_would_write() -> None:
 
 
 def test_only_what_differs_from_the_defaults_is_written() -> None:
-    data = yaml.safe_load(forms.render(s.ScenarioDraftIn.model_validate(_draft())))
+    data = yaml.safe_load(forms.render(s.ScenarioDraftIn.model_validate(_draft()), DEMO)[0])
     assert data == {
         "id": "form-001",
         "name": "Answers a question",
@@ -243,7 +245,7 @@ def test_text_comes_back_exactly_as_typed_whatever_yaml_it_resembles() -> None:
     draft = s.ScenarioDraftIn.model_validate(
         _draft(goal=hostile[0], scriptedTurns=hostile, role=hostile[4], tags=["yes", "null"])
     )
-    text = forms.render(draft)
+    text = forms.render(draft, DEMO)[0]
     sc = _parsed(text)
     assert sc.conversation.scripted_turns == hostile
     assert (sc.goal, sc.persona.role, sc.tags) == (hostile[0], hostile[4], ["yes", "null"])
@@ -257,7 +259,7 @@ def test_the_yaml_never_has_an_anchor_or_an_alias() -> None:
     draft = s.ScenarioDraftIn.model_validate(_draft())
     draft.must_call = same
     draft.must_not_call = same
-    text = forms.render(draft)
+    text = forms.render(draft, DEMO)[0]
     assert "&id" not in text and "*id" not in text
 
 
@@ -268,7 +270,7 @@ def test_the_yaml_never_has_an_anchor_or_an_alias() -> None:
         ({"id": "Ünïcode id!"}, "n-code-id.yaml"),
         ({"id": "_x"}, "x.yaml"),
         ({"id": ""}, "new-scenario.yaml"),
-        ({"id": "a" * 100}, "a" * 59 + ".yaml"),
+        ({"id": "a" * 100}, f"{'a' * 50}-{hashlib.sha256(b'a' * 100).hexdigest()[:8]}.yaml"),
         ({"id": "rf-099", "fileName": "chosen.yaml"}, "chosen.yaml"),
     ],
 )
@@ -441,3 +443,204 @@ def test_the_form_routes_need_the_token(tmp_path: Path) -> None:
     anon = TestClient(app, base_url=BASE)
     assert anon.get(FORM).status_code == 401
     assert anon.post(DRAFT, json=_draft()).status_code == 401
+
+
+# --- review of #72: what is declared is graded, and what is shown is what is saved ----------
+
+
+def test_every_template_keeps_the_default_checks_so_later_rules_are_graded(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    c = connect(app)
+    for t in c.get(FORM).json()["templates"]:
+        assert t["draft"]["useDefaultChecks"], t["id"]
+        # A tool rule added to any template is graded, never written down and ignored.
+        body = {**t["draft"], "mustCall": ["lookup_order"], "mustNotCall": ["create_refund"]}
+        out = c.post(DRAFT, json=body).json()
+        ids = {x["id"] for x in yaml.safe_load(out["yaml"]).get("scorers", [])} or set(
+            out["defaultChecks"]
+        )
+        assert {"tools.expected_called", "tools.forbidden_not_called"} <= ids, t["id"]
+        assert not [w for w in out["check"]["warnings"] if "nothing grades" in w["message"]]
+
+
+def test_added_checks_join_the_default_pack_and_replace_its_settings() -> None:
+    draft = s.ScenarioDraftIn.model_validate(
+        _draft(
+            mustCall=["lookup_order"],
+            checks=[
+                {"id": "judge.goal_achievement", "threshold": 0.75},
+                {"id": "conversation.turn_budget", "params": {"budget": 4}},
+                {"id": "conversation.no_errors", "threshold": 0.5},
+            ],
+        )
+    )
+    specs = yaml.safe_load(forms.render(draft, DEMO)[0])["scorers"]
+    assert [x["id"] for x in specs] == [
+        *forms.pack(draft, DEMO),
+        "judge.goal_achievement",
+        "conversation.turn_budget",
+    ]
+    assert {"id": "conversation.no_errors", "threshold": 0.5} in specs
+    assert "tools.expected_called" in forms.pack(draft, DEMO)
+
+
+def test_a_declared_refusal_or_policy_is_graded_by_default(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    c = connect(app)
+    refusal = c.post(DRAFT, json=_draft(refusal=True)).json()
+    assert "judge.goal_achievement" in refusal["defaultChecks"]
+    policy = c.post(DRAFT, json=_draft(policy=["Never share another customer's data."])).json()
+    assert "security.policy_adherence" in policy["defaultChecks"]
+    assert "scorers" not in yaml.safe_load(policy["yaml"]), "still `scorers: default`"
+
+
+def test_an_expectation_no_chosen_check_reads_is_named(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    by_hand = {"useDefaultChecks": False, "checks": [{"id": "conversation.no_errors"}]}
+    out = (
+        connect(app)
+        .post(
+            DRAFT,
+            json=_draft(
+                refusal=True,
+                expectedOutcome="Declines.",
+                policy=["Be polite."],
+                mustCall=["lookup_order"],
+                mustNotCall=["create_refund"],
+                **by_hand,
+            ),
+        )
+        .json()
+    )
+    assert out["check"]["ok"], "a warning, never a load error"
+    warned = {w["field"] for w in out["check"]["warnings"]}
+    assert {
+        "expectations.kind",
+        "expectations.expected_outcome",
+        "expectations.policy",
+        "expectations.expected_tools.must_call",
+        "expectations.expected_tools.must_not_call",
+    } <= warned
+
+
+def test_a_tool_both_required_and_forbidden_does_not_load(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    both = _draft(mustCall=["lookup_order"], mustNotCall=["lookup_order"])
+    out = connect(app).post(DRAFT, json=both).json()
+    assert not out["check"]["ok"]
+    assert "cannot be both" in str(out["check"]["problems"])
+
+
+@pytest.mark.parametrize("family", ["", "suites", "Suites", "a/b", "..", "-x"])
+def test_a_folder_the_loader_would_not_read_is_refused_before_and_at_save(
+    tmp_path: Path, family: str
+) -> None:
+    app, cat = app_for(tmp_path, copy=True)
+    c = connect(app)
+    out = c.post(DRAFT, json=_draft(family=family)).json()
+    assert not out["check"]["ok"] and "family" in _problems(out), family
+    files = [{"name": "x.yaml", "text": out["yaml"]}]
+    saved = c.post("/api/v1/scenarios/import", json={"family": family, "files": files})
+    assert saved.status_code == 422 and saved.json()["code"] == "BAD_FAMILY"
+    assert not (cat / "scenarios" / "suites").exists()
+
+
+def test_a_refused_request_body_names_its_field(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    r = connect(app).post(DRAFT, json=_draft(role="x" * 301, repeats=25))
+    assert r.status_code == 422
+    body = r.json()
+    assert body["code"] == "INVALID_REQUEST"
+    fields = {p["field"] for p in body["detail"]}
+    assert fields == {"role", "repeats"} and all(p["message"] for p in body["detail"])
+    assert "x" * 301 not in r.text, "the value sent is never echoed"
+
+
+def test_too_much_text_is_a_problem_not_a_500(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    huge = _draft(scriptedTurns=["y" * 4_000] * 60)
+    out = connect(app).post(DRAFT, json=huge)
+    assert out.status_code == 200
+    assert not out.json()["check"]["ok"] and "at most" in str(out.json()["check"]["problems"])
+
+
+def test_params_too_deep_or_too_large_are_refused_as_a_request(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    c = connect(app)
+    deep: Any = 1
+    for _ in range(50):
+        deep = [deep]
+    for params in ({"equals": deep}, {"equals": "z" * 30_000}):
+        body = _draft(
+            useDefaultChecks=False, checks=[{"id": "output.payload_equals", "params": params}]
+        )
+        r = c.post(DRAFT, json=body)
+        assert r.status_code == 422 and r.json()["code"] == "INVALID_REQUEST"
+
+
+def test_text_yaml_would_change_is_a_problem_at_its_field(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    c = connect(app)
+    out = c.post(DRAFT, json=_draft(goal="a\x85b")).json()  # NEL: YAML folds it to a space
+    assert not out["check"]["ok"]
+    assert "load back as typed" in _problems(out)["goal"]
+    for char in (" ", " "):  # written quoted, so they come back as typed
+        kept = c.post(DRAFT, json=_draft(goal=f"a{char}b")).json()
+        assert kept["check"]["ok"] and yaml.safe_load(kept["yaml"])["goal"] == f"a{char}b"
+
+
+def test_a_plugin_default_that_cannot_be_shown_never_breaks_the_form() -> None:
+    from pydantic import Field
+
+    from opseval.scoring.base import NoParams
+
+    class Opaque:
+        pass
+
+    class Params(NoParams):
+        needs_data: list[int] = Field(default_factory=lambda data: [len(data)])  # type: ignore[misc]
+        opaque: Any = Field(default_factory=Opaque)
+
+    class Plugin(Scorer):
+        id: ClassVar[str] = "x.plugin"
+
+    Plugin.Params = Params
+    fields = forms.param_fields(Plugin)
+    assert fields is not None
+    assert {p.name: p.default for p in fields} == {"needs_data": None, "opaque": None}
+
+
+def test_long_ids_get_their_own_file_names() -> None:
+    names = {
+        forms.file_name(s.ScenarioDraftIn.model_validate({"id": "a" * 60 + suffix}))
+        for suffix in ("-001", "-002")
+    }
+    assert len(names) == 2 and all(len(n) <= 64 for n in names)
+
+
+def test_an_invalid_draft_still_shows_its_own_default_checks(tmp_path: Path) -> None:
+    app, _ = app_for(tmp_path)
+    out = connect(app).post(DRAFT, json=_draft(id="", mustCall=["lookup_order"])).json()
+    assert not out["check"]["ok"]
+    assert "tools.expected_called" in out["defaultChecks"]
+
+
+def test_where_a_run_stops_and_how_a_customer_answers_are_the_servers_choices(
+    tmp_path: Path,
+) -> None:
+    demo = connect(app_for(tmp_path)[0]).get(FORM).json()
+    assert [c["value"] for c in demo["stopAt"]] == ["auto", "goal_reached", "proposal_approval"]
+    assert "supervisor_review" not in str([c["value"] for c in demo["stopAt"]])
+    actions = {a["value"]: a["modes"] for a in demo["answerActions"]}
+    assert actions == {
+        "approve": ["scripted", "simulated"],
+        "reject": ["scripted", "simulated"],
+        "script": ["simulated"],
+    }
+    chatbot = connect(_chatbot(tmp_path)).get(FORM).json()
+    assert [(c["value"], c["label"]) for c in chatbot["stopAt"]] == [
+        ("auto", "When the goal is reached")
+    ]
+    for choice in demo["stopAt"]:
+        out = connect(app_for(tmp_path)[0]).post(DRAFT, json=_draft(stopAt=choice["value"]))
+        assert out.json()["check"]["ok"], choice
