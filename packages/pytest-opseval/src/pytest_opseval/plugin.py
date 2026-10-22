@@ -118,7 +118,7 @@ class OpsevalFile(pytest.File):
         catalogue, _ = load_catalogue(
             self.path,
             profile,
-            known_scorers=REGISTRY.keys(),
+            known_scorers=REGISTRY,
             known_invariants=set(INVARIANTS),
         )
         for problem in catalogue.problems:

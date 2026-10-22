@@ -56,7 +56,7 @@ def folder(tmp_path: Path, name: str = "cat") -> Path:
 
 
 def read(path: Path):  # type: ignore[no-untyped-def]
-    return read_folder(path, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS))
+    return read_folder(path, known_scorers=REGISTRY, known_invariants=set(INVARIANTS))
 
 
 def _without_persona(path: Path) -> str:
@@ -257,14 +257,15 @@ class TestReadingAFolder:
             read(cat)
 
     def test_an_alias_bomb_in_a_valid_scenario_never_expands(self, tmp_path: Path) -> None:
-        # Scorer params accept any value, so the loader itself accepts this file.
+        # payload_equals' `equals` takes any value, so the loader itself accepts this file.
         cat = folder(tmp_path)
         (cat / "scenarios" / "bomb.yaml").write_text(
             "id: bomb\nname: bomb\ngoal: g\npersona: {role: customer}\n"
             "conversation:\n  scripted_turns: [hi]\n  stop_at: supervisor_review\n"
             "  checkpoint_policy: {proposal_approval: {action: approve}}\n"
-            "scorers:\n  - id: output.terminal_state\n"
-            "    params: {a: &a [1, 1], b: &b [*a, *a], c: [*b, *b]}\n",
+            "scorers:\n  - id: output.payload_equals\n"
+            "    params:\n      checkpoint: proposal_approval\n      path: x\n"
+            "      equals: {a: &a [1, 1], b: &b [*a, *a], c: [*b, *b]}\n",
             encoding="utf-8",
         )
         with pytest.raises(ConfigError, match="anchors and aliases are not allowed"):
@@ -282,6 +283,21 @@ class TestReadingAFolder:
         outside.write_text("id: x\n", encoding="utf-8")
         (cat / "scenarios" / "linked.yaml").symlink_to(outside)
         with pytest.raises(ConfigError, match="outside the catalogue"):
+            read(cat)
+
+    def test_a_params_typo_refuses_the_push(self, tmp_path: Path) -> None:
+        # The push checks params like `validate` does (ADR-0043), not only the schema.
+        cat = folder(tmp_path)
+        path = cat / "scenarios" / "rf-001-happy-path.yaml"
+        path.write_text(
+            path.read_text("utf-8").replace(
+                "scorers:\n",
+                "scorers:\n  - {id: conversation.turn_budget, params: {budjet: 1}}\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="budjet"):
             read(cat)
 
     def test_a_folder_without_a_profile(self, tmp_path: Path) -> None:

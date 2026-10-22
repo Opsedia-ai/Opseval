@@ -322,7 +322,7 @@ def _needs_llm_persona(scenario: Scenario) -> bool:
 
 
 def _unmet(
-    scenario: Scenario, health: PreflightReport, no_simulator: bool
+    scenario: Scenario, profile: SutProfile, health: PreflightReport, no_simulator: bool
 ) -> tuple[str, SkipKind] | None:
     """Why preflight says this scenario cannot produce a verdict, if it says so.
 
@@ -339,7 +339,7 @@ def _unmet(
         return reason, "simulator"
     requires = [
         cls.requires
-        for spec in effective_specs(scenario)
+        for spec in effective_specs(scenario, profile)
         if (cls := REGISTRY.get(spec.id)) is not None
     ]
     all_llm = bool(requires) and all(r == "llm" for r in requires)
@@ -475,7 +475,7 @@ async def launch(
     catalogue, suite_name = load_catalogue(
         catalogue_target,
         profile,
-        known_scorers=REGISTRY.keys(),
+        known_scorers=REGISTRY,
         known_invariants=set(INVARIANTS),
         filters=options.filters,
     )
@@ -630,7 +630,7 @@ async def launch(
         store.save_scenario(run_id, scenario)
         if scenario.is_blocked:
             return skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'", "quarantine")
-        blocked_by = _unmet(scenario, health, sim_client is None)
+        blocked_by = _unmet(scenario, profile, health, sim_client is None)
         if blocked_by is not None:
             reason, kind = blocked_by
             return skipped(scenario, VerdictStatus.SKIPPED_PRECONDITION, reason, kind)

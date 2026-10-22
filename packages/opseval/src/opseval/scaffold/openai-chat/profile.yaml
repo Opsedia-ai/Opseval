@@ -32,7 +32,12 @@ transport_options:
 # the endpoint returns when no trace source is configured.
 tools: {}
 #  lookup_order: {}
-#  issue_refund: {commits: true}
+#  issue_refund: {}   # `commits: true` needs a commit_gate checkpoint, which a chat endpoint lacks
+
+# Frames show only the tool calls the endpoint returns, so a must_call tool missing from them
+# is "not measured": the agent may run tools on its own server. If the endpoint returns every
+# call (a raw model whose client runs the tools), say so, and a missing call is a failure:
+# tool_calls_complete: true
 
 # Read what the agent really did from Langfuse (set OPSEVAL_LANGFUSE_* in .env).
 # The agent must use the same session id in Langfuse as the one Opseval sees.

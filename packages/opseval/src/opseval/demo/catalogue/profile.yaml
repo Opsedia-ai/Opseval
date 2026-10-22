@@ -31,6 +31,9 @@ checkpoints:
 commit_gate: supervisor_review
 committed_outcome: refund_issued
 
+# The reference agent reports every tool it runs in its frames, so a missing one is a
+# real omission, not a blind spot (ADR-0043).
+tool_calls_complete: true
 tools:
   lookup_order: {evidence_key: order_summary}
   check_eligibility: {evidence_key: eligibility}

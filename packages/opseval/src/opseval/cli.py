@@ -27,7 +27,7 @@ from opseval.models.stop import StopPolicy
 from opseval.reporting import console_summary
 from opseval.runner import RunOptions, launch
 from opseval.scaffold import PLACEHOLDER_URL, TEMPLATES, Answers, scaffold
-from opseval.scoring import INVARIANTS, REGISTRY
+from opseval.scoring import INVARIANTS, REGISTRY, describe_params
 from opseval.storage import FileStore, load_result_at
 from opseval.verdicts import EXIT_HARNESS, EXIT_NOT_JUDGED
 
@@ -144,7 +144,7 @@ def init(
         cat, _ = load_catalogue(
             directory / "suites" / "full.yaml",
             profile,
-            known_scorers=REGISTRY.keys(),
+            known_scorers=REGISTRY,
             known_invariants=set(INVARIANTS),
         )
     except ConfigError as exc:
@@ -173,7 +173,7 @@ def validate(
     try:
         prof = load_profile(profile)
         cat, suite = load_catalogue(
-            path, prof, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS)
+            path, prof, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
         )
     except ConfigError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
@@ -223,6 +223,11 @@ def list_scorers() -> None:
         typer.echo(
             f"{sid:<32} {cls.axis.value:<9} needs {cls.requires:<7} {cls.description}{origin}"
         )
+        params = describe_params(cls)
+        if params is None:
+            typer.echo(f"{'':<32} params: not declared, so not checked")
+        elif params:
+            typer.echo(f"{'':<32} params: {params}  (* required)")
     if THIRD_PARTY:
         typer.echo(f"\n{len(THIRD_PARTY)} scorer(s) come from installed plugins, marked [dist].")
     typer.echo("\nInvariant bundles: " + ", ".join(f"{k} → {v}" for k, v in INVARIANTS.items()))
@@ -663,7 +668,7 @@ def preflight(
         found, _name = load_catalogue(
             catalogue,
             sut_profile,
-            known_scorers=REGISTRY.keys(),
+            known_scorers=REGISTRY,
             known_invariants=set(INVARIANTS),
         )
         report = asyncio.run(

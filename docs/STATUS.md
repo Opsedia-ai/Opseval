@@ -6,21 +6,21 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-21** (`main` with server mode's first step: the catalogue versioned in Postgres).
+**As of 2026-10-22** (`main` with the catalogue versioned in Postgres, and defaults from the profile).
 
 ## Completion
 
 <!-- status:summary:start -->
-**Overall: 87% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 91% of 69.
+**Overall: 88% of 88 functional requirements** (Done = 1, Partial = ½, Missing = 0). Must-haves: 93% of 69.
 
 | Release | Requirements | Done / Partial / Missing | Complete |
 |---|---|---|---|
-| v0.1 | 59 | 51 / 8 / 0 | 93% |
+| v0.1 | 59 | 53 / 6 / 0 | 95% |
 | v0.2 | 15 | 12 / 2 / 1 | 87% |
 | v0.5 | 12 | 7 / 3 / 2 | 71% |
 | v0.8 | 1 | 0 / 0 / 1 | 0% |
 | v1.x | 1 | 0 / 0 / 1 | 0% |
-| **All** | 88 | 70 / 13 / 5 | **87%** |
+| **All** | 88 | 72 / 11 / 5 | **88%** |
 <!-- status:summary:end -->
 
 How to read it: one row per functional requirement in the product requirements (doc 04),
@@ -41,11 +41,11 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-CAT-01 | Offline `validate`, file + field + reason | M | v0.1 | Done | `catalogue.load_catalogue`, `LoadProblem` |
 | FR-CAT-02 | Identity fields and criticality | M | v0.1 | Done | `models/scenario.py` |
 | FR-CAT-03 | Persona fields, timezone checked | M | v0.1 | Done | `Persona`, `check_references` |
-| FR-CAT-04 | Conversation spec | M | v0.1 | Done | Diverged by decision: `stop_at` defaults to `commit_gate` (ADR-0008); probes live in the profile (ADR-0025) |
-| FR-CAT-05 | Expectations | M | v0.1 | Partial | `Expectations`, `ExpectedTools`; `kind: refusal` is accepted but nothing reads it (ATTENTION I15) |
+| FR-CAT-04 | Conversation spec | M | v0.1 | Done | Diverged by decision: `stop_at` defaults to `commit_gate` (ADR-0008), which with no commit gate in the profile means running to the goal, while writing `commit_gate` out still needs one (ADR-0043); probes live in the profile (ADR-0025) |
+| FR-CAT-05 | Expectations | M | v0.1 | Done | `Expectations`, `ExpectedTools`; `kind: refusal` reaches the judges, which are told the correct outcome is the agent declining (ADR-0043) |
 | FR-CAT-06 | Scorer list or default pack | M | v0.1 | Done | `ScorerSpec` |
 | FR-CAT-07 | Execution: repeats, threshold, timeouts | M | v0.1 | Done | `ExecutionSpec` |
-| FR-CAT-08 | Fail closed on authoring mistakes | M | v0.1 | Partial | `extra="forbid"`, `check_references`; scorer `params` are not checked at load time, so a typo or a bad value surfaces only at run time as *not measured* (ATTENTION I15) |
+| FR-CAT-08 | Fail closed on authoring mistakes | M | v0.1 | Done | `extra="forbid"`, `check_references`; every scorer's `params` checked at load against the model it declares (`Scorer.Params`, strict), a plugin without one warned about (ADR-0043) |
 | FR-CAT-09 | Suites and precedence | M | v0.1 | Done | `_load_scenario` deep merge |
 | FR-CAT-10 | Filters and `blocked` | S | v0.1 | Done | `_match_filter`, `is_blocked` |
 | FR-CAT-11 | Published JSON Schemas | S | v0.2 | Done | `schemas/v1`, `opseval schemas --check` (ADR-0026) |
@@ -56,7 +56,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SIM-04 | Planted injections | M | v0.2 | Done | `conversation.injections` (ADR-0014) |
 | FR-SIM-05 | Checkpoint decisions | M | v0.1 | Done | `Simulator.decide` |
 | FR-SIM-06 | Simulator fault is a harness error | M | v0.1 | Done | fault-injection suite |
-| FR-SIM-07 | Persona playground | S | v0.5 | Done | console Simulator page, `POST /simulator/rehearse` |
+| FR-SIM-07 | Persona playground | S | v0.5 | Done | console Simulator page, `POST /simulator/rehearse`; a scripted persona that runs out says so (`scriptExhausted`), never "goal reached" (ADR-0043) |
 | FR-RUN-01 | Pluggable transports | M | v0.1 | Done | websocket, http-json, sse, openai-chat, python (API only) |
 | FR-RUN-02 | SUT profile | M | v0.1 | Done | `models/profile.py` |
 | FR-RUN-03 | Credentials | M | v0.1 | Done | static and HS256 with refresh (ADR-0012), per-tenant tokens (ADR-0041), and `opseval.credentials` provider plugins: fail-closed discovery, every provider failure a harness error (ADR-0046) |
@@ -78,15 +78,15 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-REC-05 | Layout contract | M | v0.1 | Done | versioned layout (`opseval-runs/2` in every manifest, `opseval-runs/1` still read; unknown layouts refused by every reader, shown as errors in the console, never pruned) and the `storage.RunStore` protocol `FileStore` meets (ADR-0005 amendment) |
 | FR-SCR-01 | Three-state scores | M | v0.1 | Done | `ScoreResult` validator |
 | FR-SCR-02 | Axes | M | v0.1 | Done | `Axis` |
-| FR-SCR-03 | Deterministic scorers | M | v0.1 | Done | every listed scorer, including `output.required_fields` (present and non-empty payload fields) beside `output.payload_equals` |
-| FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Done | expected/forbidden/ordering/call_success/args_valid, `tools.approval_gated` and `flow.checkpoint_gating` (traces, else degraded frame evidence; `TRACE_UNAVAILABLE` when nothing is visible) |
+| FR-SCR-03 | Deterministic scorers | M | v0.1 | Done | every listed scorer, including `output.required_fields` (present and non-empty payload fields) beside `output.payload_equals`; `conversation.agent_replied`: a turn the agent leaves unanswered, or answers with blank text, fails (ADR-0043) |
+| FR-SCR-04 | Trace-backed tool scorers | M | v0.2 | Done | expected/forbidden/ordering/call_success/args_valid, `tools.approval_gated` and `flow.checkpoint_gating` (traces, else degraded frame evidence; `TRACE_UNAVAILABLE` when nothing is visible); from frames alone a tool missing is *not measured* unless the profile sets `tool_calls_complete` (ADR-0043) |
 | FR-SCR-05 | LLM judges with quoted ballots | M | v0.1 | Done | `scoring/judges.py`; the conversation is fenced JSON-lines data with harness facts outside (ADR-0036) |
 | FR-SCR-06 | Quality and security judges | M | v0.2 | Done | ADR-0014, ADR-0016 |
 | FR-SCR-07 | Judge audit trail | M | v0.1 | Done | prompt hash, quotes, model; rubric digests (ADR-0017) |
 | FR-SCR-08 | Vendor-family guard | S | v0.2 | Done | refused at launch by default (ADR-0016) |
 | FR-SCR-09 | Criterion permutation | C | v0.5 | Done | rotated ballots (ADR-0017) |
 | FR-SCR-10 | Scorer plugin API and contract kit | M | v0.2 | Done | `plugins.py`, `opseval.testing.ScorerContract` (ADR-0022) |
-| FR-SCR-11 | Invariants and default pack | M | v0.1 | Done | `phase_order`, `no_errors`, `no_autonomous_commit` (`tools.forbidden_not_called`) and `checkpoint_gating` (adds `flow.checkpoint_gating`), de-duplicated against the default pack |
+| FR-SCR-11 | Invariants and default pack | M | v0.1 | Done | `phase_order`, `no_errors`, `no_autonomous_commit` (`tools.forbidden_not_called`) and `checkpoint_gating` (adds `flow.checkpoint_gating`), de-duplicated against the default pack; `scorers: default` follows the scenario and profile (no phase check without phases, every declared tool expectation checked; ADR-0043) |
 | FR-VER-01 | Attempt invalidation | M | v0.1 | Done | `attempt_verdict`: any failed harness-axis score invalidates, including the always-on `protocol.replies_read` (the profile read nothing the agent sent); a run where every attempt was lost or unread exits 3 (ADR-0042) |
 | FR-VER-02 | Fold attempts | M | v0.1 | Done | `fold_attempts` |
 | FR-VER-03 | Flaky detection | M | v0.1 | Done | `TestVerdict.flaky` |
@@ -107,7 +107,7 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 | FR-SAF-01 | Host allowlist, TLS | M | v0.1 | Done | targets, every LLM endpoint (keyed or not; only the ones a suite uses are built), every preflight probe (exit 3 when refused), Langfuse, sinks, telemetry (`check_url_allowed`; errors show only scheme and host) |
 | FR-SAF-02 | Secrets and redacted digest | M | v0.1 | Done | `SECRET_FIELDS` (webhook URL included), `config_digest`; sink outcomes and allowlist errors name only the host |
 | FR-SAF-03 | Test-tenant isolation and locks | M | v0.1 | Done | one exclusive lease per scenario; a lock that cannot be read counts as held; no free tenant is a skip, never a shared account; tokens named, never stored (ADR-0041) |
-| FR-SAF-04 | Committed-outcome guard | M | v0.1 | Done | CLI and console (`serve --allow-commit`, ADR-0031); a `committed_outcome` without a `commit_gate` is a load error (ADR-0008 amendment) |
+| FR-SAF-04 | Committed-outcome guard | M | v0.1 | Done | CLI and console (`serve --allow-commit`, ADR-0031); a `committed_outcome` without a `commit_gate` is a load error (ADR-0008 amendment); a tool with `commits: true` needs a `commit_gate` too (ADR-0043) |
 | FR-SAF-05 | Artifact cleanup planning | S | v0.5 | Missing | not started |
 | FR-SAF-06 | Retention | M | v0.5 | Done | `opseval prune` (dry run unless `--yes`, `OPSEVAL_RETENTION_DAYS` default 90; never a run that may still be going; ADR-0037) |
 | FR-SAF-07 | Content-free telemetry | M | v0.1 | Done | implemented, ships dark (ADR-0021) |

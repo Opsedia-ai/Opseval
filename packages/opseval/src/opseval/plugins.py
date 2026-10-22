@@ -24,6 +24,8 @@ from collections.abc import Iterable, Iterator
 from importlib.metadata import EntryPoint, entry_points
 from typing import Any
 
+from pydantic import BaseModel
+
 from opseval.errors import ConfigError
 from opseval.models.results import Axis
 from opseval.scoring.base import REGISTRY, Scorer
@@ -81,7 +83,29 @@ def check_contract(obj: Any, *, source: str) -> type[Scorer]:
     version = getattr(obj, "version", None)
     if not isinstance(version, str) or not version:
         raise ConfigError(f"{source}: scorer {scorer_id!r} has no 'version' string")
+    params = _own_params(obj)
+    if params is not None and not (isinstance(params, type) and issubclass(params, BaseModel)):
+        raise ConfigError(
+            f"{source}: scorer {scorer_id!r} declares Params, which must be a pydantic model "
+            f"(the params it takes, checked when a scenario loads), got {params!r}"
+        )
+    # A plugin that subclasses a built-in base (a Judge) inherits that base's params model,
+    # which takes none: its own params, valid before ADR-0043, would start failing to load.
+    # Only a model the plugin declares itself is enforced.
+    obj.Params = params
     return obj
+
+
+def _own_params(cls: type) -> object:
+    """The ``Params`` a plugin class (or one of its own plugin bases) declares, not one it
+    inherits from Opseval's built-in classes."""
+    for klass in cls.__mro__:
+        if "Params" in vars(klass):
+            module = getattr(klass, "__module__", "")
+            if module == "opseval" or module.startswith("opseval."):
+                return None
+            return vars(klass)["Params"]
+    return None
 
 
 def load_scorers(*, group: str = SCORER_GROUP) -> dict[str, str]:

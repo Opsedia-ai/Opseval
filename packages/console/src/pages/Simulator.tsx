@@ -12,13 +12,13 @@ export default function Simulator() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<ApiError>();
   const [model, setModel] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
+  const [ended, setEnded] = useState<"goal" | "script" | null>(null);
   const persona = useApi(() => (id ? api.persona(id) : Promise.resolve(undefined)), [id]);
 
   useEffect(() => { if (!id && scenarios.data?.scenarios[0]) setId(scenarios.data.scenarios[0].id); }, [scenarios.data, id]);
 
   const restart = async () => {
-    setTurns([]); setReply(""); setErr(undefined); setDone(false);
+    setTurns([]); setReply(""); setErr(undefined); setEnded(null);
     if (!id) return;
     setBusy(true);
     try { const r = await api.rehearse(id, []); setTurns([r.turn]); setModel(r.model); }
@@ -31,7 +31,11 @@ export default function Simulator() {
     if (!reply.trim() || busy) return;
     const next = [...turns, { who: "agent", text: reply } as Turn];
     setTurns(next); setReply(""); setBusy(true); setErr(undefined);
-    try { const r = await api.rehearse(id, next); setDone(r.goalReached); if (!r.goalReached) setTurns([...next, r.turn]); setModel(r.model); }
+    try {
+      const r = await api.rehearse(id, next);
+      const end = r.goalReached ? "goal" : r.scriptExhausted ? "script" : null;
+      setEnded(end); if (!end) setTurns([...next, r.turn]); setModel(r.model);
+    }
     catch (e) { setErr(e as ApiError); }
     setBusy(false);
   };
@@ -55,13 +59,14 @@ export default function Simulator() {
                     <div dir={t.who === "customer" && rtl ? "rtl" : undefined}>{t.text}</div>
                   </div>))}
                 {busy && <div className="text-sm">The customer is typing…</div>}
-                {done && <Callout tone="info">The persona says its goal is reached and would end the chat here.</Callout>}
+                {ended === "goal" && <Callout tone="info">The persona says its goal is reached and would end the chat here.</Callout>}
+                {ended === "script" && <Callout tone="info">The scripted turns have run out, so the conversation ends here. That says nothing about whether the goal was met.</Callout>}
               </div>
               {err && <div className="mt-4"><ErrorBox error={err} /></div>}
               <div className="mt-5 flex gap-2">
                 <input value={reply} onChange={(e) => setReply(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void send()} disabled={!!err && err.status === 503}
                   placeholder="Reply as the agent and see how the persona reacts…" className="min-w-0 flex-1 rounded-full border border-line bg-white px-4 py-2" />
-                <CoralButton onClick={() => void send()} disabled={busy || done}>Send</CoralButton>
+                <CoralButton onClick={() => void send()} disabled={busy || ended !== null}>Send</CoralButton>
                 <Button onClick={() => void restart()}>Restart</Button>
               </div>
               <p className="mt-3 text-sm">{model ? <>One model call per turn (<Mono>{model}</Mono>).</> : "Scripted persona: no model is called."}</p>

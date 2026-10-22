@@ -17,6 +17,7 @@ conversation:
 
 scorers:
   - {id: conversation.no_errors}
+  - {id: conversation.agent_replied}   # a turn answered with nothing fails (ADR-0043)
   - {id: output.language_script, params: {script: arabic, min_fraction: 1.0}}
 
 execution:

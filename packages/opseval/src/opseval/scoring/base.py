@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from opseval.errors import ConfigError
 from opseval.llm import ChatClient, model_family
@@ -44,6 +44,12 @@ class ScoringContext:
         return self.profile.declared_model()
 
 
+class NoParams(BaseModel):
+    """A scorer that takes no params: any key given is an authoring mistake."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
 class Scorer(ABC):
     id: ClassVar[str]
     axis: ClassVar[Axis]
@@ -51,6 +57,17 @@ class Scorer(ABC):
     description: ClassVar[str] = ""
     version: ClassVar[str] = "1"
     """Bump when the scoring logic changes (``opseval rescore`` reports the difference)."""
+    Params: ClassVar[type[BaseModel] | None] = None
+    """The ``params`` this scorer takes, checked when a scenario loads (ADR-0043), so a typo
+    fails ``opseval validate`` instead of becoming *not measured* at run time. Every built-in
+    declares one (:class:`NoParams` when it takes none); a plugin that does not is unchecked,
+    and ``validate`` says so."""
+
+    @classmethod
+    def check_params(cls, params: BaseModel, profile: SutProfile) -> list[str]:
+        """Problems with valid ``params`` against the profile, found when a scenario loads
+        (``field: message``, the field relative to ``params``). Default: none."""
+        return []
 
     @abstractmethod
     async def score(
@@ -100,6 +117,16 @@ def infra_error(
     )
 
 
+def describe_params(cls: type[Scorer]) -> str | None:
+    """The params a scorer takes, ``name*`` when required; ``""`` for none; ``None`` when it
+    does not say (a plugin without a ``Params`` model, whose params go unchecked)."""
+    model = cls.Params
+    if not (isinstance(model, type) and issubclass(model, BaseModel)):
+        return None
+    fields = model.model_fields.items()
+    return ", ".join(f"{name}{'*' if info.is_required() else ''}" for name, info in fields)
+
+
 REGISTRY: dict[str, type[Scorer]] = {}
 
 
@@ -126,6 +153,31 @@ DEFAULT_PACK = [
     "output.terminal_state",
     "tools.forbidden_not_called",
 ]
+"""The pack before profiles shaped it, still used when no profile is known (ADR-0043)."""
+
+
+def default_pack(scenario: Scenario, profile: SutProfile) -> list[str]:
+    """``scorers: default`` for this scenario against this profile (ADR-0043).
+
+    Only checks that can measure something here. A chatbot with no phases and no tools no
+    longer gets ``flow.phase_order`` (always *not measured*) or a tool check that passes on
+    nothing, so it can reach "Safe to release"; and an expectation the scenario declares is
+    always checked, where before ``must_call`` or ``ordering`` under ``scorers: default`` was
+    silently never looked at.
+    """
+    tools = scenario.expectations.expected_tools
+    pack = ["conversation.no_errors", "conversation.agent_replied", "output.terminal_state"]
+    if profile.phases:
+        pack.append("flow.phase_order")
+    committing = profile.commit_gate is not None and any(t.commits for t in profile.tools.values())
+    if tools.must_not_call or tools.forbidden_before or committing:
+        pack.append("tools.forbidden_not_called")
+    if tools.must_call:
+        pack.append("tools.expected_called")
+    if tools.ordering:
+        pack.append("tools.ordering")
+    return pack
+
 
 ALWAYS_ON = [UNREAD_REPLIES]
 """Harness checks the engine runs on every attempt, whatever the scenario lists (ADR-0042).
@@ -136,12 +188,15 @@ measures nothing about the agent, so it must not change which dependencies a sce
 needs."""
 
 
-def effective_specs(scenario: Scenario) -> list[ScorerSpec]:
-    specs = (
-        [ScorerSpec(id=i) for i in DEFAULT_PACK]
-        if scenario.scorers == "default"
-        else list(scenario.scorers)
-    )
+def effective_specs(scenario: Scenario, profile: SutProfile | None = None) -> list[ScorerSpec]:
+    """What the scenario asked to be scored with. ``scorers: default`` follows the profile
+    (:func:`default_pack`); every caller that has a profile passes it, so the runner, the
+    engine, preflight and advice agree on one set."""
+    if scenario.scorers == "default":
+        ids = DEFAULT_PACK if profile is None else default_pack(scenario, profile)
+        specs = [ScorerSpec(id=i) for i in ids]
+    else:
+        specs = list(scenario.scorers)
     for inv in scenario.expectations.invariants:
         specs += [ScorerSpec(id=i) for i in INVARIANTS.get(inv, [])]
     seen: set[str] = set()
@@ -179,7 +234,7 @@ def independence_conflicts(
     for scenario in scenarios:
         if scenario.is_blocked:
             continue  # skipped before scoring, so its judges never run
-        for spec in effective_specs(scenario):
+        for spec in effective_specs(scenario, profile):
             cls = REGISTRY.get(spec.id)
             if cls is None or cls.requires != "llm":
                 continue
@@ -258,7 +313,7 @@ class ScoringEngine:
         )
         # An always-on check runs with its own spec, even if the scenario lists it: a listed
         # threshold of 0 would otherwise switch off the check that catches a wrong mapping.
-        specs = [s for s in effective_specs(scenario) if s.id not in ALWAYS_ON]
+        specs = [s for s in effective_specs(scenario, profile) if s.id not in ALWAYS_ON]
         specs += [ScorerSpec(id=i) for i in ALWAYS_ON]
         return list(await asyncio.gather(*(self._one(record, spec, ctx) for spec in specs)))
 

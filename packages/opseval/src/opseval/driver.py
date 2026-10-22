@@ -25,6 +25,7 @@ from opseval.errors import (
 )
 from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
 from opseval.models.record import (
+    SCRIPT_EXHAUSTED,
     CreatedArtifact,
     FrameRecord,
     InterruptRecord,
@@ -466,31 +467,44 @@ class Driver:
                 continue
             turn = await self._simulate(self.sim.next_turn(self.transcript()))
             self._injections += turn.injections
+            if turn.script_exhausted:
+                self._notes.append(SCRIPT_EXHAUSTED)
+                raise _Stop(TerminalState.GOAL_REACHED, "the scripted turns ran out")
             if turn.goal_reached:
                 raise _Stop(TerminalState.GOAL_REACHED, "the customer considers the goal reached")
             await self._send_user(session, turn.text)
 
     async def _agent_turn(self, session: Session) -> tuple[str, Any]:
-        """Read frames until the agent's turn ends. Returns (how it ended, last frame)."""
-        first = True
+        """Read frames until the agent's turn ends. Returns (how it ended, last frame).
+
+        Until the agent has *answered* (``SutProfile.answers``), the turn's own deadline applies;
+        after that, the quiet window ends the turn. A handshake, a typing notification or a frame
+        with no words is not an answer: before, any of them started the quiet timer, the customer
+        replied before the agent had, and the agent's answer was filed under the next turn (I12).
+        On a request/response transport the whole reply is already here, so the first frame
+        that is not transport chatter ends the wait, as it always has.
+        """
+        loop = asyncio.get_running_loop()
+        turn = self.s.execution.turn_timeout_seconds
+        deadline = loop.time() + turn
+        waiting = True
         quiet = self.p.turn_quiet_ms / 1000
         while True:
             try:
                 payload = await session.receive(
-                    self.s.execution.turn_timeout_seconds if first else quiet
+                    max(0.0, deadline - loop.time()) if waiting else quiet
                 )
             except TransportTimeout:
-                if first:
-                    raise _Stop(
-                        TerminalState.TIMEOUT,
-                        f"no reply within {self.s.execution.turn_timeout_seconds:.0f}s",
-                    ) from None
+                if waiting:
+                    raise _Stop(TerminalState.TIMEOUT, f"no reply within {turn:.0f}s") from None
                 return "quiet", None
             kind = self.p.classify(payload)
-            # Transport chatter (e.g. a late resume confirmation) is not the agent's reply.
-            first = first and kind is FrameKind.HANDSHAKE
             text = payload.get(self.p.text_field) if isinstance(payload, dict) else None
-            self._record("received", payload, kind, text if isinstance(text, str) else None)
+            text = text if isinstance(text, str) else None
+            # Transport chatter (e.g. a late resume confirmation) is never the agent's reply.
+            if waiting and kind is not FrameKind.HANDSHAKE:
+                waiting = not (session.replies_in_send or self.p.answers(kind, text, payload))
+            self._record("received", payload, kind, text)
             if kind is FrameKind.ERROR:
                 raise _Stop(TerminalState.ERROR_FRAME, "the agent sent an error frame")
             if kind is FrameKind.RESULT:

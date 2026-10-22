@@ -20,7 +20,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -32,7 +32,7 @@ from sqlalchemy import and_, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from opseval.catalogue import load_catalogue, load_profile, suite_files
+from opseval.catalogue import KnownScorers, load_catalogue, load_profile, suite_files
 from opseval.db.schema import (
     CatalogueItem,
     CatalogueLabel,
@@ -144,7 +144,7 @@ def _files(root: Path) -> list[tuple[str, Path]]:
 
 
 def read_folder(
-    root: Path, *, known_scorers: Iterable[str], known_invariants: set[str]
+    root: Path, *, known_scorers: KnownScorers, known_invariants: set[str]
 ) -> list[CatalogueFile]:
     """Every file of a catalogue folder, through exactly the checks ``opseval validate``
     applies. Any problem anywhere refuses the whole folder: a push is all or nothing."""
@@ -153,7 +153,8 @@ def read_folder(
         raise ConfigError(f"{root}: not a folder")
     found = _files(root)
     profile = load_profile(root / "profile.yaml")
-    known = list(known_scorers)
+    # The registry stays a mapping, so each scorer's params are checked too (ADR-0043).
+    known = known_scorers if isinstance(known_scorers, Mapping) else list(known_scorers)
     problems: list[str] = []
 
     def check(path: Path) -> set[str]:

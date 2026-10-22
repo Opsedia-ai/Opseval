@@ -11,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from opseval.models.profile import FrameKind
 
+SCRIPT_EXHAUSTED = "script_exhausted"
+"""Noted when a scripted customer ran out of turns (ADR-0043). The attempt ends
+``goal_reached``, but that shows only that the conversation ran to its end, not that the goal
+was met; scorers read the note, which lives here so they need not import the driver."""
+
 
 class TerminalState(StrEnum):
     OUTCOME_COMMITTED = "outcome_committed"

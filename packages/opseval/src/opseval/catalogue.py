@@ -4,14 +4,14 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from opseval.errors import ConfigError
 from opseval.models.gate import GatePolicy
@@ -59,6 +59,9 @@ def _problems_from(path: Path, exc: ValidationError) -> list[LoadProblem]:
 
 BUILTIN_PREFIX = "builtin:"
 
+KnownScorers = Iterable[str] | Mapping[str, Any]
+"""Scorer ids, or the registry itself (id → class), which also lets params be checked."""
+
 
 def builtin_profiles() -> dict[str, Path]:
     """Profiles shipped with Opseval, usable as ``--profile builtin:<name>``."""
@@ -87,22 +90,36 @@ def load_profile(path: str | Path) -> SutProfile:
 def check_references(
     scenario: Scenario,
     profile: SutProfile,
-    known_scorers: Iterable[str],
+    known_scorers: KnownScorers,
     known_invariants: set[str],
 ) -> list[str]:
-    """Cross-check a scenario against the active profile and scorer catalogue."""
+    """Cross-check a scenario against the active profile and scorer catalogue.
+
+    ``known_scorers`` is the scorer ids, or the registry itself (id → class): given the
+    registry, each scorer's ``params`` are checked against the model it declares (ADR-0043),
+    so a typo fails here rather than becoming *not measured* at run time.
+    """
     errors: list[str] = []
     known = set(known_scorers)
+    classes = known_scorers if isinstance(known_scorers, Mapping) else {}
     conv = scenario.conversation
     if conv.stop_at not in RESERVED_STOP_AT and conv.stop_at not in profile.checkpoints:
         errors.append(
             f"conversation.stop_at: {conv.stop_at!r} is not a checkpoint of profile "
             f"{profile.name!r} (known: {sorted(profile.checkpoints)})"
         )
-    if conv.stop_at == "commit_gate" and profile.commit_gate is None:
+    if (
+        conv.stop_at == "commit_gate"
+        and profile.commit_gate is None
+        and "stop_at" in conv.model_fields_set
+    ):
+        # Left out, stop_at means "stop before the irreversible step, if there is one": with
+        # no commit gate the conversation runs to its goal (ADR-0043). Written out, it asks
+        # for a gate this profile does not have.
         errors.append(
-            "conversation.stop_at: the default 'commit_gate' needs a profile with a commit_gate; "
-            f"profile {profile.name!r} declares none, so set stop_at: goal_reached"
+            "conversation.stop_at: 'commit_gate' needs a profile with a commit_gate; "
+            f"profile {profile.name!r} declares none, so set stop_at: goal_reached (or leave "
+            "it out)"
         )
     for name, policy in conv.checkpoint_policy.items():
         if name not in profile.checkpoints:
@@ -148,11 +165,25 @@ def check_references(
         if inv not in known_invariants:
             errors.append(f"expectations.invariants: unknown invariant {inv!r}")
     if isinstance(scenario.scorers, list):
-        for spec in scenario.scorers:
+        for index, spec in enumerate(scenario.scorers):
             if spec.id not in known:
                 errors.append(
                     f"scorers: unknown scorer id {spec.id!r} (see `opseval list-scorers`)"
                 )
+            cls = classes.get(spec.id)
+            model = getattr(cls, "Params", None)
+            if cls is not None and isinstance(model, type) and issubclass(model, BaseModel):
+                try:
+                    params = model.model_validate(spec.params)
+                except ValidationError as exc:
+                    for err in exc.errors():
+                        where = ".".join(str(part) for part in err["loc"])
+                        field = f"scorers.{index}.params" + (f".{where}" if where else "")
+                        errors.append(f"{field}: {spec.id}: {err['msg']}")
+                else:
+                    for problem in cls.check_params(params, profile):
+                        where, _, message = problem.partition(": ")
+                        errors.append(f"scorers.{index}.params.{where}: {spec.id}: {message}")
             if spec.id == "security.policy_adherence" and not scenario.expectations.policy:
                 errors.append(
                     "scorers: 'security.policy_adherence' grades the agent against "
@@ -193,7 +224,7 @@ def reference_problems(
     scenario: Scenario,
     where: str,
     profile: SutProfile,
-    known_scorers: Iterable[str],
+    known_scorers: KnownScorers,
     known_invariants: set[str],
 ) -> list[LoadProblem]:
     """`check_references`, as problems with the field split from the message."""
@@ -209,7 +240,7 @@ def check_scenario_text(
     where: str,
     profile: SutProfile,
     *,
-    known_scorers: Iterable[str],
+    known_scorers: KnownScorers,
     known_invariants: set[str],
 ) -> tuple[Scenario | None, list[LoadProblem]]:
     """One scenario file's text through exactly the checks `opseval validate` applies to
@@ -265,7 +296,7 @@ def load_catalogue(
     target: str | Path,
     profile: SutProfile,
     *,
-    known_scorers: Iterable[str],
+    known_scorers: KnownScorers,
     known_invariants: set[str],
     filters: list[str] | None = None,
 ) -> tuple[Catalogue, str]:
@@ -273,7 +304,8 @@ def load_catalogue(
     path = Path(target)
     if not path.exists():
         raise ConfigError(f"{path}: no such file or directory")
-    known = list(known_scorers)
+    # The registry stays a mapping, so reference checks can see each scorer's params model.
+    known = known_scorers if isinstance(known_scorers, Mapping) else list(known_scorers)
     suite_name = path.stem
     defaults: dict[str, Any] = {}
     overrides: dict[str, Any] = {}

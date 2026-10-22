@@ -37,12 +37,20 @@ def scenario_warnings(
     def warn(field: str, message: str) -> None:
         out.append(LoadProblem(where, field, message))
 
-    specs = effective_specs(scenario)
+    specs = effective_specs(scenario, profile)
     needs = {spec.id: getattr(REGISTRY.get(spec.id), "requires", None) for spec in specs}
     if scenario.is_blocked:
         # Nothing else applies to a scenario that never runs.
         warn("tags", "tagged 'blocked': quarantined, it is reported but never run")
         return out
+    for index, spec in enumerate(specs):
+        cls = REGISTRY.get(spec.id)
+        if spec.params and cls is not None and cls.Params is None:
+            warn(
+                f"scorers.{index}.params",
+                f"{spec.id} does not declare the params it takes (a plugin without a Params "
+                "model), so a typo in them is not caught here",
+            )
     if scenario.execution.repeats == 1:
         warn(
             "execution.repeats",

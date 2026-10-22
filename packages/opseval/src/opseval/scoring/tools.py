@@ -24,7 +24,7 @@ from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import ScorerSpec
-from opseval.scoring.base import Scorer, ScoringContext, register
+from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
 
 When = int | datetime  # frame seq (frames) or start time (traces)
 
@@ -48,6 +48,13 @@ class Evidence:
         if self.source == "trace":
             return tool in profile.tools
         return profile.frame_verifiable(tool)
+
+    def proves_absence(self, profile: SutProfile) -> bool:
+        """Can a tool missing from this evidence be taken as not called? A trace sees every
+        call; frames show only what the agent reports, unless the profile says they report
+        everything (``tool_calls_complete``, ADR-0043). An agent that runs a tool on its own
+        server and reports none would otherwise be failed for the harness's blind spot."""
+        return self.source == "trace" or profile.tool_calls_complete
 
     def verifiable_at_all(self, profile: SutProfile) -> bool:
         """Could this evidence show a tool call at all, for any declared tool?
@@ -125,8 +132,13 @@ def _base_details(ev: Evidence) -> dict[str, Any]:
 @register
 class ExpectedCalled(Scorer):
     id = "tools.expected_called"
+    Params = NoParams
     axis = Axis.TOOLS
-    description = "Every must_call tool ran (trace-backed; degraded to frame evidence)."
+    version = "2"  # 2: from frames, a missing tool is not measured unless tool_calls_complete
+    description = (
+        "Every must_call tool ran (trace-backed; degraded to frame evidence, where a tool "
+        "missing is not measured unless the profile sets tool_calls_complete)."
+    )
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
         must = ctx.scenario.expectations.expected_tools.must_call
@@ -142,6 +154,16 @@ class ExpectedCalled(Scorer):
                 unverifiable=unverifiable,
             )
         missing = [t for t in verifiable if ev.first(t) is None]
+        if missing and not ev.proves_absence(ctx.profile):
+            return self.infra(
+                spec,
+                f"NOT_MEASURABLE: {', '.join(missing)} did not appear in the agent's frames, which "
+                "show only the tool calls it reports; set tool_calls_complete: true in the "
+                "profile if it reports every one, or read traces",
+                missing=missing,
+                unverifiable=unverifiable,
+                **_base_details(ev),
+            )
         return self.result(
             spec,
             (len(verifiable) - len(missing)) / len(verifiable),
@@ -244,6 +266,7 @@ class _GateScorer(Scorer):
 @register
 class ForbiddenNotCalled(_GateScorer):
     id = "tools.forbidden_not_called"
+    Params = NoParams
     axis = Axis.TOOLS
     description = (
         "No must_not_call tool ran, no forbidden_before tool ran before its checkpoint was "
@@ -258,6 +281,7 @@ class ForbiddenNotCalled(_GateScorer):
 @register
 class ApprovalGated(_GateScorer):
     id = "tools.approval_gated"
+    Params = NoParams
     axis = Axis.TOOLS
     nothing_to_check = "no tool needs an approval first"
     description = (
@@ -272,6 +296,7 @@ class ApprovalGated(_GateScorer):
 @register
 class CheckpointGating(Scorer):
     id = "flow.checkpoint_gating"
+    Params = NoParams
     axis = Axis.FLOW
     description = (
         "While a checkpoint waited for the customer's answer, the agent did not act: no tool "
@@ -355,7 +380,9 @@ class CheckpointGating(Scorer):
 @register
 class Ordering(Scorer):
     id = "tools.ordering"
+    Params = NoParams
     axis = Axis.TOOLS
+    version = "2"  # 2: from frames, a 'before' never seen is unverifiable unless complete
     description = "For each expected_tools.ordering rule, 'before' first ran before 'after'."
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
@@ -374,7 +401,8 @@ class Ordering(Scorer):
             if first_after is None:
                 result = "not_applicable"  # 'after' never ran: nothing to order
             elif first_before is None:
-                result = "violated"  # 'after' ran without 'before'
+                # 'after' ran without 'before', unless frames could have missed 'before'.
+                result = "violated" if ev.proves_absence(ctx.profile) else "unverifiable"
             else:
                 cmp = ev.compare(first_before, first_after)
                 result = {"before": "ok", "after": "violated", "ambiguous": "ambiguous"}[cmp]
@@ -394,6 +422,7 @@ class Ordering(Scorer):
 @register
 class CallSuccess(Scorer):
     id = "tools.call_success"
+    Params = NoParams
     axis = Axis.TOOLS
     requires = "trace"
     description = "Share of the agent's tool calls that succeeded (needs traces)."
@@ -419,6 +448,7 @@ class ArgsValid(Scorer):
     """FR-SCR-04: the agent's tool arguments match the schema the profile declares."""
 
     id = "tools.args_valid"
+    Params = NoParams
     axis = Axis.TOOLS
     requires = "trace"
     description = (

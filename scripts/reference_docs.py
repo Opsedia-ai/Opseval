@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from opseval.config import SECRET_FIELDS, Settings
-from opseval.scoring import INVARIANTS, REGISTRY
+from opseval.scoring import INVARIANTS, REGISTRY, describe_params
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "reference"
@@ -49,13 +49,19 @@ def scorers() -> str:
         "simulator: a failure there makes the attempt *not judged*, never an agent failure.",
         "",
         "Name a scorer in a scenario's `scorers:` list, for example",
-        "`{id: judge.goal_achievement, threshold: 0.8}`.",
+        "`{id: judge.goal_achievement, threshold: 0.8}`. *Params* are what it takes in",
+        "`params:` (`*` required); they are checked when the scenario loads, so a typo fails",
+        "`opseval validate` (ADR-0043).",
     ]
     for axis in order:
-        lines += ["", f"## {axis}", "", "| Scorer | Needs | Version | What it checks |"]
-        lines.append("|---|---|---|---|")
+        lines += ["", f"## {axis}", "", "| Scorer | Needs | Version | Params | What it checks |"]
+        lines.append("|---|---|---|---|---|")
         for sid, cls in by_axis[axis]:
-            lines.append(f"| `{sid}` | {cls.requires} | {cls.version} | {_cell(cls.description)} |")
+            params = describe_params(cls)
+            shown = "unchecked" if params is None else (f"`{params}`" if params else "none")
+            lines.append(
+                f"| `{sid}` | {cls.requires} | {cls.version} | {shown} | {_cell(cls.description)} |"
+            )
     lines += [
         "",
         "## Invariant bundles",

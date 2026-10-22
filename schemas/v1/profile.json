@@ -512,6 +512,11 @@
       ],
       "default": null
     },
+    "tool_calls_complete": {
+      "default": false,
+      "title": "Tool Calls Complete",
+      "type": "boolean"
+    },
     "tool_calls_field": {
       "anyOf": [
         {

@@ -177,7 +177,7 @@ def catalogue_push(
 
     try:
         load_scorers()
-        files = read_folder(folder, known_scorers=REGISTRY.keys(), known_invariants=set(INVARIANTS))
+        files = read_folder(folder, known_scorers=REGISTRY, known_invariants=set(INVARIANTS))
     except ConfigError as exc:
         raise _fail(exc) from exc
 
