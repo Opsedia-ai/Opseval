@@ -10,9 +10,10 @@ An unmeasured number is ``None`` (JSON null), never 0.
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 from opseval.models.gate import Preset
@@ -465,9 +466,13 @@ class SuiteIn(ApiIn):
     overwrite: bool = False  # replacing an existing suite must be asked for
 
 
+SCENARIO_TEXT_MAX = 200_000
+"""The most text one scenario file may have, wherever it comes in."""
+
+
 class ImportFile(ApiIn):
     name: str
-    text: Annotated[str, Field(max_length=200_000)]
+    text: Annotated[str, Field(max_length=SCENARIO_TEXT_MAX)]
 
 
 class ImportIn(ApiIn):
@@ -485,14 +490,14 @@ class ScenarioSourceOut(Api):
 
 
 class ScenarioTextIn(ApiIn):
-    text: Annotated[str, Field(max_length=200_000)]
+    text: Annotated[str, Field(max_length=SCENARIO_TEXT_MAX)]
     file: str | None = None  # the file being edited: its own id is no clash
     family: str | None = None  # for a new file: the folder under scenarios/
     file_name: str | None = None  # for a new file: its name, checked before it is written
 
 
 class ScenarioSaveIn(ApiIn):
-    text: Annotated[str, Field(max_length=200_000)]
+    text: Annotated[str, Field(max_length=SCENARIO_TEXT_MAX)]
     etag: str
 
 
@@ -538,11 +543,33 @@ class _AnswerFields(BaseModel):
     """What the customer says when rejecting."""
 
 
+PARAMS_MAX_BYTES = 20_000
+PARAMS_MAX_DEPTH = 8
+
+
 class _CheckFields(BaseModel):
     id: str = Field(min_length=1, max_length=100)
     threshold: float | None = Field(default=None, ge=0, le=1)
     """None keeps the scorer's default (1.0)."""
     params: dict[str, Any] = {}
+
+    @field_validator("params")
+    @classmethod
+    def _bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Bounded before the YAML is written: a deep value would overflow the dumper's
+        # recursion, and a large one the editor's 200 KB, as a bare 500 either way.
+        stack: list[tuple[Any, int]] = [(value, 1)]
+        while stack:
+            item, depth = stack.pop()
+            if depth > PARAMS_MAX_DEPTH:
+                raise ValueError(f"nested more than {PARAMS_MAX_DEPTH} levels deep")
+            if isinstance(item, dict):
+                stack.extend((child, depth + 1) for child in item.values())
+            elif isinstance(item, list):
+                stack.extend((child, depth + 1) for child in item)
+        if len(json.dumps(value, ensure_ascii=False).encode()) > PARAMS_MAX_BYTES:
+            raise ValueError(f"more than {PARAMS_MAX_BYTES:,} bytes")
+        return value
 
 
 class _DraftFields(BaseModel):
@@ -569,12 +596,14 @@ class _DraftFields(BaseModel):
     refusal: bool = False
     """The agent is expected to decline (``expectations.kind: refusal``)."""
     expected_outcome: str | None = Field(default=None, max_length=2_000)
-    must_call: Annotated[list[str], Field(max_length=50)] = []
-    must_not_call: Annotated[list[str], Field(max_length=50)] = []
+    must_call: Annotated[list[Annotated[str, Field(max_length=100)]], Field(max_length=50)] = []
+    must_not_call: Annotated[list[Annotated[str, Field(max_length=100)]], Field(max_length=50)] = []
     policy: Annotated[list[Annotated[str, Field(max_length=500)]], Field(max_length=50)] = []
     injection: str | None = Field(default=None, max_length=4_000)
     """A prompt-injection payload planted in the first customer turn."""
     use_default_checks: bool = True
+    """On: ``scorers: default`` for this scenario and profile, plus any ``checks`` added to it
+    (then written out as one list). Off: exactly ``checks``."""
     repeats: int = Field(default=3, ge=1, le=20)
     family: str = Field(default="uncategorised", max_length=64)
     file_name: str | None = Field(default=None, max_length=70)
@@ -685,6 +714,20 @@ class FormTemplate(Api):
     draft: ScenarioDraftOut
 
 
+class FormChoice(Api):
+    value: str
+    label: str
+    help: str | None = None
+
+
+class FormAction(Api):
+    """An answer the customer can give at a checkpoint, and the modes it works in."""
+
+    value: DraftAction
+    label: str
+    modes: list[DraftMode]
+
+
 class FormOut(Api):
     """Everything the guided form may offer, decided by the server."""
 
@@ -692,6 +735,9 @@ class FormOut(Api):
     languages: list[FormLanguage]
     checks: list[FormCheck]
     templates: list[FormTemplate]
+    stop_at: list[FormChoice]
+    """Where a run may stop, for this profile."""
+    answer_actions: list[FormAction]
     default_checks: list[str]
     """``scorers: default`` for a scenario with no tool expectations."""
     read_only: bool

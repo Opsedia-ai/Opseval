@@ -4,13 +4,13 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import type { Draft, Drafted, ScenarioForm as Form } from "../lib/types";
 import ScenarioForm, { parseParam } from "../pages/ScenarioForm";
 
 vi.mock("../lib/api", async (original) => {
   const real = await original<typeof import("../lib/api")>();
-  return { ...real, api: { ...real.api, scenarioForm: vi.fn(), draftScenario: vi.fn(), importScenarios: vi.fn(), scenarioById: vi.fn() } };
+  return { ...real, api: { ...real.api, scenarioForm: vi.fn(), draftScenario: vi.fn(), saveNewScenario: vi.fn() } };
 });
 
 const DRAFT: Draft = {
@@ -24,6 +24,12 @@ const chatbot = (over: Partial<Form> = {}): Form => ({
   languages: [{ code: "en", dialects: [], stable: true }],
   checks: [{ id: "conversation.turn_budget", area: "flow", reads: "frames", question: "Within budget?", params: [{ name: "budget", kind: "integer", required: false, description: "Turns allowed.", choices: null, minimum: 1, maximum: null, default: null }] }],
   templates: [{ id: "question", title: "A question", description: "Scripted.", draft: DRAFT }],
+  stopAt: [{ value: "auto", label: "When the goal is reached", help: null }],
+  answerActions: [
+    { value: "approve", label: "approves", modes: ["scripted", "simulated"] },
+    { value: "reject", label: "rejects", modes: ["scripted", "simulated"] },
+    { value: "script", label: "decides from what is proposed", modes: ["simulated"] },
+  ],
   defaultChecks: ["conversation.no_errors", "conversation.agent_replied", "output.terminal_state"],
   readOnly: false,
   ...over,
@@ -45,7 +51,7 @@ function show() {
 }
 const save = () => screen.getByRole("button", { name: /save/i }) as HTMLButtonElement;
 
-beforeEach(() => { vi.mocked(api.draftScenario).mockReset(); vi.mocked(api.importScenarios).mockReset(); vi.mocked(api.scenarioById).mockReset(); });
+beforeEach(() => { vi.mocked(api.draftScenario).mockReset(); vi.mocked(api.saveNewScenario).mockReset(); });
 
 describe("typed settings", () => {
   it("are decoded, never judged", () => {
@@ -81,8 +87,7 @@ describe("the form", () => {
 
     const yaml = "# yaml-language-server: x\nid: question-002\n";
     vi.mocked(api.draftScenario).mockResolvedValue(verdict(true, yaml));
-    vi.mocked(api.importScenarios).mockResolvedValue({ imported: ["question-001"] });
-    vi.mocked(api.scenarioById).mockResolvedValue({ file: "f/question-001.yaml", id: "question-001", text: yaml, etag: "e" });
+    vi.mocked(api.saveNewScenario).mockResolvedValue("f/question-001.yaml");
     fireEvent.change(screen.getByLabelText("Id"), { target: { value: "question-002" } });
     expect(save().disabled).toBe(true); // the old verdict judged other text
     await waitFor(() => expect(save().disabled).toBe(false));
@@ -91,8 +96,7 @@ describe("the form", () => {
 
     fireEvent.click(save());
     await screen.findByText("the editor");
-    expect(api.importScenarios).toHaveBeenCalledWith("uncategorised", [{ name: "question-001.yaml", text: yaml }]);
-    expect(api.scenarioById).toHaveBeenCalledWith("question-001");
+    expect(api.saveNewScenario).toHaveBeenCalledWith("uncategorised", "question-001.yaml", yaml);
   });
 
   it("never saves into a read-only catalogue", async () => {
@@ -120,5 +124,63 @@ describe("the form", () => {
       expect(sent?.checks?.map((c) => c.id)).toEqual(["conversation.no_errors", "conversation.turn_budget"]);
       expect(sent?.checks?.[1].params).toEqual({ budget: 4 });
     });
+  });
+});
+
+describe("what the form cannot send", () => {
+  it("keeps a cleared number as typed and waits, instead of snapping it to 1", async () => {
+    vi.mocked(api.scenarioForm).mockResolvedValue(chatbot());
+    vi.mocked(api.draftScenario).mockResolvedValue(verdict(true));
+    show();
+    await screen.findByText("valid");
+    const repeats = screen.getByLabelText("Repeats") as HTMLInputElement;
+    fireEvent.change(repeats, { target: { value: "" } });
+    expect(repeats.value).toBe("");
+    expect(save().disabled).toBe(true);
+    expect(screen.getByText(/not read as typed: repeats/i)).toBeTruthy();
+    fireEvent.change(repeats, { target: { value: "5" } });
+    await waitFor(() => expect(vi.mocked(api.draftScenario).mock.lastCall?.[0].repeats).toBe(5));
+    await waitFor(() => expect(save().disabled).toBe(false));
+  });
+
+  it("names the fields of a request the API refused", async () => {
+    vi.mocked(api.scenarioForm).mockResolvedValue(chatbot());
+    vi.mocked(api.draftScenario).mockRejectedValue(
+      new ApiError(422, "INVALID_REQUEST", "role: too long", [{ path: "request", field: "role", message: "String should have at most 300 characters" }]),
+    );
+    show();
+    await screen.findByText(/cannot be sent as they are/i);
+    expect(screen.getByText("role")).toBeTruthy();
+    expect(screen.getByText(/at most 300 characters/)).toBeTruthy();
+    expect(save().disabled).toBe(true);
+  });
+
+  it("offers only the answers the server says work for this kind of customer", async () => {
+    const withCheckpoint = chatbot({ profile: { ...chatbot().profile, checkpoints: [{ name: "approval", phase: null, commitGate: false }] } });
+    vi.mocked(api.scenarioForm).mockResolvedValue(withCheckpoint);
+    vi.mocked(api.draftScenario).mockResolvedValue(verdict(true));
+    show();
+    const select = await screen.findByLabelText("Answer at approval");
+    const offered = () => [...(select as HTMLSelectElement).options].map((o) => o.value);
+    expect(offered()).toEqual(["", "approve", "reject"]); // scripted: no LLM to decide
+    fireEvent.click(screen.getByLabelText(/a simulated customer/i));
+    await waitFor(() => expect(offered()).toEqual(["", "approve", "reject", "script"]));
+  });
+});
+
+describe("saving a new file", () => {
+  it("asks the server where it went, and says so if it cannot find it", async () => {
+    const { api: real } = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+    const fetched: string[] = [];
+    const reply = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status }));
+    vi.stubGlobal("fetch", (url: string) => {
+      fetched.push(url);
+      return url.endsWith("/scenarios/import") ? reply({ imported: ["x-001"], problems: [] }) : reply({ file: "flat/x-001.yaml", id: "x-001", text: "", etag: "e" });
+    });
+    expect(await real.saveNewScenario("flat", "x-001.yaml", "id: x-001")).toBe("flat/x-001.yaml");
+    expect(fetched).toEqual(["/api/v1/scenarios/import", "/api/v1/scenarios/x-001/source"]);
+    vi.stubGlobal("fetch", (url: string) => (url.endsWith("/scenarios/import") ? reply({ imported: ["x-001"], problems: [] }) : reply({ code: "UNKNOWN_SCENARIO" }, 404)));
+    await expect(real.saveNewScenario("flat", "x-001.yaml", "id: x-001")).rejects.toMatchObject({ code: "SAVED_NOT_LISTED" });
+    vi.unstubAllGlobals();
   });
 });
