@@ -47,7 +47,7 @@ class ScoringContext:
 class NoParams(BaseModel):
     """A scorer that takes no params: any key given is an authoring mistake."""
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid", strict=True, use_attribute_docstrings=True)
 
 
 class Scorer(ABC):

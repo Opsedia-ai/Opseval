@@ -559,10 +559,14 @@ personas), each checkpoint raised and the customer's decision, tool calls from t
 harness error, with the record's redaction stated, never implied. A run in flight shows its
 **live progress**: scenarios done, attempts recorded, and the one running now; verdicts appear
 only when it ends. **Cancel run** stops it before its next attempt, whether the console or the
-CLI started it; a run that stopped early says why, and what it did not run is listed as skipped. **Test cases are edited in the console**: the YAML with the same checks as
-`opseval validate` as you type (schema, scorer and checkpoint names, ids used elsewhere), saved
-only when valid and never over a newer version of the file; new ones start from a template. See
-[ADR-0029](docs/adr/0029-console-api.md).
+CLI started it; a run that stopped early says why, and what it did not run is listed as skipped. **Test cases are added with a form**: start from a template (a question,
+a simulated customer, an approval step, a refusal, a prompt injection) and fill in the customer,
+the conversation, the answer at each of your profile's checkpoints, the tools it must or must not
+call, the rules it must follow and the checks with their settings. Opseval writes the YAML beside
+the form and checks it as `opseval validate` would; what is saved is an ordinary scenario file
+([ADR-0048](docs/adr/0048-guided-scenario-form.md)). **Or edit the YAML** with the same checks as
+you type (schema, scorer and checkpoint names, ids used elsewhere), saved only when valid and
+never over a newer version of the file. See [ADR-0029](docs/adr/0029-console-api.md).
 
 ## Server mode (preview)
 

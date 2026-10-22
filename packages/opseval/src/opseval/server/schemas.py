@@ -516,3 +516,182 @@ class ReadinessItem(Api):
     label: str
     ready: bool
     detail: str  # what a person should do, or what is limited, when not ready
+
+
+# --- the guided scenario form (ADR-0048) -------------------------------------------------
+#
+# The form is filled in the browser; everything it offers, and the YAML it becomes, comes from
+# the server: the choices from the profile and the scorer registry, the YAML and its checks
+# from the loader. Draft fields are declared once and shared by the request and the response,
+# because a request may not nest a response model (scripts/console_types.py).
+
+DraftMode = Literal["scripted", "simulated"]
+"""``scripted``: fixed customer turns, no LLM. ``simulated``: an LLM plays the customer."""
+DraftAction = Literal["approve", "reject", "script"]
+"""``script``: the simulated customer decides from the checkpoint payload (simulated mode only)."""
+
+
+class _AnswerFields(BaseModel):
+    checkpoint: str = Field(min_length=1, max_length=100)
+    action: DraftAction = "approve"
+    feedback: str | None = Field(default=None, max_length=2_000)
+    """What the customer says when rejecting."""
+
+
+class _CheckFields(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    threshold: float | None = Field(default=None, ge=0, le=1)
+    """None keeps the scorer's default (1.0)."""
+    params: dict[str, Any] = {}
+
+
+class _DraftFields(BaseModel):
+    id: str = Field(default="", max_length=100)
+    name: str = Field(default="", max_length=300)
+    goal: str = Field(default="", max_length=4_000)
+    criticality: Criticality = Criticality.NORMAL
+    tags: Annotated[list[Annotated[str, Field(max_length=60)]], Field(max_length=30)] = []
+    role: str = Field(default="customer", max_length=300)
+    language: str = Field(default="en", max_length=20)
+    dialect: str | None = Field(default=None, max_length=40)
+    typing_noise: float = Field(default=0.0, ge=0, le=1)
+    mode: DraftMode = "scripted"
+    scripted_turns: Annotated[
+        list[Annotated[str, Field(max_length=4_000)]], Field(max_length=100)
+    ] = []
+    opening_message: str | None = Field(default=None, max_length=4_000)
+    flow: str = Field(default="", max_length=8_000)
+    """What the simulated customer is after and how they behave (simulated mode)."""
+    max_turns: int = Field(default=30, ge=1, le=100)
+    stop_at: str = Field(default="auto", max_length=100)
+    """``auto`` (stop before the irreversible step, if the profile has one; else at the goal),
+    ``goal_reached``, or a checkpoint of the profile."""
+    refusal: bool = False
+    """The agent is expected to decline (``expectations.kind: refusal``)."""
+    expected_outcome: str | None = Field(default=None, max_length=2_000)
+    must_call: Annotated[list[str], Field(max_length=50)] = []
+    must_not_call: Annotated[list[str], Field(max_length=50)] = []
+    policy: Annotated[list[Annotated[str, Field(max_length=500)]], Field(max_length=50)] = []
+    injection: str | None = Field(default=None, max_length=4_000)
+    """A prompt-injection payload planted in the first customer turn."""
+    use_default_checks: bool = True
+    repeats: int = Field(default=3, ge=1, le=20)
+    family: str = Field(default="uncategorised", max_length=64)
+    file_name: str | None = Field(default=None, max_length=70)
+    """None: named after the id."""
+
+
+class DraftAnswerIn(ApiIn, _AnswerFields):
+    pass
+
+
+class DraftCheckIn(ApiIn, _CheckFields):
+    pass
+
+
+class ScenarioDraftIn(ApiIn, _DraftFields):
+    """A scenario as the form describes it; ``POST /scenarios/draft`` turns it into YAML."""
+
+    answers: Annotated[list[DraftAnswerIn], Field(max_length=50)] = []
+    checks: Annotated[list[DraftCheckIn], Field(max_length=50)] = []
+    """The checks to run when ``use_default_checks`` is off."""
+
+
+class DraftAnswerOut(Api, _AnswerFields):
+    pass
+
+
+class DraftCheckOut(Api, _CheckFields):
+    pass
+
+
+class ScenarioDraftOut(Api, _DraftFields):
+    """A starting point the server offers: one of the form's templates."""
+
+    answers: list[DraftAnswerOut] = []
+    checks: list[DraftCheckOut] = []
+
+
+class DraftOut(Api):
+    """The YAML a draft becomes, and what the loader says about it. Nothing is written."""
+
+    yaml: str
+    family: str
+    file_name: str
+    check: ScenarioCheckOut
+    default_checks: list[str]
+    """What ``scorers: default`` runs for this scenario against this profile (ADR-0043)."""
+
+
+class FormCheckpoint(Api):
+    name: str
+    phase: str | None
+    commit_gate: bool
+    """Approving it leads to the irreversible outcome: the run stops here unless the scenario
+    allows commits, which the form never does."""
+
+
+class FormTool(Api):
+    name: str
+    commits: bool
+
+
+class FormProfile(Api):
+    name: str
+    phases: list[str]
+    checkpoints: list[FormCheckpoint]
+    tools: list[FormTool]
+    traces: bool
+    tool_calls_complete: bool
+
+
+class FormLanguage(Api):
+    code: str
+    dialects: list[str]
+    stable: bool
+
+
+ParamKind = Literal[
+    "text", "integer", "number", "boolean", "choice", "text_list", "integer_list", "json"
+]
+
+
+class FormParam(Api):
+    """One field a check takes, described by the server from the check's own params model."""
+
+    name: str
+    kind: ParamKind
+    required: bool
+    description: str | None
+    choices: list[str] | None
+    minimum: float | None
+    maximum: float | None
+    default: Any = None
+
+
+class FormCheck(Api):
+    id: str
+    area: Axis
+    reads: Literal["chat", "trace", "frames"]
+    question: str
+    params: list[FormParam] | None
+    """None: the check (a plugin) does not declare its params, so the form offers none."""
+
+
+class FormTemplate(Api):
+    id: str
+    title: str
+    description: str
+    draft: ScenarioDraftOut
+
+
+class FormOut(Api):
+    """Everything the guided form may offer, decided by the server."""
+
+    profile: FormProfile
+    languages: list[FormLanguage]
+    checks: list[FormCheck]
+    templates: list[FormTemplate]
+    default_checks: list[str]
+    """``scorers: default`` for a scenario with no tool expectations."""
+    read_only: bool

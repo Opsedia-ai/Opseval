@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Plus, Upload } from "lucide-react";
+import { FileCode, Plus, Upload } from "lucide-react";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import { Button, Callout, Card, Data, Explainer, Mono, Page, PageHeader, Pill, Table } from "../components/ui";
@@ -9,7 +9,7 @@ export default function Scenarios() {
   return (
     <>
       <PageHeader title="Test cases" sub="One situation each, as YAML in your catalogue." aside={<>
-        <Button to="/suites">Suites</Button><Button to="/import"><Upload size={16} />Bulk import</Button><Button to="/scenarios/new"><Plus size={16} />New test case</Button></>} />
+        <Button to="/suites">Suites</Button><Button to="/import"><Upload size={16} />Bulk import</Button><Button to="/scenarios/new/yaml"><FileCode size={16} />Write YAML</Button><Button to="/scenarios/new"><Plus size={16} />New test case</Button></>} />
       <Page>
         <Explainer><b>A test case describes one situation to put the agent in:</b> who the customer is, what they want, how they behave at approval checkpoints and which checks decide whether the agent handled it.</Explainer>
         <Data res={res}>{(c) => (<>
