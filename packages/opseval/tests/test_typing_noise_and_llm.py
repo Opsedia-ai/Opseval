@@ -10,7 +10,7 @@ import pytest
 
 from opseval.errors import LLMInfraError, LLMRateLimited, LLMRequestError, RateLimited
 from opseval.llm import ChatClient, UsageMeter
-from opseval.simulator.langpacks import resolve
+from opseval.simulator.langpacks import UnknownLanguage, resolve
 from opseval.simulator.typing_noise import add_typing_noise
 
 TEXT = (
@@ -51,8 +51,9 @@ class TestLanguagePacks:
     def test_dialect_aliases_and_fallbacks(self) -> None:
         assert resolve("ar", "eg").dialect == "egyptian"
         assert resolve("ar", "khaleeji").dialect == "gulf"
-        assert resolve("ar", "levantine").dialect is None  # falls back to MSA
-        assert resolve("xx", None).code == "en"
+        assert resolve("ar", "levantine").dialect is None  # MSA, declared (ADR-0059)
+        with pytest.raises(UnknownLanguage):
+            resolve("xx", None)  # never English (ADR-0059)
 
 
 def _client(

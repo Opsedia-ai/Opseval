@@ -3,6 +3,15 @@
 - **Status:** Proposed
 - **Date:** 2026-10-28
 - **Deciders:** Opseval maintainers (owner request 2026-10-28)
+- **Implementation:** Step 1 implemented (2026-10-28): *Unknown is a load error* and *BCP-47
+  codes, old names kept* (`opseval.langpacks`). The new packs, `voice_map`, `stt_language`,
+  `script`, `output.language_script` v2 and the judge's dialect label are not built yet. Two
+  details this ADR left open: the existing Gulf pack covers Saudi Arabia and the UAE, so it is
+  tagged `ar-x-gulf` (private use, as `ar-x-codeswitch`) and `ar-SA`, `ar-AE`, `ar-KW`, `ar-QA`,
+  `ar-BH`, `ar-OM` are declared fallbacks *to the Gulf pack* (the nearer pack, not the base
+  language) until each has its own; and the dialects that silently became MSA before (Levantine,
+  Maghrebi, `ar-LB`, `ar-MA`, …) and regional English (`en-US`, `en-GB`, …) are declared
+  fallbacks, so they still load, now with a warning.
 
 ## Context
 

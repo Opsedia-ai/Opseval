@@ -5,9 +5,9 @@ An error stops a file from loading. A warning does not, and never changes ``ok``
 code: it says what the scenario will *not* tell you, so nobody reads a green run as proof of
 something it never checked. Two kinds:
 
-- about the file itself (one repeat, a lowered pass threshold, a planted injection or a
-  declared expectation that no scorer grades, trace-backed checks with no trace source, the
-  commit opt-in, quarantine);
+- about the file itself (a dialect simulated with a nearer pack, one repeat, a lowered pass
+  threshold, a planted injection or a declared expectation that no scorer grades, trace-backed
+  checks with no trace source, the commit opt-in, quarantine);
 - about this machine (judge checks with no judge configured, an LLM persona with no simulator).
   These are checked only when the caller says what is configured.
 """
@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from opseval.catalogue import LoadProblem
+from opseval.langpacks import UnknownLanguage, lookup
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario
 from opseval.scoring import REGISTRY, effective_specs
@@ -53,6 +54,7 @@ def scenario_warnings(
                 f"{spec.id} does not declare the params it takes (a plugin without a Params "
                 "model), so a typo in them is not caught here",
             )
+    _language(scenario, warn)
     if scenario.execution.repeats == 1:
         warn(
             "execution.repeats",
@@ -98,6 +100,23 @@ def scenario_warnings(
                 "(set OPSEVAL_SIMULATOR_BASE_URL and OPSEVAL_SIMULATOR_MODEL)",
             )
     return out
+
+
+def _language(scenario: Scenario, warn: Callable[[str, str], None]) -> None:
+    """A dialect with no pack of its own, which a nearer pack declares it stands in for
+    (ADR-0059): it loads, but the customer does not write that dialect."""
+    persona = scenario.persona
+    try:
+        found = lookup(persona.language, persona.dialect)
+    except UnknownLanguage:
+        return  # a load error, reported by the loader
+    if found.fallback_from is not None:
+        field = "persona.dialect" if found.fallback_from == persona.dialect else "persona.language"
+        warn(
+            field,
+            f"no pack for {found.fallback_from!r} yet: the customer writes with the "
+            f"{found.pack.tag} pack instead, so this does not test that dialect",
+        )
 
 
 def _ungraded(

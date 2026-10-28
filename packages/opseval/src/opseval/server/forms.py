@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined, to_jsonable_python
 
+from opseval.langpacks import PACKS
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import (
     ConversationSpec,
@@ -37,7 +38,6 @@ from opseval.models.scenario import (
 from opseval.schemas import editor_hint
 from opseval.scoring import REGISTRY, Scorer, default_pack
 from opseval.server import schemas as s
-from opseval.simulator.langpacks import PACKS
 
 HEADER = (
     f"{editor_hint('scenario')}\n"
@@ -167,7 +167,7 @@ def blank() -> Scenario:
 
 def languages() -> list[s.FormLanguage]:
     by_code: dict[str, tuple[set[str], bool]] = {}
-    for pack in PACKS.values():  # a pack is listed once per alias; offer its own dialect name
+    for pack in PACKS:  # offer each pack's own dialect name, not its aliases or its tag
         dialects, stable = by_code.get(pack.code, (set(), False))
         if pack.dialect:
             dialects.add(pack.dialect)

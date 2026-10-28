@@ -321,6 +321,11 @@ execution:
   repeats: 3
 ```
 
+`language` takes a BCP-47 tag (`en`, `ar`, `ar-EG`, `ar-x-gulf`) or, as above, a language plus a
+`dialect` name. A language Opseval has no pack for is a load error, never simulated as English;
+a dialect without a pack of its own loads only where a nearer pack declares it, with a warning
+from `opseval validate` (ADR-0059).
+
 ### Judges and security tests
 
 | Judge | Axis | What it checks |
