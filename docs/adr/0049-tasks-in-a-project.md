@@ -108,20 +108,27 @@ The database layer and its CLI are built; the console and runs are not.
   Two details the decision left open:
   - `catalogue_items (task_id, project_id)` is a composite foreign key to `tasks (id,
     project_id)`, so an item can never sit in one project's row and another project's task.
-  - `profile_item_id` and `default_suite_item_id` are `ON DELETE SET NULL`. A task cascades
-    from its project, as items do; `runs.task_id` (ADR-0051) will be `RESTRICT`, which keeps
-    a task with runs from being deleted.
-  - The downgrade to `0001` works while every project has only its `default` task, and is
-    refused otherwise.
+  - `profile_item_id` and `default_suite_item_id` are composite foreign keys, `(item, task)`
+    to `catalogue_items (id, task_id)`, so a task can only link its own items; a trigger
+    (`opseval_task_link_kinds`) checks the profile is a `profile` and the suite a `suite`.
+    They are `NO ACTION`, not `SET NULL`: Postgres before 15 cannot null one column of a
+    composite key, and nothing deletes an item except with its task. A task cascades from its
+    project, as items do; `runs.task_id` (ADR-0051) will be `RESTRICT`, which keeps a task
+    with runs from being deleted.
+  - The downgrade to `0001` works while every task is a `default` one as the upgrade made it
+    (chat, text, no region, not archived, no default suite), and is refused otherwise, with a
+    list of what it would lose.
 - **A new project gets its `default` task** (`ensure_project`), so a project made after the
-  migration looks like one made before it.
+  migration looks like one made before it. Organisation, project and task are inserted
+  `ON CONFLICT DO NOTHING` and then read, so two `db init` at once both succeed.
 - **The store takes a task.** `push`, `set_label`, `list_items`, `history`, `resolve` and
   `materialize` take a `Task`, never a project. `get_task(session, "org/p", slug)` finds one.
   A missing task is a `ConfigError` naming `org/project`, the slug and the `db init --task`
   command, and nothing is created.
 - **A push links the folder's profile** as the task's `profile_item_id`. If the profile's name
   changes, the link follows it to the new item.
-- **The lock is the task row**: `FOR UPDATE` for a push or a label move, `FOR SHARE` for a pull.
+- **The lock is the task row**: `FOR NO KEY UPDATE` for a push, a label move or a task update,
+  `FOR SHARE` for a pull. An archived task refuses an update too (only `unarchive` changes it).
   Two tasks of one project never wait for each other.
 - **Archiving.** An archived task refuses pushes and label moves. A write reads `archived_at`
   under its own lock, so an archive that commits first is always seen. Pull, list and history

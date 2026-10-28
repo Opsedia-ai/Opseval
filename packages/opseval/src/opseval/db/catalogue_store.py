@@ -271,29 +271,61 @@ async def ensure_project(session: AsyncSession, ref: str, *, name: str | None = 
     """Create the organisation and project if they do not exist (headless initialisation).
     A new project comes with its ``default`` task, as the migration gave every old one."""
     org_slug, project_slug = parse_project(ref)
+    # INSERT … ON CONFLICT DO NOTHING, then read: two `db init` at once both succeed, the
+    # second finding what the first made, instead of failing on the unique key.
+    await session.execute(
+        insert(Organization)
+        .values(id=uuid.uuid4(), slug=org_slug, name=org_slug)
+        .on_conflict_do_nothing(index_elements=[Organization.slug])
+    )
     org = await session.scalar(select(Organization).where(Organization.slug == org_slug))
-    if org is None:
-        org = Organization(slug=org_slug, name=org_slug)
-        session.add(org)
-        await session.flush()
+    if org is None:  # pragma: no cover - inserted or found above
+        raise ConfigError(f"organisation {org_slug!r} could not be created")
+    made = await session.scalar(
+        insert(Project)
+        .values(
+            id=uuid.uuid4(), organization_id=org.id, slug=project_slug, name=name or project_slug
+        )
+        .on_conflict_do_nothing(index_elements=[Project.organization_id, Project.slug])
+        .returning(Project.id)
+    )
     project = await session.scalar(
         select(Project).where(Project.organization_id == org.id, Project.slug == project_slug)
     )
-    if project is None:
-        project = Project(organization_id=org.id, slug=project_slug, name=name or project_slug)
-        session.add(project)
-        await session.flush()
-        session.add(
-            Task(
-                project_id=project.id,
-                slug=DEFAULT_TASK,
-                name=DEFAULT_TASK,
-                kind=DEFAULT_KIND,
-                modality=DEFAULT_MODALITY,
-            )
+    if project is None:  # pragma: no cover - inserted or found above
+        raise ConfigError(f"project {org_slug}/{project_slug} could not be created")
+    if made is not None:
+        await _insert_task(
+            session, project.id, DEFAULT_TASK, DEFAULT_TASK, DEFAULT_KIND, DEFAULT_MODALITY, None
         )
-        await session.flush()
     return project
+
+
+async def _insert_task(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    slug: str,
+    name: str,
+    kind: str,
+    modality: str,
+    region: str | None,
+) -> bool:
+    """Insert a task unless one with ``slug`` is there; whether this call made it."""
+    made = await session.scalar(
+        insert(Task)
+        .values(
+            id=uuid.uuid4(),
+            project_id=project_id,
+            slug=slug,
+            name=name,
+            kind=kind,
+            modality=modality,
+            region=region,
+        )
+        .on_conflict_do_nothing(index_elements=[Task.project_id, Task.slug])
+        .returning(Task.id)
+    )
+    return made is not None
 
 
 async def get_project(session: AsyncSession, ref: str) -> Project:
@@ -350,36 +382,46 @@ async def ensure_task(
     """Create task ``slug`` in an existing project, unless it is there; ``(task, created)``.
 
     Asking for a kind or modality the existing task does not have is an error, not a silent
-    no-op: the caller would believe the task is what they asked for."""
+    no-op: the caller would believe the task is what they asked for. So is an archived task:
+    nothing can be pushed to it, and only `task unarchive` brings it back."""
     check_task_slug(slug)
     for value, check in ((kind, check_kind), (modality, check_modality)):
         if value is not None:
             check(value)
     project = await get_project(session, project_ref)
-    task = await session.scalar(
-        select(Task).where(Task.project_id == project.id, Task.slug == slug)
+    # `--region ""` means no region, as in `task update`; compared as stored.
+    wanted_region = region or None
+    created = await _insert_task(
+        session,
+        project.id,
+        slug,
+        name or slug,
+        kind or DEFAULT_KIND,
+        modality or DEFAULT_MODALITY,
+        wanted_region,
     )
-    if task is None:
-        task = Task(
-            project_id=project.id,
-            slug=slug,
-            name=name or slug,
-            kind=kind or DEFAULT_KIND,
-            modality=modality or DEFAULT_MODALITY,
-            region=region,
-        )
-        session.add(task)
-        await session.flush()
+    task = await session.scalar(
+        select(Task)
+        .where(Task.project_id == project.id, Task.slug == slug)
+        .execution_options(populate_existing=True)
+    )
+    if task is None:  # pragma: no cover - inserted or found above
+        raise ConfigError(f"task {slug!r} could not be created in {_ref(project_ref)}")
+    if created:
         return task, True
-    differs = [
-        f"{field} is {have!r}, not {want!r}"
-        for field, have, want in (
-            ("kind", task.kind, kind),
-            ("modality", task.modality, modality),
-            ("region", task.region, region),
+    if task.archived_at is not None:
+        raise ConfigError(
+            f"task {slug!r} already exists in {_ref(project_ref)} and is archived; "
+            f"`opseval task unarchive {slug} --project {_ref(project_ref)}` brings it back"
         )
-        if want is not None and want != have
+    asked: list[tuple[str, str | None, str | None]] = [
+        (field, have, want)
+        for field, have, want in (("kind", task.kind, kind), ("modality", task.modality, modality))
+        if want is not None
     ]
+    if region is not None:
+        asked.append(("region", task.region, wanted_region))
+    differs = [f"{field} is {have!r}, not {want!r}" for field, have, want in asked if want != have]
     if differs:
         raise ConfigError(
             f"task {slug!r} already exists in {_ref(project_ref)} and its "
@@ -416,10 +458,14 @@ async def list_tasks(
         query = query.where(Task.archived_at.is_(None))
     tasks = list(await session.scalars(query))
     linked = {t.profile_item_id for t in tasks} | {t.default_suite_item_id for t in tasks}
+    # Keyed by (item, task): a name is shown only for an item of the task that links it.
     names = {
-        i.id: i.name
+        (i.id, i.task_id): i.name
         for i in await session.scalars(
-            select(CatalogueItem).where(CatalogueItem.id.in_([i for i in linked if i]))
+            select(CatalogueItem).where(
+                CatalogueItem.project_id == project.id,
+                CatalogueItem.id.in_([i for i in linked if i]),
+            )
         )
     }
     counts = {
@@ -438,8 +484,10 @@ async def list_tasks(
             modality=t.modality,
             region=t.region,
             archived_at=t.archived_at,
-            profile=names.get(t.profile_item_id) if t.profile_item_id else None,
-            default_suite=names.get(t.default_suite_item_id) if t.default_suite_item_id else None,
+            profile=names.get((t.profile_item_id, t.id)) if t.profile_item_id else None,
+            default_suite=(
+                names.get((t.default_suite_item_id, t.id)) if t.default_suite_item_id else None
+            ),
             items=counts.get(t.id, 0),
         )
         for t in tasks
@@ -457,8 +505,9 @@ async def update_task(
     default_suite: str | None = None,
 ) -> Task:
     """Change what an operator may change: kind, modality, name, region, the default suite
-    (a suite of this task, by name)."""
-    await session.execute(select(Task.id).where(Task.id == task.id).with_for_update())
+    (a suite of this task, by name). An archived task is refused, as a push is: unarchive it
+    first."""
+    await _lock(session, task, write=True)
     if kind is not None:
         task.kind = check_kind(kind)
     if modality is not None:
@@ -468,7 +517,9 @@ async def update_task(
     if region is not None:
         task.region = region or None
     if default_suite is not None:
-        task.default_suite_item_id = (await _item(session, task, "suite", default_suite)).id
+        task.default_suite_item_id = _link(
+            task, await _item(session, task, "suite", default_suite), "suite"
+        )
     await session.flush()
     return task
 
@@ -477,7 +528,7 @@ async def archive_task(session: AsyncSession, task: Task, *, archived: bool = Tr
     """Hide a task, or bring it back. Nothing is deleted: its versions, labels and (later)
     runs stay, and it can still be listed and pulled. An archived task takes no push and no
     label move, so nothing changes under a task nobody is looking at."""
-    await session.execute(select(Task.id).where(Task.id == task.id).with_for_update())
+    await session.execute(select(Task.id).where(Task.id == task.id).with_for_update(key_share=True))
     task.archived_at = datetime.now(UTC) if archived else None
     await session.flush()
     return task
@@ -489,8 +540,10 @@ async def archive_task(session: AsyncSession, task: Task, *, archived: bool = Tr
 async def _lock(session: AsyncSession, task: Task, *, write: bool) -> None:
     """Serialise catalogue changes per task, and let reads see one whole push.
 
-    A push (or a label move) holds the task row ``FOR UPDATE`` until it commits; a pull holds
-    it ``FOR SHARE``. So a pull waits for a push in progress, then no push can start until the
+    A push, a label move or a task update holds the task row ``FOR NO KEY UPDATE`` until it
+    commits; a pull holds it ``FOR SHARE``. The two conflict, and ``NO KEY`` leaves out only
+    the key-share locks that inserting a row referencing the task takes, which a push does
+    itself. So a pull waits for a push in progress, then no push can start until the
     pull has read everything: it never mixes two pushes into a catalogue nobody pushed, which
     a series of reads under READ COMMITTED otherwise could. Two tasks of one project never
     wait for each other.
@@ -498,12 +551,34 @@ async def _lock(session: AsyncSession, task: Task, *, write: bool) -> None:
     A write reads ``archived_at`` under the lock, so an archive that commits first is seen.
     """
     clause = select(Task.archived_at).where(Task.id == task.id)
-    archived_at = await session.scalar(clause.with_for_update(read=not write))
+    lock = clause.with_for_update(key_share=True) if write else clause.with_for_update(read=True)
+    archived_at = await session.scalar(lock)
     if write and archived_at is not None:
+        ref = await _task_project(session, task)
         raise ConfigError(
-            f"task {task.slug!r} is archived; nothing can be pushed or labelled in it "
-            f"(`opseval task unarchive {task.slug}` brings it back)"
+            f"task {task.slug!r} is archived; nothing in it can be pushed, labelled or "
+            f"changed (`opseval task unarchive {task.slug} --project {ref}` brings it back)"
         )
+
+
+async def _task_project(session: AsyncSession, task: Task) -> str:
+    """``org/project`` of a task, for a message the operator can paste."""
+    row = (
+        await session.execute(
+            select(Organization.slug, Project.slug)
+            .join(Project, Project.organization_id == Organization.id)
+            .where(Project.id == task.project_id)
+        )
+    ).one()
+    return f"{row[0]}/{row[1]}"
+
+
+def _link(task: Task, item: CatalogueItem, kind: str) -> uuid.UUID:
+    """An item a task may link as its profile or default suite: its own, of ``kind``. The
+    database refuses anything else too (a composite key and a trigger); this names it."""
+    if item.task_id != task.id or item.kind != kind:  # pragma: no cover - callers select so
+        raise ConfigError(f"{item.kind} {item.name!r} is not a {kind} of task {task.slug!r}")
+    return item.id
 
 
 async def _latest_versions(
@@ -615,9 +690,9 @@ async def push(
         await session.flush()
         report.added.append((f.kind, f.name, version.version))
         current[item.id] = version.id
-    profiles = [items[(f.kind, f.name)].id for f in files if f.kind == "profile"]
+    profiles = [items[(f.kind, f.name)] for f in files if f.kind == "profile"]
     if profiles:  # read_folder always yields exactly one
-        task.profile_item_id = profiles[0]
+        task.profile_item_id = _link(task, profiles[0], "profile")
     others = [i for i in items.values() if i.id not in current]
     await _move_label(session, LATEST, current, others)
     if label is not None:
