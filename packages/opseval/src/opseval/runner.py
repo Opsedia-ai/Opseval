@@ -28,6 +28,7 @@ from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.demo import catalogue_dir as demo_catalogue_dir
 from opseval.driver import RATE_LIMITED_NOTE, Driver
 from opseval.errors import ConfigError
+from opseval.langpacks import effective_language
 from opseval.llm import UsageMeter, client_for_role
 from opseval.models.gate import Preset, ResolvedGatePolicy
 from opseval.models.gate import resolve as resolve_gate
@@ -318,7 +319,7 @@ def build_trace_source(
 
 
 def _needs_llm_persona(scenario: Scenario) -> bool:
-    return not scenario.conversation.scripted_turns
+    return scenario.conversation.llm_persona
 
 
 def _unmet(
@@ -822,7 +823,11 @@ async def launch(
         settings,
         event=TelemetryEvent.RUN,
         transports=[options.transport],
-        languages=[s.persona.language for s in catalogue.scenarios],
+        languages=[
+            effective_language(s.persona, scripted=not s.conversation.llm_persona).tag
+            or s.persona.language
+            for s in catalogue.scenarios
+        ],
         trace_source=trace_source.name if trace_source else None,
         demo_target=str(catalogue_target).startswith(str(demo_catalogue_dir())),
         log=log,
