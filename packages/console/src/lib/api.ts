@@ -59,6 +59,9 @@ export const api = {
   usage: () => call<T.RunUsage[]>("/usage"),
   scenarios: () => call<T.Catalogue>("/scenarios"),
   persona: (id: string) => call<T.Persona>(`/scenarios/${encodeURIComponent(id)}/persona`),
+  scenarioById: (id: string) => call<T.ScenarioSource>(`/scenarios/${encodeURIComponent(id)}/source`),
+  scenarioForm: () => call<T.ScenarioForm>("/scenarios/form"),
+  draftScenario: (body: T.DraftBody) => post<T.Drafted>("/scenarios/draft", body),
   scenarioFile: (file: string) => call<T.ScenarioSource>(`/scenarios/source?file=${encodeURIComponent(file)}`),
   saveScenarioFile: (file: string, text: string, etag: string) =>
     call<T.ScenarioSource>(`/scenarios/source?file=${encodeURIComponent(file)}`, { method: "PUT", body: JSON.stringify({ text, etag }) }),
@@ -75,4 +78,22 @@ export const api = {
   saveSuite: (body: T.SuiteBody) => call<T.Suite>("/suites", { method: "PUT", body: JSON.stringify(body) }),
   importScenarios: (family: string, files: { name: string; text: string }[]) =>
     post<{ imported: string[] }>("/scenarios/import", { family, files }),
+  saveNewScenario,
 };
+
+/**
+ * Write one new scenario file (the never-overwrite import) and return where the server put
+ * it: a flat catalogue has no scenarios/ folder, so the path is never assumed. Shared by the
+ * form and the YAML editor, so the rule after a save lives in one place.
+ */
+async function saveNewScenario(family: string, name: string, text: string): Promise<string> {
+  const out = await post<{ imported: string[] }>("/scenarios/import", { family, files: [{ name, text }] });
+  const id = out.imported[0];
+  if (out.imported.length !== 1 || !id) throw new ApiError(422, "NOT_IMPORTED", "nothing was written; check the folder and file name");
+  try {
+    return (await call<T.ScenarioSource>(`/scenarios/${encodeURIComponent(id)}/source`)).file;
+  } catch {
+    // Written, but not found by its id: say so rather than invite a second save.
+    throw new ApiError(0, "SAVED_NOT_LISTED", `saved as ${family}/${name}, but the catalogue does not list ${id}; open it from Test cases`);
+  }
+}

@@ -462,3 +462,176 @@ export interface ReadinessItem {
   ready: boolean;
   detail: string;
 }
+
+export interface DraftAnswerIn {
+  checkpoint: string;
+  action?: "approve" | "reject" | "script";
+  feedback?: string | null;
+}
+
+export interface DraftCheckIn {
+  id: string;
+  threshold?: number | null;
+  params?: Record<string, unknown>;
+}
+
+/** A scenario as the form describes it; ``POST /scenarios/draft`` turns it into YAML. */
+export interface ScenarioDraftIn {
+  id?: string;
+  name?: string;
+  goal?: string;
+  criticality?: Criticality;
+  tags?: string[];
+  role?: string;
+  language?: string;
+  dialect?: string | null;
+  typingNoise?: number;
+  mode?: "scripted" | "simulated";
+  scriptedTurns?: string[];
+  openingMessage?: string | null;
+  flow?: string;
+  maxTurns?: number;
+  stopAt?: string;
+  refusal?: boolean;
+  expectedOutcome?: string | null;
+  mustCall?: string[];
+  mustNotCall?: string[];
+  policy?: string[];
+  injection?: string | null;
+  useDefaultChecks?: boolean;
+  repeats?: number;
+  family?: string;
+  fileName?: string | null;
+  answers?: DraftAnswerIn[];
+  checks?: DraftCheckIn[];
+}
+
+export interface DraftAnswerOut {
+  checkpoint: string;
+  action: "approve" | "reject" | "script";
+  feedback: string | null;
+}
+
+export interface DraftCheckOut {
+  id: string;
+  threshold: number | null;
+  params: Record<string, unknown>;
+}
+
+/** A starting point the server offers: one of the form's templates. */
+export interface ScenarioDraftOut {
+  id: string;
+  name: string;
+  goal: string;
+  criticality: Criticality;
+  tags: string[];
+  role: string;
+  language: string;
+  dialect: string | null;
+  typingNoise: number;
+  mode: "scripted" | "simulated";
+  scriptedTurns: string[];
+  openingMessage: string | null;
+  flow: string;
+  maxTurns: number;
+  stopAt: string;
+  refusal: boolean;
+  expectedOutcome: string | null;
+  mustCall: string[];
+  mustNotCall: string[];
+  policy: string[];
+  injection: string | null;
+  useDefaultChecks: boolean;
+  repeats: number;
+  family: string;
+  fileName: string | null;
+  answers: DraftAnswerOut[];
+  checks: DraftCheckOut[];
+}
+
+/** The YAML a draft becomes, and what the loader says about it. Nothing is written. */
+export interface DraftOut {
+  yaml: string;
+  family: string;
+  fileName: string;
+  check: ScenarioCheckOut;
+  defaultChecks: string[];
+}
+
+export interface FormCheckpoint {
+  name: string;
+  phase: string | null;
+  commitGate: boolean;
+}
+
+export interface FormTool {
+  name: string;
+  commits: boolean;
+}
+
+export interface FormProfile {
+  name: string;
+  phases: string[];
+  checkpoints: FormCheckpoint[];
+  tools: FormTool[];
+  traces: boolean;
+  toolCallsComplete: boolean;
+}
+
+export interface FormLanguage {
+  code: string;
+  dialects: string[];
+  stable: boolean;
+}
+
+/** One field a check takes, described by the server from the check's own params model. */
+export interface FormParam {
+  name: string;
+  kind: "text" | "integer" | "number" | "boolean" | "choice" | "text_list" | "integer_list" | "json";
+  required: boolean;
+  description: string | null;
+  choices: string[] | null;
+  minimum: number | null;
+  maximum: number | null;
+  default: unknown;
+}
+
+export interface FormCheck {
+  id: string;
+  area: Axis;
+  reads: "chat" | "trace" | "frames";
+  question: string;
+  params: FormParam[] | null;
+}
+
+export interface FormTemplate {
+  id: string;
+  title: string;
+  description: string;
+  draft: ScenarioDraftOut;
+}
+
+export interface FormChoice {
+  value: string;
+  label: string;
+  help: string | null;
+}
+
+/** An answer the customer can give at a checkpoint, and the modes it works in. */
+export interface FormAction {
+  value: "approve" | "reject" | "script";
+  label: string;
+  modes: ("scripted" | "simulated")[];
+}
+
+/** Everything the guided form may offer, decided by the server. */
+export interface FormOut {
+  profile: FormProfile;
+  languages: FormLanguage[];
+  checks: FormCheck[];
+  templates: FormTemplate[];
+  stopAt: FormChoice[];
+  answerActions: FormAction[];
+  defaultChecks: string[];
+  readOnly: boolean;
+}

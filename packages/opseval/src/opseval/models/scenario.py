@@ -150,6 +150,15 @@ class ExpectedTools(Strict):
     ordering: list[OrderingRule] = Field(default_factory=list)
     forbidden_before: list[ForbiddenBefore] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _not_both(self) -> ExpectedTools:
+        # Required and forbidden at once fails whatever the agent does: an authoring mistake
+        # that would read as an agent failure.
+        both = sorted(set(self.must_call) & set(self.must_not_call))
+        if both:
+            raise ValueError(f"{', '.join(both)} cannot be both in must_call and in must_not_call")
+        return self
+
 
 class Expectations(Strict):
     kind: Literal["completion", "refusal"] = "completion"

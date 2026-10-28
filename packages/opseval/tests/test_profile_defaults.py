@@ -26,6 +26,7 @@ from opseval.models.profile import SutProfile
 from opseval.models.record import SCRIPT_EXHAUSTED, RunRecord, TerminalState
 from opseval.models.results import ScoreStatus
 from opseval.models.scenario import Scenario
+from opseval.preflight import llm_roles_needed
 from opseval.runner import RunOptions, launch
 from opseval.scoring import (
     DEFAULT_PACK,
@@ -683,3 +684,26 @@ class TestReviewOf71:
             ScoreStatus.FAILED
         )
         assert verdict.passed is None
+
+
+@pytest.mark.parametrize(
+    ("expectations", "judge"),
+    [
+        ({"kind": "refusal"}, "judge.goal_achievement"),
+        ({"policy": ["Never share another customer's data."]}, "security.policy_adherence"),
+    ],
+)
+def test_a_declared_refusal_or_policy_is_graded_under_the_default_pack(
+    profile: SutProfile, expectations: dict[str, Any], judge: str
+) -> None:
+    # ADR-0048: written down and never read, an agent doing the opposite passed.
+    sc = make_scenario(scorers="default", expectations=expectations)
+    assert judge in default_pack(sc, profile)
+    with_profile = {x.id for x in effective_specs(sc, profile)}
+    without = {x.id for x in effective_specs(sc)}
+    assert judge in with_profile and judge in without, "preflight counts it too"
+    assert "judge" in llm_roles_needed([sc]), "so the judge client is built for the run"
+    plain = make_scenario(scorers="default")
+    assert not {"judge.goal_achievement", "security.policy_adherence"} & set(
+        default_pack(plain, profile)
+    ), "a completion scenario still runs in CI for free"

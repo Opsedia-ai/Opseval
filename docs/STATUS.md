@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-28** (`main` with the catalogue versioned in Postgres and defaults from the profile; the 2026-10-28 roadmap planned in ADRs 0049–0066).
+**As of 2026-10-28** (`main` with the catalogue versioned in Postgres, defaults from the profile and the guided scenario form; the 2026-10-28 roadmap planned in ADRs 0049–0066).
 
 ## Completion
 
@@ -144,7 +144,7 @@ PRD gains it.
 | FR-DX-04 | Docs site | M | v0.1 | Partial | MkDocs Material site with quickstart, concepts, SUT profile guide, cookbook, ADRs, and a scorer and settings reference generated from the code (drift fails CI); built strictly in CI (ADR-0039); not deployed before Gate 0 |
 | FR-DX-05 | Actionable errors | M | v0.1 | Done | `ConfigError` messages |
 | FR-CTL | Run control: stop policies, cancel, rescore, calibrate, preflight | M | v0.1 | Done | all five stop policies (suite `stop:`, `run` flags, console launch form and suite editor) and cancel before any attempt (`opseval cancel`, console Cancel run; ADR-0035); rescore, calibrate, preflight |
-| FR-AUT | Authoring workbench | M | v0.5 | Partial | scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground; a warnings tier beside errors (`advice.scenario_warnings`: what a valid scenario will not measure, in the editor and `opseval validate`, never blocking); but the suite editor cannot select scenarios in subfolders, where the console saves them (ATTENTION I20), and both import and a new file in the editor accept `.yml` names the loader never reads |
+| FR-AUT | Authoring workbench | M | v0.5 | Partial | guided scenario form (ADR-0048): templates, choices from the profile and the check registry with each check's settings, the YAML written by the server and judged by the loader as you type, saved through the never-overwrite import; every declared expectation graded (refusal and policy join `scorers: default`, and a warning names any an explicit list leaves ungraded); scenario YAML editor with the loader's checks as you type, saved only when valid and never over a newer file; bulk import; suite editor with the release-gate editor (ADR-0032); persona playground; a warnings tier beside errors (`advice.scenario_warnings`: what a valid scenario will not measure, in the editor and `opseval validate`, never blocking); but the form cannot open an existing scenario or start from a copy or a rehearsal, and the suite editor cannot select scenarios in subfolders, where the console saves them (ATTENTION I20); a new file must be `.yaml`, the only name the loader reads |
 | FR-SRV | Server mode | M | v0.5 | Partial | local `serve` API, serving the built console same-origin (ADR-0034) with run detail down to each attempt's conversation and live progress for runs in flight, token auth (ADR-0029, ADR-0031); Postgres foundation with migrations, organisations and projects, and the catalogue versioned with labels in the database, pushed from and pulled back to folders (`opseval db`, `opseval catalogue`, ADR-0047); no runs in the database, workers, accounts, OIDC or live events yet; console not yet in the wheel |
 
 ## Non-functional requirements

@@ -35,5 +35,7 @@ recomputes aggregates, and `null` from the API is rendered as "not measured", ne
 | Compare, Trend, Usage | `GET /compare`, `/trend`, `/usage` |
 | Simulator | `GET /scenarios/{id}/persona`, `POST /simulator/rehearse` |
 | Test cases, Bulk import | `GET /scenarios`, `POST /scenarios/import` (all-or-nothing) |
+| New test case (the form, ADR-0048) | `GET /scenarios/form` (every choice it offers), `POST /scenarios/draft` (the YAML and the loader's verdict; writes nothing), then `POST /scenarios/import` |
+| Edit test case, Write YAML | `GET/PUT /scenarios/source`, `POST /scenarios/validate`, `GET /scenarios/{id}/source` |
 | Suites | `GET /suites`, `PUT /suites` |
 | Checks, Settings | `GET /checks`, `GET /config` (secrets redacted server-side) |

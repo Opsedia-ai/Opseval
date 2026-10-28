@@ -78,7 +78,7 @@ def ts(node: dict[str, Any], where: str) -> str:
         value = ts(extra, where) if isinstance(extra, dict) else "unknown"
         keys = ts(node["propertyNames"], where) if "propertyNames" in node else "string"
         return f"Record<{keys}, {value}>"
-    if not node:
+    if not set(node) - {"title", "description", "default"}:
         return "unknown"  # an untyped (Any) field, declared as such
     raise ValueError(f"{where}: no TypeScript for schema {node}")
 

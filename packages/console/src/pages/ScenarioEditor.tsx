@@ -69,9 +69,8 @@ export default function ScenarioEditor() {
     setErr(undefined); setSaved("");
     try {
       if (isNew) {
-        const out = await api.importScenarios(family, [{ name, text }]);
-        if (out.imported.length !== 1) throw new ApiError(422, "NOT_IMPORTED", "nothing was written; check the folder and file name");
-        nav(`/scenarios/edit?file=${encodeURIComponent(`scenarios/${family}/${name}`)}`);
+        const saved = await api.saveNewScenario(family, name, text);
+        nav(`/scenarios/edit?file=${encodeURIComponent(saved)}`);
       } else {
         const out = await api.saveScenarioFile(file, text, etag);
         setEtag(out.etag); setSaved(`Saved ${out.file}.`);

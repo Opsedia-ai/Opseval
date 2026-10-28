@@ -25,6 +25,18 @@ export type ScenarioSource = G.ScenarioSourceOut;
 export type ScenarioCheck = G.ScenarioCheckOut;
 export type Catalogue = G.CatalogueOut;
 
+/** The guided scenario form (ADR-0048): what it may offer, decided by the server. */
+export type ScenarioForm = G.FormOut;
+export type FormCheck = G.FormCheck;
+export type FormParam = G.FormParam;
+export type FormTemplate = G.FormTemplate;
+/** A filled-in form. The form holds every field, though the API lets a request leave them out. */
+export type Draft = G.ScenarioDraftOut;
+export type DraftBody = G.ScenarioDraftIn;
+export type DraftCheck = G.DraftCheckOut;
+/** The YAML a draft becomes and the loader's verdict on it; nothing is written. */
+export type Drafted = G.DraftOut;
+
 export type GatePreset = G.GateOut["preset"];
 export type GateSetting = G.GateSettingOut;
 export type GateCatalog = G.GateCatalogOut;

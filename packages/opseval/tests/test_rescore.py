@@ -124,6 +124,8 @@ class TestRescore:
             data = yaml.safe_load(path.read_text("utf-8"))
             tools = data.setdefault("expectations", {}).setdefault("expected_tools", {})
             tools["must_not_call"] = ["lookup_order"]  # the agent always looks the order up
+            # Required and forbidden at once is a load error (ADR-0048).
+            tools["must_call"] = [t for t in tools.get("must_call", []) if t != "lookup_order"]
             if data.get("scorers") != "default":
                 data["scorers"] = [*data.get("scorers", []), {"id": "tools.forbidden_not_called"}]
             path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
