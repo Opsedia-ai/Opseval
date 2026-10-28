@@ -22,7 +22,7 @@ let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   created = [];
   revoked = [];
-  fetchMock = vi.fn(async () => new Response(new Blob(["RIFF"]), { status: 200, headers: { "content-type": "audio/wav" } }));
+  fetchMock = vi.fn(async () => new Response("RIFF", { status: 200, headers: { "content-type": "audio/wav" } }));
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal("URL", Object.assign(Object.create(URL), {
     createObjectURL: () => { const u = `blob:test/${created.length}`; created.push(u); return u; },
