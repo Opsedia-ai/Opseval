@@ -10,6 +10,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from opseval.models.profile import FrameKind
+from opseval.models.usage import UsageEvent
 
 SCRIPT_EXHAUSTED = "script_exhausted"
 """Noted when a scripted customer ran out of turns (ADR-0043). The attempt ends
@@ -282,6 +283,10 @@ class RunRecord(Frozen):
     created"; empty and checked is "nothing created"."""
     voice: VoiceTimeline | None = None
     """The attempt's spoken timeline; None for a text attempt (ADR-0053)."""
+    usage_events: tuple[UsageEvent, ...] | None = None
+    """Every LLM, TTS and STT call this attempt paid for: the simulator's turns, the speech
+    and the judges' ballots (ADR-0066). ``None`` on records written before per-call usage
+    (not measured); ``()`` when the attempt made no such call."""
 
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]

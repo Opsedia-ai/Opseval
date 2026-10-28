@@ -58,7 +58,7 @@ def _first_error(exc: Exception) -> str:
 
 LEGACY_LAYOUT = "opseval-runs/1"
 """A folder whose manifest has no layout field predates versioning: layout 1."""
-LAYOUT = "opseval-runs/5"
+LAYOUT = "opseval-runs/6"
 """The layout this version writes. Bump it (and keep reading the old) on any change a reader
 of an older folder, or an older reader of a new folder, could misread or reject. 2: run
 records may carry created_artifacts. 3: frames may carry spoken audio and its transcript,
@@ -67,10 +67,30 @@ usage rows may carry speech counts (audio seconds, characters) and ``null`` toke
 speech role (ADR-0054); an older reader (``extra="forbid"``, integer tokens) would reject it.
 5: the profile snapshot may carry an ``audio:`` block, and a spoken reply's payload the voice
 bridge's evidence (``_opseval_voice``: transcripts tried, the STT canary, ADR-0053), with the
-audio files themselves under ``audio/``."""
+audio files themselves under ``audio/``. 6: a record carries its usage events (one per LLM,
+TTS or STT call, ADR-0066), a result the calls made outside any attempt, and a usage row
+reasoning and cached tokens, failed calls and how many calls reported each count, with token
+totals ``null`` when a call did not report them."""
 KNOWN_LAYOUTS = frozenset(
-    {LEGACY_LAYOUT, "opseval-runs/2", "opseval-runs/3", "opseval-runs/4", LAYOUT}
+    {
+        LEGACY_LAYOUT,
+        "opseval-runs/2",
+        "opseval-runs/3",
+        "opseval-runs/4",
+        "opseval-runs/5",
+        LAYOUT,
+    }
 )
+
+PRE_USAGE_LAYOUTS = frozenset(
+    {LEGACY_LAYOUT, "opseval-runs/2", "opseval-runs/3", "opseval-runs/4", "opseval-runs/5"}
+)
+"""Layouts written before per-call usage (ADR-0066): their records carry no usage events, and
+their usage rows' totals are as written (a count the provider did not report was added as 0).
+
+The rule: this set is literal and closed. It is never derived from ``LAYOUT`` or
+``KNOWN_LAYOUTS``: when ``LAYOUT`` moves to 7, a layout-6 run still has per-call usage and must
+not become "written before per-call usage". Nothing is ever added to it."""
 
 
 class UnknownLayout(ConfigError):
@@ -254,6 +274,20 @@ class FileStore:
 
     def load_result(self, run_id: str) -> SuiteResult:
         return load_result_at(self.run_dir(run_id))
+
+    def finished_results(self) -> list[SuiteResult]:
+        """Every finished run this version can read, newest first. A run without
+        ``result.json`` is still in flight; a re-score lives inside its run's folder and is
+        not a run of its own."""
+        out: list[SuiteResult] = []
+        for folder in self.root.glob("*/result.json"):
+            if not self.layout_known(folder.parent.name):
+                continue  # listed by the console as an error row: shown, never misread
+            try:
+                out.append(self.load_result(folder.parent.name))
+            except (ValueError, OSError):
+                continue  # a half-written or foreign folder is not a run
+        return sorted(out, key=lambda r: r.started_at, reverse=True)
 
     def save_record(self, record: RunRecord) -> Path:
         name = f"{SAFE.sub('_', record.test_id)}__attempt{record.attempt_index}.json"

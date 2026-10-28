@@ -18,6 +18,7 @@ from opseval.models.preflight import PreflightReport
 from opseval.models.record import TerminalState
 from opseval.models.scenario import Criticality
 from opseval.models.stop import StopPolicy
+from opseval.models.usage import AttemptUsage, UsageEvent, UsageReported
 
 
 class ScoreStatus(StrEnum):
@@ -196,18 +197,36 @@ class TestVerdict(BaseModel):
 
 
 class ModelUsage(BaseModel):
+    """One ``(role, model)``'s usage in a run, folded from its usage events (ADR-0066).
+
+    A total covers the calls that were answered, and is ``None`` unless every one of them
+    reported that count; ``reported`` says how many did. ``reported`` is ``None`` on results
+    written before per-call usage: their totals are kept as written (a missing count was then
+    added as 0), and are shown as such."""
+
     model_config = ConfigDict(extra="forbid")
     role: str
     model: str
     calls: int = 0
     input_tokens: int | None = 0
-    """Tokens sent to an LLM role. ``None`` for a speech role (TTS, STT), which has no tokens:
-    not measured, never 0 (ADR-0054). LLM rows, and every result written before, keep 0."""
+    """Tokens sent to an LLM role. ``None`` for a speech role (TTS, STT), which has no tokens,
+    and when an answered call did not report it: not measured, never 0 (ADR-0054/0066)."""
     output_tokens: int | None = 0
-    """Tokens an LLM role returned; ``None`` for a speech role."""
+    """Tokens an LLM role returned; ``None`` for a speech role or when not reported."""
     rate_limited_calls: int = 0
     """HTTP 429 answers received, one per response (a call retried three times counts 3)."""
-    cost_usd: float | None = None  # None = no price known, never 0
+    cost_usd: float | None = None
+    """None = no price known (or a priced count not reported), never 0."""
+    reasoning_tokens: int | None = None
+    """Part of ``output_tokens`` spent reasoning, as the provider reported it
+    (``completion_tokens_details.reasoning_tokens``). None: not reported, never 0."""
+    cached_input_tokens: int | None = None
+    """Part of ``input_tokens`` served from the provider's cache
+    (``prompt_tokens_details.cached_tokens``). None: not reported, never 0."""
+    failed_calls: int = 0
+    """Calls that got no usable answer after their retries: nothing to count or price."""
+    reported: UsageReported | None = None
+    """How many answered calls reported each count. None: written before per-call usage."""
     audio_in_seconds: float | None = None
     """Audio sent to a speech-to-text role (ADR-0054). None for a role that sends none, and
     on results written before speech providers: not measured, never 0."""
@@ -296,6 +315,11 @@ class SuiteResult(BaseModel):
     gate: Gate
     exit_code: int
     usage: list[ModelUsage] = Field(default_factory=list)
+    usage_events: list[UsageEvent] = Field(default_factory=list)
+    """Calls made outside any attempt (ADR-0066). An attempt's own calls live in its record."""
+    attempt_usage: list[AttemptUsage] = Field(default_factory=list)
+    """A re-score's calls, per attempt it re-graded (ADR-0066). Empty on a run, whose attempts
+    keep their calls in their records."""
     config_digest: dict[str, Any] = Field(default_factory=dict)
     load_errors: list[str] = Field(default_factory=list)
     rescore: RescoreInfo | None = None

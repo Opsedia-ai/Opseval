@@ -55,6 +55,13 @@ export async function callBlob(path: string): Promise<Blob> {
 }
 const post = <R,>(path: string, body: unknown) => call<R>(path, { method: "POST", body: JSON.stringify(body) });
 
+/** The dashboards' query string: empty filters are left out (the server reads them as "any"). */
+export function usageParams(q: T.UsageQuery): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) if (v) p.set(k, v);
+  return p.toString();
+}
+
 export const api = {
   health: () => call<T.Health>("/health"),
   runs: () => call<T.RunSummary[]>("/runs"),
@@ -67,6 +74,8 @@ export const api = {
   scenarioTrend: (suite: string) =>
     call<T.ScenarioTrend>(`/trend/scenarios${suite ? `?suite=${encodeURIComponent(suite)}` : ""}`),
   usage: () => call<T.RunUsage[]>("/usage"),
+  costDashboard: (q: T.UsageQuery) => call<T.CostDashboard>(`/analytics/cost?${usageParams(q)}`),
+  tokensDashboard: (q: T.UsageQuery) => call<T.TokensDashboard>(`/analytics/tokens?${usageParams(q)}`),
   scenarios: () => call<T.Catalogue>("/scenarios"),
   persona: (id: string) => call<T.Persona>(`/scenarios/${encodeURIComponent(id)}/persona`),
   scenarioById: (id: string) => call<T.ScenarioSource>(`/scenarios/${encodeURIComponent(id)}/source`),

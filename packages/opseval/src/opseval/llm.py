@@ -2,56 +2,210 @@
 """OpenAI-compatible chat client (no vendor SDKs, ADR-0003).
 
 Retries 429 / 5xx / connection errors / timeouts with backoff; other 4xx fail at once.
-Every call is counted in :class:`UsageMeter`. Unknown prices give ``None``, never 0.
+Every call is one usage event in :class:`UsageMeter` (ADR-0066): a count the provider does
+not report is ``None``, and an unknown price gives ``None``, never 0.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 
 from opseval.config import Settings, check_url_allowed
 from opseval.errors import LLMInfraError, LLMRateLimited, LLMRequestError
 from opseval.models.results import ModelUsage
-
-# USD per 1M tokens (input, output). Deliberately small; unknown models are "no rate".
-PRICES: dict[str, tuple[float, float]] = {}
-
-# USD per (second of audio, character) for speech models (ADR-0054). Empty on purpose, like
-# PRICES: an unpriced model has cost None ("no price"), never $0.
-SPEECH_PRICES: dict[str, tuple[float | None, float | None]] = {}
+from opseval.models.usage import (
+    USAGE_ROLES,
+    PriceTable,
+    UsageEvent,
+    UsageReported,
+    UsageRole,
+    has_tokens,
+)
+from opseval.pricing import priced
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 BACKOFF = (1.0, 2.0, 4.0, 8.0, 16.0)
 
+AttemptKey = tuple[str, int]
+"""(scenario id, attempt index): the attempt a call is made for."""
+
+_ATTEMPT: ContextVar[AttemptKey | None] = ContextVar("opseval_attempt", default=None)
+
+
+def _count(value: Any) -> int | None:
+    """A token count as the provider reported it, or ``None`` when it did not (or reported
+    something that is not a count). 0 is a count; a missing field is not."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _cost(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if math.isfinite(value) and value >= 0 else None
+
+
+def token_counts(usage: dict[str, Any] | None) -> dict[str, int | None]:
+    """The four token counts of an OpenAI-style ``usage`` object; ``None`` for each one the
+    provider did not report, never 0 (ADR-0066)."""
+    usage = usage if isinstance(usage, dict) else {}
+    prompt = usage.get("prompt_tokens_details")
+    completion = usage.get("completion_tokens_details")
+    return {
+        "input_tokens": _count(usage.get("prompt_tokens")),
+        "output_tokens": _count(usage.get("completion_tokens")),
+        "cached_input_tokens": _count(prompt.get("cached_tokens"))
+        if isinstance(prompt, dict)
+        else None,
+        "reasoning_tokens": _count(completion.get("reasoning_tokens"))
+        if isinstance(completion, dict)
+        else None,
+    }
+
+
+N = TypeVar("N", int, float)
+
+
+def _sum_if_all(values: list[N | None]) -> N | None:
+    """The total when every value is known, else ``None`` (ADR-0066). No values: ``None``."""
+    known = [v for v in values if v is not None]
+    if not values or len(known) < len(values):
+        return None
+    return sum(known[1:], known[0])
+
+
+def _sum_known(values: list[N | None]) -> N | None:
+    known = [v for v in values if v is not None]
+    return sum(known[1:], known[0]) if known else None
+
+
+def fold_usage(
+    role: str, model: str, events: list[UsageEvent], rate_limited: int = 0
+) -> ModelUsage:
+    """One ``(role, model)``'s events folded into a :class:`ModelUsage`.
+
+    Token totals and the cost cover the answered calls and are ``None`` unless every one of
+    them reported the count (``reported`` says how many did). A role with no tokens
+    (:func:`~opseval.models.usage.has_tokens`) has ``None`` token totals. Audio seconds and
+    characters count the calls that produced them, as before (ADR-0054): a speech role that
+    never sent audio shows "not measured", not 0 s."""
+    answered = [e for e in events if e.answered]
+
+    def tokens(name: str) -> int | None:
+        if not has_tokens(role):
+            return None
+        counts: list[int | None] = [getattr(e, name) for e in answered]
+        return _sum_if_all(counts)
+
+    def reported(name: str) -> int:
+        return sum(1 for e in answered if getattr(e, name) is not None)
+
+    costs = [e.cost_usd for e in answered]
+    return ModelUsage(
+        role=role,
+        model=model,
+        calls=len(events),
+        failed_calls=len(events) - len(answered),
+        rate_limited_calls=sum(e.rate_limited for e in events) + rate_limited,
+        input_tokens=tokens("input_tokens"),
+        output_tokens=tokens("output_tokens"),
+        reasoning_tokens=tokens("reasoning_tokens"),
+        cached_input_tokens=tokens("cached_input_tokens"),
+        cost_usd=_sum_if_all(costs),
+        audio_in_seconds=_sum_known([e.audio_in_seconds for e in answered]),
+        audio_out_seconds=_sum_known([e.audio_out_seconds for e in answered]),
+        characters=_sum_known([e.characters for e in answered]),
+        reported=UsageReported(
+            answered=len(answered),
+            input_tokens=reported("input_tokens"),
+            output_tokens=reported("output_tokens"),
+            reasoning_tokens=reported("reasoning_tokens"),
+            cached_input_tokens=reported("cached_input_tokens"),
+            cost=reported("cost_usd"),
+        ),
+    )
+
 
 @dataclass
 class UsageMeter:
-    by_key: dict[tuple[str, str], ModelUsage] = field(default_factory=dict)
+    """Every call the harness pays for, one :class:`UsageEvent` each (ADR-0066).
+
+    A call made inside :meth:`attempt` belongs to that attempt; its events go into the
+    attempt's record. ``snapshot`` folds them per ``(role, model)`` for the result."""
+
+    prices: PriceTable | None = None
+    """The price table; ``None`` is the built-in one."""
+    clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    events: list[tuple[AttemptKey | None, UsageEvent]] = field(default_factory=list)
+    """Every event in the order it was recorded, with the attempt it belongs to."""
+    _by_attempt: dict[AttemptKey | None, list[UsageEvent]] = field(default_factory=dict)
+    _by_key: dict[tuple[str, str], list[UsageEvent]] = field(default_factory=dict)
+    """Per ``(role, model)``, in the order each was first seen (the snapshot's order)."""
+    _extra_rate_limited: dict[tuple[str, str], int] = field(default_factory=dict)
+
+    @contextmanager
+    def attempt(self, test_id: str, index: int) -> Iterator[None]:
+        """Attribute every call made in this block (and the tasks it starts) to one attempt."""
+        token = _ATTEMPT.set((test_id, index))
+        try:
+            yield
+        finally:
+            _ATTEMPT.reset(token)
+
+    def add(self, event: UsageEvent, *, provider_cost: float | None = None) -> UsageEvent:
+        """Price ``event`` with the row in force when it was made and keep it."""
+        event = priced(event, self.prices, provider_cost=provider_cost)
+        attempt = _ATTEMPT.get()
+        self.events.append((attempt, event))
+        # Indexed as they arrive, so an attempt's events and a snapshot never scan the run.
+        self._by_attempt.setdefault(attempt, []).append(event)
+        self._by_key.setdefault((event.role, event.model), []).append(event)
+        return event
 
     def record(
-        self, role: str, model: str, usage: dict[str, Any] | None, rate_limited: int
-    ) -> None:
-        entry = self.by_key.setdefault((role, model), ModelUsage(role=role, model=model))
-        entry.calls += 1
-        entry.rate_limited_calls += rate_limited
-        if usage:
-            entry.input_tokens = (entry.input_tokens or 0) + int(usage.get("prompt_tokens", 0) or 0)
-            entry.output_tokens = (entry.output_tokens or 0) + int(
-                usage.get("completion_tokens", 0) or 0
-            )
-        price = PRICES.get(model)
-        entry.cost_usd = (
-            None
-            if price is None
-            else ((entry.input_tokens or 0) * price[0] + (entry.output_tokens or 0) * price[1])
-            / 1_000_000
+        self,
+        role: str,
+        model: str,
+        usage: dict[str, Any] | None,
+        rate_limited: int,
+        *,
+        answered: bool | None = None,
+        provider: str | None = None,
+        at: datetime | None = None,
+        latency_ms: float | None = None,
+        retries: int = 0,
+    ) -> UsageEvent:
+        """Count one LLM call. ``usage`` is the provider's usage object (``None``: none was
+        sent, or the call failed). A count it does not carry stays ``None``, never 0."""
+        counts = token_counts(usage)
+        provider_cost = _cost(usage.get("cost")) if isinstance(usage, dict) else None
+        return self.add(
+            UsageEvent(
+                at=at or self.clock(),
+                role=_role(role),
+                provider=provider,
+                model=model,
+                answered=usage is not None if answered is None else answered,
+                rate_limited=rate_limited,
+                retries=retries,
+                latency_ms=latency_ms,
+                **counts,
+            ),
+            provider_cost=provider_cost,
         )
 
     def record_speech(
@@ -63,51 +217,59 @@ class UsageMeter:
         audio_out_seconds: float | None = None,
         characters: int | None = None,
         rate_limited: int = 0,
-    ) -> None:
+        answered: bool = True,
+        provider: str | None = None,
+        at: datetime | None = None,
+        latency_ms: float | None = None,
+    ) -> UsageEvent:
         """Count one TTS or STT call (ADR-0054). A count the call did not produce (a failed
-        call has no audio out) adds nothing; a role's counts start at 0 only once one is
-        known, so a role that never sent audio shows "not measured", not 0 s. A speech row
+        call has no audio out) is ``None``; a role's totals count only the calls that produced
+        them, so a role that never sent audio shows "not measured", not 0 s. A speech call
         has no tokens: they stay ``None``, never 0."""
-        entry = self._speech_entry(role, model)
-        entry.calls += 1
-        entry.rate_limited_calls += rate_limited
-        if audio_in_seconds is not None:
-            entry.audio_in_seconds = (entry.audio_in_seconds or 0.0) + audio_in_seconds
-        if audio_out_seconds is not None:
-            entry.audio_out_seconds = (entry.audio_out_seconds or 0.0) + audio_out_seconds
-        if characters is not None:
-            entry.characters = (entry.characters or 0) + characters
-        entry.cost_usd = speech_cost(model, entry)
+        return self.add(
+            UsageEvent(
+                at=at or self.clock(),
+                role=_role(role),
+                provider=provider,
+                model=model,
+                answered=answered,
+                audio_in_seconds=audio_in_seconds,
+                audio_out_seconds=audio_out_seconds,
+                characters=characters,
+                rate_limited=rate_limited,
+                latency_ms=latency_ms,
+            )
+        )
 
     def record_speech_rate_limited(self, role: str, model: str, responses: int) -> None:
         """Count HTTP 429 answers a speech client received within one call, one per response
         (as :class:`ChatClient` does), without counting another call."""
         if responses:
-            self._speech_entry(role, model).rate_limited_calls += responses
+            key = (role, model)
+            self._extra_rate_limited[key] = self._extra_rate_limited.get(key, 0) + responses
+            self._by_key.setdefault(key, [])
 
-    def _speech_entry(self, role: str, model: str) -> ModelUsage:
-        return self.by_key.setdefault(
-            (role, model),
-            ModelUsage(role=role, model=model, input_tokens=None, output_tokens=None),
-        )
+    def events_for(self, test_id: str, index: int) -> tuple[UsageEvent, ...]:
+        return tuple(self._by_attempt.get((test_id, index), ()))
+
+    def outside_attempts(self) -> list[UsageEvent]:
+        return list(self._by_attempt.get(None, ()))
+
+    def by_attempt(self) -> dict[AttemptKey, tuple[UsageEvent, ...]]:
+        """Every attempt's events (calls outside any attempt left out), in first-seen order."""
+        return {k: tuple(v) for k, v in self._by_attempt.items() if k is not None}
 
     def snapshot(self) -> list[ModelUsage]:
-        return [u.model_copy() for u in self.by_key.values()]
+        return [
+            fold_usage(role, model, events, self._extra_rate_limited.get((role, model), 0))
+            for (role, model), events in self._by_key.items()
+        ]
 
 
-def speech_cost(model: str, usage: ModelUsage) -> float | None:
-    """The cost of a speech role's usage so far, or ``None`` when the model has no price or
-    the priced quantity was never counted."""
-    price = SPEECH_PRICES.get(model)
-    if price is None:
-        return None
-    per_second, per_character = price
-    if per_character is not None and usage.characters is not None:
-        return usage.characters * per_character
-    counted = [s for s in (usage.audio_in_seconds, usage.audio_out_seconds) if s is not None]
-    if per_second is not None and counted:
-        return sum(counted) * per_second
-    return None
+def _role(role: str) -> UsageRole:
+    if role in USAGE_ROLES:
+        return role
+    raise ValueError(f"unknown usage role {role!r}; one of {', '.join(USAGE_ROLES)}")
 
 
 class ChatClient:
@@ -180,6 +342,8 @@ class ChatClient:
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
         client = self._http or httpx.AsyncClient()
         rate_limited = 0
+        at = self._meter.clock()
+        began = time.monotonic()
         try:
             for attempt in range(self._max_retries + 1):
                 retry_after: float | None = None
@@ -194,7 +358,7 @@ class ChatClient:
                     error: str = f"{type(exc).__name__}: {exc}"
                 else:
                     if resp.status_code == 200:
-                        return self._parse(resp, rate_limited)
+                        return self._parse(resp, rate_limited, at, began, retries=attempt)
                     if resp.status_code not in RETRY_STATUSES:
                         raise LLMRequestError(
                             f"{self.role} LLM rejected the request: HTTP {resp.status_code} "
@@ -205,7 +369,17 @@ class ChatClient:
                     error = f"HTTP {resp.status_code}"
                     retry_after = _retry_after(resp)
                 if attempt == self._max_retries:
-                    self._meter.record(self.role, self.model, None, rate_limited)
+                    self._meter.record(
+                        self.role,
+                        self.model,
+                        None,
+                        rate_limited,
+                        answered=False,
+                        provider=self.provider,
+                        at=at,
+                        latency_ms=_since(began),
+                        retries=attempt,
+                    )
                     gave_up = LLMRateLimited if error == "HTTP 429" else LLMInfraError
                     raise gave_up(
                         f"{self.role} LLM unavailable after {attempt + 1} attempts ({error})"
@@ -218,7 +392,14 @@ class ChatClient:
                 await client.aclose()
         raise LLMInfraError("unreachable")  # pragma: no cover
 
-    def _parse(self, resp: httpx.Response, rate_limited: int) -> str:
+    @property
+    def provider(self) -> str | None:
+        """Who serves the calls: the API's host, as sent."""
+        return urlsplit(self.base_url).hostname
+
+    def _parse(
+        self, resp: httpx.Response, rate_limited: int, at: datetime, began: float, *, retries: int
+    ) -> str:
         try:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
@@ -226,8 +407,23 @@ class ChatClient:
             raise LLMInfraError(f"{self.role} LLM returned a malformed body") from exc
         if not isinstance(content, str):
             raise LLMInfraError(f"{self.role} LLM returned no text content")
-        self._meter.record(self.role, self.model, data.get("usage"), rate_limited)
+        usage = data.get("usage")
+        self._meter.record(
+            self.role,
+            self.model,
+            # An answer without a usage object reported no counts: each stays None.
+            usage if isinstance(usage, dict) else {},
+            rate_limited,
+            provider=self.provider,
+            at=at,
+            latency_ms=_since(began),
+            retries=retries,
+        )
         return content
+
+
+def _since(began: float) -> float:
+    return round((time.monotonic() - began) * 1000, 1)
 
 
 def _retry_after(resp: httpx.Response) -> float | None:

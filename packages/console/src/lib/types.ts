@@ -71,6 +71,19 @@ export type LaunchBody = G.LaunchIn;
 export type Launched = G.LaunchOut;
 export type SuiteBody = G.SuiteIn;
 
+/** The Cost and Tokens dashboards (ADR-0066). Every number is the server's; null is not measured. */
+export type Measured = G.MeasuredOut;
+export type Ratio = G.RatioOut;
+export type UsageBucket = G.UsageBucket;
+export type UsageSeries = G.UsageSeries;
+export type UsageScope = G.UsageScopeOut;
+export type UsageFilterOptions = G.UsageFilterOptions;
+export type CostDashboard = G.CostDashboard;
+export type TokensDashboard = G.TokensDashboard;
+export type UsageBucketing = G.UsageFiltersOut["bucket"];
+/** The dashboards' filters as the page holds them; "" is "any". */
+export interface UsageQuery { suite: string; role: string; model: string; since: string; until: string; bucket: UsageBucketing }
+
 /** Recorded audio of a voice attempt (ADR-0053): what each turn can do is the server's call. */
 export type AudioTurn = G.AudioTurnOut;
 export type AttemptAudio = G.AttemptAudioOut;

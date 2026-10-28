@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# Built-in model prices (ADR-0066). USD per 1M tokens, per 1M characters, or per minute of
+# audio. Every row has an effective_from date: a call is priced with the newest row in force
+# when it was made, so an old run keeps its price. A price change is a NEW row with a later
+# date; never edit a row that runs may already have been priced with.
+#
+# A model with no row has no price: its cost is "no price", never $0. Per-project overrides
+# come with the database (ADR-0066, phase D2).
+prices:
+  - match: "(openai/)?gpt-4o-mini(-\\d{4}-\\d{2}-\\d{2})?"
+    unit: tokens
+    effective_from: 2024-07-18
+    input: 0.15
+    output: 0.60
+    source: "https://openai.com/api/pricing (launch price)"
+  - match: "(openai/)?gpt-4o-mini(-\\d{4}-\\d{2}-\\d{2})?"
+    unit: tokens
+    effective_from: 2024-10-01
+    input: 0.15
+    output: 0.60
+    cached_input: 0.075
+    source: "https://openai.com/api/pricing (prompt caching, 2024-10-01)"
+  - match: "(openai/)?gpt-4o"
+    unit: tokens
+    effective_from: 2024-05-13
+    input: 5.00
+    output: 15.00
+    source: "https://openai.com/api/pricing (launch price)"
+  - match: "(openai/)?gpt-4o"
+    unit: tokens
+    effective_from: 2024-10-02
+    input: 2.50
+    output: 10.00
+    cached_input: 1.25
+    source: "https://openai.com/api/pricing (gpt-4o points at gpt-4o-2024-08-06)"
+  - match: "whisper-1"
+    unit: seconds
+    effective_from: 2023-03-01
+    audio_in: 0.006
+    source: "https://openai.com/api/pricing (per minute of audio)"
+  - match: "tts-1"
+    unit: characters
+    effective_from: 2023-11-06
+    characters: 15.00
+    source: "https://openai.com/api/pricing (per 1M characters)"
+  - match: "tts-1-hd"
+    unit: characters
+    effective_from: 2023-11-06
+    characters: 30.00
+    source: "https://openai.com/api/pricing (per 1M characters)"

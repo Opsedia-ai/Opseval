@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# Metadata for the Opseval Bitbucket pipe (ADR-0058, E3). The pipe image is built from the
+# Dockerfile next to this file and published at go-public; until then build it yourself.
+name: Opseval
+image: ghcr.io/opsedia-ai/opseval-pipe:<version>
+category: Testing
+description: >-
+  Run an Opseval suite against a deployed conversational agent and gate on the result.
+  Exit codes: 0 pass, 1 the agent failed, 2 not judged, 3 harness or configuration error;
+  the step fails on 1, 2 and 3. JUnit results go to test-results/opseval/junit.xml.
+repository: https://github.com/Opsedia-ai/Opseval
+vendor:
+  name: Opsedia
+  website: https://github.com/Opsedia-ai
+maintainer:
+  name: Opsedia
+  website: https://github.com/Opsedia-ai
+tags:
+  - testing
+  - evaluation
+  - ai-agents
+  - release-gate
+# The variables the pipe reads (Bitbucket passes them as environment variables).
+variables:
+  - { name: SUITE, required: true, description: "Scenario file, directory or suite file to run." }
+  - { name: PROFILE, required: true, description: "SUT profile YAML, or builtin:<name>." }
+  - { name: TARGET, required: true, description: "Agent URL. Its host must be in ALLOWED_HOSTS." }
+  - { name: TRANSPORT, default: websocket, description: "websocket | http-json | openai-chat | sse | ..." }
+  - { name: REPEATS, default: "", description: "Override the scenarios' repeats (1-20)." }
+  - { name: FILTER, default: "", description: "Filters (tag=..., id=...), one per line." }
+  - { name: EXTRA_ARGS, default: "", description: "Extra arguments for `opseval run`, space-separated." }
+  - { name: ALLOWED_HOSTS, default: "", description: "OPSEVAL_ALLOWED_HOSTS, comma-separated." }
+  - { name: SIMULATOR_BASE_URL, default: "", description: "OPSEVAL_SIMULATOR_BASE_URL." }
+  - { name: SIMULATOR_MODEL, default: "", description: "OPSEVAL_SIMULATOR_MODEL." }
+  - { name: JUDGE_BASE_URL, default: "", description: "OPSEVAL_JUDGE_BASE_URL." }
+  - { name: JUDGE_MODEL, default: "", description: "OPSEVAL_JUDGE_MODEL." }
+  - { name: OPSEVAL_ENV, default: "", description: "Other non-secret settings, one OPSEVAL_NAME=value per line." }
+  - { name: READ_DOTENV, default: "false", description: "\"true\" lets Opseval read a .env in the clone." }
+  - { name: SECRET_ENV_NAMES, default: "", description: "Other secret settings (config.SECRET_FIELDS) by name, e.g. OPSEVAL_LANGFUSE_SECRET_KEY; pass each as a variable of its own name from a secured variable." }
+  - { name: SIMULATOR_API_KEY, secret: true, description: "From a secured variable: $OPSEVAL_SIMULATOR_API_KEY." }
+  - { name: JUDGE_API_KEY, secret: true, description: "From a secured variable: $OPSEVAL_JUDGE_API_KEY." }
+  - { name: AGENT_TOKEN, secret: true, description: "From a secured variable: $OPSEVAL_STATIC_TOKEN." }

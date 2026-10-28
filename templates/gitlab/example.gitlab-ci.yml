@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# An example .gitlab-ci.yml: evaluate the agent on every merge request and on the default
+# branch, and release only when the evaluation passed (exit 0). Exit 1, 2 or 3 fails the
+# `opseval` job, so `release` (which needs it) does not run.
+#
+# Settings: OPSEVAL_JUDGE_API_KEY (and OPSEVAL_SIMULATOR_API_KEY, OPSEVAL_STATIC_TOKEN if you
+# use them) are masked, hidden CI/CD variables (Settings > CI/CD > Variables), never inputs.
+# A merge request from a fork gets no protected variables: with no key the judges are not
+# measured (exit 2), never a pass.
+stages: [test, release]
+
+include:
+  # Until go-public, include the file from your mirror of the Opseval repository, pinned to a
+  # full commit SHA. Afterwards the catalog component works the same way:
+  #   - component: $CI_SERVER_FQDN/opsedia-ai/opseval/opseval@<version>
+  - project: opsedia-ai/opseval
+    ref: <full commit SHA>
+    file: templates/gitlab/opseval.yml
+    inputs:
+      suite: evals/suites/smoke.yaml
+      profile: evals/profile.yaml
+      target: wss://agent.staging.example.com/ws
+      allowed-hosts: agent.staging.example.com,api.openai.com
+      judge-base-url: https://api.openai.com/v1
+      judge-model: gpt-4.1-mini
+      # Until the image is published: docker build -t opseval . in the Opseval repository,
+      # push it to your registry, and name it here.
+      image: registry.example.com/tools/opseval:0.2.0
+      opseval-env: |
+        OPSEVAL_SIMULATOR_TIMEOUT_SECONDS=120
+
+release:
+  stage: release
+  needs: [opseval]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - ./scripts/publish.sh

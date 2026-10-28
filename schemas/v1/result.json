@@ -1,5 +1,33 @@
 {
   "$defs": {
+    "AttemptUsage": {
+      "additionalProperties": false,
+      "description": "The calls made for one attempt outside its record: a re-score's judge calls\n(ADR-0066). A run's own attempt calls live in the attempt's record instead.",
+      "properties": {
+        "attempt_index": {
+          "title": "Attempt Index",
+          "type": "integer"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/UsageEvent"
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "test_id": {
+          "title": "Test Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "test_id",
+        "attempt_index",
+        "events"
+      ],
+      "title": "AttemptUsage",
+      "type": "object"
+    },
     "AttemptVerdict": {
       "additionalProperties": false,
       "properties": {
@@ -239,6 +267,7 @@
     },
     "ModelUsage": {
       "additionalProperties": false,
+      "description": "One ``(role, model)``'s usage in a run, folded from its usage events (ADR-0066).\n\nA total covers the calls that were answered, and is ``None`` unless every one of them\nreported that count; ``reported`` says how many did. ``reported`` is ``None`` on results\nwritten before per-call usage: their totals are kept as written (a missing count was then\nadded as 0), and are shown as such.",
       "properties": {
         "audio_in_seconds": {
           "anyOf": [
@@ -263,6 +292,18 @@
           ],
           "default": null,
           "title": "Audio Out Seconds"
+        },
+        "cached_input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cached Input Tokens"
         },
         "calls": {
           "default": 0,
@@ -292,6 +333,11 @@
           ],
           "default": null,
           "title": "Cost Usd"
+        },
+        "failed_calls": {
+          "default": 0,
+          "title": "Failed Calls",
+          "type": "integer"
         },
         "input_tokens": {
           "anyOf": [
@@ -325,6 +371,29 @@
           "default": 0,
           "title": "Rate Limited Calls",
           "type": "integer"
+        },
+        "reasoning_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Tokens"
+        },
+        "reported": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageReported"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "role": {
           "title": "Role",
@@ -894,6 +963,237 @@
       "title": "TestVerdict",
       "type": "object"
     },
+    "UsageEvent": {
+      "additionalProperties": false,
+      "description": "One call the harness paid for. Lives in the attempt's record in files mode (ADR-0066).\n\nToken counts follow the OpenAI usage object: ``cached_input_tokens`` is the part of\n``input_tokens`` served from the provider's cache (``prompt_tokens_details.cached_tokens``)\nand ``reasoning_tokens`` the part of ``output_tokens`` spent reasoning\n(``completion_tokens_details.reasoning_tokens``).",
+      "properties": {
+        "answered": {
+          "default": true,
+          "title": "Answered",
+          "type": "boolean"
+        },
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        },
+        "audio_in_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio In Seconds"
+        },
+        "audio_out_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio Out Seconds"
+        },
+        "cached_input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cached Input Tokens"
+        },
+        "characters": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Characters"
+        },
+        "cost_source": {
+          "default": "unknown",
+          "enum": [
+            "provider",
+            "price_table",
+            "unknown"
+          ],
+          "title": "Cost Source",
+          "type": "string"
+        },
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Tokens"
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latency Ms"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        },
+        "price_from": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price From"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "rate_limited": {
+          "default": 0,
+          "title": "Rate Limited",
+          "type": "integer"
+        },
+        "reasoning_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Tokens"
+        },
+        "retries": {
+          "default": 0,
+          "title": "Retries",
+          "type": "integer"
+        },
+        "role": {
+          "enum": [
+            "simulator",
+            "judge",
+            "attacker",
+            "generator",
+            "tts",
+            "stt",
+            "telephony"
+          ],
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "role",
+        "model"
+      ],
+      "title": "UsageEvent",
+      "type": "object"
+    },
+    "UsageReported": {
+      "additionalProperties": false,
+      "description": "How many answered calls reported each count (ADR-0066). A total is ``None`` unless\nevery answered call reported it; this says how many did.",
+      "properties": {
+        "answered": {
+          "default": 0,
+          "title": "Answered",
+          "type": "integer"
+        },
+        "cached_input_tokens": {
+          "default": 0,
+          "title": "Cached Input Tokens",
+          "type": "integer"
+        },
+        "cost": {
+          "default": 0,
+          "title": "Cost",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "default": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "reasoning_tokens": {
+          "default": 0,
+          "title": "Reasoning Tokens",
+          "type": "integer"
+        }
+      },
+      "title": "UsageReported",
+      "type": "object"
+    },
     "VerdictChange": {
       "additionalProperties": false,
       "properties": {
@@ -933,6 +1233,13 @@
   "additionalProperties": false,
   "description": "Opseval opseval/v1 result contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
   "properties": {
+    "attempt_usage": {
+      "items": {
+        "$ref": "#/$defs/AttemptUsage"
+      },
+      "title": "Attempt Usage",
+      "type": "array"
+    },
     "config_digest": {
       "additionalProperties": true,
       "title": "Config Digest",
@@ -1050,6 +1357,13 @@
         "$ref": "#/$defs/ModelUsage"
       },
       "title": "Usage",
+      "type": "array"
+    },
+    "usage_events": {
+      "items": {
+        "$ref": "#/$defs/UsageEvent"
+      },
+      "title": "Usage Events",
       "type": "array"
     }
   },
