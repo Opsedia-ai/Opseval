@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -85,11 +86,12 @@ class Repo:
         committer: tuple[str, str] | None = None,
         trailers: str = "",
         body: str = "",
+        file: str = "f.txt",
     ) -> str:
         name, email = author
         cname, cemail = committer or author
-        (self.path / "f.txt").write_text(subject, "utf-8")
-        self.git("add", "f.txt")
+        (self.path / file).write_text(subject, "utf-8")
+        self.git("add", file)
         message = (
             subject + (f"\n\n{body}" if body else "") + (f"\n\n{trailers}" if trailers else "")
         )
@@ -185,7 +187,8 @@ def test_dependabot_signs_off_with_its_own_address(dco: ModuleType, repo: Repo) 
     assert _run_dco(dco, repo, base) == 1, "the bot is not exempt, only its sign-off address"
 
 
-def _merge(repo: Repo, committer: tuple[str, str], trailers: str = "") -> None:
+def _side(repo: Repo) -> None:
+    """A branch ``side`` off ``HEAD~1`` that adds g.txt, while ``work`` changed f.txt."""
     repo.git("switch", "-q", "-C", "side", "HEAD~1")
     (repo.path / "g.txt").write_text("side", "utf-8")
     repo.git("add", "g.txt")
@@ -193,9 +196,25 @@ def _merge(repo: Repo, committer: tuple[str, str], trailers: str = "") -> None:
         "commit", "-q", "-m", "side\n\n" + SIGNED, env=_ident(("Ada Lovelace", "ada@example.com"))
     )
     repo.git("switch", "-q", "work")
+
+
+def _merge(
+    repo: Repo,
+    committer: tuple[str, str],
+    trailers: str = "",
+    change: Callable[[Path], None] | None = None,
+) -> None:
+    """Merge ``side`` into ``work``; ``change`` edits the result before it is committed."""
+    _side(repo)
     env = {**_ident(("Ada Lovelace", "ada@example.com")), **_ident(committer, "COMMITTER")}
     message = "Merge branch 'side'" + (f"\n\n{trailers}" if trailers else "")
-    repo.git("merge", "-q", "--no-ff", "-m", message, "side", env=env)
+    if change is None:
+        repo.git("merge", "-q", "--no-ff", "-m", message, "side", env=env)
+        return
+    repo.git("merge", "-q", "--no-ff", "--no-commit", "side", env=env)
+    change(repo.path)
+    repo.git("add", "-A")
+    repo.git("commit", "-q", "-m", message, env=env)
 
 
 def _ident(who: tuple[str, str], role: str = "AUTHOR") -> dict[str, str]:
@@ -205,23 +224,126 @@ def _ident(who: tuple[str, str], role: str = "AUTHOR") -> dict[str, str]:
     return env
 
 
-def test_a_merge_github_made_is_skipped(
-    dco: ModuleType, repo: Repo, capsys: pytest.CaptureFixture[str]
+GITHUB = ("GitHub", "noreply@github.com")
+
+
+@pytest.mark.parametrize("committer", [GITHUB, ("Ada Lovelace", "ada@example.com")])
+def test_a_merge_with_no_changes_of_its_own_is_skipped_whoever_made_it(
+    dco: ModuleType, repo: Repo, capsys: pytest.CaptureFixture[str], committer: tuple[str, str]
 ) -> None:
     base = repo.commit("base")
     repo.commit("feat: x", trailers=SIGNED)
-    _merge(repo, ("GitHub", "noreply@github.com"))
+    _merge(repo, committer)
     assert _run_dco(dco, repo, base) == 0
-    assert "1 GitHub merge commit(s) skipped" in capsys.readouterr().out
+    assert "1 merge commit(s) with no changes of their own skipped" in capsys.readouterr().out
 
 
-def test_a_merge_made_by_hand_is_checked(dco: ModuleType, repo: Repo) -> None:
+def _extra_file(path: Path) -> None:
+    (path / "evil.txt").write_text("not in either parent", "utf-8")
+
+
+def _drop_sides_change(path: Path) -> None:
+    # Takes work's side of everything: the combined diff is empty, but side's g.txt is gone.
+    (path / "g.txt").unlink()
+
+
+@pytest.mark.parametrize("change", [_extra_file, _drop_sides_change])
+def test_a_merge_with_changes_of_its_own_must_be_signed_off(
+    dco: ModuleType,
+    repo: Repo,
+    capsys: pytest.CaptureFixture[str],
+    change: Callable[[Path], None],
+) -> None:
+    """A committer address is trivially spoofed; the merge's own content decides."""
     base = repo.commit("base")
     repo.commit("feat: x", trailers=SIGNED)
-    _merge(repo, ("Ada Lovelace", "ada@example.com"))
+    _merge(repo, GITHUB, change=change)
     assert _run_dco(dco, repo, base) == 1
+    assert "a merge with changes of its own" in capsys.readouterr().err
     repo.git("reset", "-q", "--hard", "HEAD~1")
-    _merge(repo, ("Ada Lovelace", "ada@example.com"), trailers=SIGNED)
+    _merge(repo, GITHUB, trailers=SIGNED, change=change)
+    assert _run_dco(dco, repo, base) == 0
+
+
+def test_a_conflict_resolution_must_be_signed_off(dco: ModuleType, repo: Repo) -> None:
+    base = repo.commit("base")
+    repo.git("switch", "-q", "-c", "side")
+    repo.commit("side edit", trailers=SIGNED)
+    repo.git("switch", "-q", "work")
+    repo.commit("work edit", trailers=SIGNED)
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.git("merge", "-q", "side")
+    (repo.path / "f.txt").write_text("resolved", "utf-8")
+    repo.git("add", "f.txt")
+    repo.git("commit", "-q", "-m", "Merge branch 'side'", env=_ident(GITHUB, "COMMITTER"))
+    assert _run_dco(dco, repo, base) == 1
+
+
+def test_an_octopus_merge_is_always_checked(dco: ModuleType, repo: Repo) -> None:
+    base = repo.commit("base")
+    for name in ("a", "b"):
+        repo.git("switch", "-q", "-c", name, base)
+        (repo.path / f"{name}.txt").write_text(name, "utf-8")
+        repo.git("add", f"{name}.txt")
+        repo.git(
+            "commit", "-q", "-m", f"{name}\n\n{SIGNED}", env=_ident(("Ada", "ada@example.com"))
+        )
+    repo.git("switch", "-q", "work")
+    repo.git("merge", "-q", "--no-ff", "-m", "octopus", "a", "b", env=_ident(GITHUB, "COMMITTER"))
+    assert _run_dco(dco, repo, base) == 1
+
+
+def test_git_configuration_cannot_change_what_is_parsed(
+    dco: ModuleType, repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``log.showSignature`` prints verification lines into ``git log``'s output."""
+    base = repo.commit("base")
+    repo.git("config", "log.showSignature", "true")
+    repo.git("config", "color.ui", "always")
+    keygen = shutil.which("ssh-keygen")
+    if keygen is not None:  # an SSH-signed commit: git log then prints "No signature" lines
+        key = tmp_path / "key"
+        subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+        repo.git("config", "gpg.format", "ssh")
+        repo.git("config", "user.signingkey", str(key))
+        repo.git("config", "commit.gpgSign", "true")
+    repo.commit("feat: x", trailers=SIGNED)
+    calls: list[list[str]] = []
+    real = subprocess.run
+
+    def spy(args: list[str], **kwargs: Any) -> Any:
+        calls.append(list(args))
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(dco.subprocess, "run", spy)
+    assert _run_dco(dco, repo, base) == 0
+    (log,) = [c for c in calls if "log" in c]
+    assert log[1:5] == ["-c", "log.showSignature=false", "-c", "color.ui=never"]
+    assert "--no-color" in log and "-z" in log
+    assert any(a.startswith("--format=%H") for a in log)
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "feat: \x1f a separator",
+        # A forged sign-off: the subject tries to end its own record with one.
+        "feat: x\x1fSigned-off-by: Ada Lovelace <ada@example.com>",
+    ],
+)
+def test_a_control_character_in_a_record_is_an_unreadable_range(
+    dco: ModuleType, repo: Repo, capsys: pytest.CaptureFixture[str], subject: str
+) -> None:
+    base = repo.commit("base")
+    repo.commit(subject)
+    assert _run_dco(dco, repo, base) == 2
+    assert "unreadable commit record" in capsys.readouterr().err
+
+
+def test_a_record_separator_in_a_subject_is_only_text(dco: ModuleType, repo: Repo) -> None:
+    """Records are NUL-separated, which a commit message cannot hold."""
+    base = repo.commit("base")
+    repo.commit("feat: x\x1e", trailers=SIGNED)
     assert _run_dco(dco, repo, base) == 0
 
 
@@ -253,19 +375,44 @@ def _ci() -> dict[str, Any]:
 def test_the_dco_job_checks_the_pull_request_range_with_no_credentials() -> None:
     jobs = _ci()["jobs"]
     job = jobs["dco"]
-    assert job["if"] == "github.event_name == 'pull_request'"
+    # No job-level `if:`: a skipped job reports a passing required check.
+    assert "if" not in job
     assert job["permissions"] == {"contents": "read"}
-    checkout = job["steps"][0]
+    on_pr = "github.event_name == 'pull_request'"
+    idle, checkout, step = job["steps"]
+    assert idle["if"] == "github.event_name != 'pull_request'" and "uses" not in idle
     pinned = jobs["check"]["steps"][0]["uses"]
     assert checkout["uses"] == pinned, "the same SHA-pinned checkout as the other jobs"
+    assert checkout["if"] == on_pr
+    # The default ref of a pull_request run: the merge ref, whose parents are the range.
     assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": False}
-    step = job["steps"][1]
-    # The SHAs go through env, never interpolated into the shell.
-    assert step["env"] == {
-        "BASE": "${{ github.event.pull_request.base.sha }}",
-        "HEAD": "${{ github.event.pull_request.head.sha }}",
-    }
-    assert step["run"] == 'python3 scripts/check_dco.py "$BASE" "$HEAD"'
+    assert step["if"] == on_pr
+    # The SHA goes through env, never interpolated into the shell.
+    assert step["env"] == {"PR_HEAD": "${{ github.event.pull_request.head.sha }}"}
+    script = step["run"]
+    assert "${{" not in script
+    assert '[ "$merged" != "$PR_HEAD" ]' in script and "exit 2" in script
+    # HEAD^1..HEAD^2, never base.sha..head.sha: main commits merged into the branch after
+    # base.sha was recorded would be checked as the pull request's own.
+    assert script.rstrip().endswith("python3 scripts/check_dco.py HEAD^1 HEAD^2")
+
+
+def test_the_merge_ref_range_leaves_out_main_merged_into_the_branch(
+    dco: ModuleType, repo: Repo
+) -> None:
+    """What CI does, with a stale ``base.sha``: main moved on and was merged into the branch."""
+    stale_base = repo.commit("main: old, unsigned")
+    repo.git("branch", "main")
+    repo.commit("feat: mine", trailers=SIGNED)
+    repo.git("switch", "-q", "main")
+    repo.commit("main: newer, unsigned", file="main.txt")
+    repo.git("switch", "-q", "work")
+    repo.git("merge", "-q", "--no-ff", "-m", "Merge main", "main", env=_ident(GITHUB, "COMMITTER"))
+    head = repo.git("rev-parse", "HEAD")
+    assert _run_dco(dco, repo, stale_base, head) == 1, "base.sha..head checks main's commit"
+    repo.git("switch", "-q", "main")
+    repo.git("merge", "-q", "--no-ff", "-m", "the merge ref", head, env=_ident(GITHUB, "COMMITTER"))
+    assert _run_dco(dco, repo, "HEAD^1", "HEAD^2") == 0
 
 
 def test_every_action_in_ci_is_pinned_to_a_commit() -> None:
@@ -323,8 +470,10 @@ def test_the_ruleset_is_what_adr_0065_decides() -> None:
     # Reported by GitHub Actions only, so another app cannot post a passing `dco`.
     assert {c["integration_id"] for c in checks} == {15368}
     # The admin bypass while there is one maintainer; removed in a PR once a team exists.
+    # In pull_request mode: an admin may merge their own pull request without the review,
+    # never push to main directly, force-push or delete it.
     assert ruleset["bypass_actors"] == [
-        {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+        {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}
     ]
 
 
@@ -350,11 +499,74 @@ def test_check_names_follow_github(rules: ModuleType) -> None:
         {"strategy": {"matrix": {"python": ["3.11"], "include": [{"python": "3.14"}]}}},
         {"name": "check ${{ matrix.python }}"},
         {"strategy": {"matrix": {"python": []}}},
+        {"strategy": {"matrix": {"python": ["3.11"]}}, "if": "github.event_name == 'push'"},
+        {"strategy": {"matrix": {"cfg": [{"os": "linux"}]}}},
+        {"strategy": {"matrix": {"cfg": [["a", "b"]]}}},
+        {"strategy": {"matrix": {"cfg": [None]}}},
     ],
 )
 def test_a_shape_that_cannot_be_named_fails_closed(rules: ModuleType, job: dict[str, Any]) -> None:
     found = rules.problems(_ruleset(), {"jobs": {**_ci()["jobs"], "check": job}})
     assert any("cannot name the CI checks" in p for p in found)
+
+
+def test_a_job_level_if_is_refused(rules: ModuleType) -> None:
+    with pytest.raises(rules.Unsupported, match="skipped job reports a passing check"):
+        rules.check_names({"jobs": {"dco": {"if": "github.event_name == 'pull_request'"}}})
+
+
+def _checks(ruleset: dict[str, Any]) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = _rule(ruleset, "required_status_checks")["parameters"][
+        "required_status_checks"
+    ]
+    return found
+
+
+@pytest.mark.parametrize("integration", [None, 1, "15368", True])
+def test_every_required_check_comes_from_github_actions(
+    rules: ModuleType, integration: Any
+) -> None:
+    ruleset = _ruleset()
+    check = _checks(ruleset)[-1]
+    if integration is None:
+        del check["integration_id"]
+    else:
+        check["integration_id"] = integration
+    found = rules.problems(ruleset, _ci())
+    assert found == [
+        "required check `dco` must have `integration_id` 15368 (GitHub Actions), "
+        "or any app could report it"
+    ]
+
+
+def test_the_bypass_is_for_pull_requests_only(rules: ModuleType) -> None:
+    ruleset = _ruleset()
+    ruleset["bypass_actors"][0]["bypass_mode"] = "always"
+    found = rules.problems(ruleset, _ci(), {"@ayanasser"})
+    assert any("`bypass_mode` must be `pull_request`" in p for p in found)
+    assert any("single owner" in p for p in found), "an `always` bypass does not count"
+
+
+def test_a_sole_code_owner_needs_the_pull_request_bypass(rules: ModuleType) -> None:
+    ruleset = _ruleset()
+    ruleset["bypass_actors"] = []
+    for owners in ({"@ayanasser"}, None, set()):
+        (found,) = rules.problems(ruleset, _ci(), owners)
+        assert "cannot approve their own pull request" in found
+    # A team, or several people, can review each other's pull requests.
+    assert rules.problems(ruleset, _ci(), {"@opsedia-ai/maintainers"}) == []
+    assert rules.problems(ruleset, _ci(), {"@a", "@b"}) == []
+    review = _rule(ruleset, "pull_request")["parameters"]
+    review["require_code_owner_review"] = False
+    found = rules.problems(ruleset, _ci(), {"@ayanasser"})
+    assert found == ["`pull_request.require_code_owner_review` must be true"]
+
+
+def test_code_owners_are_read_from_codeowners(rules: ModuleType) -> None:
+    text = "# a comment\n*  @Ayanasser  # trailing\n/ee/ @org/Team ops@example.com\n\n"
+    assert rules.code_owners(text) == {"@ayanasser", "@org/team", "ops@example.com"}
+    owners = rules.code_owners((ROOT / ".github" / "CODEOWNERS").read_text("utf-8"))
+    assert owners == {"@ayanasser"}
 
 
 def test_a_renamed_or_added_job_is_a_mismatch(rules: ModuleType) -> None:
@@ -415,7 +627,7 @@ def _fake_gh(tmp_path: Path, ids: str) -> tuple[dict[str, str], Path]:
     gh = bin_dir / "gh"
     gh.write_text(
         "#!/bin/sh\n"
-        f'echo "$*" >> "{log}"\n'
+        f'echo "$* [cwd=$(pwd -P)]" >> "{log}"\n'
         'case "$*" in\n'
         '  "repo view"*) echo Opsedia-ai/Opseval ;;\n'
         f'  *--paginate*) printf "{ids}" ;;\n'
@@ -427,9 +639,11 @@ def _fake_gh(tmp_path: Path, ids: str) -> tuple[dict[str, str], Path]:
     return {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}, log
 
 
-def _apply(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+def _apply(
+    env: dict[str, str], *args: str, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(APPLY), *args], env=env, capture_output=True, text=True, check=False
+        ["bash", str(APPLY), *args], env=env, cwd=cwd, capture_output=True, text=True, check=False
     )
 
 
@@ -456,10 +670,16 @@ def test_a_dry_run_validates_prints_and_never_calls_github(tmp_path: Path) -> No
 def test_apply_creates_or_updates_by_name(tmp_path: Path, ids: str, expected: str) -> None:
     env, log = _fake_gh(tmp_path, ids)
     args = ("--apply",) if not ids else ("--apply", "--repo", "o/r")
-    out = _apply(env, *args)
+    out = _apply(env, *args, cwd=tmp_path)  # run from outside the checkout
     assert out.returncode == 0, out.stderr
     calls = log.read_text("utf-8")
     assert expected in calls and f"--input {RULESET}" in calls
+    if not ids:
+        # The repository of the script's own checkout, never of the current directory.
+        (view,) = [line for line in calls.splitlines() if line.startswith("repo view")]
+        assert view.endswith(f"[cwd={ROOT.resolve()}]")
+    else:
+        assert "repo view" not in calls, "--repo is used as given"
 
 
 @needs_bash
@@ -476,9 +696,12 @@ SHA = "1" * 40
 ZERO = "0" * 40
 
 
-def _hook(stdin: str, **env: str) -> subprocess.CompletedProcess[str]:
+UPSTREAM = "git@github.com:Opsedia-ai/Opseval.git"
+
+
+def _hook(stdin: str, url: str = UPSTREAM, **env: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["/bin/sh", str(HOOK), "origin", "git@example.com:o/r.git"],
+        ["/bin/sh", str(HOOK), "origin", url],
         input=stdin,
         env={**os.environ, **env},
         capture_output=True,
@@ -502,6 +725,77 @@ def test_the_hook_refuses_main_and_its_deletion() -> None:
         out = _hook(stdin, SKIP_PRE_PUSH_CHECKS="1")
         assert out.returncode == 1
         assert "refusing to push to main on origin" in out.stderr and "pull request" in out.stderr
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@github.com:Opsedia-ai/Opseval.git",
+        "git@github.com:opsedia-ai/opseval",
+        "ssh://git@github.com/Opsedia-ai/Opseval.git",
+        "ssh://git@github.com/OPSEDIA-AI/OPSEVAL",
+        "https://github.com/Opsedia-ai/Opseval.git",
+        "https://github.com/Opsedia-AI/Opseval/",
+        "https://x-access-token@github.com/Opsedia-ai/Opseval",
+        "",  # no URL: the hook run by hand counts as upstream
+    ],
+)
+def test_the_hook_refuses_main_of_the_upstream_repository(url: str) -> None:
+    out = _hook(f"refs/heads/work {SHA} refs/heads/main {ZERO}\n", url, SKIP_PRE_PUSH_CHECKS="1")
+    assert out.returncode == 1 and "refusing to push to main" in out.stderr
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@github.com:someone/Opseval.git",
+        "https://github.com/someone/Opseval",
+        "git@github.com:Opsedia-ai/Opseval-fork.git",
+        "https://github.com/Opsedia-ai/Opseval.git.evil",
+        "https://gitlab.com/Opsedia-ai/Opseval.git",
+        "/srv/git/opseval.git",
+    ],
+)
+def test_the_hook_lets_main_go_to_a_fork_after_the_checks(
+    url: str, tmp_path: Path, repo: Repo
+) -> None:
+    for stdin in (
+        f"refs/heads/work {SHA} refs/heads/main {ZERO}\n",
+        f"(delete) {ZERO} refs/heads/main {SHA}\n",
+    ):
+        out = _hook(stdin, url, SKIP_PRE_PUSH_CHECKS="1")
+        assert out.returncode == 0, out.stderr
+    # Not refused, so the fast checks run (and fail here: no uv on this PATH).
+    repo.commit("base")
+    out = subprocess.run(
+        ["/bin/sh", str(HOOK), "origin", url],
+        input=f"refs/heads/work {SHA} refs/heads/main {ZERO}\n",
+        cwd=repo.path,
+        env={**os.environ, "PATH": str(_only(tmp_path, "git", "grep"))},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 1 and "uv is not installed" in out.stderr
+    assert "refusing" not in out.stderr
+
+
+def _only(tmp_path: Path, *tools: str) -> Path:
+    """A PATH directory holding only ``tools``."""
+    bin_dir = tmp_path / "only"
+    bin_dir.mkdir()
+    for tool in tools:
+        found = shutil.which(tool)
+        assert found is not None
+        (bin_dir / tool).symlink_to(found)
+    return bin_dir
+
+
+def test_the_hook_refuses_main_when_grep_cannot_run() -> None:
+    """grep failing to run is not "no match": main stays refused (fail closed)."""
+    stdin = f"refs/heads/work {SHA} refs/heads/main {ZERO}\n"
+    out = _hook(stdin, "/srv/fork.git", PATH="/nonexistent")
+    assert out.returncode == 1 and "refusing to push to main" in out.stderr
 
 
 def test_the_hook_lets_a_branch_through() -> None:
@@ -536,17 +830,73 @@ def test_the_hook_says_when_it_cannot_run_the_checks(tmp_path: Path, repo: Repo)
     assert out.returncode == 1 and "uv is not installed" in out.stderr
 
 
-def test_a_real_push_to_main_is_refused(tmp_path: Path, repo: Repo) -> None:
+def test_a_real_push_goes_through_the_hook(tmp_path: Path, repo: Repo) -> None:
+    """git passes the hook the URL it pushes to; a local remote is a fork, not upstream."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
     repo.commit("feat: x", trailers=SIGNED)
     repo.git("config", "core.hooksPath", str(HOOK.parent))
     repo.git("remote", "add", "origin", str(remote))
-    with pytest.raises(subprocess.CalledProcessError) as refused:
-        repo.git("push", "-q", "origin", "work:main", env={"SKIP_PRE_PUSH_CHECKS": "1"})
-    assert "refusing to push to main" in refused.value.stderr
     repo.git("push", "-q", "origin", "work:feat/x", env={"SKIP_PRE_PUSH_CHECKS": "1"})
+    repo.git("push", "-q", "origin", "work:main", env={"SKIP_PRE_PUSH_CHECKS": "1"})
     branches = subprocess.run(
         ["git", "branch", "--list"], cwd=remote, capture_output=True, text=True, check=True
     ).stdout
-    assert "feat/x" in branches and "main" not in branches
+    assert "feat/x" in branches and "main" in branches
+
+
+# --- make hooks ----------------------------------------------------------------------------
+
+needs_make = pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+
+
+def _make_hooks(repo: Repo, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["make", "-s", "-f", str(ROOT / "Makefile"), "hooks", *args],
+        cwd=repo.path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _hooks_path(repo: Repo) -> str:
+    out = subprocess.run(
+        ["git", "config", "--get", "core.hooksPath"], cwd=repo.path, capture_output=True, text=True
+    )
+    return out.stdout.strip()
+
+
+@needs_make
+def test_make_hooks_installs_and_reinstalls(repo: Repo) -> None:
+    for _ in range(2):
+        out = _make_hooks(repo)
+        assert out.returncode == 0, out.stderr
+        assert _hooks_path(repo) == "scripts/githooks"
+
+
+@needs_make
+def test_make_hooks_will_not_switch_off_the_clones_own_hooks(repo: Repo) -> None:
+    hooks = Path(repo.git("rev-parse", "--git-path", "hooks"))
+    hooks = hooks if hooks.is_absolute() else repo.path / hooks
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit.sample").write_text("#!/bin/sh\n", "utf-8")
+    assert _make_hooks(repo).returncode == 0, "sample hooks are not hooks"
+    repo.git("config", "--unset", "core.hooksPath")
+    (hooks / "pre-commit").write_text("#!/bin/sh\n", "utf-8")
+    out = _make_hooks(repo)
+    assert out.returncode != 0 and "pre-commit" in out.stderr and "FORCE=1" in out.stderr
+    assert _hooks_path(repo) == ""
+    out = _make_hooks(repo, "FORCE=1")
+    assert out.returncode == 0, out.stderr
+    assert _hooks_path(repo) == "scripts/githooks"
+
+
+@needs_make
+def test_make_hooks_will_not_replace_another_hooks_path(repo: Repo) -> None:
+    repo.git("config", "core.hooksPath", ".husky")
+    out = _make_hooks(repo)
+    assert out.returncode != 0 and "already .husky" in out.stderr
+    assert _hooks_path(repo) == ".husky"
+    assert _make_hooks(repo, "FORCE=1").returncode == 0
+    assert _hooks_path(repo) == "scripts/githooks"

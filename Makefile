@@ -7,10 +7,25 @@ install:
 	uv sync
 
 # The pre-push hook (ADR-0065): refuses a push to main, runs ruff and the schema check first.
-# Sets core.hooksPath in this clone's .git/config only.
+# Sets core.hooksPath in this clone's .git/config only. Setting it switches off every other
+# hook of the clone, so it refuses (unless FORCE=1) when core.hooksPath already points
+# elsewhere or the hooks directory has hooks of its own (anything but the *.sample files).
 hooks:
-	git config --local core.hooksPath scripts/githooks
-	@echo "pre-push hook installed (scripts/githooks/pre-push)"
+	@current=$$(git config --get core.hooksPath || true); \
+	if [ -n "$$current" ] && [ "$$current" != scripts/githooks ]; then \
+		echo "make hooks: core.hooksPath is already $$current; setting it would switch those hooks off." >&2; \
+		if [ "$(FORCE)" != 1 ]; then echo "  Move them to scripts/githooks, or run: make hooks FORCE=1" >&2; exit 1; fi; \
+	elif [ -z "$$current" ]; then \
+		dir=$$(git rev-parse --git-path hooks) || exit 1; \
+		own=$$(find "$$dir" -maxdepth 1 ! -type d ! -name '*.sample' 2>/dev/null | sort); \
+		if [ -n "$$own" ]; then \
+			echo "make hooks: $$dir has hooks that core.hooksPath would switch off:" >&2; \
+			echo "$$own" | sed 's/^/  /' >&2; \
+			if [ "$(FORCE)" != 1 ]; then echo "  Move them to scripts/githooks, or run: make hooks FORCE=1" >&2; exit 1; fi; \
+		fi; \
+	fi; \
+	git config --local core.hooksPath scripts/githooks && \
+	echo "pre-push hook installed (scripts/githooks/pre-push)"
 
 lint:
 	uv run ruff check .
