@@ -50,7 +50,9 @@ export function ScopeNote({ scope, serverOnly, children }: { scope: UsageScope; 
         <p data-legacy="true">{scope.legacyRuns.length} run{scope.legacyRuns.length === 1 ? " was" : "s were"} written before per-call usage: per-model totals as written (a count the provider did not report was then added as 0), no reasoning or cached tokens, no per-scenario figures.</p>
       )}
       {scope.attemptsWithoutUsage > 0 && <p>{scope.attemptsWithoutUsage} attempts have no per-call usage: not measured.</p>}
-      {scope.unreadableRuns.length > 0 && <p>Left out, records unreadable: {scope.unreadableRuns.join(", ")}.</p>}
+      {scope.unreadableRuns.length > 0 && <p data-unreadable="true">Left out entirely, records unreadable (no calls, no passed tests): {scope.unreadableRuns.join(", ")}.</p>}
+      {scope.rescoredRuns.length > 0 && <p data-rescored="true">Re-grading: the latest re-score of {scope.rescoredRuns.join(", ")} is counted with its run ({scope.rescoreCalls} calls, shown as &quot;(rescore)&quot;), not as a run of its own; per-scenario figures are the attempts as they ran.</p>}
+      {scope.unreadableRescores.length > 0 && <p>Re-scores left out, unreadable: {scope.unreadableRescores.join(", ")}.</p>}
       <p className="text-muted-ink">Filtering by {serverOnly.join(", ")} needs server mode.</p>
     </div>
   );

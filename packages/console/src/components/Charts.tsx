@@ -3,9 +3,10 @@
 // - a null is a GAP, never a 0 on the axis: a segment with no value is not drawn, and a bucket
 //   with nothing measured shows "no data" instead of a bar;
 // - a partial value (complete: false) is a floor: drawn hatched, its tooltip says "≥" and how
-//   many calls it covers.
+//   many calls it covers. A bucket where any series was not measured (null with calls to count)
+//   is a floor as a whole: every segment of it is hatched and said "partial".
 import { Fragment, useState } from "react";
-import type { Measured, UsageBucket, UsageSeries } from "../lib/types";
+import type { Measured, Ratio, UsageBucket, UsageSeries } from "../lib/types";
 import { NotMeasured } from "./ui";
 
 /** The reference categorical order (dataviz skill palette.md, light surface), never cycled. */
@@ -38,6 +39,25 @@ export function MeasuredValue({ m, fmt, unit = "calls" }: { m: Measured; fmt: Fo
     </span>
   );
 }
+
+/** A ratio: "≥" when its numerator was a floor, its coverage when not every unit was measured. */
+export function RatioValue({ r, fmt, unit, percent }: { r: Ratio; fmt: Format; unit: string; percent?: boolean }) {
+  if (r.value === null) return <NotMeasured text={r.of === 0 ? `no ${unit}` : "not measured"} />;
+  const shown = percent ? `${Math.round(r.value * 100)}%` : fmt(r.value);
+  return (
+    <span data-partial={r.complete ? undefined : "true"}>
+      {r.complete ? "" : "≥ "}{shown}
+      {(r.measured < r.of || !r.complete) && <span className="ml-1 text-xs font-normal text-muted-ink">({r.measured} of {r.of} {unit})</span>}
+    </span>
+  );
+}
+
+/** The groups a bucket is missing: not measured although they had calls to count. */
+export function missingIn(series: UsageSeries[], i: number): string[] {
+  return series.filter((s) => s.points[i].value === null && s.points[i].of > 0).map((s) => s.group);
+}
+
+const partialNote = (missing: string[]) => (missing.length ? ` · partial: ${missing.join(", ")} not measured` : "");
 
 const W = 720, H = 240, PAD_L = 64, PAD_B = 28, PAD_T = 12;
 
@@ -74,24 +94,26 @@ export function StackedBars({ buckets, series, order, fmt, title }: {
           const cx = PAD_L + slot * i + slot / 2;
           let base = 0;
           const drawn = series.filter((s) => s.points[i].value !== null);
+          const missing = missingIn(series, i);
           return (
-            <g key={b.key} data-bucket={b.key}>
+            <g key={b.key} data-bucket={b.key} data-partial={missing.length ? "true" : undefined}>
               {drawn.length === 0 ? (
-                <text x={cx} y={PAD_T + plotH - 6} textAnchor="middle" fontSize="11" fill="#3d5556" data-gap="true">no data</text>
+                <text x={cx} y={PAD_T + plotH - 6} textAnchor="middle" fontSize="11" fill="#3d5556" data-gap="true">{missing.length ? "not measured" : "no data"}</text>
               ) : drawn.map((s) => {
                 const p = s.points[i];
                 const v = p.value as number;
                 const top = y(base + v), h = Math.max(y(base) - top - 2, 1);
                 base += v;
                 const id = `${b.key}|${s.group}`;
+                const partial = !p.complete || missing.length > 0;
                 return (
                   <g key={s.group} onMouseEnter={() => setHover(id)} onMouseLeave={() => setHover(null)}>
                     <rect x={cx - bar / 2} y={top} width={bar} height={h} rx="3" fill={colorFor(s.group, order)}
-                      data-series={s.group} data-value={v} data-partial={p.complete ? undefined : "true"}
+                      data-series={s.group} data-value={v} data-partial={partial ? "true" : undefined}
                       opacity={hover && hover !== id ? 0.6 : 1}>
-                      <title>{`${b.label} · ${s.group}: ${describe(p, fmt)}`}</title>
+                      <title>{`${b.label} · ${s.group}: ${describe(p, fmt)}${partialNote(missing)}`}</title>
                     </rect>
-                    {!p.complete && <rect x={cx - bar / 2} y={top} width={bar} height={h} rx="3" fill="url(#partial)" pointerEvents="none" />}
+                    {partial && <rect x={cx - bar / 2} y={top} width={bar} height={h} rx="3" fill="url(#partial)" pointerEvents="none" />}
                   </g>
                 );
               })}
@@ -127,7 +149,8 @@ export function SeriesTable({ buckets, series, fmt, title }: { buckets: UsageBuc
           <thead><tr><th className="pr-3">Bucket</th>{series.map((s) => <th key={s.group} className="pr-3">{s.group}</th>)}</tr></thead>
           <tbody>
             {buckets.map((b, i) => (
-              <tr key={b.key}><td className="pr-3">{b.label}</td>
+              <tr key={b.key} data-partial={missingIn(series, i).length ? "true" : undefined}>
+                <td className="pr-3">{b.label}{missingIn(series, i).length ? ` (partial: ${missingIn(series, i).join(", ")} not measured)` : ""}</td>
                 {series.map((s) => <Fragment key={s.group}><td className="pr-3">{describe(s.points[i], fmt)}</td></Fragment>)}
               </tr>))}
           </tbody>
