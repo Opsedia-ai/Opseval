@@ -5,9 +5,10 @@ An error stops a file from loading. A warning does not, and never changes ``ok``
 code: it says what the scenario will *not* tell you, so nobody reads a green run as proof of
 something it never checked. Two kinds:
 
-- about the file itself (a dialect simulated with a nearer pack, one repeat, a lowered pass
-  threshold, a planted injection or a declared expectation that no scorer grades, trace-backed
-  checks with no trace source, the commit opt-in, quarantine);
+- about the file itself (a dialect simulated with a nearer pack, scripted turns in a language
+  with no pack, one repeat, a lowered pass threshold, a planted injection or a declared
+  expectation that no scorer grades, trace-backed checks with no trace source, the commit
+  opt-in, quarantine);
 - about this machine (judge checks with no judge configured, an LLM persona with no simulator).
   These are checked only when the caller says what is configured.
 """
@@ -93,7 +94,7 @@ def scenario_warnings(
                 f"no judge is configured here: {', '.join(judged)} will be not measured "
                 "(set OPSEVAL_JUDGE_BASE_URL and OPSEVAL_JUDGE_MODEL)",
             )
-        if not scenario.conversation.scripted_turns and not configured.simulator:
+        if scenario.conversation.llm_persona and not configured.simulator:
             warn(
                 "conversation",
                 "an LLM persona and no simulator configured here: it will be skipped "
@@ -103,14 +104,23 @@ def scenario_warnings(
 
 
 def _language(scenario: Scenario, warn: Callable[[str, str], None]) -> None:
-    """A dialect with no pack of its own, which a nearer pack declares it stands in for
-    (ADR-0059): it loads, but the customer does not write that dialect."""
+    """What the customer will not write (ADR-0059): a dialect a nearer pack stands in for, or,
+    for scripted turns, a language with no pack at all (it loads: the turns are sent as
+    written, but an LLM persona would be refused)."""
     persona = scenario.persona
     try:
         found = lookup(persona.language, persona.dialect)
-    except UnknownLanguage:
-        return  # a load error, reported by the loader
-    if found.fallback_from is not None:
+    except UnknownLanguage as exc:
+        if not scenario.conversation.llm_persona:
+            warn(
+                f"persona.{exc.field}",
+                f"no language pack for {persona.language!r}"
+                + (f" ({persona.dialect!r})" if persona.dialect else "")
+                + ": fine for scripted turns, which are sent as written; an LLM persona "
+                "would be refused",
+            )
+        return  # for an LLM persona, a load error the loader reports
+    if found.fallback_from is not None and scenario.conversation.llm_persona:
         field = "persona.dialect" if found.fallback_from == persona.dialect else "persona.language"
         warn(
             field,

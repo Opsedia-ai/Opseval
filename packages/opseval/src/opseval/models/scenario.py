@@ -117,6 +117,12 @@ class ConversationSpec(Strict):
     injections: list[Injection] = Field(default_factory=list)
     """Payloads planted verbatim (protected from typing noise) for security judges."""
 
+    @property
+    def llm_persona(self) -> bool:
+        """An LLM plays the customer (no ``scripted_turns``): it needs a simulator and a
+        language pack. Scripted turns are sent verbatim and need neither."""
+        return not self.scripted_turns
+
     @model_validator(mode="after")
     def _check(self) -> ConversationSpec:
         if not self.flow.strip() and not self.scripted_turns:

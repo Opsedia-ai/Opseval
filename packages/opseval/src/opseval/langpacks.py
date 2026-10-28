@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from opseval.errors import ConfigError
+from opseval.models.scenario import Persona
 
 
 class UnknownLanguage(ConfigError):
@@ -73,20 +74,24 @@ def _sub(code: str, name: str) -> str:
 
 
 def register(pack: LanguagePack) -> None:
+    """Add a pack. All or nothing: a key already taken raises before anything is written."""
     code = _norm(pack.code)
     tag_code, _, tag_sub = _norm(pack.tag).partition("-")
     if tag_code != code:
         raise ValueError(f"pack {pack.tag!r}: tag does not start with its code {pack.code!r}")
     keys: list[tuple[str, str | None]] = [(code, tag_sub or None)]
     keys += [(code, _sub(code, n)) for n in (pack.dialect, *pack.aliases) if n]
-    for key in dict.fromkeys(keys):
-        if key in _EXACT or (key[1] is not None and (code, key[1]) in _FALLBACK):
+    exact = list(dict.fromkeys(keys))
+    fallback = list(dict.fromkeys((code, _sub(code, n)) for n in pack.fallback_for))
+    for key in exact:
+        if key in _EXACT or key in _FALLBACK:
             raise ValueError(f"pack {pack.tag!r}: {key} is already taken")
+    for fkey in fallback:
+        if fkey in _EXACT or fkey in _FALLBACK or fkey in exact:
+            raise ValueError(f"pack {pack.tag!r}: fallback {fkey[1]!r} is already taken")
+    for key in exact:
         _EXACT[key] = pack
-    for name in pack.fallback_for:
-        fkey = (code, _sub(code, name))
-        if fkey in _FALLBACK or fkey in _EXACT:
-            raise ValueError(f"pack {pack.tag!r}: fallback {name!r} is already taken")
+    for fkey in fallback:
         _FALLBACK[fkey] = pack
     PACKS.append(pack)
 
@@ -103,15 +108,22 @@ def lookup(language: str, dialect: str | None) -> Resolution:
     """
     lang = _norm(language)
     code, _, from_tag = lang.partition("-")
-    if not code or (code, None) not in _EXACT:
+    asked: list[tuple[str, str, str]] = [(from_tag, "language", language)] if from_tag else []
+    if dialect is not None and dialect.strip():
+        asked.append((_sub(code, dialect), "dialect", dialect))
+    # A code is known when any pack has it: a regional pack (fr-CA) needs no base pack (fr).
+    if not code or not any(_norm(p.code) == code for p in PACKS):
         raise UnknownLanguage(
             f"no language pack for {language!r} (packs: {_known()}); add a pack or use one "
             "of these",
             field="language",
         )
-    asked: list[tuple[str, str, str]] = [(from_tag, "language", language)] if from_tag else []
-    if dialect is not None and dialect.strip():
-        asked.append((_sub(code, dialect), "dialect", dialect))
+    if not asked and (code, None) not in _EXACT:
+        raise UnknownLanguage(
+            f"no base pack for {language!r}, only regional ones (packs: {_known(code)}); "
+            "name one of these",
+            field="language",
+        )
     found: list[Resolution] = []
     for sub, fld, raw in asked:
         if (code, sub) in _EXACT:
@@ -141,6 +153,42 @@ def resolve(language: str, dialect: str | None) -> LanguagePack:
     return lookup(language, dialect).pack
 
 
+@dataclass(frozen=True)
+class Spoken:
+    """The language the simulated customer writes in a scenario, resolved once (ADR-0059)."""
+
+    language: str
+    dialect: str | None
+    tag: str | None
+    """The pack's tag, or ``None`` when no pack is used (scripted turns with no pack, or a
+    dialect a pack only stands in for)."""
+
+    @property
+    def label(self) -> str:
+        """``ar (egyptian)``: how a judge is told the language. Unchanged for every name a
+        persona could give before ADR-0059's tags, so judge prompts and digests are too."""
+        return f"{self.language} ({self.dialect})" if self.dialect else self.language
+
+
+def effective_language(persona: Persona, *, scripted: bool) -> Spoken:
+    """What the customer writes: an LLM persona writes the pack it resolves to (a declared
+    fallback included, so ``ar`` + ``levantine`` is MSA), named canonically however the persona
+    spelled it; scripted turns are sent verbatim, so they are in the declared language, named
+    canonically only when it is exactly a pack.
+
+    Judges grade against this, so the persona judge holds the customer to what the simulator
+    was told to write, and two spellings of one pack give the same rubric digest.
+    """
+    try:
+        found = lookup(persona.language, persona.dialect)
+    except UnknownLanguage:
+        # Only scripted turns load without a pack (an LLM persona is refused at load).
+        return Spoken(persona.language, persona.dialect or None, None)
+    if scripted and found.fallback_from is not None:
+        return Spoken(persona.language, persona.dialect or None, None)
+    return Spoken(found.pack.code, found.pack.dialect, found.pack.tag)
+
+
 register(
     LanguagePack(
         tag="en",
@@ -152,7 +200,10 @@ register(
         ),
         stable=True,
         # Until en-US and en-GB have packs of their own (ADR-0059, step 2).
-        fallback_for=("US", "GB", "AU", "CA", "IE", "NZ"),
+        fallback_for=(
+            *("US", "GB", "AU", "CA", "IE", "NZ"),
+            *("american", "british", "uk", "australian", "canadian", "irish"),
+        ),
     )
 )
 register(
@@ -233,7 +284,9 @@ __all__ = [
     "PACKS",
     "LanguagePack",
     "Resolution",
+    "Spoken",
     "UnknownLanguage",
+    "effective_language",
     "lookup",
     "register",
     "resolve",
