@@ -89,8 +89,7 @@ from opseval.verdicts import (
     release_gate,
     skipped,
 )
-from opseval.voice import AudioRecorder, SpeechKit, VoiceTransport, check_audio_privacy
-from opseval.voice.recording import Mode as AudioMode
+from opseval.voice import AudioPlan, AudioRecorder, SpeechKit, VoiceTransport, check_audio_privacy
 
 TransportFactory = Callable[[SutProfile], Transport]
 
@@ -616,11 +615,11 @@ async def _launch(
     meter = UsageMeter()
     voice = options.transport in VOICE_TRANSPORTS and options.transport_factory is None
     kit: SpeechKit | None = None
-    audio_mode: AudioMode = "hashes"
+    audio_plan = AudioPlan("hashes")
     if voice:
         # Before anything is sent: audio that would be stored unencrypted, or a run that
         # could not speak or listen, is refused here (exit 3, ADR-0053).
-        audio_mode = check_audio_privacy(settings, synthetic=options.synthetic_voices)
+        audio_plan = check_audio_privacy(settings, synthetic=options.synthetic_voices)
         kit = speech_kit(settings, profile, meter)
         kits.append(kit)
     make_transport = build_transport_factory(options, settings, kit=kit)
@@ -824,7 +823,14 @@ async def _launch(
             )
             transport = make_transport(profile, tenant)
             if isinstance(transport, VoiceTransport):
-                recorder = AudioRecorder(store.run_dir(run_id), scenario.id, i, audio_mode)
+                recorder = AudioRecorder(
+                    store.run_dir(run_id),
+                    scenario.id,
+                    i,
+                    audio_plan.mode,
+                    key=audio_plan.key,
+                    run_id=run_id,
+                )
                 transport = transport.for_attempt(recorder, scenario.persona.language)
             driver = Driver(
                 scenario=scenario,
@@ -947,7 +953,10 @@ async def _launch(
     # After the verdict exists and before it is written, so the outcomes are part of the
     # saved result. A sink can never change the verdict; publish_all catches everything.
     result = result.model_copy(update={"sinks": await publish_all(sinks, result, log=log)})
-    store.save_report(run_id, render_html(result, store.load_records(run_id), profile))
+    store.save_report(
+        run_id,
+        render_html(result, store.load_records(run_id), profile, run_dir=store.run_dir(run_id)),
+    )
     store.save_junit(run_id, render_junit(result))
     store.save_result(result)  # written last: marks the run as complete
     # After the result is on disk, so a slow or dead collector cannot cost anything.

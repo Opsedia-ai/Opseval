@@ -97,3 +97,24 @@ async function saveNewScenario(family: string, name: string, text: string): Prom
     throw new ApiError(0, "SAVED_NOT_LISTED", `saved as ${family}/${name}, but the catalogue does not list ${id}; open it from Test cases`);
   }
 }
+
+/**
+ * A voice attempt's recorded audio as a Blob (ADR-0053): a turn by its seq, or the whole
+ * call. An <audio src> cannot carry the token, so the bytes are fetched here, with it, and
+ * played from a blob: URL that the component revokes. The server decrypts in memory and
+ * answers no-store; an unplayable turn is an ApiError with its code (AUDIO_PRUNED, …).
+ */
+export async function fetchAudio(run: string, test: string, index: number, which: number | "call", mono = false): Promise<Blob> {
+  const path = `/runs/${encodeURIComponent(run)}/attempts/${encodeURIComponent(test)}/${index}/audio/${which}${mono ? "?mono=true" : ""}`;
+  let res: Response;
+  try {
+    res = await fetch(`/api/v1${path}`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  } catch {
+    throw new ApiError(0, "OFFLINE", "Cannot reach the Opseval API. Start it with: opseval serve");
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.code ?? `HTTP_${res.status}`, body.message ?? `Request failed (${res.status})`);
+  }
+  return res.blob();
+}

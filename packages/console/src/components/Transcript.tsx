@@ -1,9 +1,10 @@
 import { api } from "../lib/api";
 import type { TranscriptEntry } from "../lib/types";
 import { useApi } from "../lib/useApi";
+import { CallAudio, TurnAudio, type Where } from "./AudioPlayer";
 import { Callout, Data, Mono, NotMeasured, Pill, cx } from "./ui";
 
-export function Entry({ e }: { e: TranscriptEntry }) {
+export function Entry({ e, where }: { e: TranscriptEntry; where?: Where }) {
   if (e.kind === "message") {
     const customer = e.who === "customer";
     return (
@@ -13,7 +14,10 @@ export function Entry({ e }: { e: TranscriptEntry }) {
             {customer ? "customer" : "agent"}{e.phase && ` · ${e.phase}`}{e.latencyMs !== null && ` · ${Math.round(e.latencyMs)} ms`}
           </div>
           {/* dir=auto: an Arabic persona's turns read right to left */}
-          <div dir="auto" className="whitespace-pre-wrap">{e.text}</div>
+          {e.text
+            ? <div dir="auto" className="whitespace-pre-wrap">{e.text}</div>
+            : <div data-state="unheard" className="italic opacity-80">spoken; nothing was heard in it (no transcript)</div>}
+          {e.audio && where && <div className="mt-1"><TurnAudio where={where} audio={e.audio} /></div>}
         </div>
       </div>
     );
@@ -45,8 +49,9 @@ export default function Transcript({ run, test, index }: { run: string; test: st
         {r.artifactsChecked && <p className="text-sm" data-state="created-artifacts"><b>Created in the system under test:</b>{" "}
           {r.createdArtifacts.length === 0 ? "nothing" : r.createdArtifacts.map((a, i) => (
             <span key={i}>{i > 0 && ", "}<Mono>{a.kind}</Mono> {a.idRedacted ? <i>(id redacted)</i> : <><Mono>{a.id}</Mono>{a.idTruncated && <i> (truncated)</i>}</>}</span>))}</p>}
+        {r.audio && <CallAudio where={{ run, test, index }} audio={r.audio} />}
         <div className="space-y-2 rounded-2xl border border-line bg-white p-4">
-          {r.entries.length === 0 ? <NotMeasured text="no conversation recorded" /> : r.entries.map((e) => <Entry key={`${e.seq}-${e.kind}`} e={e} />)}
+          {r.entries.length === 0 ? <NotMeasured text="no conversation recorded" /> : r.entries.map((e) => <Entry key={`${e.seq}-${e.kind}`} e={e} where={{ run, test, index }} />)}
         </div>
         {r.toolCalls.length > 0 && (
           <div><div className="mb-1 text-sm font-semibold text-ink">Tool calls (from the trace)</div>

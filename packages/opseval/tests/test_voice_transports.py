@@ -576,7 +576,7 @@ class TestRunnerVoiceRules:
         options = RunOptions(
             target="ws://127.0.0.1:1", transport="audio-ws", profile=cat / "profile.yaml"
         )
-        with pytest.raises(ConfigError, match="encrypted at rest"):
+        with pytest.raises(ConfigError, match="only ever stored encrypted"):
             await launch(cat / "suites" / "smoke.yaml", options, settings)
         assert not any(tmp_path.iterdir())
 

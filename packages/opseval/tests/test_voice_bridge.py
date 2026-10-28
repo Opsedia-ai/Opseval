@@ -998,11 +998,13 @@ class TestRedactionAndPrivacy:
         from opseval.config import Settings
         from opseval.voice import check_audio_privacy
 
-        with pytest.raises(ConfigError, match="OPSEVAL_RECORD_AUDIO=hashes"):
-            check_audio_privacy(Settings())
-        assert check_audio_privacy(Settings(record_audio="hashes")) == "hashes"
-        assert check_audio_privacy(Settings(), synthetic=True) == "files"
-        with pytest.raises(ConfigError, match="next voice step"):
+        with pytest.raises(ConfigError, match="OPSEVAL_AUDIO_ENCRYPTION_KEY"):
+            check_audio_privacy(Settings(audio_encryption_key=None))
+        hashes = check_audio_privacy(Settings(record_audio="hashes", audio_encryption_key=None))
+        assert (hashes.mode, hashes.key) == ("hashes", None)
+        demo = check_audio_privacy(Settings(audio_encryption_key=None), synthetic=True)
+        assert (demo.mode, demo.key) == ("files", None)
+        with pytest.raises(ConfigError, match="32 random bytes"):  # checked even with hashes
             check_audio_privacy(Settings(record_audio="hashes", audio_encryption_key="k" * 32))
 
     def test_an_audio_path_never_leaves_audio(self, tmp_path: Path) -> None:

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -32,21 +34,60 @@ def fmt_score(value: float | None) -> str:
 _env.filters["score"] = fmt_score
 
 
+@dataclass(frozen=True)
+class AudioNote:
+    """What the report says about a voice attempt's audio. The report embeds none: audio is
+    played in the console, or exported with the command shown (ADR-0053, V0d)."""
+
+    turns: int
+    state: str
+    command: str | None
+
+
+def audio_note(record: RunRecord, run_dir: str | Path | None) -> AudioNote | None:
+    refs = [f.audio for f in record.frames if f.audio is not None]
+    if not refs:
+        return None
+    folder = Path(run_dir) if run_dir is not None else Path("reports") / record.run_id
+    pruned = (folder / "audio" / "PRUNED.json").is_file() or any(r.pruned for r in refs)
+    files = [r for r in refs if r.path is not None]
+    if pruned:
+        return AudioNote(len(refs), "pruned by retention; the transcript and hashes remain", None)
+    if not files:
+        return AudioNote(len(refs), "only hashes were kept (OPSEVAL_RECORD_AUDIO=hashes)", None)
+    sealed = sum(r.encryption != "none" for r in files)
+    state = "encrypted" if sealed == len(files) else "plain WAV (synthetic demo voices)"
+    if 0 < sealed < len(files):
+        state = f"{sealed} of {len(files)} encrypted"
+    test, n = record.test_id, record.attempt_index
+    out = shlex.quote(f"{test}-attempt{n}.wav")
+    command = (
+        f"opseval audio export {shlex.quote(str(folder))} --test {shlex.quote(test)} "
+        f"--attempt {n} --out {out}"
+    )
+    return AudioNote(len(refs), state, command)
+
+
 def render_html(
-    result: SuiteResult, records: list[RunRecord], profile: SutProfile | None = None
+    result: SuiteResult,
+    records: list[RunRecord],
+    profile: SutProfile | None = None,
+    run_dir: str | Path | None = None,
 ) -> str:
     """Render the self-contained report.
 
     ``profile`` supplies the declared phase order for the flow map (FR-RPT-05). Without
     it the flow map reports itself unmeasured rather than inventing an expected order.
+    ``run_dir`` is the run folder, named in the command that exports a voice attempt's audio.
     """
     by_key = {(r.test_id, r.attempt_index): r for r in records}
     flows = flow_maps(records, profile) if profile is not None else {}
     # The same conversation mapping as the console (opseval.transcript), so they never differ.
     talks = {key: transcript(r) for key, r in by_key.items()}
     links = {key: connection(r) for key, r in by_key.items()}
+    audio = {key: audio_note(r, run_dir) for key, r in by_key.items()}
     return _env.get_template("report.html.j2").render(
-        result=result, records=by_key, flows=flows, talks=talks, links=links
+        result=result, records=by_key, flows=flows, talks=talks, links=links, audio=audio
     )
 
 

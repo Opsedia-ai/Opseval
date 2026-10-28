@@ -58,7 +58,7 @@ ADR-0056, WebRTC is ADR-0057, and languages are ADR-0059.
   `pruned`); a pruned ref with a path is refused.
 - `AudioRef.encryption` (`none` or `aes-256-gcm`) and `key_id` (a fingerprint of
   `OPSEVAL_AUDIO_ENCRYPTION_KEY`, never the key) are in the record from V0a, so encrypted files
-  (V0c) need no further layout bump. `key_id` is set exactly when `encryption` is not `none`,
+  (V0d) need no further layout bump. `key_id` is set exactly when `encryption` is not `none`,
   and hashes-only audio cannot claim encryption (there is no file).
 - `FrameRecord.transcript`: provider, model, `confidence`, word timings, and whose ASR it is
   (`opseval` or `agent`). `text` stays the field scorers read.
@@ -311,3 +311,70 @@ Left for the next steps: audio encryption at rest (the `opseval[voice]` extra), 
 retention (`OPSEVAL_AUDIO_RETENTION_DAYS`), the region check, tuning the second STT and the
 per-language thresholds (ADR-0059), the full-duplex driver (barge-in), phone and WebRTC, and
 showing audio and the voice timeline in the report and the console.
+
+## Implementation (V0d, 2026-10-28): audio at rest and listening back
+
+The owner settled ATTENTION D17 on 2026-10-28: `cryptography` (Apache-2.0 or BSD-3-Clause; with
+`cffi`, MIT-0, and `pycparser`, BSD-3-Clause) in the optional `opseval[voice]` extra, which
+`make audit` now exports with `server`. The core install gains nothing: the library is
+imported only when a file is sealed or opened (a test checks `opseval.cli` and
+`opseval.server` import without it), and a run that needs it without the extra is refused
+(exit 3) naming `pip install 'opseval[voice]'`. The owner's requirement: a failed call can be
+listened back to.
+
+- **The file** (`voice/crypto.py`): `magic "OPSAUDIO" | version 1 | key id (8 bytes) | nonce
+  (12) | AES-256-GCM ciphertext and tag`, one file per speaker per turn
+  (`<turn>-<speaker>.wav.enc`, undecodable agent audio `.raw.enc`). A fresh random 96-bit nonce
+  per file. The additional data is the header and the file's place as canonical JSON: run id,
+  test id, attempt, the turn number in its name (the file is written before its frame's `seq`
+  exists) and the speaker. A file moved to any other place, or changed by one byte, does not
+  open (`AUDIO_TAMPERED`); and the record's SHA-256 of the plaintext is checked after
+  decryption, which also covers the demo's plain files.
+- **The key**: `OPSEVAL_AUDIO_ENCRYPTION_KEY`, 32 bytes as 64 hex or base64 (standard or
+  URL-safe); anything else, or fewer than 12 distinct bytes (a placeholder), is a `ConfigError`.
+  It is checked at launch even with `OPSEVAL_RECORD_AUDIO=hashes`. `key_id` = the first 16 hex
+  of HMAC-SHA256(key, "opseval-audio-key-id"): a fingerprint that cannot be tested against a
+  guessed key without the key. `opseval audio keygen` prints a new key.
+- **Launch** (`check_audio_privacy` → `AudioPlan`): files with a key are sealed; files without
+  a key are refused except for the demo's synthetic voices (plain WAV); hashes keep no file.
+  The demo keeps a key set in the environment, so `opseval demo --voice` with a key writes
+  sealed files and exercises the whole path. The V0c refusal of a set key is gone.
+- **One reader** (`voice/playback.py`) for the CLI and the console. A turn is addressed by
+  its frame's `seq`; its state is decided from the record and the run folder without the key:
+  `available`, `pruned`, `hashes_only`, `undecodable`, `missing`, and the server adds
+  `key_missing` / `key_mismatch` from the record's `key_id`. Decrypted audio stays in memory.
+- **The whole call** is laid on the attempt's clock: each turn at `round(at_ms * rate / 1000)`,
+  silence between, stereo (caller left, agent right) or mono (summed, clipped to 16 bits).
+  `at_ms` is the recorded start, except that a turn the record shows starting before the
+  previous turn ended, with no `barge_in` event for it, is moved to that end: audio sent faster
+  than it plays (`audio-http`, the demo) would otherwise sound like a conversation that never
+  happened. A recorded barge-in stays an overlap. Any turn missing for a reason other than
+  undecodable agent audio refuses the whole call (fail closed); undecodable turns are silence,
+  named. A call over 4 hours by the record's times is refused rather than allocated.
+- **CLI** (`voice/cli.py`): `opseval audio list|export|keygen`. `export` writes a turn
+  (`--turn SEQ`, `--raw` for undecodable bytes), the whole call (stereo; `--mono`;
+  `--speaker caller|agent` keeps one side, timed as in the call), refuses to overwrite without
+  `--force`, and exits 3 with the code and reason (`AUDIO_KEY_MISMATCH` names both key ids,
+  "audio pruned on <date>", "only hashes were kept").
+- **Console API** (`server/audio.py`, registered by `create_app`, behind the same host check
+  and token): `GET …/attempts/{test}/{n}/audio` (the descriptor), `…/audio/call?mono=` and
+  `…/audio/{seq}` (`audio/wav`, `Cache-Control: no-store`, `Content-Disposition: inline`).
+  Codes: `AUDIO_NOT_FOUND`/`AUDIO_HASHES_ONLY`/`AUDIO_MISSING` 404, `AUDIO_PRUNED` 410,
+  `AUDIO_KEY_MISSING`/`AUDIO_KEY_MISMATCH`/`AUDIO_UNDECODABLE`/`AUDIO_KEY_INVALID` 409,
+  `AUDIO_TAMPERED` 422. A malformed server key does not stop `opseval serve`; it is said on
+  every audio request. The attempt detail carries `audio` (turns, `callState`, `callNote`,
+  `skipped`) and each spoken message entry its `audio` descriptor. A spoken turn with no
+  transcript is now a message entry with `text: null` (in the report too: "spoken; nothing was
+  heard in it"), because it is the turn someone needs to hear.
+- **Console**: a ▶ per spoken turn and "Play whole call" / "Download WAV"
+  (`components/AudioPlayer.tsx`). The bytes are fetched with the token (an `<audio src>`
+  cannot send it) into a blob URL that is revoked when replaced or unmounted; the CSP gains
+  exactly `media-src 'self' blob:`. Unplayable states are words, never a broken player.
+- **Report**: no audio embedded; per voice attempt, "Audio: N turn(s), encrypted — listen in
+  the console or `opseval audio export <run folder> --test … --attempt … --out ….wav`".
+- **Retention**: `OPSEVAL_AUDIO_RETENTION_DAYS` (30) in `opseval prune` (ADR-0037 amendment):
+  the files go, the record stays, and `audio/PRUNED.json` says when.
+
+Still open: the region check, the full-duplex driver (barge-in), phone and WebRTC, the voice
+timeline in the report and console, key rotation tooling (re-sealing old runs under a new
+key), and the blob store of server mode (ADR-0051), which must seal the same way.

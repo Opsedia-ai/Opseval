@@ -57,7 +57,9 @@ def transcript(record: RunRecord) -> list[Entry]:
     decided = {i.decision_seq: i for i in record.interrupts if i.decision_seq is not None}
     out: list[Entry] = []
     for f in record.frames:
-        if f.text:
+        # A spoken turn is shown even when nothing was heard in it (an empty transcript): it
+        # is the turn someone needs to listen to, and hiding it would hide what failed.
+        if f.text or f.audio is not None:
             who: Literal["customer", "agent"] = "customer" if f.direction == "sent" else "agent"
             out.append(Entry(f.seq, "message", who, f.text, f.phase, f.latency_ms))
         if f.seq in raised:

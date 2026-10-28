@@ -30,6 +30,11 @@ serve = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
 ]
+# Voice: audio recorded by a voice run is encrypted at rest with AES-256-GCM (ADR-0053).
+# Only a voice run that keeps audio files needs it; the core never imports it.
+voice = [
+    "cryptography>=44",
+]
 # Server mode on Postgres, the Langfuse model (ADR-0047). asyncpg rather than psycopg:
 # psycopg is LGPL, which the dependency licence allowlist does not admit.
 server = [

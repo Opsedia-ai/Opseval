@@ -70,3 +70,7 @@ export type Rehearsal = G.RehearseOut;
 export type LaunchBody = G.LaunchIn;
 export type Launched = G.LaunchOut;
 export type SuiteBody = G.SuiteIn;
+
+/** Recorded audio of a voice attempt (ADR-0053): what each turn can do is the server's call. */
+export type AudioTurn = G.AudioTurnOut;
+export type AttemptAudio = G.AttemptAudioOut;

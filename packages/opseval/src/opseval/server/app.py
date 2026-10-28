@@ -36,6 +36,7 @@ from opseval.config import Settings
 from opseval.errors import ConfigError
 from opseval.plugins import load_scorers
 from opseval.server import actions, views
+from opseval.server import audio as audio_api
 from opseval.server import schemas as s
 from opseval.storage import FileStore, UnknownLayout
 
@@ -68,6 +69,8 @@ CONSOLE_HEADERS = {
     # (clickjacking), and it loads nothing from anywhere but its own origin, fonts included.
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; "
+        # Recorded audio is fetched with the token and played from a blob: URL (ADR-0053).
+        "media-src 'self' blob:; "
         "style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; "
         "base-uri 'none'; "
         "form-action 'none'"
@@ -179,6 +182,7 @@ def create_app(
     app.state.token = token
     app.state.ctx = ctx
     expected = f"Bearer {token}".encode()
+    audio_key = audio_api.ServerKey(settings)
 
     @app.middleware("http")
     async def guard(
@@ -310,7 +314,9 @@ def create_app(
             raise actions.ApiError(
                 404, "UNKNOWN_ATTEMPT", f"no record of {test_id} attempt {index} in {run_id}"
             )
-        return out
+        return audio_api.with_audio(out, ctx, run_id, audio_key)
+
+    audio_api.register(app, ctx, audio_key, API)
 
     @app.get(f"{API}/compare")
     def compare(baseline: str, candidate: str) -> s.Comparison:

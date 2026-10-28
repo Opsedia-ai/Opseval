@@ -7,7 +7,7 @@ into text (STT). The driver, the scorers and the judges then work as they do for
 
 !!! note "Preview"
     This is the turn-based bridge. Barge-in and talk-over (ADR-0055), phone calls (ADR-0056),
-    WebRTC (ADR-0057) and encrypted audio at rest are not built yet.
+    WebRTC (ADR-0057) are not built yet.
 
 ## Try it
 
@@ -57,7 +57,7 @@ export OPSEVAL_TTS_URL=https://api.openai.com OPSEVAL_TTS_MODEL=gpt-4o-mini-tts
 export OPSEVAL_TTS_VOICE_MAP='{"default": "alloy"}'
 export OPSEVAL_STT_URL=https://api.openai.com OPSEVAL_STT_MODEL=whisper-1
 export OPSEVAL_TTS_KEY=… OPSEVAL_STT_KEY=…
-export OPSEVAL_RECORD_AUDIO=hashes          # see "Audio and privacy" below
+export OPSEVAL_AUDIO_ENCRYPTION_KEY=…       # see "Audio and privacy" below (or RECORD_AUDIO=hashes)
 
 opseval run suites/voice.yaml --profile profile.yaml --transport audio-ws --target wss://agent.example.com/voice
 ```
@@ -115,13 +115,73 @@ could be measured.
 
 ## Audio and privacy
 
-A voice can be biometric data, so recorded audio must be encrypted at rest. Encryption arrives
-in the next voice step. Until then, a voice run is refused (exit 3) unless it keeps hashes only:
+A voice can be biometric data, so recorded audio is only ever stored encrypted at rest
+(ADR-0053). A voice run against a real agent keeps its audio only with a key; without one it is
+refused at launch (exit 3), unless it keeps hashes only:
 
+- `OPSEVAL_RECORD_AUDIO=files` (the default) writes one file per speaker per turn under the run
+  folder's `audio/` (`audio/<test>/attempt<N>/<turn>-<speaker>.wav.enc`), each sealed on its own
+  with AES-256-GCM under `OPSEVAL_AUDIO_ENCRYPTION_KEY`. This needs the voice extra:
+  `pip install 'opseval[voice]'` (it adds `cryptography`; without it the run is refused, naming
+  the command). The key is 32 random bytes, as 64 hex characters or base64:
+  `opseval audio keygen` makes one. A short key, or a placeholder such as a repeated character,
+  is refused.
+- Every file has a fresh random nonce, and its run, test, attempt, turn and speaker are bound
+  into it: a file edited, or moved to another turn, attempt or run, does not open. The record
+  holds each turn's SHA-256, which is checked again after decryption.
+- The record keeps the key's fingerprint (`key_id`), never the key, so after a rotation you can
+  tell which key opens which run. **Keep the key**: without it the audio cannot be played back,
+  by design.
 - `OPSEVAL_RECORD_AUDIO=hashes` keeps no audio at all: each turn's SHA-256, length, codec, rate
   and duration.
-- `OPSEVAL_RECORD_AUDIO=files` (the default) writes one WAV per speaker per turn under the run
-  folder's `audio/`. Only the demo's synthetic voices may do so without encryption.
-- Setting `OPSEVAL_AUDIO_ENCRYPTION_KEY` is refused for now, since this version cannot encrypt.
+- The demo's synthetic voices are written as plain WAV, unless a key is set: then they are
+  sealed like a real run's, which is a quick way to try the commands below.
+- Audio the agent sent that could not be decoded is kept as it came, sealed the same way.
+
+### Listening back to a call
+
+When a voice scenario fails, listen to what the agent actually said.
+
+**In the console** (`opseval serve` with the same `OPSEVAL_AUDIO_ENCRYPTION_KEY`): open the run,
+then an attempt's conversation. Each spoken turn has a ▶ control, including a turn nothing was
+heard in (often the one that failed), and the attempt has **Play whole call** and **Download
+WAV**. The server decrypts in memory for each request, behind the console's token, and answers
+`Cache-Control: no-store`; nothing decrypted is written to disk. A turn that cannot be played
+says why instead: *audio pruned*, *only hashes kept*, *no key to decrypt* (the server has none),
+*encrypted with another key*.
+
+**From the command line:**
+
+```bash
+opseval audio list reports/<run id> --test vr-001             # every turn, its times and state
+opseval audio export reports/<run id> --test vr-001 --attempt 0 --out call.wav       # whole call
+opseval audio export reports/<run id> --test vr-001 --attempt 0 --mono --out call.wav
+opseval audio export reports/<run id> --test vr-001 --attempt 0 --turn 3 --out turn3.wav
+opseval audio export reports/<run id> --test vr-001 --attempt 0 --speaker agent --out agent.wav
+```
+
+- The whole call is **stereo** by default: the caller on the left, the agent on the right, so
+  you can tell them apart even when they overlap. `--mono` mixes them (summed, clipped to 16
+  bits where they overlap). `--speaker` keeps one side.
+- Each turn plays at its time on the attempt's clock, with the silences between turns. A turn
+  the record shows starting before the previous one ended is moved to that end, unless the
+  bridge recorded a barge-in for it, which is kept as the overlap it was: audio sent faster than
+  it plays (`audio-http`, or the demo) would otherwise sound like two people talking at once.
+- `--turn N` takes the seq that `opseval audio list` and the console show. An undecodable agent
+  turn is silent in the whole call (and named); `--turn N --raw` writes its bytes as they came.
+- Errors exit 3 and say why: `AUDIO_KEY_MISMATCH` names both key ids, a pruned run says
+  "audio pruned on <date>", a hashes-only run says "only hashes were kept".
+
+The HTML report embeds no audio. For each voice attempt it says how many turns were recorded and
+gives the exact `opseval audio export` command.
+
+### Retention
+
+Recorded audio has its own, shorter retention: `OPSEVAL_AUDIO_RETENTION_DAYS` (30 by default).
+`opseval prune` removes a finished run's audio once the run is older than that, long before the
+run itself goes (`OPSEVAL_RETENTION_DAYS`, 90). It is a dry run without `--yes`
+(`--audio-older-than DAYS` overrides the setting). The record is never rewritten: it keeps every
+turn's hash and transcript, so text scorers still rescore, and `audio/PRUNED.json` records when
+the audio went, so it reads as "audio pruned on <date>", never as missing evidence.
 
 Credentials are redacted from transcripts as from any text. The audio itself is not redacted.

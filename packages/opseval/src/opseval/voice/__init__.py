@@ -3,9 +3,10 @@
 attempt's audio goes."""
 
 from opseval.voice.bridge import SpeechKit, VoiceBridge, VoiceTransport, usable
-from opseval.voice.recording import AudioRecorder, check_audio_privacy
+from opseval.voice.recording import AudioPlan, AudioRecorder, check_audio_privacy
 
 __all__ = [
+    "AudioPlan",
     "AudioRecorder",
     "SpeechKit",
     "VoiceBridge",

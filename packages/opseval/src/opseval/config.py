@@ -143,9 +143,15 @@ class Settings(BaseSettings):
     (a voice can be biometric data), so without the key a voice run is refused (exit 3).
     ``hashes``: no bytes at all, only each turn's SHA-256, length, codec, rate and duration."""
     audio_encryption_key: SecretStr | None = None
-    """The key that encrypts recorded audio at rest (ADR-0053), separate from the key that
-    encrypts agent credentials. Encryption arrives in the next voice step: until then a run
-    with this set is refused (exit 3); use ``OPSEVAL_RECORD_AUDIO=hashes``."""
+    """The key that seals recorded audio at rest with AES-256-GCM (ADR-0053), separate from
+    the key that encrypts agent credentials: 32 random bytes as 64 hex characters or base64
+    (`opseval audio keygen`). Needs the ``opseval[voice]`` extra. The same key opens the files
+    again (`opseval audio export`, the console's player); each file records the key's
+    fingerprint, never the key."""
+    audio_retention_days: int = Field(default=30, ge=1)
+    """``opseval prune`` removes a finished run's recorded audio once the run is older than
+    this many days, before the run itself goes (``OPSEVAL_RETENTION_DAYS``). The record keeps
+    every turn's hash and transcript, and the audio reads as "pruned", never as missing."""
 
     # Trace source: OTLP-JSON spans on disk (ADR-0028)
     otlp_spans_path: str | None = None

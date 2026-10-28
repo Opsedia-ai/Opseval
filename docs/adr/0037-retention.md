@@ -45,3 +45,15 @@ runs that may be in flight, possibly started by another process or another host.
   outside the reports folder.
 - Not built: pruning from the console, keep-the-last-N rules, per-suite windows. Those are
   policy choices that belong with the server mode or EE-06.
+
+## Amendment (2026-10-28): recorded audio first (ADR-0053 V0d)
+
+A voice run's `audio/` has a retention of its own, `OPSEVAL_AUDIO_RETENTION_DAYS` (30 by
+default), shorter than the run's: a voice can be biometric data. `opseval prune` plans both, a
+dry run without `--yes` as before (`--audio-older-than` overrides the setting), with the same
+rules for which runs it may touch: ended, layout known, a plain folder directly inside the
+reports folder, never through a link (`audio/` itself included). Records are never rewritten
+(ADR-0005), so the record keeps every turn's hash and transcript and `audio/PRUNED.json`
+(written before any file is removed, so a prune stopped part-way still reads as pruned) says
+when the audio went. Readers report "audio pruned on <date>", never missing evidence. A run
+the run prune deletes is not listed again for its audio.
