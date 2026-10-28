@@ -58,7 +58,7 @@ schemas/v1/               published JSON Schemas, generated from the models (ADR
 packages/pytest-opseval/  pytest plugin: scenarios as pytest items (entry point disabled in our own run)
 packages/console/         React + Vite web console (ADR-0004/0029); `src/lib/types.ts` mirrors server/schemas.py
 action.yml                composite GitHub Action (dogfooded by the `action` CI job)
-docs/adr/                 architecture decisions (0001-0034); new decisions get a new ADR
+docs/adr/                 architecture decisions (0001-0066); new decisions get a new ADR
 ```
 
 ## Commands
@@ -148,6 +148,8 @@ Definition of done for any change: `make check` is green (which now includes `op
 - Defaults from the profile (ADR-0043): `effective_specs(scenario, profile)` / `default_pack` — always `no_errors`, `agent_replied`, `terminal_state`; `phase_order` only with phases; tool checks when the scenario declares them or a committing tool sits behind a gate; callers with a profile pass it (engine, runner skips, rescore, advice). `stop_at` left out with no commit gate runs to the goal (`model_fields_set` tells it from an explicit `commit_gate`, still an error); `output.terminal_state` v2. `conversation.agent_replied` (flow) fails a turn answered with nothing/blank. Every scorer declares `Params` (a strict `NoParams` subclass; a test enforces it for built-ins); `check_references` validates params when handed the registry (`known_scorers=REGISTRY`; `catalogue.KnownScorers`), plugins without one are unchecked and warned. `kind: refusal` adds a context line and `kind=refusal` to the rubric (completion rubrics unchanged). Scripted exhaustion → note `models.record.SCRIPT_EXHAUSTED`. `SutProfile.answers` is the one rule for an answer (words incl. redaction markers, checkpoint/result/error, tool calls; never a handshake or notification): the driver waits for one on streaming transports before the quiet window (I12), and `agent_replied` grades on it. Frames prove a tool ran, never that it didn't: absence is not measured unless `tool_calls_complete` (expected_called/ordering v2). `commits: true` needs a `commit_gate`. `Scorer.check_params(params, profile)` for profile references in params. Plugins: a non-model `Params` is a contract error; an inherited built-in `Params` is ignored. Refusal is `judge.goal_achievement`'s alone (v3); rescore compares rubric digests on snapshots too when the old score has one.
 
 ## Next up (suggested order)
+
+The roadmap of 2026-10-28 (owner request: tasks, accounts, analytics and dashboards, voice with MENA first, CI/CD anywhere, the flexibility ladder, protecting `main`) is planned in ADRs 0049–0066; the order is ATTENTION D16, and STATUS lists it under "Planned beyond the PRD". Voice is the top priority. Older suggestions:
 
 1. A Tempo/Jaeger fetcher reusing the OTLP mapping; trace enrichment (SUT scores, release tag: FR-REC-04).
 2. Adaptive, multi-turn attacks (PyRIT recipe) on top of planted injections.
