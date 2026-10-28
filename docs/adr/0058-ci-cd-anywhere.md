@@ -224,19 +224,35 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
   image, and the pipe is built from it. `MODE=docker` runs `docker run` for Jenkins, Azure DevOps
   and the documented line.
   - With Docker, the container gets only the validated settings (an env file outside the
-    workspace) and the three keys by name (`-e NAME`, never a value on the command line).
-  - It runs as the job's own uid:gid so it can write the reports into the mounted workspace,
-    and as the image's user 10001 when the job runs as root. It never runs as root.
+    workspace), the three keys and any secret named in `secret-env-names` by name (`-e NAME`,
+    never a value on the command line or in the env file).
+  - It runs as the job's own uid:gid so it can write the reports into the mounted workspace.
+    When the job runs as root it runs as the image's user 10001, and that build's run folder is
+    `chown`ed to 10001 (never `chmod 0777`). It never runs as root.
+  - The workspace is mounted at its own absolute path (`-v "$PWD:$PWD" -w "$PWD"`), and a
+    suite, profile or reports folder outside it is exit 3. An agent in a container using the
+    host's Docker socket mounts host paths, so `docker-workspace-host-path` names the
+    workspace's path on the host.
 - **The E1 rules, once.** Inputs mirror the action's and the reusable workflow's settings
   inputs, in each system's spelling. `opseval-env` refuses a secret setting (the list is tested
   equal to `config.SECRET_FIELDS`), a setting with its own input, a duplicate or another shape,
   and a simulator or judge key with no base URL and model is exit 3. Before anything runs,
   `OPSEVAL_DOTENV` is `false` unless `read-dotenv` is true.
-- **Exit codes.** 0 to 3 pass through unchanged. Exit 2 with no `result.json` is Click refusing
-  its arguments (a typo in `extra-args`), reported as 3, a configuration error, not as "not
-  judged". Any other code (Docker could not start the image, 125) is 3.
+- **Exit codes.** 0 to 3 pass through unchanged, but 0, 1 and 2 only when the run left a
+  `result.json` whose top-level `exit_code` is the same. Without one nothing was judged (Click
+  refusing a typo in `extra-args`, or an image whose entrypoint is not `opseval`), so it is 3,
+  a configuration error, not a pass, an agent failure or "not judged". `--help`, `--version`,
+  `--reports-dir` and `--junit` in `extra-args` are refused before anything runs. Any other code
+  (Docker could not start the image, 125) is 3.
   - A stale `junit.xml` or `summary.md` from an earlier build in a reused workspace is deleted
-    first.
+    first. Each build writes its run to `REPORTS_DIR/build-XXXXXX` and removes earlier build
+    folders first, but only folders the script made itself and marked (`.opseval-ci-build`),
+    never a link. We chose this over publishing a per-build path because the systems' artifact
+    paths are static (GitLab `artifacts:reports`, Azure task inputs, Bitbucket `artifacts`).
+  - On Azure DevOps (`TF_BUILD=True`) Opseval's output goes through `sed`, which puts a
+    zero-width space into any `##vso[` or `##[`. The agent's words reach that output, so
+    without the filter an agent could print `##vso[task.complete result=Succeeded]`. The exit
+    code is taken from `PIPESTATUS`, never from the filter.
   - Jenkins publishes `junit` with `skipMarkingBuildUnstable: true`, and 1, 2 and 3 are each
     `FAILURE` with their own message, never `UNSTABLE`.
   - Azure DevOps sets `failTaskOnFailedTests: false`. Its three publishing steps run on
@@ -248,7 +264,11 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
   mapped to `env:`, CircleCI contexts named by `env_var_name` parameters, Bitbucket secured
   variables passed to the pipe.
   - On Azure an undefined secret reaches the step as its own macro text; the template treats
-    that as no key.
+    that as no key. With that role's base URL and model set, it is exit 3 instead, unless
+    `llmWithoutKey: true`. A Key Vault-linked group's hyphenated name (`OPSEVAL-JUDGE-API-KEY`,
+    since Key Vault allows no `_`) is read too, and two different values are exit 3.
+  - GitLab passes every input as a variable with `expand: false`, so a `$` in an input never
+    reads another variable.
 - **Per system.**
   - The Jenkins step is `opseval(...)` (`vars/opseval.groovy`), not `opsevalRun`: a library's
     step is named after its file.
@@ -256,6 +276,18 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
   - The Bitbucket pipe writes JUnit to `test-results/opseval/junit.xml`, where Bitbucket looks,
     and keeps the run folder in `opseval-reports/` so the run's own `junit.xml` is not counted
     twice.
+  - Bitbucket mounts the clone owned by root, so uid 10001 cannot write it. The pipe image
+    starts as root (`USER root`). `pipe.sh` uses root only to make the two report folders and
+    `chown` them to 10001, then re-runs itself as 10001 with `setpriv --reuid=10001
+    --regid=10001 --clear-groups`. `setpriv` is in util-linux in the Debian bookworm base, and
+    the pipe's build runs `setpriv --version` so an image without it cannot be built. A pipe
+    still root after the drop is exit 3. Opseval never runs as root. The alternatives were
+    rejected: running Opseval as root, or a 0777 folder.
+  - The CircleCI executor sets neither `entrypoint` nor `command`. CircleCI's configuration
+    reference says that with neither set, the primary container ignores the image's
+    `ENTRYPOINT` and `CMD`, and that setting `entrypoint` makes CircleCI run it. Because Docker
+    drops the image's `CMD` along with it, `entrypoint: ["/bin/sh"]` would start a shell with
+    nothing to do. A test keeps both keys out.
   - A GitLab catalog component must be `templates/<name>.yml` in its own project, so until it is
     published the file is included with `include: project:` and the same inputs.
 - **The image.** It is not published before Gate 0, so every `image` input defaults to
@@ -267,7 +299,9 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
   only (`tests/test_ci_templates.py`):
   - every file parses, and the shell scripts pass `bash -n`;
   - the shared script runs under `bash -e` with a fake `opseval` and a fake `docker`, for exit
-    codes 0 to 3, the E1 settings rules and secrets by name;
+    codes 0 to 3, a missing or mismatched `result.json`, the E1 settings rules, secrets by
+    name, the Azure output filter, workspace paths, per-build folders, and (with fake `id`,
+    `chown` and `setpriv`) a job running as root;
   - the Bitbucket, Azure and CircleCI preludes run the same way.
 
   Publishing the image, the GitLab component, the orb and the pipe waits for go-public.

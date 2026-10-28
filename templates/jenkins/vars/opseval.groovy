@@ -17,14 +17,22 @@
 //
 // Secrets come only from Jenkins credentials (Secret text), named by id:
 // simulatorApiKeyCredentialsId, judgeApiKeyCredentialsId, agentTokenCredentialsId. They are
-// bound with withCredentials and reach the container by name, never in a command line.
+// bound with withCredentials and reach the container by name, never in a command line. Any
+// other secret setting goes in secretCredentials, a map from its name to a credential id
+// (secretCredentials: [OPSEVAL_LANGFUSE_SECRET_KEY: 'langfuse-secret']); a name that is not
+// a secret setting (config.SECRET_FIELDS) is exit 3.
+//
+// When the agent itself runs in a container that uses the host's Docker (a Docker-in-Docker
+// socket), `docker run -v` mounts a path on the Docker host, not in the agent: set
+// dockerWorkspaceHostPath to where the workspace is on the host.
 
 def call(Map config = [:]) {
     def known = [
         'suite', 'profile', 'target', 'transport', 'repeats', 'filter', 'extraArgs',
         'allowedHosts', 'simulatorBaseUrl', 'simulatorModel', 'judgeBaseUrl', 'judgeModel',
-        'opsevalEnv', 'readDotenv', 'image', 'reportsDir',
+        'opsevalEnv', 'readDotenv', 'image', 'reportsDir', 'dockerWorkspaceHostPath',
         'simulatorApiKeyCredentialsId', 'judgeApiKeyCredentialsId', 'agentTokenCredentialsId',
+        'secretCredentials',
     ]
     def unknown = config.keySet().findAll { !(it in known) }
     if (unknown) {
@@ -50,6 +58,7 @@ def call(Map config = [:]) {
         "OPSEVAL_ENV=${setting(config, 'opsevalEnv')}",
         "READ_DOTENV=${setting(config, 'readDotenv', 'false')}",
         "REPORTS_DIR=${reports}",
+        "DOCKER_WORKSPACE_HOST_PATH=${setting(config, 'dockerWorkspaceHostPath')}",
     ]
     def secrets = []
     if (config.simulatorApiKeyCredentialsId) {
@@ -61,6 +70,19 @@ def call(Map config = [:]) {
     if (config.agentTokenCredentialsId) {
         secrets << string(credentialsId: config.agentTokenCredentialsId, variable: 'OPSEVAL_STATIC_TOKEN')
     }
+    // Other secret settings: bound under their own names, and named (never valued) to the
+    // script, which checks each is a secret setting and passes it to the container by name.
+    def named = config.secretCredentials ?: [:]
+    if (!(named instanceof Map)) {
+        error('Opseval: secretCredentials must be a map of setting name to credential id (exit 3, a configuration error)')
+    }
+    named.each { name, id ->
+        if (!(name ==~ /OPSEVAL_[A-Z0-9_]+/)) {
+            error("Opseval: secretCredentials has '${name}', which is not an OPSEVAL_ setting name (exit 3, a configuration error)")
+        }
+        secrets << string(credentialsId: id.toString(), variable: name.toString())
+    }
+    vars << "SECRET_ENV_NAMES=${named.keySet().join(' ')}"
 
     def script = "${pwd(tmp: true)}/opseval-ci.sh"
     writeFile(file: script, text: libraryResource('opseval/opseval-ci.sh'))

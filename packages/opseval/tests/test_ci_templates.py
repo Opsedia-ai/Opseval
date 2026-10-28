@@ -118,8 +118,10 @@ def _kebab(name: str) -> str:
 
 
 def _expected_inputs() -> set[str]:
+    """The action's inputs, plus the secret settings named for the templates to pass on (the
+    action reads every OPSEVAL_ secret from the job's own environment)."""
     action = set(_yaml(ACTION)["inputs"])
-    return (action - GITHUB_ONLY) | SETTINGS_INPUTS
+    return (action - GITHUB_ONLY) | SETTINGS_INPUTS | {"secret-env-names"}
 
 
 def _code_lines(path: Path) -> list[str]:
@@ -264,6 +266,7 @@ if [ "$1" = summary ]; then
 fi
 printf '%s\n' "$@" > "$FAKE_LOG/args"
 env | grep '^OPSEVAL_' | sort > "$FAKE_LOG/env"
+if [ -n "${FAKE_OUTPUT:-}" ]; then printf '%b\n' "$FAKE_OUTPUT"; fi
 while [ $# -gt 0 ]; do
   case "$1" in
     --reports-dir) reports="$2"; shift 2 ;;
@@ -272,7 +275,9 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$reports/20261028-run"
 if [ -z "${FAKE_NO_RESULT:-}" ]; then
-  echo '{}' > "$reports/20261028-run/result.json"
+  # As SuiteResult.model_dump_json(indent=2) writes it: a nested exit_code is a policy.
+  printf '{\n  "gate": {\n    "exit_code": "strict"\n  },\n  "exit_code": %s,\n  "x": 1\n}\n' \
+    "${FAKE_RECORDED:-${FAKE_CODE:-0}}" > "$reports/20261028-run/result.json"
   echo '<testsuites/>' > "$reports/junit.xml"
 fi
 exit "${FAKE_CODE:-0}"
@@ -299,7 +304,29 @@ while [ $# -gt 0 ]; do
 done
 exec env -i PATH="$PATH" FAKE_LOG="$FAKE_LOG" FAKE_CODE="${FAKE_CODE:-0}" \
   FAKE_NO_RESULT="${FAKE_NO_RESULT:-}" FAKE_SUMMARY_FAILS="${FAKE_SUMMARY_FAILS:-}" \
+  FAKE_RECORDED="${FAKE_RECORDED:-}" FAKE_OUTPUT="${FAKE_OUTPUT:-}" \
   ${envs[@]+"${envs[@]}"} opseval "$@"
+"""
+
+
+# Stand-ins for a job running as root: `id` answers FAKE_UID, `chown` and `setpriv` record what
+# they were asked, and `setpriv` runs the rest as uid 10001 (unless told it keeps root).
+FAKE_ID = r"""#!/usr/bin/env bash
+case "$1" in
+  -u | -g) if [ -n "${FAKE_UID:-}" ]; then echo "$FAKE_UID"; exit 0; fi ;;
+esac
+exec /usr/bin/id "$@"
+"""
+FAKE_CHOWN = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG/chown"
+"""
+FAKE_SETPRIV = r"""#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FAKE_LOG/setpriv"
+while [ $# -gt 0 ]; do
+  case "$1" in --*) shift ;; *) break ;; esac
+done
+if [ -z "${FAKE_SETPRIV_KEEPS_ROOT:-}" ]; then export FAKE_UID=10001; fi
+exec "$@"
 """
 
 
@@ -309,7 +336,7 @@ def _executable(path: Path, text: str) -> None:
 
 
 def _run(
-    tmp_path: Path, script: str | Path = SHARED, **env: str
+    tmp_path: Path, script: str | Path = SHARED, *, fake_root: bool = False, **env: str
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     """Run a script in a fresh workspace; return the result, the workspace and the fake's log."""
     bin_dir = tmp_path / "bin"
@@ -319,6 +346,11 @@ def _run(
         d.mkdir(exist_ok=True)
     _executable(bin_dir / "opseval", FAKE_OPSEVAL)
     _executable(bin_dir / "docker", FAKE_DOCKER)
+    if fake_root:
+        _executable(bin_dir / "id", FAKE_ID)
+        _executable(bin_dir / "chown", FAKE_CHOWN)
+        _executable(bin_dir / "setpriv", FAKE_SETPRIV)
+        env.setdefault("FAKE_UID", "0")
     if isinstance(script, str):
         path = tmp_path / "inline.sh"
         path.write_text(script, encoding="utf-8")
@@ -348,7 +380,8 @@ def _args(log: Path) -> list[str]:
 
 def _env(log: Path) -> dict[str, str]:
     lines = (log / "env").read_text(encoding="utf-8").splitlines()
-    return dict(line.split("=", 1) for line in lines)
+    # A line with no "=" continues another variable's multi-line value (SECRET_ENV_NAMES).
+    return dict(line.split("=", 1) for line in lines if "=" in line)
 
 
 @needs_bash
@@ -371,11 +404,36 @@ def test_exit_codes_come_out_unchanged(code: str, message: str, mode: str, tmp_p
 
 
 @needs_bash
-def test_exit_2_without_a_result_is_a_configuration_error(tmp_path: Path) -> None:
-    """Click exits 2 on a bad flag: that is Opseval refusing its arguments, not "not judged"."""
-    done, _, _ = _run(tmp_path, FAKE_CODE="2", FAKE_NO_RESULT="1")
+@pytest.mark.parametrize("code", ["0", "1", "2"])
+@pytest.mark.parametrize("mode", ["local", "docker"])
+def test_a_verdict_without_a_result_is_a_configuration_error(
+    code: str, mode: str, tmp_path: Path
+) -> None:
+    """Click exits 2 on a bad flag, and an image whose entrypoint is not opseval may exit 0 or
+    1: with no result.json nothing was judged, so it is never a pass or an agent failure."""
+    done, _, _ = _run(tmp_path, FAKE_CODE=code, FAKE_NO_RESULT="1", MODE=mode, IMAGE="opseval")
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "nothing was judged" in done.stderr
+    assert "refused its arguments" in done.stderr and "entrypoint" in done.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(("code", "recorded"), [("0", "1"), ("1", "0"), ("0", "3"), ("2", "")])
+def test_a_code_the_run_did_not_record_is_3(code: str, recorded: str, tmp_path: Path) -> None:
+    done, _, _ = _run(tmp_path, FAKE_CODE=code, FAKE_RECORDED=recorded or '"x"')
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "cannot be trusted" in done.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "extra", ["--help", "--version", "--no-traces --help", "--reports-dir /tmp/x", "--junit=x.xml"]
+)
+def test_extra_args_that_would_judge_nothing_are_refused(extra: str, tmp_path: Path) -> None:
+    done, _, log = _run(tmp_path, EXTRA_ARGS=extra)
     assert done.returncode == 3
-    assert "refused its arguments" in done.stderr
+    assert "EXTRA_ARGS has" in done.stderr
+    assert not (log / "args").exists()
 
 
 @needs_bash
@@ -431,7 +489,7 @@ def test_the_run_gets_the_inputs_as_flags(tmp_path: Path) -> None:
         "--reports-dir", run_dir, "--junit", f"{run_dir}/junit.xml",
         "--no-traces", "--no-preflight",
     ]  # fmt: skip
-    assert run_dir.startswith("opseval-reports/run-")
+    assert run_dir.startswith("opseval-reports/build-")
     assert (work / "out" / "junit.xml").is_file()
     assert (work / "opseval-reports" / "run-dir").read_text().strip() == f"{run_dir}/20261028-run"
 
@@ -606,6 +664,183 @@ def test_an_unknown_mode_is_3(tmp_path: Path) -> None:
     assert done.returncode == 3
 
 
+@needs_bash
+def test_each_build_publishes_only_its_own_run(tmp_path: Path) -> None:
+    """An earlier build's run folder (marked by the script) goes; nothing else is touched."""
+    reports = tmp_path / "work" / "opseval-reports"
+    old = reports / "build-earlier"
+    (old / "20261027-run").mkdir(parents=True)
+    (old / ".opseval-ci-build").write_text("", encoding="utf-8")
+    (old / "20261027-run" / "result.json").write_text("{}", encoding="utf-8")
+    unmarked = reports / "build-mine"
+    unmarked.mkdir()
+    (reports / "notes.txt").write_text("keep", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / ".opseval-ci-build").write_text("", encoding="utf-8")
+    (reports / "build-link").symlink_to(elsewhere)
+    done, _, _ = _run(tmp_path)
+    assert done.returncode == 0, done.stderr
+    assert not old.exists()
+    assert unmarked.is_dir() and (reports / "notes.txt").is_file()
+    assert (reports / "build-link").is_symlink() and (elsewhere / ".opseval-ci-build").exists()
+    builds = [p for p in reports.glob("build-*") if (p / ".opseval-ci-build").is_file()]
+    builds = [p for p in builds if not p.is_symlink()]
+    assert len(builds) == 1
+    run_dir = (reports / "run-dir").read_text(encoding="utf-8").strip()
+    assert run_dir.startswith(f"opseval-reports/{builds[0].name}/")
+
+
+@needs_bash
+@pytest.mark.parametrize("mode", ["local", "docker"])
+def test_named_secrets_reach_opseval_by_name_only(mode: str, tmp_path: Path) -> None:
+    done, _, log = _run(
+        tmp_path,
+        MODE=mode,
+        IMAGE="opseval",
+        SECRET_ENV_NAMES="OPSEVAL_LANGFUSE_SECRET_KEY, OPSEVAL_WEBHOOK_URL\nOPSEVAL_TTS_KEY",
+        OPSEVAL_LANGFUSE_SECRET_KEY="lf-secret-value",
+        OPSEVAL_WEBHOOK_URL="https://hooks.example.com/secret-path",
+    )
+    assert done.returncode == 0, done.stderr
+    env = _env(log)
+    assert env["OPSEVAL_LANGFUSE_SECRET_KEY"] == "lf-secret-value"
+    assert env["OPSEVAL_WEBHOOK_URL"] == "https://hooks.example.com/secret-path"
+    assert "lists OPSEVAL_TTS_KEY, but this job has no value" in done.stderr
+    if mode == "docker":
+        argv = (log / "docker").read_text(encoding="utf-8")
+        envfile = (log / "envfile").read_text(encoding="utf-8")
+        for value in ("lf-secret-value", "secret-path"):
+            assert value not in argv and value not in envfile
+        lines = argv.splitlines()
+        for name in ("OPSEVAL_LANGFUSE_SECRET_KEY", "OPSEVAL_WEBHOOK_URL"):
+            assert lines[lines.index(name) - 1] == "-e"
+        assert "OPSEVAL_TTS_KEY" not in lines  # named but unset: not passed
+
+
+@needs_bash
+def test_every_secret_setting_can_be_named(tmp_path: Path) -> None:
+    from opseval.config import SECRET_FIELDS
+
+    names = {f"OPSEVAL_{n.upper()}" for n in SECRET_FIELDS} - set(SECRETS)
+    done, _, _ = _run(tmp_path, SECRET_ENV_NAMES=" ".join(sorted(names)))
+    assert done.returncode == 0, done.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("names", "message"),
+    [
+        ("OPSEVAL_LANGFUSE_HOST", "not a secret setting"),
+        ("OPSEVAL_ALLOWED_HOSTS", "not a secret setting"),
+        ("PATH", "not a secret setting"),
+        ("OPSEVAL_LANGFUSE_SECRET_KEY OPSEVAL_NOPE", "not a secret setting"),
+        ("OPSEVAL_JUDGE_API_KEY", "has its own input"),
+        ("OPSEVAL_STATIC_TOKEN", "has its own input"),
+    ],
+)
+def test_only_secret_settings_can_be_named(names: str, message: str, tmp_path: Path) -> None:
+    done, _, log = _run(tmp_path, SECRET_ENV_NAMES=names, MODE="docker", IMAGE="opseval")
+    assert done.returncode == 3
+    assert message in done.stderr
+    assert not (log / "docker").exists()
+
+
+AZURE_COMMANDS = (
+    "##vso[task.complete result=Succeeded;]done",
+    "  ##vso[task.setvariable variable=x]y",
+    "##VSO[task.complete result=Succeeded]",
+    "##[error]looks like a failure",
+    "the agent said ##vso[task.uploadfile]/etc/passwd",
+)
+
+
+@needs_bash
+@pytest.mark.parametrize("code", ["0", "1"])
+def test_on_azure_the_agents_words_cannot_be_logging_commands(code: str, tmp_path: Path) -> None:
+    done, _, _ = _run(
+        tmp_path, TF_BUILD="True", FAKE_CODE=code, FAKE_OUTPUT="\\n".join(AZURE_COMMANDS)
+    )
+    assert done.returncode == int(code), done.stderr
+    out = done.stdout + done.stderr
+    assert not re.search(r"##vso\[", out, re.IGNORECASE)
+    assert "##[" not in out
+    assert "#​#vso[task.complete" in out and "#​#[error]" in out
+    # Off Azure DevOps the output is left alone.
+    done, _, _ = _run(tmp_path, FAKE_OUTPUT=AZURE_COMMANDS[0])
+    assert AZURE_COMMANDS[0] in done.stdout
+
+
+@needs_bash
+def test_docker_mounts_the_workspace_at_its_own_path(tmp_path: Path) -> None:
+    done, work, log = _run(tmp_path, MODE="docker", IMAGE="opseval")
+    assert done.returncode == 0, done.stderr
+    lines = (log / "docker").read_text(encoding="utf-8").splitlines()
+    ws = str(work.resolve())
+    assert lines[lines.index("-v") + 1] == f"{ws}:{ws}"
+    assert lines[lines.index("-w") + 1] == ws
+
+
+@needs_bash
+def test_docker_mounts_the_host_path_of_the_workspace_when_given(tmp_path: Path) -> None:
+    done, work, log = _run(
+        tmp_path, MODE="docker", IMAGE="opseval", DOCKER_WORKSPACE_HOST_PATH="/srv/jenkins/ws/app"
+    )
+    assert done.returncode == 0, done.stderr
+    lines = (log / "docker").read_text(encoding="utf-8").splitlines()
+    assert lines[lines.index("-v") + 1] == f"/srv/jenkins/ws/app:{work.resolve()}"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"SUITE": "/etc/suite.yaml"}, "SUITE '/etc/suite.yaml' is outside the workspace"),
+        ({"PROFILE": "../profile.yaml"}, "PROFILE '../profile.yaml' is outside the workspace"),
+        ({"REPORTS_DIR": "../out"}, "REPORTS_DIR '../out' is outside the workspace"),
+        ({"REPORTS_DIR": "/tmp/opseval-out"}, "outside the workspace"),
+        ({"DOCKER_WORKSPACE_HOST_PATH": "ws"}, "must be an absolute path"),
+        ({"DOCKER_WORKSPACE_HOST_PATH": "/a:b"}, "cannot mount"),
+    ],
+)
+def test_docker_refuses_paths_the_container_cannot_see(
+    env: dict[str, str], message: str, tmp_path: Path
+) -> None:
+    done, _, log = _run(tmp_path, MODE="docker", IMAGE="opseval", **env)
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert message in done.stderr
+    assert not (log / "docker").exists()
+
+
+@needs_bash
+def test_docker_accepts_paths_inside_the_workspace(tmp_path: Path) -> None:
+    work = (tmp_path / "work").resolve()
+    (work / "evals").mkdir(parents=True)
+    (work / "evals" / "suite.yaml").write_text("", encoding="utf-8")
+    done, _, log = _run(
+        tmp_path,
+        MODE="docker",
+        IMAGE="opseval",
+        SUITE=str(work / "evals" / "suite.yaml"),
+        PROFILE="builtin:openai-chat",
+        REPORTS_DIR="out/reports",
+    )
+    assert done.returncode == 0, done.stderr
+    assert _args(log)[1] == str(work / "evals" / "suite.yaml")
+
+
+@needs_bash
+def test_a_root_job_gives_the_image_user_the_run_folder_never_0777(tmp_path: Path) -> None:
+    done, work, log = _run(tmp_path, fake_root=True, MODE="docker", IMAGE="opseval")
+    assert done.returncode == 0, done.stderr
+    lines = (log / "docker").read_text(encoding="utf-8").splitlines()
+    assert lines[lines.index("--user") + 1] == "10001:10001"
+    (chown,) = (log / "chown").read_text(encoding="utf-8").splitlines()
+    assert chown.startswith("-R 10001:10001 opseval-reports/build-")
+    build = work / chown.split()[-1]
+    assert stat.S_IMODE(build.stat().st_mode) == 0o700
+
+
 # --- the platform preludes, run --------------------------------------------------------------
 
 
@@ -634,6 +869,108 @@ def test_the_bitbucket_pipe_maps_its_secret_variables(tmp_path: Path) -> None:
     assert env["OPSEVAL_JUDGE_API_KEY"] == "sk-judge"
     # Only the pipe's own variables count: nothing else sets a key.
     assert "OPSEVAL_SIMULATOR_API_KEY" not in env
+
+
+@needs_bash
+def test_the_bitbucket_pipe_drops_root_before_anything_runs(tmp_path: Path) -> None:
+    done, work, log = _run(tmp_path, PIPE, fake_root=True, FAKE_CODE="1")
+    assert done.returncode == 1, done.stderr
+    assert _args(log)[0] == "run"
+    assert (log / "setpriv").read_text(encoding="utf-8").splitlines()[:3] == [
+        "--reuid=10001",
+        "--regid=10001",
+        "--clear-groups",
+    ]
+    (chown,) = (log / "chown").read_text(encoding="utf-8").splitlines()
+    assert chown == "10001:10001 opseval-reports test-results/opseval"
+    assert (work / "test-results" / "opseval" / "junit.xml").is_file()
+
+
+@needs_bash
+def test_the_bitbucket_pipe_never_runs_opseval_as_root(tmp_path: Path) -> None:
+    done, _, log = _run(tmp_path, PIPE, fake_root=True, FAKE_SETPRIV_KEEPS_ROOT="1")
+    assert done.returncode == 3
+    assert "still root" in done.stderr
+    assert not (log / "args").exists()
+
+
+@needs_bash
+def test_the_bitbucket_pipe_maps_secrets_after_dropping_root(tmp_path: Path) -> None:
+    """The mapping runs once, as 10001: the re-run must not lose the keys."""
+    done, _, log = _run(
+        tmp_path,
+        PIPE,
+        fake_root=True,
+        JUDGE_API_KEY="sk-judge",
+        JUDGE_BASE_URL="https://api.openai.com/v1",
+        JUDGE_MODEL="gpt-4.1-mini",
+    )
+    assert done.returncode == 0, done.stderr
+    assert _env(log)["OPSEVAL_JUDGE_API_KEY"] == "sk-judge"
+
+
+def _azure(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    return _run(tmp_path, _azure_step()["bash"], MODE="docker", IMAGE="opseval", **env)
+
+
+@needs_bash
+def test_azure_reads_key_vault_names(tmp_path: Path) -> None:
+    """Key Vault secret names cannot hold "_": OPSEVAL-JUDGE-API-KEY is the judge key."""
+    done, _, log = _azure(
+        tmp_path,
+        OPSEVAL_JUDGE_API_KEY="$(OPSEVAL_JUDGE_API_KEY)",
+        OE_KV_OPSEVAL_JUDGE_API_KEY="sk-from-key-vault",
+        OPSEVAL_STATIC_TOKEN="$(OPSEVAL_STATIC_TOKEN)",
+        OE_KV_OPSEVAL_STATIC_TOKEN="$(OPSEVAL-STATIC-TOKEN)",
+        SECRET_ENV_NAMES="OPSEVAL_LANGFUSE_SECRET_KEY",
+        OPSEVAL_LANGFUSE_SECRET_KEY="$(OPSEVAL_LANGFUSE_SECRET_KEY)",
+        OE_KV_OPSEVAL_LANGFUSE_SECRET_KEY="lf-from-key-vault",
+        JUDGE_BASE_URL="https://api.openai.com/v1",
+        JUDGE_MODEL="gpt-4.1-mini",
+    )
+    assert done.returncode == 0, done.stderr
+    env = _env(log)
+    assert env["OPSEVAL_JUDGE_API_KEY"] == "sk-from-key-vault"
+    assert env["OPSEVAL_LANGFUSE_SECRET_KEY"] == "lf-from-key-vault"
+    assert "OPSEVAL_STATIC_TOKEN" not in env
+    assert not [k for k in env if k.startswith("OE_KV_")]
+    argv = (log / "docker").read_text(encoding="utf-8")
+    assert "from-key-vault" not in argv
+
+
+@needs_bash
+def test_azure_refuses_two_different_values_for_one_key(tmp_path: Path) -> None:
+    done, _, _ = _azure(tmp_path, OPSEVAL_STATIC_TOKEN="one", OE_KV_OPSEVAL_STATIC_TOKEN="two")
+    assert done.returncode == 3
+    assert "both set, to different values" in done.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize("role", ["SIMULATOR", "JUDGE"])
+def test_azure_an_undefined_key_with_its_endpoint_set_is_3(role: str, tmp_path: Path) -> None:
+    """Azure passes an undefined secret through as its macro text; never drop it silently."""
+    endpoint = {f"{role}_BASE_URL": "https://api.openai.com/v1", f"{role}_MODEL": "gpt-4.1-mini"}
+    key = f"OPSEVAL_{role}_API_KEY"
+    literal = {key: f"$({key})", f"OE_KV_{key}": f"$({key.replace('_', '-')})"}
+    done, _, log = _azure(tmp_path, **endpoint, **literal)
+    assert done.returncode == 3
+    assert f"{key} is not defined" in done.stderr and key.replace("_", "-") in done.stderr
+    assert not (log / "docker").exists()
+    # An endpoint that takes no key says so.
+    done, _, _ = _azure(tmp_path, **endpoint, **literal, LLM_WITHOUT_KEY="true")
+    assert done.returncode == 0, done.stderr
+
+
+def test_azure_maps_each_named_secret_from_both_spellings() -> None:
+    env = _azure_step()["env"]
+    (each,) = (k for k in env if k.startswith("${{ each name in parameters.secretEnvNames"))
+    assert env[each] == {
+        "${{ name }}": "$(${{ name }})",
+        "OE_KV_${{ name }}": "$(${{ replace(name, '_', '-') }})",
+    }
+    assert env["SECRET_ENV_NAMES"] == "${{ join(' ', parameters.secretEnvNames) }}"
+    for name in SECRETS:
+        assert env[f"OE_KV_{name}"] == f"$({name.replace('_', '-')})"
 
 
 @needs_bash
@@ -698,13 +1035,25 @@ def test_gitlab_inputs_reach_the_script_only_as_variables() -> None:
     assert used == set(spec["spec"]["inputs"])  # every input is used
 
 
+def test_gitlab_never_expands_an_input() -> None:
+    """A "$" in an input must stay text, not read another CI/CD variable."""
+    variables = _gitlab_job()["variables"]
+    from_inputs = {k: v for k, v in variables.items() if "inputs." in str(v)}
+    assert len(from_inputs) == len(_gitlab()[0]["spec"]["inputs"]) - 4  # not stage, name, ...
+    for name, value in from_inputs.items():
+        assert isinstance(value, dict) and value["expand"] is False, name
+        assert re.fullmatch(r"\$\[\[ inputs\.[a-z-]+ \]\]", value["value"])
+
+
 def test_jenkins_parameters_mirror_the_action() -> None:
     text = JENKINS.read_text(encoding="utf-8")
     known = text[text.index("def known = [") : text.index("]", text.index("def known = ["))]
     names = {_kebab(n) for n in re.findall(r"'([A-Za-z]+)'", known)}
-    extra = {"image", "reports-dir"} | {
+    extra = {"image", "reports-dir", "docker-workspace-host-path"} | {
         f"{s}-credentials-id" for s in ("simulator-api-key", "judge-api-key", "agent-token")
     }
+    # secretCredentials maps each other secret setting's name to a credential id.
+    names = {"secret-env-names" if n == "secret-credentials" else n for n in names}
     assert names - extra == _expected_inputs()
 
 
@@ -749,7 +1098,8 @@ def test_the_jenkinsfile_uses_the_step_with_a_credential() -> None:
 
 def test_azure_parameters_mirror_the_action() -> None:
     params = {p["name"] for p in _yaml(AZURE)["parameters"]}
-    assert {_kebab(p) for p in params} - {"image", "artifact-name"} == _expected_inputs()
+    extra = {"image", "artifact-name", "llm-without-key", "docker-workspace-host-path"}
+    assert {_kebab(p) for p in params} - extra == _expected_inputs()
     default = {p["name"]: p.get("default") for p in _yaml(AZURE)["parameters"]}
     assert default["image"] == PLACEHOLDER
 
@@ -759,6 +1109,9 @@ def test_azure_maps_exactly_the_secret_variables_and_no_secret_parameter() -> No
     for name in SECRETS:
         assert step["env"][name] == f"$({name})"
     for param in _yaml(AZURE)["parameters"]:
+        if param["name"] in ("secretEnvNames", "llmWithoutKey"):  # names and a boolean
+            assert param["type"] in ("object", "boolean")
+            continue
         assert not re.search(r"key|token|secret|password", param["name"], re.IGNORECASE)
     # Parameters reach the script only through env, never pasted into it.
     for s in _yaml(AZURE)["steps"]:
@@ -796,6 +1149,13 @@ def test_circleci_parameters_mirror_the_action() -> None:
     assert orb["executors"]["default"]["parameters"]["image"]["default"] == PLACEHOLDER
 
 
+def test_circleci_leaves_the_primary_containers_entrypoint_ignored() -> None:
+    """With neither key, CircleCI ignores the image's ENTRYPOINT (opseval) for the primary
+    container; setting one would make CircleCI run it."""
+    (container,) = _yaml(ORB)["executors"]["default"]["docker"]
+    assert "entrypoint" not in container and "command" not in container
+
+
 def test_circleci_secrets_are_variable_names_never_values() -> None:
     params = _yaml(ORB)["commands"]["evaluate"]["parameters"]
     for name in ("simulator_api_key", "judge_api_key", "agent_token"):
@@ -818,11 +1178,16 @@ def test_the_bitbucket_pipe_variables_mirror_the_action() -> None:
         assert v.get("secret", False) == (v["name"] in secrets)
 
 
-def test_the_bitbucket_pipe_runs_the_image_as_its_own_user() -> None:
+def test_the_bitbucket_pipe_starts_as_root_only_to_drop_it() -> None:
+    """The clone is root's, so the pipe starts as root; setpriv must be there to drop it."""
     text = PIPE_DOCKERFILE.read_text(encoding="utf-8")
     assert f"ARG OPSEVAL_IMAGE={PLACEHOLDER}" in text
     assert "FROM ${OPSEVAL_IMAGE}" in text
-    assert "USER" not in "\n".join(_code_lines(PIPE_DOCKERFILE))
+    code = _code_lines(PIPE_DOCKERFILE)
+    assert [ln for ln in code if ln.startswith("USER")] == ["USER root"]
+    assert "RUN setpriv --version" in code
+    for path in (PIPE_DOCKERFILE, PIPE, SHARED):
+        assert not [ln for ln in _code_lines(path) if "777" in ln]
     assert 'ENTRYPOINT ["/usr/local/bin/opseval-pipe"]' in text
     assert os.access(PIPE, os.X_OK)
 
