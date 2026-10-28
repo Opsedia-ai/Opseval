@@ -100,6 +100,21 @@ class Task(Base):
         UniqueConstraint("id", "project_id"),
         CheckConstraint(_one_of("kind", TASK_KINDS), name="kind"),
         CheckConstraint(_one_of("modality", MODALITIES), name="modality"),
+        # A task links only its own items: (item, this task) must be an item of this task.
+        # NO ACTION rather than SET NULL: Postgres before 15 cannot null one column of a
+        # composite key, and nothing deletes an item except with its task (the cascade
+        # removes both rows in one statement, which NO ACTION checks only at its end).
+        # The item's kind is checked by a trigger the migration installs.
+        ForeignKeyConstraint(
+            ["profile_item_id", "id"],
+            ["catalogue_items.id", "catalogue_items.task_id"],
+            use_alter=True,
+        ),
+        ForeignKeyConstraint(
+            ["default_suite_item_id", "id"],
+            ["catalogue_items.id", "catalogue_items.task_id"],
+            use_alter=True,
+        ),
     )
 
     id: Mapped[uuid.UUID] = _id()
@@ -110,14 +125,13 @@ class Task(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     modality: Mapped[str] = mapped_column(String(16), nullable=False)
-    profile_item_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("catalogue_items.id", ondelete="SET NULL", use_alter=True), nullable=True
-    )
-    """The task's profile; set by a push, ``None`` until the task has a catalogue."""
+    profile_item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    """The task's profile (an item of this task, of kind ``profile``); set by a push,
+    ``None`` until the task has a catalogue."""
     default_suite_item_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("catalogue_items.id", ondelete="SET NULL", use_alter=True), nullable=True
+        UUID(as_uuid=True), nullable=True
     )
-    """The suite a run uses when it names none."""
+    """The suite (an item of this task, of kind ``suite``) a run uses when it names none."""
     region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     """Where the task's data may live (matters once audio is stored, ADR-0053)."""
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -130,6 +144,8 @@ class CatalogueItem(Base):
     __tablename__ = "catalogue_items"
     __table_args__ = (
         UniqueConstraint("task_id", "kind", "name"),
+        # The target of the tasks' (item, task) links above.
+        UniqueConstraint("id", "task_id"),
         CheckConstraint("kind IN ('scenario', 'suite', 'profile')", name="kind"),
         ForeignKeyConstraint(
             ["task_id", "project_id"], ["tasks.id", "tasks.project_id"], ondelete="CASCADE"

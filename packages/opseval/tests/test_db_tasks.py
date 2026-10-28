@@ -216,9 +216,32 @@ class TestTheMigration:
             await migrate.upgrade(engine)
             async with sessions(engine)() as s, s.begin():
                 await ensure_task(s, "acme/one", "voice", kind="voice")
-            with pytest.raises(RuntimeError, match="besides 'default'"):
+            with pytest.raises(RuntimeError, match="acme/one: task 'voice' and its catalogue"):
                 async with engine.begin() as conn:
                     await conn.run_sync(_downgrade, "0001")
+            assert await migrate.current(engine) == "0002"
+        finally:
+            await engine.dispose()
+
+    async def test_it_refuses_to_drop_a_default_tasks_settings(self, pg_url: str) -> None:
+        # The old schema has no place for them: refused and listed, never silently dropped.
+        engine = _engine(pg_url)
+        try:
+            await migrate.upgrade(engine, "0001")
+            await _seed_0001(engine)
+            await migrate.upgrade(engine)
+            async with sessions(engine)() as s, s.begin():
+                one = await get_task(s, "acme/one")
+                await update_task(s, one, kind="voice", region="eu", default_suite="smoke")
+                await archive_task(s, await get_task(s, "acme/two"))
+            with pytest.raises(RuntimeError) as caught:
+                async with engine.begin() as conn:
+                    await conn.run_sync(_downgrade, "0001")
+            message = str(caught.value)
+            assert "nothing was downgraded" in message
+            assert "acme/one: the default task's kind voice, region eu, a default suite" in message
+            assert "acme/two: the default task's archived" in message
+            assert "acme/empty" not in message
             assert await migrate.current(engine) == "0002"
         finally:
             await engine.dispose()
@@ -245,6 +268,60 @@ class TestTheTable:
         with pytest.raises(IntegrityError, match="fk_catalogue_items_task_id_tasks"):
             async with sessions(engine)() as s, s.begin():
                 s.add(CatalogueItem(project_id=other.id, task_id=task.id, kind="suite", name="x"))
+
+    async def test_a_task_links_only_its_own_items_of_the_right_kind(
+        self, engine: AsyncEngine, tmp_path: Path
+    ) -> None:
+        cat = folder(tmp_path)
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, PROJECT)
+            await ensure_project(s, "acme/other")
+            chat, voice = await get_task(s, PROJECT), await _voice(s)
+            elsewhere = await get_task(s, "acme/other")
+            for task in (chat, voice, elsewhere):
+                await push(s, task, read(cat))
+            items = {
+                (i.task_id, i.kind): i.id
+                for i in await s.scalars(select(CatalogueItem))
+                if i.kind != "scenario"
+            }
+            chat_id, voice_id = chat.id, voice.id
+        # Each of the right kind, so only the key can refuse it.
+        for what, owner in (("another task's", voice_id), ("another project's", elsewhere.id)):
+            for column, kind in (
+                ("profile_item_id", "profile"),
+                ("default_suite_item_id", "suite"),
+            ):
+                item = items[(owner, kind)]
+                with pytest.raises(IntegrityError, match=f"fk_tasks_{column}_catalogue_items"):
+                    async with sessions(engine)() as s, s.begin():
+                        await s.execute(
+                            text(f"UPDATE tasks SET {column} = :item WHERE id = :task"),
+                            {"item": item, "task": chat_id},
+                        )
+                    pytest.fail(f"{column} took {what} item")
+        wrong_kind = {
+            "profile_item_id": (items[(chat_id, "suite")], "ck_tasks_profile_item_kind"),
+            "default_suite_item_id": (
+                items[(chat_id, "profile")],
+                "ck_tasks_default_suite_item_kind",
+            ),
+        }
+        for column, (item, name) in wrong_kind.items():
+            with pytest.raises(IntegrityError, match=name):
+                async with sessions(engine)() as s, s.begin():
+                    await s.execute(
+                        text(f"UPDATE tasks SET {column} = :item WHERE id = :task"),
+                        {"item": item, "task": chat_id},
+                    )
+        # The store's own links pass, and a task (or a project) with links can still go.
+        async with sessions(engine)() as s, s.begin():
+            await update_task(s, await get_task(s, PROJECT), default_suite="smoke")
+        async with sessions(engine)() as s, s.begin():
+            await s.execute(text("DELETE FROM tasks WHERE id = :t"), {"t": voice_id})
+            await s.execute(text("DELETE FROM projects WHERE slug = 'support-bot'"))
+            left = await s.scalar(select(func.count()).select_from(CatalogueItem))
+        assert left == 7  # acme/other's catalogue only
 
     async def test_a_new_project_has_its_default_task(self, engine: AsyncEngine) -> None:
         async with sessions(engine)() as s, s.begin():
@@ -298,6 +375,59 @@ class TestNamingATask:
                 await ensure_task(s, PROJECT, "Voice")
             with pytest.raises(ConfigError, match="no project"):
                 await ensure_task(s, "acme/nope", "voice")
+
+    async def test_an_empty_region_is_no_region(self, engine: AsyncEngine) -> None:
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, PROJECT)
+            made, created = await ensure_task(s, PROJECT, "x", region="")
+            assert created and made.region is None
+            # Asking again for no region is what the task has, so nothing differs.
+            assert (await ensure_task(s, PROJECT, "x", region=""))[1] is False
+            await update_task(s, made, region="eu")
+            with pytest.raises(ConfigError, match="region is 'eu', not None"):
+                await ensure_task(s, PROJECT, "x", region="")
+
+    async def test_ensuring_an_archived_task_says_so_and_leaves_it_archived(
+        self, engine: AsyncEngine
+    ) -> None:
+        async with sessions(engine)() as s, s.begin():
+            await archive_task(s, await _voice(s))
+            with pytest.raises(ConfigError) as caught:
+                await ensure_task(s, PROJECT, "voice")
+            assert (await get_task(s, PROJECT, "voice")).archived_at is not None
+        assert "is archived" in str(caught.value)
+        assert f"opseval task unarchive voice --project {PROJECT}" in str(caught.value)
+
+    async def test_two_inits_at_once_both_succeed(self, engine: AsyncEngine) -> None:
+        # The second waits on the first's insert, then finds what it made: no unique-key error.
+        async def init(s: AsyncSession) -> bool:
+            await ensure_project(s, "acme/new")
+            _task, created = await ensure_task(s, "acme/new", "voice", kind="voice")
+            return created
+
+        async with sessions(engine)() as first:
+            await first.begin()
+            assert await init(first)
+            async with sessions(engine)() as second:
+                await second.begin()
+                waiting = asyncio.create_task(init(second))
+                await asyncio.sleep(0.3)
+                assert not waiting.done()  # it waits on the first's rows
+                await first.commit()
+                assert await waiting is False
+                await second.commit()
+        both = await asyncio.gather(*(self._init_in_own_session(engine, n) for n in range(4)))
+        assert sorted(both) == [False, False, False, True]
+        async with sessions(engine)() as s, s.begin():
+            slugs = [t.slug for t in await list_tasks(s, "acme/new")]
+            racing = [t.slug for t in await list_tasks(s, "acme/race")]
+        assert slugs == [DEFAULT_TASK, "voice"] and racing == [DEFAULT_TASK, "x"]
+
+    @staticmethod
+    async def _init_in_own_session(engine: AsyncEngine, n: int) -> bool:
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, "acme/race")
+            return (await ensure_task(s, "acme/race", "x"))[1]
 
     async def test_update_changes_what_an_operator_may_change(
         self, engine: AsyncEngine, tmp_path: Path
@@ -388,6 +518,10 @@ class TestArchiving:
                 await push(s, voice, read(cat))
             with pytest.raises(ConfigError, match="'voice' is archived"):
                 await set_label(s, voice, "suite", "smoke", 1, "staging")
+            with pytest.raises(ConfigError, match="'voice' is archived") as caught:
+                await update_task(s, voice, region="eu")
+            assert f"opseval task unarchive voice --project {PROJECT}" in str(caught.value)
+            assert voice.region is None
             # Reads still work: nothing is deleted, and a pull can bring the catalogue out.
             assert len(await list_items(s, voice)) == 7
             assert await history(s, voice, "suite", "smoke")
