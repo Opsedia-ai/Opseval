@@ -26,6 +26,7 @@ from opseval.errors import (
 from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
 from opseval.models.record import (
     SCRIPT_EXHAUSTED,
+    AudioRef,
     CreatedArtifact,
     FrameRecord,
     InterruptRecord,
@@ -33,6 +34,7 @@ from opseval.models.record import (
     RedactionInfo,
     RunRecord,
     TerminalState,
+    TranscriptInfo,
 )
 from opseval.models.scenario import (
     CheckpointPolicy,
@@ -43,7 +45,7 @@ from opseval.models.scenario import (
     Scenario,
 )
 from opseval.paths import dig
-from opseval.redaction import redact_text, redact_value
+from opseval.redaction import redact_frame, redact_text, redact_value
 from opseval.simulator import Simulator
 from opseval.transport.base import Session, Transport
 
@@ -164,6 +166,8 @@ class Driver:
         text: str | None,
         *,
         at: datetime | None = None,
+        audio: AudioRef | None = None,
+        transcript: TranscriptInfo | None = None,
     ) -> int:
         latency = None
         if direction == "received" and self._last_sent_at is not None:
@@ -173,23 +177,25 @@ class Driver:
             raw = payload.get(self.p.phase_field)
             phase = raw if isinstance(raw, str) else None
         seq = len(self._frames)
-        # `redact` removes credential-shaped *keys*; `redact_value` removes credential
-        # *values*, which is the only thing that can help a free-text turn (FR-REC-03).
-        payload_clean, payload_kinds = redact_value(redact(payload))
-        text_clean, text_kinds = (None, []) if text is None else redact_text(text)
-        self._redacted.update(payload_kinds + text_kinds)
-        self._frames.append(
+        # `redact` removes credential-shaped *keys*; `redact_frame` removes credential
+        # *values* from every free-text field (payload strings, text, and a voice turn's word
+        # timings: FR-REC-03, ADR-0053), so no frame is kept without passing through it.
+        frame, kinds = redact_frame(
             FrameRecord(
                 seq=seq,
                 at=at or datetime.now(UTC),
                 direction="sent" if direction == "sent" else "received",
                 kind=kind,
-                payload=payload_clean,
+                payload=redact(payload),
                 latency_ms=latency,
                 phase=phase,
-                text=text_clean,
+                text=text,
+                audio=audio,
+                transcript=transcript,
             )
         )
+        self._redacted.update(kinds)
+        self._frames.append(frame)
         return seq
 
     def transcript(self) -> list[tuple[str, str]]:

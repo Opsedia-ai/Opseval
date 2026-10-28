@@ -20,6 +20,12 @@ class AllowedHostError(ConfigError):
     """A credential would be sent to a host that is not allowlisted, or without TLS."""
 
 
+class UnsupportedCapability(ConfigError):
+    """A scenario asked a transport for something it cannot do (press keys on a transport
+    without DTMF, say). A configuration problem, exit 3: never the agent's fault, and never
+    silently dropped (ADR-0053)."""
+
+
 class HarnessError(OpsevalError):
     """A failure of the harness itself (never the agent's fault)."""
 
