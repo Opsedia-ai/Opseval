@@ -32,6 +32,11 @@ ADR-0056, WebRTC is ADR-0057, and languages are ADR-0059.
 
 - `start()` opens the call or stream; `close()` ends it.
 - `send_audio(chunk)` streams caller audio (PCM16 at the session's rate); `send_dtmf(digits)`.
+- `capabilities` (a class-level `frozenset`) names what a transport can do beyond speaking and
+  listening; today only `dtmf`. A transport without it that is asked to press keys raises
+  `UnsupportedCapability`, a `ConfigError` (exit 3): never dropped, never the agent's fault.
+  Because the set is on the class, the catalogue loader can later refuse, at load time, a
+  scenario that presses keys on a profile whose transport lacks `dtmf`.
 - `end_of_caller_turn()` says the caller has finished speaking. A request/response transport
   sends the turn there, and the agent's turn clock starts there (ADR-0042).
 - `next_event(timeout)` returns the next typed event, raising `TransportTimeout` or
@@ -45,8 +50,16 @@ ADR-0056, WebRTC is ADR-0057, and languages are ADR-0059.
 
 ### The record
 
-- `FrameRecord.audio`: blob ref (a path relative to the run folder), `start_ms`, `end_ms`,
-  `sha256`, codec and rate.
+- `FrameRecord.audio` (`AudioRef`): blob ref (a path relative to the run folder, under
+  `audio/`), `start_ms`, `end_ms`, `sha256`, codec, rate and length. It is checked when loaded:
+  `0 <= start_ms <= end_ms`; the rate is one of `audio.RATES` (repeated as
+  `models.record.AUDIO_RATES`, since models import nothing else, and a test keeps them equal).
+  Three states: a file (`path` set), hashes only (no path, not `pruned`) and pruned (no path,
+  `pruned`); a pruned ref with a path is refused.
+- `AudioRef.encryption` (`none` or `aes-256-gcm`) and `key_id` (a fingerprint of
+  `OPSEVAL_AUDIO_ENCRYPTION_KEY`, never the key) are in the record from V0a, so encrypted files
+  (V0c) need no further layout bump. `key_id` is set exactly when `encryption` is not `none`,
+  and hashes-only audio cannot claim encryption (there is no file).
 - `FrameRecord.transcript`: provider, model, `confidence`, word timings, and whose ASR it is
   (`opseval` or `agent`). `text` stays the field scorers read.
 - `RunRecord.voice`: the attempt's timeline (speech starts and ends per speaker, barge-ins,
@@ -68,7 +81,14 @@ judges run on voice with no change:
   caller sample was sent, not when TTS was called. STT runs after `AgentSpeechEnd`, under its own
   `OPSEVAL_STT_TIMEOUT_SECONDS`. An overrun is an `SttError`, never a `TransportTimeout`.
 - PCM16, μ-law and A-law conversion and resampling are written in-house. `audioop` was removed
-  in Python 3.13 and the core must run on 3.11 to 3.13.
+  in Python 3.13 and the core must run on 3.11 to 3.13. G.711 is checked bit for bit against
+  `audioop`'s output. Resampling streams through `audio.Resampler` (`feed`/`flush`), which keeps
+  the exact fractional position and the last sample across chunks, so chunked output is the same
+  bytes as one-shot output: no drift, no seam at a chunk boundary. The codec lookup tables are
+  built by `audio.warm(codec)`, which `AudioSession.__init__` calls, so building them is never on
+  the agent's clock. WAV input at a rate outside `audio.RATES`, or with data that is not a whole
+  number of frames, is refused (`AudioDecodeError`), not resampled: the transport decides the
+  rate.
 
 The bridge is turn-based, so it cannot measure barge-in or talk-over. That is ADR-0055's job.
 
@@ -142,7 +162,14 @@ PDPL, the UAE PDPL and China's PIPL.
   providers it may use (ADR-0054). A provider outside the region's list is refused at launch.
 - **Credentials are redacted in transcripts.** A transcript becomes `FrameRecord.text`, so
   `redaction.redact_text` (ADR-0033) runs on it before the record is written, and on word
-  timings too. Audio itself is not redacted; that is stated in the record.
+  timings too. The driver passes every frame through `redaction.redact_frame` (payload strings,
+  `text`, `transcript.words`), so a field added later has one place to be covered. A credential
+  can be spoken as one word or split over several, so the detectors run on each word, on the
+  words joined by spaces, on runs of words joined with nothing, and on the turn's text (words
+  are matched to what was found there). A word inside a credential becomes
+  `[redacted:<kind>]`, its timing kept; the kinds are counted in `RunRecord.redaction` like any
+  other. It errs towards removing: a word run straight on to a credential can be taken as its
+  last piece. Audio itself is not redacted; that is stated in the record.
 
 ## Consequences
 

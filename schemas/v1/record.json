@@ -2,7 +2,7 @@
   "$defs": {
     "AudioRef": {
       "additionalProperties": false,
-      "description": "One turn's audio, kept beside the record (ADR-0053). Caller and agent audio are\nseparate files, so either can be withheld or deleted on its own.",
+      "description": "One turn's audio, kept beside the record (ADR-0053). Caller and agent audio are\nseparate files, so either can be withheld or deleted on its own.\n\nThree states, told apart by ``path`` and ``pruned``: a file (``path`` set), hashes only\n(no path, not pruned: ``OPSEVAL_RECORD_AUDIO=hashes``, or audio that could not be\ndecoded), and pruned (no path, ``pruned``: the file existed and retention removed it).",
       "properties": {
         "bytes": {
           "minimum": 0,
@@ -18,9 +18,31 @@
           "title": "Codec",
           "type": "string"
         },
+        "encryption": {
+          "default": "none",
+          "enum": [
+            "none",
+            "aes-256-gcm"
+          ],
+          "title": "Encryption",
+          "type": "string"
+        },
         "end_ms": {
           "title": "End Ms",
           "type": "number"
+        },
+        "key_id": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{16,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Id"
         },
         "path": {
           "anyOf": [
@@ -56,6 +78,7 @@
           "type": "string"
         },
         "start_ms": {
+          "minimum": 0,
           "title": "Start Ms",
           "type": "number"
         }
