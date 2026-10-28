@@ -55,9 +55,11 @@ opseval run ./release/suites/smoke.yaml --profile ./release/profile.yaml --targe
 | Every file a suite selects must be under `scenarios/` with a `.yaml` name | Otherwise a pulled suite would run fewer scenarios than `validate` saw |
 | `pull` writes only into a new or empty folder | A stale file left there would otherwise run as part of the label |
 | YAML anchors and aliases are refused | A few hundred bytes of aliases can expand to gigabytes |
+| Datasets are stored byte for byte, at most `OPSEVAL_MAX_DATASET_BYTES` (5 MB) each, and pulled only under `datasets/` | A pulled label runs the rows it was validated with (ADR-0060) |
 
 A folder holds `profile.yaml`, `suites/*.yaml` and `scenarios/**/*.yaml`, the layout
-`opseval init` writes. Other files are not pushed.
+`opseval init` writes, plus `datasets/**/*.csv` and `datasets/**/*.jsonl` for scenarios with a
+`dataset:` (each an item of kind `dataset`, named by its path). Other files are not pushed.
 
 ## Tasks
 

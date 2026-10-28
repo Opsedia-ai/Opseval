@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The versioned catalogue in Postgres (ADR-0047), the way Langfuse versions prompts.
 
-- **Push** a catalogue folder (``profile.yaml``, ``suites/``, ``scenarios/``): every file goes
+- **Push** a catalogue folder (``profile.yaml``, ``suites/``, ``scenarios/``, and the
+  ``datasets/`` CSV and JSONL files scenarios expand over, ADR-0060): every file goes
   through the loader's own checks first, and one problem refuses the whole push. A file that
   changed becomes a new numbered version; an unchanged one adds nothing.
 - **Label** versions (``production``, ``staging``, anything). Pushing with a label moves it to
@@ -37,6 +38,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from opseval.catalogue import KnownScorers, load_catalogue, load_profile, suite_files
+from opseval.datasets import DatasetError, Limits, parse_dataset
 from opseval.db.schema import (
     MODALITIES,
     TASK_KINDS,
@@ -48,7 +50,7 @@ from opseval.db.schema import (
     Task,
 )
 from opseval.errors import ConfigError
-from opseval.models.scenario import Suite
+from opseval.models.scenario import DATASET_FOLDER, DATASET_SUFFIXES, Suite
 
 LATEST = "latest"
 """The catalogue as last pushed. Every push moves it, nobody else can, so it is never stale."""
@@ -150,7 +152,7 @@ def _refuse_aliases(text: str, where: str) -> None:
         raise ConfigError(f"{where}: invalid YAML: {exc}") from exc
 
 
-def _files(root: Path) -> list[tuple[str, Path]]:
+def _files(root: Path, *, max_dataset_bytes: int) -> list[tuple[str, Path]]:
     profile = root / "profile.yaml"
     if not profile.is_file():
         raise ConfigError(
@@ -160,23 +162,57 @@ def _files(root: Path) -> list[tuple[str, Path]]:
     found = [("profile", profile)]
     found += [("suite", p) for p in sorted((root / "suites").glob("*.yaml"))]
     found += [("scenario", p) for p in sorted((root / "scenarios").rglob("*.yaml"))]
-    for _kind, path in found:
+    data = root / DATASET_FOLDER
+    found += [
+        ("dataset", p)
+        for p in sorted(data.rglob("*"))
+        if p.suffix in DATASET_SUFFIXES and (p.is_file() or p.is_symlink())
+    ]
+    for kind, path in found:
         if not path.resolve().is_relative_to(root):
             raise ConfigError(f"{path}: a link to a file outside the catalogue folder")
-        if path.stat().st_size > MAX_FILE_BYTES:
+        if kind == "dataset":
+            if not path.resolve().is_relative_to(data.resolve()):
+                raise ConfigError(f"{path}: a link to a file outside {DATASET_FOLDER}/")
+            if path.stat().st_size > max_dataset_bytes:
+                raise ConfigError(
+                    f"{path}: larger than {max_dataset_bytes} bytes (OPSEVAL_MAX_DATASET_BYTES)"
+                )
+        elif path.stat().st_size > MAX_FILE_BYTES:
             raise ConfigError(f"{path}: larger than {MAX_FILE_BYTES // 1024} KB")
     return found
 
 
+def _dataset_file(root: Path, path: Path) -> CatalogueFile:
+    """A dataset as it is stored: its text exactly (line endings too, so a pulled file has the
+    digest the pushed one had), named by its path, which is how scenarios name it."""
+    rel = path.relative_to(root).as_posix()
+    raw = path.read_bytes()
+    try:
+        columns, rows = parse_dataset(rel, raw)
+    except DatasetError as exc:
+        raise ConfigError(str(exc)) from exc
+    content = {"format": path.suffix[1:], "columns": list(columns), "rows": len(rows)}
+    return CatalogueFile(
+        kind="dataset", name=rel, path=rel, source=raw.decode("utf-8"), content=content
+    )
+
+
 def read_folder(
-    root: Path, *, known_scorers: KnownScorers, known_invariants: set[str]
+    root: Path,
+    *,
+    known_scorers: KnownScorers,
+    known_invariants: set[str],
+    limits: Limits | None = None,
 ) -> list[CatalogueFile]:
     """Every file of a catalogue folder, through exactly the checks ``opseval validate``
-    applies. Any problem anywhere refuses the whole folder: a push is all or nothing."""
+    applies. Any problem anywhere refuses the whole folder: a push is all or nothing.
+    ``limits`` (default: from settings) caps dataset files and expansions (ADR-0060)."""
     root = root.resolve()
     if not root.is_dir():
         raise ConfigError(f"{root}: not a folder")
-    found = _files(root)
+    limits = limits or Limits.from_settings()
+    found = _files(root, max_dataset_bytes=limits.max_dataset_bytes)
     profile = load_profile(root / "profile.yaml")
     # The registry stays a mapping, so each scorer's params are checked too (ADR-0043).
     known = known_scorers if isinstance(known_scorers, Mapping) else list(known_scorers)
@@ -186,7 +222,11 @@ def read_folder(
         """Load ``path`` as the loader would; return the scenario files it covered."""
         try:
             cat, _ = load_catalogue(
-                path, profile, known_scorers=known, known_invariants=known_invariants
+                path,
+                profile,
+                known_scorers=known,
+                known_invariants=known_invariants,
+                limits=limits,
             )
         except ConfigError as exc:
             problems.append(str(exc))
@@ -230,6 +270,9 @@ def read_folder(
         # Where the file sits in the folder, not where a link points: that is where the
         # suite's globs look for it, and where a pull must put it back.
         rel = path.relative_to(root).as_posix()
+        if kind == "dataset":
+            out.append(_dataset_file(root, path))
+            continue
         text = path.read_text(encoding="utf-8")
         _refuse_aliases(text, rel)
         data = yaml.safe_load(text)
@@ -819,10 +862,14 @@ async def resolve(
 
 def _safe_target(dest: Path, path: str) -> Path:
     rel = PurePosixPath(path)
-    allowed = rel == PurePosixPath("profile.yaml") or (
-        len(rel.parts) > 1 and rel.parts[0] in ("suites", "scenarios")
+    nested = len(rel.parts) > 1
+    allowed = (
+        rel == PurePosixPath("profile.yaml")
+        or (nested and rel.parts[0] in ("suites", "scenarios") and rel.suffix == ".yaml")
+        # Datasets (ADR-0060): only their two formats, and only where scenarios look for them.
+        or (nested and rel.parts[0] == DATASET_FOLDER and rel.suffix in DATASET_SUFFIXES)
     )
-    if rel.is_absolute() or ".." in rel.parts or not allowed or rel.suffix != ".yaml":
+    if rel.is_absolute() or ".." in rel.parts or not allowed:
         raise ConfigError(f"stored path {path!r} is not a catalogue file path; refusing to write")
     target = (dest / Path(*rel.parts)).resolve()
     if not target.is_relative_to(dest):  # pragma: no cover - the checks above rule it out
@@ -853,5 +900,7 @@ async def materialize(
     for _item, version in chosen:
         target = _safe_target(dest, version.path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(version.source, encoding="utf-8")
+        # A dataset is written back exactly as pushed (its digest is in every run's snapshot).
+        newline = "" if PurePosixPath(version.path).parts[0] == DATASET_FOLDER else None
+        target.write_text(version.source, encoding="utf-8", newline=newline)
     return chosen

@@ -8,6 +8,7 @@ instead of surfacing later as fake agent failures.
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -190,9 +191,120 @@ class ExecutionSpec(Strict):
     turn_timeout_seconds: Annotated[float, Field(gt=0)] = 120.0
 
 
+DATASET_FOLDER = "datasets"
+DATASET_SUFFIXES = (".csv", ".jsonl")
+VARIABLE_NAME = r"^[A-Za-z_][A-Za-z0-9_]*$"
+"""A dataset column, and so a placeholder's name (ADR-0060)."""
+MATRIX_AXES = ("language", "dialect", "persona")
+"""The matrix axes, in the order cells are produced. Each is also a placeholder."""
+
+
+class DatasetSpec(Strict):
+    """Rows that one scenario stands for, one expanded scenario per row (ADR-0060)."""
+
+    path: str
+    """Relative to the catalogue root, under ``datasets/``: ``datasets/orders.csv``."""
+    allow_blank: list[Annotated[str, Field(pattern=VARIABLE_NAME)]] = Field(default_factory=list)
+    """Columns whose cells may be blank. A blank cell anywhere else is a load error."""
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, value: str) -> str:
+        rel = PurePosixPath(value)
+        if (
+            "\\" in value
+            or rel.is_absolute()
+            or len(rel.parts) < 2
+            or rel.parts[0] != DATASET_FOLDER
+            or any(part in (".", "..") for part in rel.parts)
+            or rel.suffix not in DATASET_SUFFIXES
+        ):
+            raise ValueError(
+                f"{value!r}: a dataset is a .csv or .jsonl file under datasets/ at the catalogue "
+                "root, written relative to that root (datasets/orders.csv)"
+            )
+        return value
+
+
+class PersonaVariant(Strict):
+    """One value of the matrix's ``persona`` axis: fields that replace the scenario's own."""
+
+    role: str | None = Field(default=None, min_length=1)
+    typing_noise: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
+    timezone: str | None = None
+
+    @model_validator(mode="after")
+    def _something(self) -> PersonaVariant:
+        if not self.model_fields_set:
+            raise ValueError("a persona variant needs at least one of role, typing_noise, timezone")
+        return self
+
+
+class Matrix(Strict):
+    """Axes a scenario runs across, one expanded scenario per cell (ADR-0060)."""
+
+    language: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+    """BCP-47 tags (``ar-EG``), resolved by the language packs (ADR-0059)."""
+    dialect: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+    """Dialect names, for the older ``language`` + ``dialect`` spelling."""
+    persona: list[PersonaVariant] = Field(default_factory=list)
+    exclude: list[dict[str, str | int]] = Field(default_factory=list)
+    """Cells left out, each named by some of its axes (``persona`` by its index from 0)."""
+
+    @model_validator(mode="after")
+    def _check(self) -> Matrix:
+        axes = {name: getattr(self, name) for name in MATRIX_AXES if getattr(self, name)}
+        if not axes:
+            raise ValueError("a matrix needs at least one axis: language, dialect or persona")
+        for name, values in axes.items():
+            seen = [v.model_dump(exclude_none=True) if name == "persona" else v for v in values]
+            if any(seen.count(v) > 1 for v in seen):
+                raise ValueError(f"{name}: a value is listed twice")
+        for index, rule in enumerate(self.exclude):
+            if not rule:
+                raise ValueError(f"exclude.{index}: empty; name the axes of the cells to leave out")
+            for key, value in rule.items():
+                if key not in axes:
+                    raise ValueError(
+                        f"exclude.{index}: {key!r} is not an axis of this matrix "
+                        f"(axes: {', '.join(axes)})"
+                    )
+                if key == "persona":
+                    if isinstance(value, bool) or not isinstance(value, int):
+                        raise ValueError(
+                            f"exclude.{index}.persona: name a persona by its index (0, 1, …)"
+                        )
+                    if not 0 <= value < len(self.persona):
+                        raise ValueError(
+                            f"exclude.{index}.persona: no persona {value} "
+                            f"(there are {len(self.persona)})"
+                        )
+                elif value not in axes[key]:
+                    raise ValueError(
+                        f"exclude.{index}.{key}: {value!r} is not one of the matrix's {key} values"
+                    )
+        return self
+
+
+class ExpandedFrom(Strict):
+    """Where an expanded scenario came from. Set by the loader, never written by hand."""
+
+    base_id: str
+    hash: Annotated[str, Field(pattern=r"^[0-9a-f]{8}$")]
+    """The first 8 hex digits of SHA-256 over the row's values and the matrix cell."""
+    dataset: str | None = None
+    dataset_digest: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+    """SHA-256 of the dataset file as it was read."""
+    row: Annotated[int, Field(ge=1)] | None = None
+    """The row's line in the dataset file (the CSV header is row 1)."""
+    matrix: dict[str, str | int] = Field(default_factory=dict)
+    """The matrix cell: ``language``/``dialect`` values, ``persona`` by index."""
+
+
 class Scenario(Strict):
     schema_: str = Field(default=SCHEMA_VERSION, alias="schema")
-    id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")]
+    id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}(@[0-9a-f]{8})?$")]
+    """Authored ids never hold ``@``: ``<id>@<hash>`` is an expanded scenario's (ADR-0060)."""
     name: str = Field(min_length=1)
     goal: str = Field(min_length=1)
     tags: list[str] = Field(default_factory=list)
@@ -204,8 +316,48 @@ class Scenario(Strict):
     expectations: Expectations = Field(default_factory=Expectations)
     scorers: list[ScorerSpec] | Literal["default"] = "default"
     execution: ExecutionSpec = Field(default_factory=ExecutionSpec)
+    dataset: DatasetSpec | str | None = None
+    """A CSV or JSONL file under ``datasets/``: one scenario per row, ``{{column}}`` in text
+    replaced by the row's value (ADR-0060). A plain string is the path."""
+    matrix: Matrix | None = None
+    """Language, dialect and persona axes: one scenario per cell, times every dataset row."""
+    expanded_from: ExpandedFrom | None = None
+    """Set by the loader on each expanded scenario; refused in an authored file."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @field_validator("dataset")
+    @classmethod
+    def _dataset(cls, value: DatasetSpec | str | None) -> DatasetSpec | None:
+        return DatasetSpec(path=value) if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _expansion(self) -> Scenario:
+        if self.expanded_from is None:
+            if "@" in self.id:
+                raise ValueError(
+                    "id: '@' is reserved for the scenarios a dataset or matrix expands to"
+                )
+            return self
+        if self.dataset is not None or self.matrix is not None:
+            raise ValueError("an expanded scenario has no dataset or matrix of its own")
+        if self.id != f"{self.expanded_from.base_id}@{self.expanded_from.hash}":
+            raise ValueError("id: an expanded scenario's id is <base_id>@<hash>")
+        return self
+
+    @property
+    def dataset_spec(self) -> DatasetSpec | None:
+        return self.dataset if isinstance(self.dataset, DatasetSpec) else None
+
+    @property
+    def is_template(self) -> bool:
+        """It stands for many scenarios: the loader expands it (ADR-0060)."""
+        return self.dataset is not None or self.matrix is not None
+
+    @property
+    def base_id(self) -> str:
+        """The authored id; an expanded scenario's ``<id>`` before the ``@``."""
+        return self.expanded_from.base_id if self.expanded_from else self.id
 
     @field_validator("schema_")
     @classmethod

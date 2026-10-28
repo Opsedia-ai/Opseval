@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ValidationError
 
+from opseval.datasets import Expansion, Limits, case_label, expand
 from opseval.errors import ConfigError
 from opseval.langpacks import UnknownLanguage, lookup
 from opseval.models.gate import GatePolicy
@@ -37,6 +38,9 @@ class Catalogue:
     scenarios: list[Scenario] = field(default_factory=list)
     problems: list[LoadProblem] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)  # scenario id -> file
+    expansions: dict[str, Expansion] = field(default_factory=dict)
+    """Authored id -> what its ``dataset:``/``matrix:`` expanded to (ADR-0060); a scenario
+    without either is not listed. ``sources`` names the expanded ids."""
     gate: GatePolicy | None = None  # the suite's gate policy, when a suite was loaded
     stop: StopPolicy | None = None  # the suite's stop policy, when a suite was loaded
 
@@ -223,10 +227,86 @@ def _load_scenario(
         return None, [LoadProblem(str(path), "", "a scenario file must contain a mapping")]
     # precedence: suite overrides > scenario value > suite defaults > schema default
     merged = _deep_merge(_deep_merge(defaults, raw), overrides)
+    return _validate_authored(merged, path)
+
+
+LOADER_ONLY = "expanded_from"
+
+
+def _validate_authored(
+    raw: dict[str, Any], path: Path
+) -> tuple[Scenario | None, list[LoadProblem]]:
+    if LOADER_ONLY in raw:
+        return None, [
+            LoadProblem(
+                str(path),
+                LOADER_ONLY,
+                "set by the loader on the scenarios a dataset or matrix expands to; remove it",
+            )
+        ]
     try:
-        return Scenario.model_validate(merged), []
+        return Scenario.model_validate(raw), []
     except ValidationError as exc:
         return None, _problems_from(path, exc)
+
+
+def catalogue_root(path: Path, *, fallback: Path) -> Path:
+    """The folder a scenario file's ``datasets/`` path is relative to (ADR-0060): the parent
+    of the nearest ``scenarios`` folder above it, else ``fallback`` (the loaded folder, or a
+    single file's own folder)."""
+    for parent in path.parents:
+        if parent.name == "scenarios":
+            return parent.parent
+    return fallback
+
+
+@dataclass
+class ScenarioCheck:
+    """One authored scenario through the loader: the scenario as written (with its base id),
+    what it expands to (itself, for a plain one) and every problem, at its field."""
+
+    scenario: Scenario | None
+    expanded: list[Scenario]
+    problems: list[LoadProblem]
+    expansion: Expansion | None = None
+
+
+def check_expanded(
+    template: Scenario,
+    where: str,
+    profile: SutProfile,
+    known_scorers: KnownScorers,
+    known_invariants: set[str],
+    *,
+    root: Path | None,
+    limits: Limits | None = None,
+) -> ScenarioCheck:
+    """Expand ``template`` and check every expansion's references against the profile. A
+    problem one expansion shares with the others is reported once."""
+    cached: list[Limits] = []
+
+    def lim() -> Limits:
+        if not cached:
+            cached.append(limits or Limits.from_settings())
+        return cached[0]
+
+    cases, problems, info = expand(template, root=root, limits=lim)
+    out = [LoadProblem(where, fld, msg) for fld, msg in problems]
+    if info is not None:
+        info.file = where
+    seen: set[tuple[str, str]] = set()
+    for case in cases:
+        for msg in check_references(case, profile, known_scorers, known_invariants):
+            fld, _, rest = msg.partition(": ")
+            if (fld, rest) in seen:
+                continue
+            seen.add((fld, rest))
+            if case.expanded_from is not None:
+                ef = case.expanded_from
+                label = case_label(ef.row, ef.dataset, ef.matrix)
+                rest = f"{label}: {rest}" if label else rest
+            out.append(LoadProblem(where, fld, rest))
+    return ScenarioCheck(template, [] if out else cases, out, info)
 
 
 def reference_problems(
@@ -251,24 +331,53 @@ def check_scenario_text(
     *,
     known_scorers: KnownScorers,
     known_invariants: set[str],
+    root: Path | None = None,
+    limits: Limits | None = None,
 ) -> tuple[Scenario | None, list[LoadProblem]]:
     """One scenario file's text through exactly the checks `opseval validate` applies to
-    it: YAML (with the line), a mapping, the schema (each problem at its field path), and
-    its references against the profile. The one place the console's editor and import
+    it: YAML (with the line), a mapping, the schema (each problem at its field path), its
+    expansion (ADR-0060; ``root`` is the catalogue folder its dataset is under) and its
+    references against the profile. The one place the console's editor and import
     validate, so they cannot drift from the loader."""
+    found = check_scenario_source(
+        text,
+        where,
+        profile,
+        known_scorers=known_scorers,
+        known_invariants=known_invariants,
+        root=root,
+        limits=limits,
+    )
+    return found.scenario, found.problems
+
+
+def check_scenario_source(
+    text: str,
+    where: str,
+    profile: SutProfile,
+    *,
+    known_scorers: KnownScorers,
+    known_invariants: set[str],
+    root: Path | None = None,
+    limits: Limits | None = None,
+) -> ScenarioCheck:
+    """:func:`check_scenario_text`, with what the scenario expands to."""
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         line = f"line {mark.line + 1}" if mark is not None else ""
-        return None, [LoadProblem(where, line, f"invalid YAML: {exc}")]
+        return ScenarioCheck(None, [], [LoadProblem(where, line, f"invalid YAML: {exc}")])
     if not isinstance(raw, dict):
-        return None, [LoadProblem(where, "", "a scenario file must contain a mapping")]
-    try:
-        scenario = Scenario.model_validate(raw)
-    except ValidationError as exc:
-        return None, _problems_from(Path(where), exc)
-    return scenario, reference_problems(scenario, where, profile, known_scorers, known_invariants)
+        return ScenarioCheck(
+            None, [], [LoadProblem(where, "", "a scenario file must contain a mapping")]
+        )
+    scenario, problems = _validate_authored(raw, Path(where))
+    if scenario is None:
+        return ScenarioCheck(None, [], problems)
+    return check_expanded(
+        scenario, where, profile, known_scorers, known_invariants, root=root, limits=limits
+    )
 
 
 def _match_filter(scenario: Scenario, flt: str) -> bool:
@@ -278,7 +387,8 @@ def _match_filter(scenario: Scenario, flt: str) -> bool:
     if key == "tag":
         return value in scenario.tags
     if key == "id":
-        return scenario.id == value
+        # An authored id selects every scenario its dataset or matrix expands to (ADR-0060).
+        return value in (scenario.id, scenario.base_id)
     if key == "criticality":
         return scenario.criticality.value == value
     raise ConfigError(f"unknown filter key {key!r}; use tag, id or criticality")
@@ -308,8 +418,12 @@ def load_catalogue(
     known_scorers: KnownScorers,
     known_invariants: set[str],
     filters: list[str] | None = None,
+    limits: Limits | None = None,
 ) -> tuple[Catalogue, str]:
-    """Load a scenario file, a directory, or a suite file. Returns (catalogue, suite name)."""
+    """Load a scenario file, a directory, or a suite file. Returns (catalogue, suite name).
+
+    A scenario with ``dataset:`` or ``matrix:`` becomes its expansions (ADR-0060); ``limits``
+    (default: from settings, read only if something expands) caps them."""
     path = Path(target)
     if not path.exists():
         raise ConfigError(f"{path}: no such file or directory")
@@ -336,30 +450,45 @@ def load_catalogue(
         suite_stop = suite.stop
         all_filters += suite.filters
         files = suite_files(path, suite)
+        fallback = path.parent.parent if path.parent.name == "suites" else path.parent
     elif path.is_dir():
         files = sorted(p for p in path.rglob("*.yaml") if "suites" not in p.parts)
+        fallback = path.parent if path.name == "scenarios" else path
     else:
         files = [path]
+        fallback = path.parent
 
     cat = Catalogue(gate=suite_gate, stop=suite_stop)
     seen: dict[str, str] = {}
     for f in files:
-        scenario, problems = _load_scenario(f, defaults, overrides)
+        template, problems = _load_scenario(f, defaults, overrides)
         cat.problems.extend(problems)
-        if scenario is None:
+        if template is None:
             continue
-        cat.problems.extend(reference_problems(scenario, str(f), profile, known, known_invariants))
-        if scenario.id in seen:
+        if template.id in seen:
             cat.problems.append(
                 LoadProblem(
-                    str(f), "id", f"duplicate id {scenario.id!r} (also in {seen[scenario.id]})"
+                    str(f), "id", f"duplicate id {template.id!r} (also in {seen[template.id]})"
                 )
             )
             continue
-        seen[scenario.id] = str(f)
-        if all(_match_filter(scenario, flt) for flt in all_filters):
-            cat.scenarios.append(scenario)
-            cat.sources[scenario.id] = str(f)
+        seen[template.id] = str(f)
+        found = check_expanded(
+            template,
+            str(f),
+            profile,
+            known,
+            known_invariants,
+            root=catalogue_root(f, fallback=fallback),
+            limits=limits,
+        )
+        cat.problems.extend(found.problems)
+        if found.expansion is not None:
+            cat.expansions[template.id] = found.expansion
+        for scenario in found.expanded:
+            if all(_match_filter(scenario, flt) for flt in all_filters):
+                cat.scenarios.append(scenario)
+                cat.sources[scenario.id] = str(f)
     # A scenario with problems must not run: drop it (it becomes a load error).
     bad_files = {p.path for p in cat.problems}
     cat.scenarios = sorted(

@@ -24,9 +24,10 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from opseval.advice import Configured, scenario_warnings
-from opseval.catalogue import check_scenario_text, load_catalogue
+from opseval.advice import Configured, expansion_warnings, scenario_warnings
+from opseval.catalogue import check_scenario_source, check_scenario_text, load_catalogue
 from opseval.config import Settings
+from opseval.datasets import Limits
 from opseval.errors import ConfigError, OpsevalError
 from opseval.llm import UsageMeter, client_for_role
 from opseval.models.gate import GatePolicy, from_flat, to_yaml_block
@@ -458,6 +459,8 @@ def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
             profile,
             known_scorers=REGISTRY,
             known_invariants=set(INVARIANTS),
+            root=root,
+            limits=Limits.from_settings(ctx.settings),
         )
         problems.extend(_problem(p.path, p.field, p.message) for p in found_problems)
         if found is None:
@@ -512,9 +515,16 @@ def _id_index(ctx: ServerContext) -> dict[str, Path]:
     if cached is not None and cached[0] == signature:
         return cached[1]
     cat, _ = load_catalogue(
-        folder, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+        folder,
+        profile,
+        known_scorers=REGISTRY,
+        known_invariants=set(INVARIANTS),
+        limits=Limits.from_settings(ctx.settings),
     )
     index = {sid: Path(src).resolve() for sid, src in cat.sources.items()}
+    # A dataset or matrix scenario is also found by its authored id (ADR-0060), so an id
+    # clash with it is caught and its file opens by that id.
+    index.update({base: Path(e.file).resolve() for base, e in cat.expansions.items()})
     _INDEX[folder] = (signature, index)
     return index
 
@@ -582,9 +592,16 @@ def _check_scenario(
     empty a suite, and, for a new file, whether its folder and name can be written."""
     root, profile = ctx.need_catalogue()
     where = body.file or (f"{body.family}/{body.file_name}" if body.file_name else "(new)")
-    sc, problems = check_scenario_text(
-        body.text, where, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+    checked = check_scenario_source(
+        body.text,
+        where,
+        profile,
+        known_scorers=REGISTRY,
+        known_invariants=set(INVARIANTS),
+        root=root,
+        limits=Limits.from_settings(ctx.settings),
     )
+    sc, problems = checked.scenario, checked.problems
     out = [_problem(p.path, p.field, p.message) for p in problems]
     editing = _scenario_file(ctx, body.file)[1] if body.file else None
     if body.file is None and body.file_name is not None:
@@ -617,16 +634,26 @@ def _check_scenario(
             judge=bool(ctx.settings.judge_base_url and ctx.settings.judge_model),
             simulator=bool(ctx.settings.simulator_base_url and ctx.settings.simulator_model),
         )
-        warnings = [
-            _problem(w.path, w.field, w.message)
-            for w in scenario_warnings(sc, where, profile, here)
-        ]
+        # A dataset or matrix scenario is warned about as it expands, each warning once.
+        found = list(
+            dict.fromkeys(
+                w
+                for case in checked.expanded or [sc]
+                for w in scenario_warnings(case, where, profile, here)
+            )
+        )
+        if checked.expansion is not None:
+            found += expansion_warnings(checked.expansion)
+        warnings = [_problem(w.path, w.field, w.message) for w in found]
     verdict = s.ScenarioCheckOut(
         ok=sc is not None and not out,
         id=sc.id if sc else None,
         title=sc.name if sc else None,
         problems=out,
         warnings=warnings,
+        expanded=[case.id for case in checked.expanded]
+        if sc is not None and sc.is_template
+        else [],
     )
     return verdict, sc
 

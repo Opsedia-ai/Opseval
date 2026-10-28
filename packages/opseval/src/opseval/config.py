@@ -238,6 +238,14 @@ class Settings(BaseSettings):
     """How long to wait for a free tenant before skipping the scenario."""
     reports_dir: str = "reports"
     """Where run folders are written."""
+    max_expansion: int = Field(default=100, ge=1, le=100_000)
+    """The most scenarios one scenario's ``dataset:`` and ``matrix:`` may expand to (ADR-0060).
+    Over it is a load error naming the count, never a truncation: a truncated set would drop
+    coverage silently."""
+    max_dataset_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
+    """The largest dataset file (CSV or JSONL under ``datasets/``) a load reads or a
+    ``catalogue push`` stores. Over it is an error naming the file."""
+
     retention_days: int = Field(default=90, ge=1)
     """``opseval prune`` deletes finished runs older than this many days (FR-SAF-06)."""
 

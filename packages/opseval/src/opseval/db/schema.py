@@ -51,8 +51,8 @@ NAMING = {
     "pk": "pk_%(table_name)s",
 }
 
-KINDS = ("scenario", "suite", "profile")
-"""What a catalogue item can be. The same three files a catalogue folder holds."""
+KINDS = ("scenario", "suite", "profile", "dataset")
+"""What a catalogue item can be: the files a catalogue folder holds (datasets: ADR-0060)."""
 TASK_KINDS = ("chat", "agentic", "voice", "batch")
 """What a task's agent does (ADR-0049)."""
 MODALITIES = ("text", "audio_file", "audio_stream", "telephony", "webrtc")
@@ -223,14 +223,15 @@ event.listen(Task.__table__, "before_drop", _before_drop)
 
 
 class CatalogueItem(Base):
-    """One scenario, suite or profile, by the name it is known by in its task."""
+    """One scenario, suite, profile or dataset (ADR-0060), by the name it is known by in its
+    task. A dataset's name is its path (``datasets/orders.csv``)."""
 
     __tablename__ = "catalogue_items"
     __table_args__ = (
         UniqueConstraint("task_id", "kind", "name"),
         # The target of the tasks' (item, task) links above.
         UniqueConstraint("id", "task_id"),
-        CheckConstraint("kind IN ('scenario', 'suite', 'profile')", name="kind"),
+        CheckConstraint(_one_of("kind", KINDS), name="kind"),
         ForeignKeyConstraint(
             ["task_id", "project_id"], ["tasks.id", "tasks.project_id"], ondelete="CASCADE"
         ),

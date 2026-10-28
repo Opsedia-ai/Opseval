@@ -718,6 +718,9 @@ class ScenarioCheckOut(Api):
     title: str | None
     problems: list[Problem]
     warnings: list[Problem] = []  # valid, but it will measure less than it looks; never blocks
+    expanded: list[str] = []
+    """The ids a ``dataset:`` or ``matrix:`` scenario expands to, from the loader (ADR-0060);
+    empty for a plain scenario, or when a problem stops the expansion."""
 
 
 class ImportOut(Api):

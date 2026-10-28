@@ -3,6 +3,51 @@
 - **Status:** Proposed
 - **Date:** 2026-10-28
 - **Deciders:** Opseval maintainers (owner request 2026-10-28)
+- **Implementation:** Implemented (2026-10-28): `opseval.datasets` (parsing, placeholders,
+  expansion), `dataset:`/`matrix:`/`expanded_from` on `Scenario`, the loader
+  (`catalogue.check_expanded`, used by `load_catalogue` and `check_scenario_text`), the run
+  snapshot and `rescore`, `catalogue push`/`pull` with migration `0004`, and the editor's check
+  (`ScenarioCheckOut.expanded`). Details this ADR left open, decided as follows:
+  - **Row numbers** are lines of the file: the CSV header is row 1, so the first data row is
+    row 2, as a spreadsheet shows it; a JSONL row is its line. Blank lines are skipped and keep
+    their numbers. CSV header names are trimmed; cells are kept exactly.
+  - **JSONL** rows must all have the first row's keys; `null` is a blank; a duplicate key,
+    `NaN`/`Infinity`, an array or an object is a load error. Numbers and booleans are written
+    into text as JSON (`3`, `2.5`, `true`) and hashed with their type.
+  - **Blank** means empty or whitespace only.
+  - **The hash** is over `{"matrix": cell, "row": values}`; a persona variant is hashed by its
+    content, not its index, so reordering personas keeps ids as reordering rows does. Two rows
+    that expand to the *same scenario* (they differ only in columns no placeholder reads) are
+    refused too, not only identical rows.
+  - **Matrix axes.** `language` sets `persona.language` and drops the template's `dialect`
+    (it belonged to the template's language) unless a `dialect` axis is present; `persona`
+    variants override `role`, `typing_noise` and `timezone`, and a variant's role may use
+    placeholders. `{{persona}}` is the variant's index. A column named like a declared axis is
+    refused. An `exclude` naming an axis the matrix lacks, or a value it does not list, is a
+    load error, and excluding every cell is one too.
+  - **Languages** are checked per expansion by the existing reference check, so the ADR-0059
+    rule holds unchanged: an unknown language is a load error for an LLM persona and a warning
+    for scripted turns.
+  - **Fields that cannot hold a placeholder** (tags, tool names, checkpoint names, …) refuse
+    `{{` in any scenario; `\{{` is resolved in plain scenarios too.
+  - **The catalogue root** for `datasets/` is the parent of the nearest `scenarios` folder
+    above the file, else the loaded folder (or a suite's root, or a single file's folder). The
+    editor and import pass the server's catalogue root.
+  - **Selection.** An authored id selects every expansion in `--filter id=`, a suite's
+    `filters` and the console's run-these-scenarios list (`RunOptions.only_ids`). Duplicate ids
+    are checked on the authored id. Tags and criticality are inherited.
+  - **Snapshots** are named by id with `@` kept (`storage.SAFE_ID`), so an expansion never
+    shares a file with an authored `a_1a2b3c4d`. No layout bump: an older reader refuses a
+    snapshot with `expanded_from` (`extra="forbid"`) rather than misreading it.
+  - **Settings** are read only when a scenario expands (`datasets.Limits`), so a catalogue
+    with no dataset never reads them.
+  - **Migration `0004`** widens `ck_catalogue_items_kind`. `0001` created it as
+    `ck_catalogue_items_ck_catalogue_items_kind` (the naming convention applied twice); `0004`
+    drops either name and creates the models' `ck_catalogue_items_kind`, and its downgrade
+    restores the released name. The downgrade refuses while any dataset item is stored.
+  - **Not built yet:** provenance in the HTML report and the console's run detail (the id
+    carries the base and hash; `expanded_from` is in the snapshot), and analytics grouped by
+    base id, language or persona (ADR-0052).
 
 ## Context
 

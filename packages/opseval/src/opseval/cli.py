@@ -179,7 +179,7 @@ def validate(
     except ConfigError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
-    from opseval.advice import Configured, scenario_warnings
+    from opseval.advice import Configured, expansion_warnings, scenario_warnings
 
     # Validation is offline and needs no credentials: a broken setting elsewhere must not
     # fail it. Without readable settings, the warnings about this machine are left out.
@@ -192,11 +192,20 @@ def validate(
             judge=bool(settings.judge_base_url and settings.judge_model),
             simulator=bool(settings.simulator_base_url and settings.simulator_model),
         )
-    warnings = [
-        w
-        for sc in cat.scenarios
-        for w in scenario_warnings(sc, cat.sources.get(sc.id, sc.id), prof, here)
-    ]
+    # The expansions of one scenario share most warnings: each is said once (ADR-0060).
+    warnings = list(
+        dict.fromkeys(
+            w
+            for sc in cat.scenarios
+            for w in scenario_warnings(sc, cat.sources.get(sc.id, sc.id), prof, here)
+        )
+    )
+    for expansion in cat.expansions.values():
+        warnings += expansion_warnings(expansion)
+        typer.echo(
+            f"• {expansion.base_id}: expands to {expansion.count} scenario(s), "
+            f"{expansion.attempts} attempt(s) ({expansion.count} x {expansion.repeats} repeats)"
+        )
     for problem in cat.problems:
         typer.secho(f"✗ {problem}", fg="red")
     for warning in warnings:
