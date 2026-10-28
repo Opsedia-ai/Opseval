@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from opseval.models.gate import GatePolicy
 from opseval.models.stop import StopPolicy
+from opseval.models.voice import VoiceSpec
 
 SCHEMA_VERSION = "opseval/v1"
 
@@ -204,8 +205,24 @@ class Scenario(Strict):
     expectations: Expectations = Field(default_factory=Expectations)
     scorers: list[ScorerSpec] | Literal["default"] = "default"
     execution: ExecutionSpec = Field(default_factory=ExecutionSpec)
+    voice: VoiceSpec | None = None
+    """What the simulated caller does on a voice call (ADR-0055): barge-in, silences, noise,
+    its voice. A text run of a scenario that declares it is refused (exit 3), so it is never
+    silently left out."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _voice_turns(self) -> Scenario:
+        # A silence planted in a turn the conversation can never reach would quietly not
+        # happen: an authoring mistake, refused at load like an injection beyond max_turns.
+        late = [s.caller_turn for s in (self.voice.silences if self.voice else [])]
+        if any(t > self.conversation.max_turns for t in late):
+            raise ValueError(
+                f"voice.silences: caller turn {max(late)} is beyond max_turns "
+                f"({self.conversation.max_turns})"
+            )
+        return self
 
     @field_validator("schema_")
     @classmethod

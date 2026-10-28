@@ -10,10 +10,16 @@
   any codec the profile says, base64 JSON envelope) and ``audio-http`` (WAV in, WAV out). It
   hears the caller by decoding the tones and answers in tones. ``bug`` injects a defect:
   ``silent`` sends only silence, ``garbled`` sends loud noise no STT can read.
+- With ``duplex`` (ADR-0055) the ``audio-ws`` agent speaks in real time, 20 ms a chunk, and
+  listens while it speaks: caller audio with energy stops it mid-sentence (it sends
+  ``speech_end``, its play-back cleared), and it answers what the caller said over it. It also
+  sends its own transcript of each caller turn (``transcript`` with ``of: caller``). The
+  ``talks-over`` bug never stops for the caller.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -25,12 +31,14 @@ from typing import Literal
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from opseval.audio import AudioDecodeError, decode, encode, from_wav, to_wav
+from opseval.audio import AudioDecodeError, decode, encode, from_wav, has_energy, to_wav
 from opseval.demo import tones
 from opseval.demo.loopback import Request, Response, multipart_file, serve_http
 
-VoiceBug = Literal["silent", "garbled"]
+VoiceBug = Literal["silent", "garbled", "talks-over"]
 VOICE_BUGS: tuple[str, ...] = ("silent", "garbled")
+DUPLEX_BUGS: tuple[str, ...] = ("talks-over",)
+CHUNK_MS = 20
 SpeechMode = Literal["ok", "down", "deaf"]
 TTS_RATE = 24_000
 ORDER_RE = re.compile(r"\d{4,}")
@@ -82,7 +90,7 @@ async def run_speech(mode: SpeechMode = "ok") -> AsyncIterator[str]:
                 pcm, rate = from_wav(data)
             except AudioDecodeError:
                 return Response(400, b'{"error": {"code": "bad_audio"}}', "application/json")
-            heard = "" if mode == "deaf" else tones.decode(pcm, rate)
+            heard = "" if mode == "deaf" else tones.decode_all(pcm, rate)
             body = {"text": heard, "segments": [{"avg_logprob": -0.05}] if heard else []}
             return Response(200, json.dumps(body).encode(), "application/json")
         return Response(404, b"not found", "text/plain")
@@ -126,7 +134,7 @@ class VoiceConversation:
 
 
 def hear(pcm16: bytes, rate: int) -> str:
-    return tones.decode(pcm16, rate)
+    return tones.decode_all(pcm16, rate)
 
 
 @dataclass
@@ -172,15 +180,94 @@ async def _ws_handler(conn: ServerConnection, bug: VoiceBug | None) -> None:
         return
 
 
+@dataclass
+class _DuplexCall(_WsCall):
+    speaking: asyncio.Task[None] | None = None
+    interrupted: bool = False
+
+
+async def _speak_paced(
+    conn: ServerConnection, call: _DuplexCall, pcm: bytes, *, yields: bool
+) -> None:
+    """One reply in real time, a chunk every 20 ms; stops at once when the caller cuts in."""
+    step = call.rate * CHUNK_MS // 1000 * 2
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await conn.send(json.dumps({"type": "speech_start"}))
+    for k, i in enumerate(range(0, len(pcm), step)):
+        if yields and call.interrupted:
+            break
+        ahead = began + k * CHUNK_MS / 1000 - loop.time()
+        if ahead > 0:
+            await asyncio.sleep(ahead)
+        chunk = encode(pcm[i : i + step], call.codec)  # type: ignore[arg-type]
+        await conn.send(json.dumps({"type": "audio", "audio": base64.b64encode(chunk).decode()}))
+    await conn.send(json.dumps({"type": "speech_end"}))
+
+
+async def _ws_duplex_handler(conn: ServerConnection, bug: VoiceBug | None) -> None:
+    """The agent of ``opseval demo --voice --duplex``: it listens while it speaks."""
+    call = _DuplexCall()
+    # Silent and garbled speech are the conversation's own defects; talking over is this
+    # handler's.
+    conversation = VoiceConversation(bug=None if bug == "talks-over" else bug)
+    yields = bug != "talks-over"
+
+    async def answer(said: str, previous: asyncio.Task[None] | None) -> None:
+        if previous is not None and not previous.done():
+            await previous  # it never stops for the caller: it finishes, then answers
+        call.interrupted = False
+        await conn.send(json.dumps({"type": "transcript", "of": "caller", "text": said}))
+        pcm = conversation.speak(conversation.reply(said), call.rate)
+        await _speak_paced(conn, call, pcm, yields=yields)
+
+    try:
+        async for message in conn:
+            frame = json.loads(message) if isinstance(message, str) else {"type": "audio"}
+            kind = frame.get("type")
+            if kind == "start":
+                call.codec, call.rate = (
+                    str(frame.get("codec", "mulaw")),
+                    int(frame.get("rate", 8000)),
+                )
+            elif kind == "audio":
+                wire = (
+                    message
+                    if isinstance(message, bytes)
+                    else base64.b64decode(frame.get("audio", ""))
+                )
+                call.buffer.append(wire)
+                pcm = decode(wire, call.codec)  # type: ignore[arg-type]
+                talking = call.speaking is not None and not call.speaking.done()
+                if talking and has_energy(pcm):
+                    call.interrupted = True
+            elif kind == "end_of_turn":
+                wire = b"".join(call.buffer)
+                call.buffer.clear()
+                said = hear(decode(wire, call.codec), call.rate)  # type: ignore[arg-type]
+                call.speaking = asyncio.create_task(answer(said, call.speaking))
+    except ConnectionClosed:
+        return
+    finally:
+        if call.speaking is not None and not call.speaking.done():
+            call.speaking.cancel()
+
+
 @asynccontextmanager
 async def run_voice_agent(
-    bug: VoiceBug | None = None, *, transport: Literal["audio-ws", "audio-http"] = "audio-ws"
+    bug: VoiceBug | None = None,
+    *,
+    transport: Literal["audio-ws", "audio-http"] = "audio-ws",
+    duplex: bool = False,
 ) -> AsyncIterator[str]:
     """The speaking agent on loopback; yields its URL for ``transport``."""
     if transport == "audio-ws":
 
         async def handler(conn: ServerConnection) -> None:
-            await _ws_handler(conn, bug)
+            if duplex:
+                await _ws_duplex_handler(conn, bug)
+            else:
+                await _ws_handler(conn, bug)
 
         async with serve(handler, "127.0.0.1", 0) as server:
             port = next(iter(server.sockets)).getsockname()[1]
@@ -212,15 +299,19 @@ async def run_voice_demo(
     *,
     speech: SpeechMode = "ok",
     transport: Literal["audio-ws", "audio-http"] = "audio-ws",
+    duplex: bool = False,
 ) -> AsyncIterator[tuple[str, str]]:
     """The agent and the speech providers together; yields (agent URL, speech URL)."""
     async with AsyncExitStack() as stack:
-        agent = await stack.enter_async_context(run_voice_agent(bug, transport=transport))
+        agent = await stack.enter_async_context(
+            run_voice_agent(bug, transport=transport, duplex=duplex)
+        )
         speech_url = await stack.enter_async_context(run_speech(speech))
         yield agent, speech_url
 
 
 __all__ = [
+    "DUPLEX_BUGS",
     "VOICE_BUGS",
     "VoiceConversation",
     "run_speech",

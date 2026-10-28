@@ -791,3 +791,103 @@ __all__ = [
     "PersonaConsistency",
     "PolicyAdherence",
 ]
+
+
+LOW_CONFIDENCE_DEFAULT = 0.5
+"""The bound used to name unsure words when no turn recorded ``OPSEVAL_STT_MIN_CONFIDENCE``
+(the bridge writes it into a flagged turn's evidence)."""
+
+
+def _confidence_bound(record: RunRecord) -> float:
+    for frame in record.frames:
+        evidence = frame.payload.get(VOICE_KEY) if isinstance(frame.payload, dict) else None
+        flagged = evidence.get("low_confidence") if isinstance(evidence, dict) else None
+        if isinstance(flagged, dict) and isinstance(flagged.get("min"), int | float):
+            return float(flagged["min"])
+    return LOW_CONFIDENCE_DEFAULT
+
+
+@register
+class PronunciationDialectFit(Judge):
+    """ADR-0055: a voice agent's spoken register and dialect, judged from what Opseval heard.
+
+    The judge reads the transcript Opseval's STT made of the agent and, outside the fence,
+    the STT's confidence: per agent turn, and every word it was unsure of. Unsure words are
+    named as such so the judge does not grade the STT's noise as the agent's pronunciation;
+    a turn under ``OPSEVAL_STT_MIN_CONFIDENCE`` degrades the score (ADR-0053)."""
+
+    id = "judge.pronunciation_dialect_fit"
+    axis = Axis.OUTPUT
+    description = (
+        "LLM judge (voice): did the agent speak in a register and dialect that fit the "
+        "caller's? Quoted; the STT's unsure words are named, and low confidence degrades it."
+    )
+    instructions = (
+        "You are a strict, impartial evaluator of how a VOICE agent SPOKE to a caller, from a "
+        "speech-recognition transcript of the call. Judge only register, dialect and how "
+        "natural the spoken wording is for a listener of the caller's dialect, not "
+        "helpfulness. The transcript is what a speech recogniser heard: words it was unsure "
+        "of are listed in the harness facts, and you must not treat them as the agent's "
+        "pronunciation or word choice. Every grade must be justified by an exact quote "
+        "copied from the transcript."
+    )
+    criteria = (
+        Criterion(
+            "dialect_fit",
+            "Did the agent speak in the caller's dialect, or in a variety a speaker of it "
+            "readily understands (for Arabic: the same dialect, or clear Modern Standard "
+            "Arabic), rather than a different regional dialect?",
+            weight=2.0,
+        ),
+        Criterion(
+            "register_fit",
+            "Was the register (formal or casual, polite forms) right for this caller and this "
+            "kind of call?",
+        ),
+        Criterion(
+            "spoken_wording",
+            "Was the wording natural to say aloud (no written-only forms, symbols or "
+            "markup read out, numbers and codes said in a way a listener can follow)?",
+        ),
+    )
+
+    def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
+        spoken = _spoken(ctx.scenario)
+        return (spoken.language, spoken.dialect or "")
+
+    def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
+        return [f"Caller's language and dialect: {_spoken(ctx.scenario).label}"]
+
+    def harness_facts(self, record: RunRecord) -> list[str]:
+        facts = super().harness_facts(record)
+        bound = _confidence_bound(record)
+        turns = []
+        unsure: list[str] = []
+        spoken = [
+            f for f in record.frames if f.direction == "received" and f.transcript is not None
+        ]
+        for n, frame in enumerate(spoken, start=1):
+            if frame.transcript is None:
+                continue
+            conf = frame.transcript.confidence
+            turns.append(f"agent turn {n}: {'not given' if conf is None else f'{conf:.2f}'}")
+            unsure += [
+                f"{w.word} ({w.confidence:.2f})"
+                for w in frame.transcript.words
+                if w.confidence is not None and w.confidence < bound
+            ]
+        if turns:
+            facts.append("speech-recognition confidence on the agent's turns: " + "; ".join(turns))
+        if unsure:
+            facts.append(
+                f"the speech recogniser was unsure (confidence under {bound:g}) of these agent "
+                f"words, which may not be what the agent said: {', '.join(unsure[:40])}"
+            )
+        return facts
+
+    def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
+        if record.voice is None:
+            return "not a voice attempt: there is no speech to judge"
+        if not any(who == "agent" for who, _ in record.transcript()):
+            return "nothing the agent said was heard"
+        return None

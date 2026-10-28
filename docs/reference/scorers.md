@@ -20,12 +20,17 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `judge.content_quality` | llm | 2 | none | LLM judge: was the agent's writing clear, grounded and appropriate? (quoted) |
 | `judge.goal_achievement` | llm | 3 | none | LLM judge: did the conversation achieve the customer's goal? (quoted, weighted) |
 | `judge.language_consistency` | llm | 3 | none | LLM judge: did the agent answer in the customer's language and dialect? (quoted) |
+| `judge.pronunciation_dialect_fit` | llm | 2 | none | LLM judge (voice): did the agent speak in a register and dialect that fit the caller's? Quoted; the STT's unsure words are named, and low confidence degrades it. |
 | `output.language_script` | frames | 1 | `script, min_fraction` | Share of agent messages written mainly in the expected script (arabic\|latin). |
 | `output.payload_equals` | frames | 3 | `checkpoint*, path*, equals*` | A checkpoint payload field has the expected value (params: checkpoint, path, equals; checks the approved occurrence, else the last one). |
 | `output.required_fields` | frames | 2 | `checkpoint*, fields*` | A checkpoint payload carries every listed field, present and not empty (params: checkpoint, fields; checks the approved occurrence, else the last one). |
 | `output.terminal_state` | frames | 2 | none | The conversation ended where the scenario's stop_at says it should. |
 | `protocol.probes_passed` | frames | 1 | none | Every protocol probe the profile declares got the answer it expects. |
-| `voice.intelligible` | frames | 2 | none | Always on for voice. Fails when the agent spoke with energy that no STT could read while the STT canary proved Opseval could hear, or sent audio that cannot be decoded; an unheard turn (the canary failed) is left out and degrades it, and with no turn heard it is not measured. |
+| `voice.agent_asr_wer` | frames | 1 | `max_mean, max_turn` | Voice (ADR-0055): how well the agent heard the caller, as the WER of its own transcript (a transcript event of the caller) against what the caller said, before any planted noise. Not measured when the agent exposes no such transcript. |
+| `voice.asr_confidence` | frames | 1 | `min_mean, min_turn` | Voice (ADR-0055): Opseval's STT confidence on the agent's turns (mean and lowest). A turn with no confidence, or not heard, is not measured, never 0. |
+| `voice.intelligible` | frames | 3 | none | Always on for voice. Fails when the agent spoke with energy that no STT could read while the STT canary proved Opseval could hear, or sent audio that cannot be decoded; an unheard turn (the canary failed) is left out and degrades it, and with no turn heard it is not measured. |
+| `voice.time_to_first_audio_ms` | frames | 1 | `max_ms*` | Voice (ADR-0055): how long until the agent's first audio, against max_ms. Never counts Opseval's own TTS or STT time. |
+| `voice.turn_latency_ms` | frames | 1 | `p50_max_ms, p95_max_ms, max_ms` | Voice (ADR-0055): from the caller's last sample to the agent's first audio, per turn; p50/p95 are computed from the turns. A turn the agent began over the caller, or whose gap the harness overlapped, is not measured (the latter degrades it). |
 
 ## flow
 
@@ -39,6 +44,10 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `flow.phase_order` | frames | 1 | `allow_gaps` | Phases first appear in profile order without skipping (params.allow_gaps). |
 | `flow.rejection_routing` | frames | 1 | none | After each rejection, the agent returns to the expected target phase. |
 | `judge.efficiency` | llm | 2 | none | LLM judge: did the agent reach the outcome without wasting the customer's time? |
+| `voice.barge_in_yield_ms` | frames | 1 | `max_ms*` | Voice (ADR-0055, duplex): after a planted barge-in, how long the agent kept talking. Not measured when no barge-in was planted or the agent had already stopped. |
+| `voice.dead_air_ms` | frames | 1 | `max_turn_ms, max_total_ms` | Voice (ADR-0055): silence while the agent is the party expected to speak, per turn. Planted silences and Opseval's simulator, TTS and STT time never count; a gap the clocks cannot place is left out and degrades it. |
+| `voice.talk_over_ratio` | frames | 1 | `max_ratio*` | Voice (ADR-0055, duplex): share of the agent's speech it began while the caller was talking. Overlap the caller started (a barge-in) is never counted. |
+| `voice.transfer` | frames | 1 | `expected, to, within_ms` | Voice (ADR-0055): the agent transferred the call (or did not), to the expected target, in time; read from the call's timeline. |
 
 ## tools
 

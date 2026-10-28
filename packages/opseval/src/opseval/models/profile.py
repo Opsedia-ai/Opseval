@@ -168,6 +168,10 @@ class AudioEnvelope(BaseModel):
     """The agent's own transcript of what it said, when it sends one (kept as evidence; the
     text scorers read Opseval's own STT)."""
     transcript_text_field: str = "text"
+    transcript_of_field: str = "of"
+    """Whose words a transcript event holds: ``"caller"`` here marks the agent's own
+    transcript of what it heard the caller say, which ``voice.agent_asr_wer`` grades against
+    the caller's known text (ADR-0055). Anything else is the agent's transcript of itself."""
     dtmf_event: str | None = "dtmf"
     dtmf_digits_field: str = "digits"
     transfer_event: str | None = "transfer"

@@ -6,8 +6,9 @@ into text (STT). The driver, the scorers and the judges then work as they do for
 ([ADR-0053](../adr/0053-voice-sessions-and-records.md)).
 
 !!! note "Preview"
-    This is the turn-based bridge. Barge-in and talk-over (ADR-0055), phone calls (ADR-0056),
-    WebRTC (ADR-0057) are not built yet.
+    The turn-based bridge and the full-duplex driver (barge-in, talk-over, dead air,
+    [ADR-0055](../adr/0055-full-duplex-voice-driver-and-metrics.md)) are built. Phone calls
+    (ADR-0056) and WebRTC (ADR-0057) are not built yet.
 
 ## Try it
 
@@ -18,6 +19,8 @@ opseval demo --voice --bug garbled           # it speaks, but nobody could under
 opseval demo --voice --stt-down              # Opseval cannot listen → exit 3, nothing judged
 opseval demo --voice --stt-deaf              # Opseval's STT hears nothing, not even itself → exit 3
 opseval demo --voice --voice-transport audio-http
+opseval demo --voice --duplex                # full duplex: the caller cuts in, the agent stops → exit 0
+opseval demo --voice --duplex --bug talks-over   # the agent never stops for the caller → exit 1
 ```
 
 The demo needs no speech model and no key. Its "voices" are synthetic: a fake TTS writes text
@@ -64,7 +67,9 @@ opseval run suites/voice.yaml --profile profile.yaml --transport audio-ws --targ
 
 - `audio-ws` streams audio over a WebSocket, as base64 in JSON or as binary frames
   (`envelope.binary: true`). The agent's other JSON messages, such as a checkpoint or a result,
-  are frames that the profile classifies as usual.
+  are frames that the profile classifies as usual. A `transcript` event with `"of": "caller"`
+  (`envelope.transcript_of_field`) is the agent's own transcript of what it heard the caller
+  say, which `voice.agent_asr_wer` grades.
 - `audio-http` sends each caller turn as one `POST` (a WAV file, or raw bytes with
   `http.request_format: raw`) and reads the answer as audio, or as JSON
   `{"audio": "<base64>", "transcript": "…"}`. Any other field of that JSON (a checkpoint, a
@@ -75,6 +80,73 @@ The agent's turn ends with its speech (its own end-of-speech event, or
 `end_of_turn_silence_ms` of silence), a checkpoint, a result, an error or a hang-up. A
 notification such as `response.created` is recorded but does not end the wait: an agent that
 sends one and never speaks has timed out.
+
+## Full duplex: interruptions, pauses and noise
+
+The bridge above is turn-based: one side speaks, then the other. To test what a voice agent does
+when both can talk at once, give the scenario a `voice:` block
+([ADR-0055](../adr/0055-full-duplex-voice-driver-and-metrics.md)):
+
+```yaml
+voice:
+  duplex: true                    # implied by barge_in
+  barge_in:                       # the caller talks over the agent
+    - {agent_turn: 1, after_ms: 600, say: "Sorry, the order is 10482."}
+  silences:                       # the caller pauses
+    - {caller_turn: 1, ms: 400, at: mid}      # mid-sentence; or `before` the turn
+  noise: {kind: babble, snr_db: 20, seed: 7}  # white | pink | babble, mixed into the caller's audio
+  caller_voice: calm_female       # a persona voice, looked up in OPSEVAL_TTS_VOICE_MAP
+  # code_switching: [ar, en]      # an LLM caller mixes both in a sentence (needs caller_voice)
+```
+
+On the duplex driver the line is read all the time, the caller's audio is paced in real time, and
+an agent turn is not over until its audio has played out. A planted barge-in is spoken (and
+mixed) before the call starts, streamed over the agent at `after_ms` into its speech, and becomes
+a customer turn in the record; the agent owes it an answer like any other turn. Duplex needs a
+streaming transport: `audio-ws`. `audio-http` hears the caller only once a turn is over, so a
+duplex scenario on it is refused at launch (exit 3), as is a `voice:` block on a text transport.
+`silences`, `noise` and `caller_voice` also work on the turn-based bridge.
+
+The noise is generated, not recorded: no clips to license and no recorded speech in the package.
+It is mixed into what the agent hears only. The STT canary and every reference text use the
+caller's clean audio and words, and the agent's own audio is never touched.
+
+### Voice metrics, and gating on them
+
+Every voice attempt records raw metrics, one row per turn (or per attempt), on the attempt's
+monotonic clock. A value that could not be measured is "not measured" with its reason, never 0.
+Scorers turn them into gate thresholds:
+
+```yaml
+scorers:
+  - {id: voice.time_to_first_audio_ms, params: {max_ms: 1500}}
+  - {id: voice.turn_latency_ms,        params: {p95_max_ms: 1500, p50_max_ms: 800}}
+  - {id: voice.barge_in_yield_ms,      params: {max_ms: 1000}}     # duplex
+  - {id: voice.talk_over_ratio,        params: {max_ratio: 0.05}}  # duplex
+  - {id: voice.dead_air_ms,            params: {max_turn_ms: 2000}}
+  - {id: voice.agent_asr_wer,          params: {max_mean: 0.15}}
+  - {id: voice.asr_confidence,         params: {min_mean: 0.7}}
+  - {id: voice.transfer,               params: {to: tier2, within_ms: 60000}}
+  - {id: judge.pronunciation_dialect_fit}
+```
+
+| Metric | What it measures | Never counted |
+|---|---|---|
+| `voice.time_to_first_audio_ms` | to the agent's first audio: from the call's start if it greets, else from the end of the caller's opening | Opseval's TTS and STT time |
+| `voice.turn_latency_ms` | the caller's last sample to the agent's first audio, per turn; p50/p95 computed from the turns (nearest rank) | a turn the agent began over the caller (not measured), a gap Opseval's TTS/STT overlapped (left out, degraded) |
+| `voice.barge_in_yield_ms` | how long the agent kept talking after a planted interruption | not measured without one, or when the agent had already stopped |
+| `voice.talk_over_ratio` | the share of the agent's speech it began while the caller was talking | overlap the caller started (a barge-in is the caller's doing) |
+| `voice.dead_air_ms` | silence while the agent is the party expected to speak: its answer gap and its pauses (≥ 200 ms) in a turn | planted silences, a gap that ends in caller speech, harness time |
+| `voice.agent_asr_wer` | the agent's own transcript of the caller (a `transcript` event with `of: caller`) against what the caller said, before noise | not measured when the agent sends none |
+| `voice.asr_confidence` | Opseval's STT confidence on the agent's turns (mean, lowest) | a turn without a confidence, or not heard |
+| `voice.transfer` | the agent handed the call over (or not), to the target, in time | — |
+| `judge.pronunciation_dialect_fit` | a quoted LLM judge: the agent's register and dialect for this caller; words the STT was unsure of are named so they are not graded as pronunciation | — |
+
+Talk-over and barge-in yield need the duplex driver; on the turn-based bridge they are "not
+measured" and say so. A turn the caller cut short that no STT could read is left out of
+`voice.intelligible` (a fragment is not proof of bad audio). An STT outage during a barge-in turn
+is a harness error (not judged), never a failed yield. Records from before these metrics read as
+not measured.
 
 ## How a spoken turn is judged
 

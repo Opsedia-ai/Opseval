@@ -809,7 +809,7 @@ def demo(
         Optional[str],  # noqa: UP045
         typer.Option(
             help="Inject a defect into the sample agent: skip-approval | forget-method | crash; "
-            "with --voice: silent | garbled"
+            "with --voice: silent | garbled; with --voice --duplex: talks-over"
         ),
     ] = None,
     repeats: Annotated[int, typer.Option(min=1, max=20)] = 3,
@@ -837,6 +837,14 @@ def demo(
             "--stt-deaf", help="With --voice: the fake STT hears nothing, not even the canary."
         ),
     ] = False,
+    duplex: Annotated[
+        bool,
+        typer.Option(
+            "--duplex",
+            help="With --voice: run the full-duplex driver (ADR-0055): the caller pauses, "
+            "speaks over noise and cuts in on the agent, and the voice metrics gate the run.",
+        ),
+    ] = False,
 ) -> None:
     """Start the sample refund agent and run the smoke suite against it (no LLM keys needed)."""
     from opseval.demo import catalogue_dir
@@ -844,10 +852,12 @@ def demo(
 
     if voice:
         raise typer.Exit(
-            _voice_demo(bug, repeats, junit, open_report, voice_transport, stt_down, stt_deaf)
+            _voice_demo(
+                bug, repeats, junit, open_report, voice_transport, stt_down, stt_deaf, duplex
+            )
         )
-    if stt_down or stt_deaf:
-        typer.secho("--stt-down and --stt-deaf need --voice", fg="red", err=True)
+    if stt_down or stt_deaf or duplex:
+        typer.secho("--stt-down, --stt-deaf and --duplex need --voice", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS)
     if bug is not None and bug not in BUGS:
         typer.secho(f"unknown bug {bug!r}; choose from {', '.join(BUGS)}", fg="red", err=True)
@@ -880,18 +890,32 @@ def _voice_demo(
     transport: str,
     stt_down: bool,
     stt_deaf: bool,
+    duplex: bool = False,
 ) -> int:
-    """``opseval demo --voice`` (ADR-0053): the speaking agent and fake speech on loopback."""
+    """``opseval demo --voice`` (ADR-0053): the speaking agent and fake speech on loopback.
+    ``--duplex`` runs the full-duplex suite (ADR-0055) on ``audio-ws``."""
     from opseval.demo import voice_catalogue_dir
-    from opseval.demo.voice_agent import VOICE_BUGS, run_voice_demo
+    from opseval.demo.voice_agent import DUPLEX_BUGS, VOICE_BUGS, run_voice_demo
 
-    if bug is not None and bug not in VOICE_BUGS:
+    bugs = (*VOICE_BUGS, *DUPLEX_BUGS) if duplex else VOICE_BUGS
+    if bug is not None and bug not in bugs:
         typer.secho(
-            f"unknown voice bug {bug!r}; choose from {', '.join(VOICE_BUGS)}", fg="red", err=True
+            f"unknown voice bug {bug!r}; choose from {', '.join(bugs)}"
+            + ("" if duplex else f" ({', '.join(DUPLEX_BUGS)} needs --duplex)"),
+            fg="red",
+            err=True,
         )
         return EXIT_HARNESS
     if transport not in ("audio-ws", "audio-http"):
         typer.secho("--voice-transport is audio-ws or audio-http", fg="red", err=True)
+        return EXIT_HARNESS
+    if duplex and transport != "audio-ws":
+        typer.secho(
+            "--duplex needs --voice-transport audio-ws: audio-http hears the caller only once "
+            "a turn is over",
+            fg="red",
+            err=True,
+        )
         return EXIT_HARNESS
     if stt_down and stt_deaf:
         typer.secho("choose one of --stt-down and --stt-deaf", fg="red", err=True)
@@ -904,6 +928,7 @@ def _voice_demo(
             bug,  # type: ignore[arg-type]
             speech=speech,  # type: ignore[arg-type]
             transport=transport,  # type: ignore[arg-type]
+            duplex=duplex,
         ) as (url, speech_url):
             settings = Settings()
             settings.allowed_hosts = ",".join(filter(None, [settings.allowed_hosts, "127.0.0.1"]))
@@ -923,7 +948,7 @@ def _voice_demo(
             # Synthetic voices may be kept as plain WAV; with OPSEVAL_AUDIO_ENCRYPTION_KEY set
             # they are sealed like a real run's, so `opseval audio export` can be tried.
             settings.record_audio = "files"
-            what = f"bug: {bug or 'none'}; STT: {speech}"
+            what = f"bug: {bug or 'none'}; STT: {speech}" + ("; full duplex" if duplex else "")
             typer.echo(f"Speaking refund agent at {url} over {transport} ({what})\n")
             options = RunOptions(
                 target=url,
@@ -933,9 +958,8 @@ def _voice_demo(
                 synthetic_voices=True,
             )
             try:
-                result = await launch(
-                    cat / "suites" / "smoke.yaml", options, settings, log=typer.echo
-                )
+                suite = "duplex.yaml" if duplex else "smoke.yaml"
+                result = await launch(cat / "suites" / suite, options, settings, log=typer.echo)
             except ConfigError as exc:
                 typer.secho(f"configuration error: {exc}", fg="red", err=True)
                 return EXIT_HARNESS

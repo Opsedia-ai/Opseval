@@ -87,13 +87,8 @@ def _symbol(window: array[int], rate: int) -> int | None:
     return ranked[0]
 
 
-def decode(pcm16: bytes, rate: int) -> str:
-    """The text in ``pcm16``, or ``""`` when it is not a clean tone message."""
-    samples = array("h")
-    samples.frombytes(pcm16[: len(pcm16) - len(pcm16) % 2])
-    start = next((i for i, s in enumerate(samples) if abs(s) > ONSET), None)
-    if start is None:
-        return ""
+def _decode_at(samples: array[int], start: int, rate: int) -> tuple[str, int] | None:
+    """The message whose first sound is at ``start``, and the sample just after it."""
     n = symbol_samples(rate)
     lo, hi = n * 15 // 100, n * 85 // 100
 
@@ -109,18 +104,53 @@ def decode(pcm16: bytes, rate: int) -> str:
 
     head = [byte(k) for k in range(3)]
     if None in head or head[0] != SYNC:
-        return ""
+        return None
     length = (head[1] or 0) << 8 | (head[2] or 0)
     rest = [byte(3 + k) for k in range(length + 1)]
     if None in rest:
-        return ""
+        return None
     body = bytes([SYNC, head[1] or 0, head[2] or 0, *(b or 0 for b in rest[:-1])])
     if sum(body) & 0xFF != rest[-1]:
-        return ""
+        return None
     try:
-        return body[3:].decode("utf-8")
+        text = body[3:].decode("utf-8")
     except UnicodeDecodeError:
-        return ""
+        return None
+    return text, start + (length + 4) * 2 * n
 
 
-__all__ = ["FREQS", "SYMBOL_MS", "decode", "encode", "noise"]
+def _samples(pcm16: bytes) -> array[int]:
+    samples = array("h")
+    samples.frombytes(pcm16[: len(pcm16) - len(pcm16) % 2])
+    return samples
+
+
+def _onset(samples: array[int], begin: int) -> int | None:
+    return next((i for i in range(begin, len(samples)) if abs(samples[i]) > ONSET), None)
+
+
+def decode(pcm16: bytes, rate: int) -> str:
+    """The text in ``pcm16``, or ``""`` when it is not a clean tone message."""
+    samples = _samples(pcm16)
+    start = _onset(samples, 0)
+    found = None if start is None else _decode_at(samples, start, rate)
+    return found[0] if found else ""
+
+
+def decode_all(pcm16: bytes, rate: int) -> str:
+    """Every tone message in ``pcm16``, in order, joined by spaces: a turn spoken in pieces
+    (a caller pausing mid-sentence, ADR-0055) is heard whole. ``""`` unless the first is a
+    clean message; anything unreadable after a message ends the reading."""
+    samples = _samples(pcm16)
+    heard: list[str] = []
+    start = _onset(samples, 0)
+    while start is not None:
+        found = _decode_at(samples, start, rate)
+        if found is None:
+            break
+        heard.append(found[0])
+        start = _onset(samples, found[1])
+    return " ".join(heard)
+
+
+__all__ = ["FREQS", "SYMBOL_MS", "decode", "decode_all", "encode", "noise"]

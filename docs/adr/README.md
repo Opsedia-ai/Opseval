@@ -55,7 +55,7 @@
 | [0052](0052-analytics-store.md) | An analytics interface with file and Postgres implementations; ClickHouse optional, in core, never required | Proposed |
 | [0053](0053-voice-sessions-and-records.md) | Voice: audio sessions, audio in the record, a bridge to the text driver, and the one rule for voice faults | Proposed |
 | [0054](0054-speech-providers.md) | Speech providers: OpenAI-compatible TTS and STT built in, others as plugins; allowlisted, failing closed, harness errors | Proposed |
-| [0055](0055-full-duplex-voice-driver-and-metrics.md) | A full-duplex voice driver (barge-in, noise, code-switching) and voice metrics usable as gate thresholds | Proposed |
+| [0055](0055-full-duplex-voice-driver-and-metrics.md) | A full-duplex voice driver (barge-in, noise, code-switching) and voice metrics usable as gate thresholds | Accepted (V1 built) |
 | [0056](0056-telephony.md) | Phone calls through a signed, TLS-only voice gateway; test numbers only | Proposed |
 | [0057](0057-webrtc.md) | WebRTC rooms through an optional extra, shipped only if its dependencies pass the licence audit | Proposed |
 | [0058](0058-ci-cd-anywhere.md) | CI/CD anywhere: a published GitHub Action and copy-paste workflows, server reporting, templates for other CI systems | Proposed |

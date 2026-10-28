@@ -51,13 +51,14 @@ def relayout(run: Path, layout: str | None, *, started: datetime | None = None) 
 
 def test_a_new_run_records_its_layout(run: Path) -> None:
     assert json.loads((run / "manifest.json").read_text("utf-8"))["layout"] == LAYOUT
-    assert LAYOUT == "opseval-runs/6", (
-        "6: records carry usage events; usage rows reasoning/cached tokens (ADR-0066)"
+    assert LAYOUT == "opseval-runs/7", (
+        "7: a voice timeline carries its mode, spans, noise and voice metrics (ADR-0055)"
     )
 
 
 @pytest.mark.parametrize(
-    "older", ["opseval-runs/2", "opseval-runs/3", "opseval-runs/4", "opseval-runs/5"]
+    "older",
+    ["opseval-runs/2", "opseval-runs/3", "opseval-runs/4", "opseval-runs/5", "opseval-runs/6"],
 )
 def test_an_older_layout_run_is_still_read(run: Path, older: str) -> None:
     relayout(run, older)

@@ -1,0 +1,39 @@
+# Full duplex (ADR-0055): the caller pauses mid-sentence, speaks over background babble and
+# cuts in on the agent's first answer. The voice metrics are gated by the scorers' params.
+id: vr-101
+name: Spoken refund, the caller cuts in
+goal: Ask for a refund of a damaged order by voice, interrupt the agent once, and hear it stop and answer.
+tags: [voice, duplex, barge-in, smoke]
+criticality: critical
+
+persona:
+  role: Busy customer on the phone, polite but in a hurry.
+  language: en
+
+conversation:
+  scripted_turns:
+    - "Hi, my order 10482 arrived damaged and I would like a refund please."
+    - "Yes, please go ahead."
+  max_turns: 5
+
+voice:
+  duplex: true
+  barge_in:
+    - {agent_turn: 1, after_ms: 600, say: "Sorry, the order is 10482."}
+  silences:
+    - {caller_turn: 1, ms: 400, at: mid}
+  noise: {kind: babble, snr_db: 30, seed: 7}
+
+scorers:
+  - {id: output.terminal_state}
+  - {id: conversation.agent_replied}
+  - {id: voice.barge_in_yield_ms, params: {max_ms: 1000}}
+  - {id: voice.talk_over_ratio, params: {max_ratio: 0.05}}
+  - {id: voice.turn_latency_ms, params: {p95_max_ms: 1500}}
+  - {id: voice.dead_air_ms, params: {max_turn_ms: 2000}}
+  - {id: voice.time_to_first_audio_ms, params: {max_ms: 1500}}
+  - {id: voice.agent_asr_wer, params: {max_mean: 0.1}}
+
+execution:
+  turn_timeout_seconds: 8
+  attempt_timeout_seconds: 90

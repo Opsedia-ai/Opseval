@@ -549,6 +549,11 @@ class Driver:
                     or session.ends_turn(payload)
                 )
             self._record("received", payload, kind, text)
+            if self._interjected(session):
+                # The caller talked over the agent (a planted barge-in, ADR-0055): that is a
+                # customer turn, and the agent owes it an answer within the turn's time.
+                waiting = True
+                deadline = loop.time() + turn
             if kind is FrameKind.ERROR:
                 raise _Stop(TerminalState.ERROR_FRAME, "the agent sent an error frame")
             if kind is FrameKind.RESULT:
@@ -566,6 +571,16 @@ class Driver:
             ):
                 return "reply", payload
             # handshake, notification, unknown and mid-turn messages: keep listening
+
+    def _interjected(self, session: Session) -> bool:
+        """Record the customer turns the session spoke on its own (the duplex voice driver's
+        barge-ins), in the order they happened, right after the agent frame they cut into."""
+        spoken = session.caller_interjections()
+        for frame, text in spoken:
+            self._last_sent_at = time.monotonic()
+            self._record("sent", frame, FrameKind.USER_MESSAGE, text)
+            self._user_turns += 1
+        return bool(spoken)
 
     def _policy(self, name: str) -> CheckpointPolicy:
         return self.s.conversation.checkpoint_policy.get(name, CheckpointPolicy())

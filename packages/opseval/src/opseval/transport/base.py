@@ -100,6 +100,13 @@ class Session(ABC):
         """The driver hands over how to run a harness call off the agent's clock. Only a
         session that makes such calls itself (the voice bridge) needs it."""
 
+    def caller_interjections(self) -> list[tuple[dict[str, Any], str]]:
+        """Customer turns the session spoke on its own, not through :meth:`send`: the duplex
+        voice driver's planted barge-ins (ADR-0055), as ``(frame, text)``. The driver records
+        each as a sent customer turn the moment it reads the agent frame they came with, and
+        then waits for the agent's answer to it like to any other turn."""
+        return []
+
     def frame_media(self, direction: str, payload: Any) -> FrameMedia | None:
         """The audio behind a frame just sent or received, or ``None`` (text sessions)."""
         return None
