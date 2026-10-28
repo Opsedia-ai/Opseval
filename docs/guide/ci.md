@@ -122,13 +122,354 @@ and profile, and never installs or runs anything from it.
 
 ## Other CI systems
 
-Run the CLI (or the container image) and keep the exit code:
+Templates for GitLab, Jenkins, Azure DevOps, CircleCI and Bitbucket are in `templates/` of the
+Opseval repository ([ADR-0058](../adr/0058-ci-cd-anywhere.md), E3). Each one:
 
-```bash
-opseval run evals/suites/smoke.yaml --profile evals/profile.yaml \
-  --target wss://agent.staging.example.com/ws --junit junit.xml
-opseval summary reports/<run>     # the same Markdown gate summary, for a job summary
+- runs the CLI container image ([ADR-0038](../adr/0038-container-image.md)) as a non-root user,
+  with `--junit`, and publishes the JUnit file and the run folder even when the job fails;
+- takes the inputs the GitHub action takes (`suite`, `profile`, `target`, `transport`,
+  `repeats`, `filter`, `extra-args`, `read-dotenv`) and the reusable workflow's settings
+  (`allowed-hosts`, `simulator-base-url`, `simulator-model`, `judge-base-url`, `judge-model`,
+  `opseval-env`), spelled the way each system spells names, plus `image`;
+- takes secrets only from the system's own secret store, under Opseval's names
+  `OPSEVAL_SIMULATOR_API_KEY`, `OPSEVAL_JUDGE_API_KEY` and `OPSEVAL_STATIC_TOKEN`, and any other
+  secret setting named in `secret-env-names`. A secret is never an input, and `opseval-env`
+  refuses a secret setting with exit 3;
+- fails on 1, 2 and 3, and names which one it was.
+
+All of them run one script, `templates/shared/opseval-ci.sh`; each template carries a copy and a
+test keeps the copies identical. These details hold everywhere:
+
+- `opseval-env` follows the reusable workflow's rules: one `OPSEVAL_NAME=value` per line; a
+  secret setting, a setting with its own input, a duplicate or a line of another shape is exit 3
+  and nothing runs. A simulator or judge key with no base URL and model is exit 3.
+- Exit 0, 1 and 2 count only when the run left a `result.json` that records the same code.
+  Otherwise nothing was judged: Opseval refused its arguments (a typo in `extra-args`), or the
+  image's entrypoint is not `opseval`. That is reported as 3, a configuration error. Any code
+  other than 0 to 3 (Docker could not start the image, say) is reported as 3 too.
+- `extra-args` may not hold `--help` or `--version` (Opseval would print and exit, judging
+  nothing), nor `--reports-dir` or `--junit` (the template sets them): exit 3 before anything
+  runs.
+- Each build writes its run to a folder of its own, `opseval-reports/build-XXXXXX/`, and first
+  removes an earlier build's folder. It removes only folders it made itself and marked with a
+  `.opseval-ci-build` file, never a link and never anything else. So a reused workspace (a
+  Jenkins agent, a self-hosted Azure agent) publishes this build's run and no other.
+- `secret-env-names` passes other secret settings, such as `OPSEVAL_LANGFUSE_SECRET_KEY` or
+  `OPSEVAL_WEBHOOK_URL`, by name only. Each must be a secret setting (`config.SECRET_FIELDS`),
+  or it is exit 3. Put the value in the system's secret store under that name. In the image
+  (GitLab, CircleCI, Bitbucket) the job's environment already reaches Opseval. With
+  `docker run` (Jenkins, Azure DevOps) each one is passed as `-e NAME`, never as a value on the
+  command line or in the env file.
+- With `docker run`, the workspace is mounted at its own absolute path (`-v "$PWD:$PWD" -w
+  "$PWD"`), so absolute paths inside it work. A suite, profile or reports folder outside the
+  workspace is exit 3, since the container cannot see it. The container runs as the job's own
+  uid:gid. A job running as root runs it as the image's user 10001 instead, and gives that user
+  this build's run folder (`chown`). No folder is ever made world-writable.
+- On Azure DevOps (`TF_BUILD=True`) Opseval's output passes through a filter: a `##vso[` or
+  `##[` in it, which could come from the agent's own words, gets a zero-width space after the
+  first `#`, so the agent cannot run logging commands such as `task.complete`.
+
+!!! warning "Docker on the host, from inside a container"
+    `docker run -v` mounts a path on the Docker *host*. When the CI agent itself runs in a
+    container that talks to the host's Docker (a mounted Docker socket: a Jenkins agent in
+    Docker, an Azure DevOps container job), the workspace's path inside the agent is not a
+    path on the host, and the mount is empty or wrong. Set `docker-workspace-host-path`
+    (`dockerWorkspaceHostPath`) to where the workspace is on the host. The run then fails
+    (exit 3) rather than judging nothing if the path is wrong, because no `result.json` comes
+    back.
+
+!!! note "Before go-public"
+    The image is published at go-public (Gate 0). Until then every template's `image` defaults
+    to the placeholder `ghcr.io/opsedia-ai/opseval:<version>`, which fails with exit 3 and how to
+    fix it. Build the image from the Opseval repository with `docker build -t opseval .`, push it
+    to a registry your CI can pull from, and set `image`. The GitLab component, the CircleCI orb
+    and the Bitbucket pipe are listed in their catalogues at go-public too.
+
+The templates are checked by tests (each file parses, the shared script is run with a fake
+`opseval` and a fake `docker` for exit codes 0 to 3), not by running GitLab, Jenkins, Azure
+DevOps, CircleCI or Bitbucket.
+
+## GitLab
+
+`templates/gitlab/opseval.yml` is a CI/CD component (`spec: inputs:`): a job in the Opseval
+image, with `artifacts: reports: junit` and the run folder as an artifact (`when: always`).
+
+```yaml
+stages: [test, release]
+
+include:
+  - project: opsedia-ai/opseval            # your mirror, until the catalog component exists
+    ref: <full commit SHA>
+    file: templates/gitlab/opseval.yml
+    inputs:
+      suite: evals/suites/smoke.yaml
+      profile: evals/profile.yaml
+      target: wss://agent.staging.example.com/ws
+      allowed-hosts: agent.staging.example.com,api.openai.com
+      judge-base-url: https://api.openai.com/v1
+      judge-model: gpt-4.1-mini
+      image: registry.example.com/tools/opseval:0.2.0
+
+release:
+  stage: release
+  needs: [opseval]                         # runs only when Opseval exited 0
+  script: [./scripts/publish.sh]
 ```
 
-Templates for GitLab, Jenkins, Azure DevOps, CircleCI and Bitbucket are planned
-([ADR-0058](../adr/0058-ci-cd-anywhere.md), E3).
+- Keys are masked (and preferably hidden and protected) CI/CD variables named
+  `OPSEVAL_JUDGE_API_KEY` and so on; GitLab hands them to the job.
+- The job runs in the image, so other `OPSEVAL_*` CI/CD variables reach Opseval too.
+- Extra inputs: `stage`, `job-name` (include the file twice to run two suites) and
+  `artifact-name`.
+- `filter` takes one filter; pass more as `extra-args: --filter tag=a --filter tag=b`.
+- Never add `allow_failure` to the job, least of all `allow_failure: exit_codes: [2, 3]`.
+- Every input reaches the script as a variable with `expand: false`, so a `$` in an input stays
+  a `$` and never reads another CI/CD variable.
+- `secret-env-names: OPSEVAL_LANGFUSE_SECRET_KEY` names another secret setting held as a masked
+  CI/CD variable.
+- A catalog component must be `templates/<name>.yml` in its own project, so this file is
+  included with `include: project:` until it is published as `opsedia-ai/opseval/opseval`.
+- The image runs as uid 10001. GitLab's Docker executor checks the project out
+  world-writable by default; on a runner that does not, the job stops with exit 3 and says so.
+
+## Jenkins
+
+`templates/jenkins/` is a shared library. Register it as `opseval` (library path
+`templates/jenkins/`, pinned to a commit), and the step `opseval(...)`
+(`templates/jenkins/vars/opseval.groovy`) runs the image with `docker run` on an agent that
+has Docker. An example is `templates/jenkins/Jenkinsfile.example`.
+
+```groovy
+@Library('opseval') _
+pipeline {
+    agent { label 'docker' }
+    stages {
+        stage('Evaluate') {
+            steps {
+                opseval(
+                    suite: 'evals/suites/smoke.yaml',
+                    profile: 'evals/profile.yaml',
+                    target: 'wss://agent.staging.example.com/ws',
+                    allowedHosts: 'agent.staging.example.com,api.openai.com',
+                    judgeBaseUrl: 'https://api.openai.com/v1',
+                    judgeModel: 'gpt-4.1-mini',
+                    judgeApiKeyCredentialsId: 'opseval-judge-api-key',
+                    image: 'opseval',
+                )
+            }
+        }
+        stage('Release') { steps { sh './scripts/publish.sh' } }
+    }
+}
+```
+
+- Keys are Secret text credentials, named by id: `simulatorApiKeyCredentialsId`,
+  `judgeApiKeyCredentialsId`, `agentTokenCredentialsId`. The step binds them with
+  `withCredentials`, and they reach the container by name, never on a command line.
+- Any other secret setting is a Secret text credential too, in
+  `secretCredentials: [OPSEVAL_LANGFUSE_SECRET_KEY: 'langfuse-secret']` (setting name to
+  credential id). A name that is not a secret setting is exit 3.
+- `opsevalEnv` takes a map or a string of lines; `filter` a list or a string of lines.
+- An agent in a container that uses the host's Docker needs `dockerWorkspaceHostPath` (see the
+  warning above).
+- It publishes `junit` with `skipMarkingBuildUnstable: true` (the build's result is the exit
+  code, not the test count) and archives the run folder.
+- Exit 1, 2 and 3 are each `FAILURE`, with a message naming which one, never `UNSTABLE`: an
+  unstable build still lets later stages and promotions run.
+- An unknown parameter fails the step.
+- The container runs as the agent's own user (never root), so it can write the reports into the
+  workspace.
+
+## Azure DevOps
+
+`templates/azure/opseval.yml` is a steps template with `parameters:`. It runs the image with
+`docker run` (Microsoft-hosted Ubuntu agents have Docker), then runs `PublishTestResults@2`,
+uploads the gate summary to the run's summary page and publishes the run folder, all with
+`condition: succeededOrFailed()`.
+
+```yaml
+resources:
+  repositories:
+    - repository: opseval
+      type: github
+      endpoint: github-opseval
+      name: Opsedia-ai/Opseval
+      ref: <full commit SHA>
+
+variables:
+  - group: opseval-secrets                  # OPSEVAL_JUDGE_API_KEY, marked secret
+
+steps:
+  - checkout: self
+  - template: templates/azure/opseval.yml@opseval
+    parameters:
+      suite: evals/suites/smoke.yaml
+      profile: evals/profile.yaml
+      target: wss://agent.staging.example.com/ws
+      allowedHosts: agent.staging.example.com,api.openai.com
+      judgeBaseUrl: https://api.openai.com/v1
+      judgeModel: gpt-4.1-mini
+      image: myregistry.azurecr.io/opseval:0.2.0
+```
+
+- Keys are secret variables named `OPSEVAL_SIMULATOR_API_KEY`, `OPSEVAL_JUDGE_API_KEY` and
+  `OPSEVAL_STATIC_TOKEN`. Azure never puts a secret into a script's environment by itself, so
+  the template maps exactly those three, and the names in `secretEnvNames`
+  (`secretEnvNames: [OPSEVAL_LANGFUSE_SECRET_KEY]`).
+- A variable group linked to Key Vault works too. Key Vault secret names cannot hold `_`, so
+  name the secret `OPSEVAL-JUDGE-API-KEY`: the template reads both spellings, and two different
+  values for one key is exit 3.
+- An undefined variable reaches the step as its own macro text, `$(OPSEVAL_JUDGE_API_KEY)`.
+  The template treats that as no value. When the simulator's or judges' base URL and model are
+  set but their key is undefined, that is exit 3 naming the key, not a run whose judges cannot
+  authenticate. Set `llmWithoutKey: true` for an endpoint that takes no key.
+- Opseval's output is filtered so that no line of it can be a `##vso[` logging command.
+- `failTaskOnFailedTests` is off: the gate decides, not the test count.
+- Never set `continueOnError` on the step.
+- `templates/azure/azure-pipelines.example.yml` gates a `Release` stage on it.
+
+## CircleCI
+
+`templates/circleci/orb/orb.yml` is an orb. Its `run` job checks the project out and runs the
+suite on the `default` executor, the Opseval image. The `evaluate` command does the same inside
+a job of your own on that executor. Both use `store_test_results` and `store_artifacts`.
+
+```yaml
+version: 2.1
+orbs:
+  opseval: opsedia-ai/opseval@1.0.0          # until published: paste the orb inline
+workflows:
+  release:
+    jobs:
+      - opseval/run:
+          context: opseval-secrets           # OPSEVAL_JUDGE_API_KEY
+          image: registry.example.com/tools/opseval:0.2.0
+          suite: evals/suites/smoke.yaml
+          profile: evals/profile.yaml
+          target: wss://agent.staging.example.com/ws
+          allowed_hosts: agent.staging.example.com,api.openai.com
+          judge_base_url: https://api.openai.com/v1
+          judge_model: gpt-4.1-mini
+      - deploy:
+          requires: [opseval/run]            # runs only when Opseval exited 0
+```
+
+- Keys come from a context or project environment variables. The parameters
+  `simulator_api_key`, `judge_api_key` and `agent_token` are `env_var_name`s (by default
+  Opseval's own names), so a value never appears in the expanded config.
+- `secret_env_names` names other secret settings (held in the context under their own names).
+- The image has no git, so `checkout` uses CircleCI's built-in git client.
+- The executor sets neither `entrypoint` nor `command`. CircleCI then ignores the image's
+  `ENTRYPOINT` (`opseval`) for the primary container and runs the steps in it. Setting
+  `entrypoint` would make CircleCI run it instead.
+- `filter` takes one filter; pass more through `extra_args`.
+
+## Bitbucket
+
+`templates/bitbucket/pipe/` is a pipe: `pipe.yml`, a `Dockerfile` built `FROM` the Opseval
+image, and its entrypoint `templates/bitbucket/pipe/pipe.sh`. The pipe exits with Opseval's
+code and writes `test-results/opseval/junit.xml`, which Bitbucket shows as test results. The
+run folder goes to `opseval-reports/`.
+
+```yaml
+pipelines:
+  pull-requests:
+    "**":
+      - step:
+          name: Opseval
+          script:
+            - pipe: docker://registry.example.com/tools/opseval-pipe:0.2.0
+              variables:
+                SUITE: evals/suites/smoke.yaml
+                PROFILE: evals/profile.yaml
+                TARGET: wss://agent.staging.example.com/ws
+                ALLOWED_HOSTS: agent.staging.example.com,api.openai.com
+                JUDGE_BASE_URL: https://api.openai.com/v1
+                JUDGE_MODEL: gpt-4.1-mini
+                JUDGE_API_KEY: $OPSEVAL_JUDGE_API_KEY   # a secured variable
+          artifacts:
+            - opseval-reports/**
+```
+
+- Build the pipe until it is published:
+  `docker build -t opseval-pipe --build-arg OPSEVAL_IMAGE=opseval templates/bitbucket/pipe`.
+- Keys are secured repository or deployment variables, passed to the pipe as
+  `SIMULATOR_API_KEY`, `JUDGE_API_KEY` and `AGENT_TOKEN`. Only those set a key.
+- Another secret setting is passed under its own name (`OPSEVAL_LANGFUSE_SECRET_KEY:
+  $OPSEVAL_LANGFUSE_SECRET_KEY`) and listed in `SECRET_ENV_NAMES`.
+- The other variables are the inputs in upper case (`SUITE`, `EXTRA_ARGS`, `OPSEVAL_ENV`, ...).
+- Bitbucket mounts the clone owned by root, which the image's user 10001 cannot write. So the
+  pipe starts as root, makes `opseval-reports/` and `test-results/opseval/`, gives both to
+  10001, and runs everything else as 10001 with `setpriv`. Opseval itself never runs as root,
+  and no folder is made world-writable. The pipe's image build runs `setpriv --version`, so an
+  image without it fails to build.
+
+## Any other CI: `docker run`
+
+Run the image with the workspace mounted at its own path, keep the exit code, and publish
+`opseval-reports/junit.xml`. Keys come from the CI system's secret store into the job's
+environment, and `-e NAME` (with no value) passes them on by name, so they never appear in a
+command line. `OPSEVAL_DOTENV=false` keeps a `.env` in the checkout from configuring the run.
+Trust 0, 1 and 2 only when the run left a `result.json`: without one nothing was judged. On a
+reused workspace, write each build to a fresh folder (here `mktemp -d`) and publish only it.
+
+```bash
+cat > opseval.env <<'EOF'
+OPSEVAL_DOTENV=false
+OPSEVAL_ALLOWED_HOSTS=agent.staging.example.com,api.openai.com
+OPSEVAL_JUDGE_BASE_URL=https://api.openai.com/v1
+OPSEVAL_JUDGE_MODEL=gpt-4.1-mini
+EOF
+mkdir -p opseval-reports
+out=$(mktemp -d opseval-reports/build-XXXXXX)
+code=0
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -v "$PWD:$PWD" -w "$PWD" --env-file opseval.env -e OPSEVAL_JUDGE_API_KEY \
+  opseval run evals/suites/smoke.yaml --profile evals/profile.yaml \
+  --target wss://agent.staging.example.com/ws \
+  --reports-dir "$out" --junit opseval-reports/junit.xml || code=$?
+if [ "$code" -le 2 ] && ! ls "$out"/*/result.json > /dev/null 2>&1; then
+  echo "Opseval: exit $code but no result.json: nothing was judged"; code=3
+fi
+case "$code" in
+  0) echo "Opseval: pass" ;;
+  1) echo "Opseval: the agent failed" ;;
+  2) echo "Opseval: not judged (blocks the release)" ;;
+  3) echo "Opseval: harness or configuration error (blocks the release)" ;;
+  *) echo "Opseval did not finish ($code): a harness error"; code=3 ;;
+esac
+exit "$code"
+```
+
+The same in PowerShell, on a Windows agent running Linux containers:
+
+```powershell
+@"
+OPSEVAL_DOTENV=false
+OPSEVAL_ALLOWED_HOSTS=agent.staging.example.com,api.openai.com
+OPSEVAL_JUDGE_BASE_URL=https://api.openai.com/v1
+OPSEVAL_JUDGE_MODEL=gpt-4.1-mini
+"@ | Set-Content -Encoding ascii opseval.env
+$out = "opseval-reports/build-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force $out | Out-Null
+docker run --rm -e HOME=/tmp -v "${PWD}:/work" -w /work --env-file opseval.env `
+  -e OPSEVAL_JUDGE_API_KEY `
+  opseval run evals/suites/smoke.yaml --profile evals/profile.yaml `
+  --target wss://agent.staging.example.com/ws `
+  --reports-dir $out --junit opseval-reports/junit.xml
+$code = $LASTEXITCODE
+if ($code -le 2 -and -not (Get-ChildItem "$out/*/result.json" -ErrorAction SilentlyContinue)) {
+  Write-Host "Opseval: exit $code but no result.json: nothing was judged"; $code = 3
+}
+switch ($code) {
+  0 { Write-Host "Opseval: pass" }
+  1 { Write-Host "Opseval: the agent failed" }
+  2 { Write-Host "Opseval: not judged (blocks the release)" }
+  3 { Write-Host "Opseval: harness or configuration error (blocks the release)" }
+  default { Write-Host "Opseval did not finish ($code): a harness error"; $code = 3 }
+}
+exit $code
+```
+
+`opseval summary opseval-reports/<run>` (run the same way) prints the Markdown gate summary for
+a job summary. Without Docker, `pip install opseval` and run the same `opseval run` line.
