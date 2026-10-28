@@ -4,7 +4,7 @@
 
 ```yaml
 # .github/workflows/eval.yml
-- uses: Opsedia-ai/Opseval@<sha>
+- uses: Opsedia-ai/Opseval@<sha>   # opsedia-ai/opseval-action@v1 from go-public
   with:
     suite: evals/suites/release.yaml
     profile: evals/profile.yaml
@@ -15,7 +15,9 @@
 
 The step's exit code is Opseval's, the report and JUnit file are uploaded, and a summary is
 posted on the pull request. Elsewhere, run `opseval run … --junit junit.xml` and
-`opseval summary reports/<run>` for the same Markdown summary.
+`opseval summary reports/<run>` for the same Markdown summary. Ready-made workflows for a pull
+request, a tag, a release and a deployment, and a reusable workflow, are in
+[Gate releases in CI](ci.md).
 
 ## Choose what blocks the release
 

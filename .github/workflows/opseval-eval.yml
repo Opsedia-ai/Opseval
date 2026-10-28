@@ -1,0 +1,336 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Opseval as a reusable workflow (ADR-0058, E1). Call it from a job:
+#
+#   jobs:
+#     eval:
+#       permissions: {contents: read}        # add pull-requests: write for the PR comment
+#       uses: Opsedia-ai/Opseval/.github/workflows/opseval-eval.yml@<sha>
+#       with:
+#         opseval-ref: <sha>                 # the same commit, so the action matches
+#         suite: evals/suites/smoke.yaml
+#         profile: evals/profile.yaml
+#         target: wss://agent.staging.example.com/ws
+#         allowed-hosts: agent.staging.example.com
+#         judge-base-url: https://api.openai.com/v1
+#         judge-model: gpt-4.1-mini
+#       secrets:
+#         judge-api-key: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}
+#
+# A caller's `env:` does not reach a called workflow, so every setting comes in as an input:
+# the four LLM endpoint inputs, and `opseval-env` for any other non-secret OPSEVAL_* setting.
+# Secrets come only through `secrets:`; `opseval-env` refuses a secret setting (exit 3).
+#
+# The job fails unless Opseval exits 0, so `needs: eval` blocks whatever comes next on
+# 1 (the agent failed), 2 (not judged) and 3 (harness or configuration error). Nothing here
+# turns 2 or 3 green; read `exit-code` to tell them apart.
+#
+# Permissions: this file declares none on purpose. A called workflow can only lower the
+# caller's token, never raise it, so the caller grants exactly what its use needs:
+# `contents: read`, plus `pull-requests: write` when the gate summary is posted on a PR.
+name: Opseval (reusable)
+on:
+  workflow_call:
+    inputs:
+      suite:
+        description: Scenario file, directory or suite file to run.
+        type: string
+        required: true
+      profile:
+        description: SUT profile YAML, or builtin:<name>.
+        type: string
+        required: true
+      target:
+        description: Agent URL (ws://, wss://, http(s)://). Its host must be in allowed-hosts.
+        type: string
+        required: true
+      transport:
+        description: websocket | http-json | openai-chat
+        type: string
+        default: websocket
+      repeats:
+        description: Override the scenarios' repeats (1-20). Empty keeps the scenario values.
+        type: string
+        default: ""
+      filter:
+        description: Newline-separated filters (tag=…, id=…, criticality=…).
+        type: string
+        default: ""
+      extra-args:
+        description: Extra arguments for `opseval run`, space-separated (e.g. --no-traces).
+        type: string
+        default: ""
+      python-version:
+        description: Python version to run Opseval with.
+        type: string
+        default: "3.12"
+      opseval-spec:
+        description: >-
+          What to install, as a pip requirement (e.g. opseval==0.2.0). Empty installs Opseval
+          from the checkout at opseval-ref (the same version as the action).
+        type: string
+        default: ""
+      comment:
+        description: Post or update the gate summary as a pull-request comment (needs pull-requests write).
+        type: string
+        default: "true"
+      artifact-name:
+        description: Name of the uploaded artifact (report.html, junit.xml, result.json).
+        type: string
+        default: opseval-report
+      allowed-hosts:
+        description: >-
+          OPSEVAL_ALLOWED_HOSTS: comma-separated hosts that may receive the conversation (the
+          agent, the simulator and judge endpoints). Loopback is always allowed.
+        type: string
+        default: ""
+      opseval-ref:
+        description: >-
+          The Opseval commit to take the action from: the same full 40-character SHA you call
+          this workflow at (a branch or tag is exit 3). Empty only in Opseval's own repository.
+        type: string
+        default: ""
+      read-dotenv:
+        description: >-
+          "true" lets Opseval read a .env file in the workspace. Off by default: a checked-out
+          repository must not be able to configure the run (OPSEVAL_DOTENV=false).
+        type: string
+        default: "false"
+      simulator-base-url:
+        description: OPSEVAL_SIMULATOR_BASE_URL, the simulator's OpenAI-compatible endpoint (allowlisted).
+        type: string
+        default: ""
+      simulator-model:
+        description: OPSEVAL_SIMULATOR_MODEL. Without it (or the base URL), only scripted scenarios run.
+        type: string
+        default: ""
+      judge-base-url:
+        description: OPSEVAL_JUDGE_BASE_URL, the judges' OpenAI-compatible endpoint (allowlisted).
+        type: string
+        default: ""
+      judge-model:
+        description: OPSEVAL_JUDGE_MODEL. Without it (or the base URL), judge scores are not measured.
+        type: string
+        default: ""
+      opseval-env:
+        description: >-
+          Other non-secret settings, one OPSEVAL_NAME=value per line (blank lines and lines
+          starting with # are ignored). A secret setting, a setting that has its own input, or
+          a line of another shape is refused with exit 3.
+        type: string
+        default: ""
+      start-demo-agent:
+        description: >-
+          For testing this workflow: start Opseval's bundled demo refund agent on
+          ws://127.0.0.1:8765 before the run. Nothing else uses it.
+        type: boolean
+        default: false
+    secrets:
+      simulator-api-key:
+        description: OPSEVAL_SIMULATOR_API_KEY, for LLM personas.
+        required: false
+      judge-api-key:
+        description: OPSEVAL_JUDGE_API_KEY, for the LLM judges.
+        required: false
+      agent-token:
+        description: OPSEVAL_STATIC_TOKEN, a bearer token sent to the agent.
+        required: false
+    outputs:
+      exit-code:
+        description: "Opseval's exit code: 0 pass · 1 fail · 2 not judged · 3 harness or configuration error."
+        value: ${{ jobs.eval.outputs.exit-code }}
+      gate:
+        description: pass or block (empty if no result was produced).
+        value: ${{ jobs.eval.outputs.gate }}
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    outputs:
+      # No exit code means the action never ran to the end: a harness or configuration
+      # error (3), as the action itself reports it, never a pass.
+      exit-code: ${{ steps.result.outputs.exit-code }}
+      gate: ${{ steps.result.outputs.gate }}
+    env:
+      OPSEVAL_ALLOWED_HOSTS: ${{ inputs.allowed-hosts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Which Opseval to use
+        id: ref
+        env:
+          OPSEVAL_REF: ${{ inputs.opseval-ref }}
+          CALLER: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$OPSEVAL_REF" ]; then
+            if [ "$CALLER" != "Opsedia-ai/Opseval" ]; then
+              echo "::error::Set opseval-ref to the full Opseval commit SHA you call this workflow at."
+              exit 3
+            fi
+            echo "source=self" >> "$GITHUB_OUTPUT"
+          elif [[ "$OPSEVAL_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source=pinned" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::opseval-ref must be a full 40-character commit SHA, not a branch or tag."
+            exit 3
+          fi
+      - name: Settings
+        env:
+          SIMULATOR_BASE_URL: ${{ inputs.simulator-base-url }}
+          SIMULATOR_MODEL: ${{ inputs.simulator-model }}
+          JUDGE_BASE_URL: ${{ inputs.judge-base-url }}
+          JUDGE_MODEL: ${{ inputs.judge-model }}
+          OPSEVAL_ENV: ${{ inputs.opseval-env }}
+          HAS_SIMULATOR_KEY: ${{ secrets.simulator-api-key != '' }}
+          HAS_JUDGE_KEY: ${{ secrets.judge-api-key != '' }}
+        run: |
+          set -euo pipefail
+          # Secret settings (config.SECRET_FIELDS): they come only through `secrets:`.
+          secret=" OPSEVAL_STATIC_TOKEN OPSEVAL_TOKEN_SIGNING_KEY OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_LANGFUSE_SECRET_KEY OPSEVAL_SERVE_TOKEN OPSEVAL_WEBHOOK_URL OPSEVAL_GITHUB_TOKEN OPSEVAL_JIRA_TOKEN OPSEVAL_DATABASE_URL OPSEVAL_TTS_KEY OPSEVAL_STT_KEY OPSEVAL_STT_SECOND_KEY "
+          # Settings with their own input.
+          own=" OPSEVAL_ALLOWED_HOSTS OPSEVAL_SIMULATOR_BASE_URL OPSEVAL_SIMULATOR_MODEL OPSEVAL_JUDGE_BASE_URL OPSEVAL_JUDGE_MODEL OPSEVAL_DOTENV "
+          lines=()
+          for pair in "OPSEVAL_SIMULATOR_BASE_URL=$SIMULATOR_BASE_URL" "OPSEVAL_SIMULATOR_MODEL=$SIMULATOR_MODEL" \
+                      "OPSEVAL_JUDGE_BASE_URL=$JUDGE_BASE_URL" "OPSEVAL_JUDGE_MODEL=$JUDGE_MODEL"; do
+            name="${pair%%=*}"
+            if [[ "$pair" == *$'\n'* || "$pair" == *$'\r'* ]]; then
+              echo "::error::The input for $name has more than one line."
+              exit 3
+            fi
+            if [ -n "${pair#*=}" ]; then lines+=("$pair"); fi
+          done
+          n=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            n=$((n + 1))
+            if [ -z "${line//[[:space:]]/}" ] || [[ "$line" =~ ^[[:space:]]*# ]]; then continue; fi
+            if [[ "$line" == *$'\r'* ]]; then
+              echo "::error::opseval-env line $n has a carriage return."
+              exit 3
+            fi
+            if [[ ! "$line" =~ ^OPSEVAL_[A-Z0-9_]+= ]]; then
+              echo "::error::opseval-env line $n is not OPSEVAL_NAME=value."
+              exit 3
+            fi
+            name="${line%%=*}"
+            if [[ "$secret" == *" $name "* ]]; then
+              echo "::error::opseval-env line $n sets $name, a secret: pass it through secrets: instead."
+              exit 3
+            fi
+            if [[ "$own" == *" $name "* ]]; then
+              echo "::error::opseval-env line $n sets $name, which has its own input: use that."
+              exit 3
+            fi
+            for seen in ${lines[@]+"${lines[@]}"}; do
+              if [ "${seen%%=*}" = "$name" ]; then
+                echo "::error::opseval-env line $n sets $name twice."
+                exit 3
+              fi
+            done
+            lines+=("$line")
+          done <<< "$OPSEVAL_ENV"
+          # A key with no endpoint and model to use it on would be silently unused: the run
+          # would skip LLM personas or leave judges unmeasured while the caller thinks they ran.
+          for role in SIMULATOR JUDGE; do
+            has_key="HAS_${role}_KEY"; base="${role}_BASE_URL"; model="${role}_MODEL"
+            if [ "${!has_key}" = "true" ] && { [ -z "${!base}" ] || [ -z "${!model}" ]; }; then
+              lower=$(printf '%s' "$role" | tr '[:upper:]' '[:lower:]')
+              echo "::error::${lower}-api-key is set but ${lower}-base-url and ${lower}-model are not both set: the key would be unused."
+              exit 3
+            fi
+          done
+          for line in ${lines[@]+"${lines[@]}"}; do
+            printf '%s\n' "$line" >> "$GITHUB_ENV"
+          done
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.ref.outputs.source == 'pinned'
+        with:
+          repository: Opsedia-ai/Opseval
+          ref: ${{ inputs.opseval-ref }}
+          path: .opseval-action
+          persist-credentials: false
+      # Our own dogfood (start-demo-agent): installed into the venv the action then reuses.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        if: inputs.start-demo-agent
+        with:
+          python-version: ${{ inputs.python-version }}
+          working-directory: ${{ runner.temp }}
+          enable-cache: "false"
+          ignore-empty-workdir: "true"
+      - name: Start the demo agent
+        if: inputs.start-demo-agent
+        working-directory: ${{ runner.temp }}
+        env:
+          SOURCE: ${{ steps.ref.outputs.source }}
+          WORKSPACE: ${{ github.workspace }}
+          UV_NO_CONFIG: "1"
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE" = "self" ]; then opseval="$WORKSPACE/packages/opseval"; else opseval="$WORKSPACE/.opseval-action/packages/opseval"; fi
+          venv="$RUNNER_TEMP/opseval-venv"
+          uv venv --quiet --allow-existing "$venv"
+          uv pip install --quiet --python "$venv/bin/python" "$opseval"
+          nohup "$venv/bin/python" -m opseval.demo.refund_agent --port 8765 > "$RUNNER_TEMP/demo-agent.log" 2>&1 &
+          for _ in $(seq 1 50); do
+            if (echo > /dev/tcp/127.0.0.1/8765) 2>/dev/null; then exit 0; fi
+            sleep 0.2
+          done
+          cat "$RUNNER_TEMP/demo-agent.log"
+          echo "::error::The demo agent did not start."
+          exit 3
+      - name: Opseval
+        id: gate
+        if: steps.ref.outputs.source == 'pinned'
+        uses: ./.opseval-action/integrations/github-action
+        env:
+          OPSEVAL_SIMULATOR_API_KEY: ${{ secrets.simulator-api-key }}
+          OPSEVAL_JUDGE_API_KEY: ${{ secrets.judge-api-key }}
+          OPSEVAL_STATIC_TOKEN: ${{ secrets.agent-token }}
+        with:
+          suite: ${{ inputs.suite }}
+          profile: ${{ inputs.profile }}
+          target: ${{ inputs.target }}
+          transport: ${{ inputs.transport }}
+          repeats: ${{ inputs.repeats }}
+          filter: ${{ inputs.filter }}
+          extra-args: ${{ inputs.extra-args }}
+          python-version: ${{ inputs.python-version }}
+          opseval-spec: ${{ inputs.opseval-spec }}
+          comment: ${{ inputs.comment }}
+          artifact-name: ${{ inputs.artifact-name }}
+          read-dotenv: ${{ inputs.read-dotenv }}
+      # Inside Opseval's own repository (opseval-ref empty): the workspace's action, no clone.
+      - name: Opseval (this repository)
+        id: gate-self
+        if: steps.ref.outputs.source == 'self'
+        uses: ./integrations/github-action
+        env:
+          OPSEVAL_SIMULATOR_API_KEY: ${{ secrets.simulator-api-key }}
+          OPSEVAL_JUDGE_API_KEY: ${{ secrets.judge-api-key }}
+          OPSEVAL_STATIC_TOKEN: ${{ secrets.agent-token }}
+        with:
+          suite: ${{ inputs.suite }}
+          profile: ${{ inputs.profile }}
+          target: ${{ inputs.target }}
+          transport: ${{ inputs.transport }}
+          repeats: ${{ inputs.repeats }}
+          filter: ${{ inputs.filter }}
+          extra-args: ${{ inputs.extra-args }}
+          python-version: ${{ inputs.python-version }}
+          opseval-spec: ${{ inputs.opseval-spec }}
+          comment: ${{ inputs.comment }}
+          artifact-name: ${{ inputs.artifact-name }}
+          read-dotenv: ${{ inputs.read-dotenv }}
+      - name: Result
+        id: result
+        if: always()
+        env:
+          PINNED_CODE: ${{ steps.gate.outputs.exit-code }}
+          PINNED_GATE: ${{ steps.gate.outputs.gate }}
+          SELF_CODE: ${{ steps.gate-self.outputs.exit-code }}
+          SELF_GATE: ${{ steps.gate-self.outputs.gate }}
+        run: |
+          code="${PINNED_CODE:-$SELF_CODE}"
+          echo "exit-code=${code:-3}" >> "$GITHUB_OUTPUT"
+          echo "gate=${PINNED_GATE:-$SELF_GATE}" >> "$GITHUB_OUTPUT"

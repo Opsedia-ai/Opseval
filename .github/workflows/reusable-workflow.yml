@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Dogfood the reusable workflow (opseval-eval.yml) against the demo agent (ADR-0058, E1).
+# Its own file, not a job in ci.yml: the required checks of main are ci.yml's jobs.
+# Only the healthy agent runs here: a called workflow that fails fails this whole run (a job
+# that calls a workflow cannot continue on error), and the action job in ci.yml already
+# proves that exit 1 is passed through.
+name: Reusable workflow
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  healthy:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/opseval-eval.yml
+    with:
+      suite: packages/opseval/src/opseval/demo/catalogue/suites/smoke.yaml
+      profile: packages/opseval/src/opseval/demo/catalogue/profile.yaml
+      target: ws://127.0.0.1:8765
+      repeats: "1"
+      comment: "false" # the action job in ci.yml owns the PR comment
+      artifact-name: opseval-report-reusable
+      allowed-hosts: 127.0.0.1
+      start-demo-agent: true
+
+  outputs:
+    needs: healthy
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: The reusable workflow passes Opseval's exit code and gate through
+        env:
+          CODE: ${{ needs.healthy.outputs.exit-code }}
+          GATE: ${{ needs.healthy.outputs.gate }}
+        run: test "$CODE" = "0" && test "$GATE" = "pass"
