@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """The server-mode schema (ADR-0047): tenancy and the versioned catalogue.
 
-Organisation → project, as in Langfuse; every project-scoped row carries ``project_id``. A
-catalogue item (a scenario, a suite or a profile) has immutable, numbered versions, and labels
-that point at one version each, the way Langfuse versions prompts: ``production`` is what a run
-fetches when it names no label, and ``latest`` is never stored, it is always the newest version.
+Organisation → project → task. Organisation and project are Langfuse's; every project-scoped
+row carries ``project_id``. A task (ADR-0049) is one evaluation target inside a project: one
+agent endpoint (its profile) and one modality, with its own catalogue. A catalogue item (a
+scenario, a suite or a profile) belongs to one task and has immutable, numbered versions, and
+labels that point at one version each, the way Langfuse versions prompts: ``production`` is
+what a run fetches when it names no label, and ``latest`` is the catalogue as last pushed.
 
 Migrations in ``migrations/versions`` create exactly this; a test compares the two, so they
 cannot drift.
@@ -20,6 +22,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     MetaData,
     String,
@@ -40,6 +43,14 @@ NAMING = {
 
 KINDS = ("scenario", "suite", "profile")
 """What a catalogue item can be. The same three files a catalogue folder holds."""
+TASK_KINDS = ("chat", "agentic", "voice", "batch")
+"""What a task's agent does (ADR-0049)."""
+MODALITIES = ("text", "audio_file", "audio_stream", "telephony", "webrtc")
+"""How Opseval talks to a task's agent (ADR-0049)."""
+
+
+def _one_of(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN ({', '.join(repr(v) for v in values)})"
 
 
 class Base(DeclarativeBase):
@@ -76,19 +87,62 @@ class Project(Base):
     created_at: Mapped[datetime] = _created()
 
 
-class CatalogueItem(Base):
-    """One scenario, suite or profile, by the name it is known by in the project."""
+class Task(Base):
+    """One evaluation target inside a project (ADR-0049): an agent endpoint and a modality,
+    with that target's scenarios, suites, runs and labels. Never hard-deleted while a run
+    points at it; ``archived_at`` hides it instead."""
 
-    __tablename__ = "catalogue_items"
+    __tablename__ = "tasks"
     __table_args__ = (
-        UniqueConstraint("project_id", "kind", "name"),
-        CheckConstraint("kind IN ('scenario', 'suite', 'profile')", name="kind"),
+        UniqueConstraint("project_id", "slug"),
+        # The target of catalogue_items' (task_id, project_id) key, so an item can never sit
+        # in one project's row and another project's task.
+        UniqueConstraint("id", "project_id"),
+        CheckConstraint(_one_of("kind", TASK_KINDS), name="kind"),
+        CheckConstraint(_one_of("modality", MODALITIES), name="modality"),
     )
 
     id: Mapped[uuid.UUID] = _id()
     project_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    modality: Mapped[str] = mapped_column(String(16), nullable=False)
+    profile_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("catalogue_items.id", ondelete="SET NULL", use_alter=True), nullable=True
+    )
+    """The task's profile; set by a push, ``None`` until the task has a catalogue."""
+    default_suite_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("catalogue_items.id", ondelete="SET NULL", use_alter=True), nullable=True
+    )
+    """The suite a run uses when it names none."""
+    region: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """Where the task's data may live (matters once audio is stored, ADR-0053)."""
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = _created()
+
+
+class CatalogueItem(Base):
+    """One scenario, suite or profile, by the name it is known by in its task."""
+
+    __tablename__ = "catalogue_items"
+    __table_args__ = (
+        UniqueConstraint("task_id", "kind", "name"),
+        CheckConstraint("kind IN ('scenario', 'suite', 'profile')", name="kind"),
+        ForeignKeyConstraint(
+            ["task_id", "project_id"], ["tasks.id", "tasks.project_id"], ondelete="CASCADE"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    """Kept next to ``task_id`` for tenancy checks and indexes; the key above keeps the two
+    consistent."""
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     """A scenario's id, a suite's name, a profile's name."""

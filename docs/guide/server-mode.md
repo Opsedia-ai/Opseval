@@ -58,3 +58,40 @@ opseval run ./release/suites/smoke.yaml --profile ./release/profile.yaml --targe
 
 A folder holds `profile.yaml`, `suites/*.yaml` and `scenarios/**/*.yaml`, the layout
 `opseval init` writes. Other files are not pushed.
+
+## Tasks
+
+A project holds **tasks** (ADR-0049). A task is one evaluation target: one agent endpoint (its
+profile) and one modality, with its own scenarios, suites and labels. A chat agent and a voice
+line can then share one project, with one set of members and keys, and keep separate catalogues.
+One catalogue folder is one task.
+
+Every project has a `default` task, and every command uses it when `--task` is left out, so the
+commands above work unchanged.
+
+```bash
+# Create a task (kind: chat | agentic | voice | batch;
+# modality: text | audio_file | audio_stream | telephony | webrtc).
+opseval db init --project acme/support-bot --task voice-line --kind voice --modality audio_stream
+
+opseval catalogue push ./voice-catalogue --project acme/support-bot --task voice-line --label staging
+opseval catalogue pull ./voice-release --project acme/support-bot --task voice-line --label production
+
+opseval task list --project acme/support-bot            # kind, modality, profile, item count
+opseval task update voice-line --project acme/support-bot --default-suite smoke --region eu
+opseval task archive voice-line --project acme/support-bot
+```
+
+| Rule | Why |
+|---|---|
+| A task that does not exist is an error naming the project and the slug | A typo in `--task` must not start an empty catalogue |
+| Two tasks may each have a scenario with the same id | Each task has its own items and version history |
+| A label belongs to one task: `production` is that task's production catalogue | A voice task's release never moves a chat task's |
+| A push links the folder's profile as the task's profile | The task knows its endpoint |
+| An archived task takes no push and no label move, but can still be listed and pulled | Archiving hides a task; it never deletes anything |
+| `db init --task` on an existing task with a different kind or modality is refused | Change it with `opseval task update`, never silently |
+
+When you upgrade from a database made before tasks existed, `opseval db upgrade` gives each
+project a `default` task with kind `chat` and modality `text`, and moves its catalogue into it.
+If the project has exactly one profile, the upgrade links it. Change the kind or modality
+afterwards with `opseval task update default …`.

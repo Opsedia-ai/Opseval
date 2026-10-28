@@ -19,7 +19,7 @@ import typer
 from opseval import __version__
 from opseval.catalogue import builtin_profiles, load_catalogue, load_profile
 from opseval.config import Settings
-from opseval.db.cli import catalogue_app, db_app
+from opseval.db.cli import catalogue_app, db_app, task_app
 from opseval.errors import ConfigError
 from opseval.models.gate import Preset
 from opseval.models.results import SuiteResult
@@ -531,6 +531,7 @@ telemetry_app = typer.Typer(
 app.add_typer(telemetry_app, name="telemetry")
 app.add_typer(db_app, name="db")
 app.add_typer(catalogue_app, name="catalogue")
+app.add_typer(task_app, name="task")
 
 
 def _sample_result() -> SuiteResult:
