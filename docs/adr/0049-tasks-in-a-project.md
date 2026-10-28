@@ -100,6 +100,54 @@ version history.
   into another's run, so the store functions take a task, not a project, wherever they read
   items.
 
+## Implementation (2026-10-28)
+
+The database layer and its CLI are built; the console and runs are not.
+
+- **Schema and migration.** `db.schema.Task` and revision `0002` (`0002_tasks.py`) as decided.
+  Two details the decision left open:
+  - `catalogue_items (task_id, project_id)` is a composite foreign key to `tasks (id,
+    project_id)`, so an item can never sit in one project's row and another project's task.
+  - `profile_item_id` and `default_suite_item_id` are `ON DELETE SET NULL`. A task cascades
+    from its project, as items do; `runs.task_id` (ADR-0051) will be `RESTRICT`, which keeps
+    a task with runs from being deleted.
+  - The downgrade to `0001` works while every project has only its `default` task, and is
+    refused otherwise.
+- **A new project gets its `default` task** (`ensure_project`), so a project made after the
+  migration looks like one made before it.
+- **The store takes a task.** `push`, `set_label`, `list_items`, `history`, `resolve` and
+  `materialize` take a `Task`, never a project. `get_task(session, "org/p", slug)` finds one.
+  A missing task is a `ConfigError` naming `org/project`, the slug and the `db init --task`
+  command, and nothing is created.
+- **A push links the folder's profile** as the task's `profile_item_id`. If the profile's name
+  changes, the link follows it to the new item.
+- **The lock is the task row**: `FOR UPDATE` for a push or a label move, `FOR SHARE` for a pull.
+  Two tasks of one project never wait for each other.
+- **Archiving.** An archived task refuses pushes and label moves. A write reads `archived_at`
+  under its own lock, so an archive that commits first is always seen. Pull, list and history
+  still work, so the catalogue can be taken out. Nothing is deleted.
+- **CLI.**
+  - `--task SLUG` (default `default`) on `catalogue push|pull|list|history|label`.
+  - `db init --project org/p --task t [--kind --modality --region]` creates a task. On an
+    existing task it reports "already exists", and refuses when the options asked for differ
+    from the task, rather than ignore them.
+  - `opseval task list [--all]`, `task update SLUG [--kind --modality --region --name
+    --default-suite]`, and `task archive|unarchive SLUG` let an operator change the defaults
+    the migration set.
+- **Deferred.**
+  - The task-scoped API routes and the console's task list are deferred to the console on the
+    database catalogue (ADR-0047 step 1), because today's console reads only folders.
+  - `run --server --task` is deferred to ADR-0051.
+- **Tests.** `tests/test_db_tasks.py` covers:
+  - the migration from `0001` with data (default tasks, moved items, the profile linked only
+    when there is exactly one, the swapped key, a second upgrade, the downgrade and its
+    refusal);
+  - the check constraints and the composite key;
+  - same-named items in two tasks;
+  - `--task` on every command, and an unknown task (exit 3, nothing created);
+  - archiving;
+  - the per-task lock.
+
 ## Not decided here
 
 - Sharing scenarios or suites across tasks (a library, or links between tasks).
