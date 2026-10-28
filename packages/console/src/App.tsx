@@ -3,6 +3,7 @@ import Shell from "./components/Shell";
 import BulkImport from "./pages/BulkImport";
 import Checks from "./pages/Checks";
 import Compare from "./pages/Compare";
+import CostDashboard from "./pages/CostDashboard";
 import NewRun from "./pages/NewRun";
 import RunDetail from "./pages/RunDetail";
 import Runs from "./pages/Runs";
@@ -12,6 +13,7 @@ import ScenarioForm from "./pages/ScenarioForm";
 import Settings from "./pages/Settings";
 import Simulator from "./pages/Simulator";
 import Suites from "./pages/Suites";
+import TokensDashboard from "./pages/TokensDashboard";
 import Trend from "./pages/Trend";
 import Usage from "./pages/Usage";
 
@@ -25,6 +27,8 @@ export default function App() {
         <Route path="compare" element={<Compare />} />
         <Route path="trend" element={<Trend />} />
         <Route path="usage" element={<Usage />} />
+        <Route path="cost" element={<CostDashboard />} />
+        <Route path="tokens" element={<TokensDashboard />} />
         <Route path="simulator" element={<Simulator />} />
         <Route path="scenarios" element={<Scenarios />} />
         <Route path="scenarios/new" element={<ScenarioForm />} />

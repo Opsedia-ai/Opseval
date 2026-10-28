@@ -25,6 +25,8 @@ export function UsageLine({ u }: { u: Usage }) {
   const parts: [string, number | null, number | undefined][] = [
     ["tokens in", u.inputTokens, undefined],
     ["tokens out", u.outputTokens, undefined],
+    ["reasoning", u.reasoningTokens, undefined],
+    ["cached in", u.cachedInputTokens, undefined],
     ["s heard", u.audioInSeconds, 1],
     ["s spoken", u.audioOutSeconds, 1],
     ["characters", u.characters, undefined],
