@@ -76,3 +76,32 @@ class TraceUnavailable(HarnessError):
 
 class LLMRequestError(HarnessError):
     """The LLM provider rejected the request (4xx other than 429)."""
+
+
+class TtsError(HarnessError):
+    """Text-to-speech failed: unreachable, 5xx, over its own timeout, or audio Opseval cannot
+    decode (ADR-0054). Opseval could not speak, so the attempt is not judged."""
+
+
+class SttError(HarnessError):
+    """Speech-to-text failed: unreachable, 5xx, over its own timeout, or a body Opseval cannot
+    read (ADR-0054). Opseval could not listen, so the attempt is not judged. An *empty*
+    transcript is not this error: it is evidence the STT canary decides (ADR-0053)."""
+
+
+class TtsRateLimited(TtsError, RateLimited):
+    """The TTS provider kept answering HTTP 429."""
+
+
+class SttRateLimited(SttError, RateLimited):
+    """The STT provider kept answering HTTP 429."""
+
+
+class TtsRequestError(TtsError):
+    """The TTS provider rejected the request (4xx other than 429): Opseval's configuration
+    (model, voice, key) is wrong, never the agent."""
+
+
+class SttRequestError(SttError):
+    """The STT provider rejected the request (4xx other than 429): Opseval's configuration
+    (model, language, key) is wrong, never the agent."""

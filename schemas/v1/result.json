@@ -240,10 +240,46 @@
     "ModelUsage": {
       "additionalProperties": false,
       "properties": {
+        "audio_in_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio In Seconds"
+        },
+        "audio_out_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio Out Seconds"
+        },
         "calls": {
           "default": 0,
           "title": "Calls",
           "type": "integer"
+        },
+        "characters": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Characters"
         },
         "cost_usd": {
           "anyOf": [

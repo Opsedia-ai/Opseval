@@ -28,11 +28,12 @@ from websockets.exceptions import InvalidStatus, WebSocketException
 
 from opseval.auth import CredentialContext, GuardedTokens, HS256Tokens
 from opseval.config import Settings, check_url_allowed
-from opseval.errors import CredentialsError
+from opseval.errors import CredentialsError, HarnessError
 from opseval.models.preflight import CheckStatus, HealthCheck, PreflightReport
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario
 from opseval.scoring import REGISTRY, effective_specs
+from opseval.speech.base import Audio
 
 PROBE_TIMEOUT = 5.0
 
@@ -291,6 +292,172 @@ async def check_traces(
     )
 
 
+# --- speech providers (ADR-0054) ---------------------------------------------------------
+
+CANARY_PHRASES = {
+    "en": "please tell me the status of my refund",
+    "ar": "أريد أن أعرف حالة طلب الاسترداد",
+}
+"""What the STT canary says, per language (no digits: the WER does not spell them out).
+Other languages use English until their language pack supplies a phrase (ADR-0059)."""
+
+
+def canary_phrase(language: str) -> str:
+    return CANARY_PHRASES.get(language.split("-")[0].lower(), CANARY_PHRASES["en"])
+
+
+def check_speech_allowed(settings: Settings) -> None:
+    """Every configured speech host is allowlisted, and the second STT is a real second
+    opinion. Raises :class:`ConfigError` (exit 3), before anything is probed."""
+    from opseval.speech.providers import check_second_stt
+
+    for url in (settings.tts_url, settings.stt_url, settings.stt_second_url):
+        if url:
+            check_url_allowed(url, settings.allowlist(), secure_schemes=("https",))
+    check_second_stt(settings)
+
+
+async def check_tts(settings: Settings, needed_by: int, *, language: str = "en") -> HealthCheck:
+    """Synthesise one short phrase with the configured TTS."""
+    from opseval.llm import UsageMeter
+    from opseval.speech.providers import text_to_speech
+
+    if needed_by == 0:
+        return HealthCheck(
+            name="tts", status=CheckStatus.NOT_NEEDED, detail="no voice scenario in this suite"
+        )
+    tts = text_to_speech(settings, UsageMeter())
+    if tts is None:
+        return HealthCheck(
+            name="tts",
+            status=CheckStatus.NOT_CONFIGURED,
+            detail="set OPSEVAL_TTS_URL and OPSEVAL_TTS_MODEL, or OPSEVAL_TTS_PROVIDER",
+            needed_by=needed_by,
+        )
+    try:
+        audio = await tts.synthesize(canary_phrase(language), voice=None, language=language)
+    except HarnessError as exc:
+        return HealthCheck(
+            name="tts", status=CheckStatus.UNAVAILABLE, detail=str(exc), needed_by=needed_by
+        )
+    finally:
+        await tts.aclose()
+    return HealthCheck(
+        name="tts",
+        status=CheckStatus.OK,
+        detail=f"{tts.describe} spoke a test phrase ({audio.seconds:.1f} s at {audio.rate} Hz)",
+        needed_by=needed_by,
+    )
+
+
+async def _canary(settings: Settings, language: str) -> tuple[Audio, str] | str:
+    """Known speech and its words: from the TTS, else the operator's WAV. A string says why
+    there is none."""
+    from opseval.audio import AudioDecodeError, from_wav
+    from opseval.llm import UsageMeter
+    from opseval.speech.providers import text_to_speech
+
+    tts = text_to_speech(settings, UsageMeter())
+    if tts is not None:
+        phrase = canary_phrase(language)
+        try:
+            return await tts.synthesize(phrase, voice=None, language=language), phrase
+        except HarnessError as exc:
+            return f"the TTS could not speak the canary ({exc})"
+        finally:
+            await tts.aclose()
+    path, text = settings.stt_canary_wav, settings.stt_canary_text
+    if not (path and text):
+        return "no TTS and no OPSEVAL_STT_CANARY_WAV with OPSEVAL_STT_CANARY_TEXT to make one"
+    try:
+        pcm16, rate = from_wav(Path(path).read_bytes())
+        return Audio(pcm16=pcm16, rate=rate), text
+    except (OSError, AudioDecodeError, ValueError) as exc:
+        return f"OPSEVAL_STT_CANARY_WAV could not be read ({type(exc).__name__})"
+
+
+async def check_stt(
+    settings: Settings, needed_by: int, *, language: str = "en", second: bool = False
+) -> HealthCheck:
+    """Transcribe known speech and measure its word error rate (the STT canary, ADR-0053).
+
+    Healthy when the WER is at most ``OPSEVAL_STT_CANARY_MAX_WER``. Without known speech the
+    provider is still asked to transcribe a second of silence: an answer proves it is up and
+    the key works, but not that it can hear, so the check is ``unverified``.
+    """
+    from opseval.llm import UsageMeter
+    from opseval.speech.providers import second_speech_to_text, speech_to_text
+    from opseval.speech.wer import word_error_rate
+
+    name = "stt_second" if second else "stt"
+    if needed_by == 0:
+        return HealthCheck(
+            name=name, status=CheckStatus.NOT_NEEDED, detail="no voice scenario in this suite"
+        )
+    build = second_speech_to_text if second else speech_to_text
+    stt = build(settings, UsageMeter())
+    if stt is None:
+        return HealthCheck(
+            name=name,
+            status=CheckStatus.NOT_CONFIGURED,
+            detail="set OPSEVAL_STT_URL and OPSEVAL_STT_MODEL, or OPSEVAL_STT_PROVIDER",
+            needed_by=needed_by,
+        )
+    canary = await _canary(settings, language)
+    audio = canary[0] if isinstance(canary, tuple) else Audio(pcm16=bytes(32_000), rate=16_000)
+    try:
+        heard = await stt.transcribe(audio, language=language)
+    except HarnessError as exc:
+        return HealthCheck(
+            name=name, status=CheckStatus.UNAVAILABLE, detail=str(exc), needed_by=needed_by
+        )
+    finally:
+        await stt.aclose()
+    if isinstance(canary, str):
+        return HealthCheck(
+            name=name,
+            status=CheckStatus.UNVERIFIED,
+            detail=f"{stt.describe} answered, but the canary was not run: {canary}",
+            needed_by=needed_by,
+        )
+    wer = word_error_rate(canary[1], heard.text)
+    bound = settings.stt_canary_max_wer
+    if wer > bound:
+        return HealthCheck(
+            name=name,
+            status=CheckStatus.UNAVAILABLE,
+            detail=(
+                f"{stt.describe} misheard the canary: WER {wer:.2f} over "
+                f"OPSEVAL_STT_CANARY_MAX_WER {bound:g} (heard {heard.text[:80]!r})"
+            ),
+            needed_by=needed_by,
+        )
+    return HealthCheck(
+        name=name,
+        status=CheckStatus.OK,
+        detail=f"{stt.describe} heard the canary (WER {wer:.2f}, at most {bound:g})",
+        needed_by=needed_by,
+    )
+
+
+async def speech_checks(
+    settings: Settings, needed_by: int, *, language: str = "en"
+) -> list[HealthCheck]:
+    """TTS, STT and (when configured) the second STT. Nothing is sent when no scenario needs
+    voice; a refused host raises :class:`ConfigError` before anything is sent."""
+    from opseval.speech.providers import second_stt_configured
+
+    if needed_by:
+        check_speech_allowed(settings)
+    checks = [
+        check_tts(settings, needed_by, language=language),
+        check_stt(settings, needed_by, language=language),
+    ]
+    if needed_by and second_stt_configured(settings):
+        checks.append(check_stt(settings, needed_by, language=language, second=True))
+    return list(await asyncio.gather(*checks))
+
+
 def _check_provider(profile: SutProfile, settings: Settings, target: str) -> HealthCheck:
     """Ask the credential provider plugin for one token, as an attempt would (ADR-0046).
 
@@ -329,11 +496,17 @@ async def preflight(
     traces_enabled: bool = True,
     verify_llm: bool = False,
     probe_target_host: bool = True,
+    voice_scenarios: int = 0,
+    voice_language: str = "en",
 ) -> PreflightReport:
     """Check everything this suite depends on, concurrently.
 
     ``probe_target_host`` is off when a transport factory was injected: there is no host
     to reach, and probing one would invent a failure the run would never have hit.
+
+    ``voice_scenarios`` is how many scenarios speak (ADR-0054). When it is 0, as for every
+    suite until the voice bridge lands, no speech provider is built or probed and the report
+    carries no speech checks.
     """
     listed = list(scenarios)
     needs = _requirements(listed)
@@ -345,27 +518,47 @@ async def preflight(
         base = getattr(settings, f"{role}_base_url")
         if base:
             check_url_allowed(base, settings.allowlist(), secure_schemes=("https",))
+    if voice_scenarios:
+        check_speech_allowed(settings)
     probe = (
         probe_target(target, transport)
         if probe_target_host
         else _already_ok("sut", "transport supplied by the caller")
     )
-    sut, simulator, judge, traces = await asyncio.gather(
+    sut, simulator, judge, traces, speech = await asyncio.gather(
         probe,
         check_llm("simulator", settings, needs["simulator"], verify=verify_llm),
         check_llm("judge", settings, needs["llm_scorers"], verify=verify_llm),
         check_traces(profile, settings, needs["traces"], enabled=traces_enabled),
+        _voice(settings, voice_scenarios, voice_language),
     )
     return PreflightReport(
-        checks=[sut, check_token(profile, settings, target=target), simulator, judge, traces]
+        checks=[
+            sut,
+            check_token(profile, settings, target=target),
+            simulator,
+            judge,
+            traces,
+            *speech,
+        ]
     )
+
+
+async def _voice(settings: Settings, needed_by: int, language: str) -> list[HealthCheck]:
+    return await speech_checks(settings, needed_by, language=language) if needed_by else []
 
 
 __all__ = [
+    "CANARY_PHRASES",
+    "canary_phrase",
     "check_llm",
+    "check_speech_allowed",
+    "check_stt",
     "check_token",
     "check_traces",
+    "check_tts",
     "llm_roles_needed",
     "preflight",
     "probe_target",
+    "speech_checks",
 ]

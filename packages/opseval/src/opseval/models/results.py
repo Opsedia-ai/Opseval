@@ -196,6 +196,13 @@ class ModelUsage(BaseModel):
     output_tokens: int = 0
     rate_limited_calls: int = 0
     cost_usd: float | None = None  # None = no price known, never 0
+    audio_in_seconds: float | None = None
+    """Audio sent to a speech-to-text role (ADR-0054). None for a role that sends none, and
+    on results written before speech providers: not measured, never 0."""
+    audio_out_seconds: float | None = None
+    """Audio a text-to-speech role returned."""
+    characters: int | None = None
+    """Characters a text-to-speech role was asked to synthesise."""
 
 
 class Gate(BaseModel):
