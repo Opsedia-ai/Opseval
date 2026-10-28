@@ -31,11 +31,21 @@ class Measured(BaseModel):
 
 
 class Ratio(BaseModel):
+    """A sum over the measured units of a denominator (attempts, passed tests, calls).
+
+    The denominator counts only the units that were measured (``measured`` of ``of``), so a
+    unit whose usage is unknown never dilutes the ratio. ``complete`` false: the numerator was
+    a floor (a call in it was not priced or did not report its count), so the ratio is too."""
+
     model_config = ConfigDict(extra="forbid")
     value: float | None
-    """``None`` when nothing was measured or the denominator is 0."""
+    """``None`` when the numerator was not measured or no unit of the denominator was."""
     measured: int
+    """Units of the denominator that were measured (and divided by)."""
     of: int
+    """Units of the denominator there were."""
+    complete: bool
+    """The numerator covered every call it should have: the ratio is not a floor."""
 
 
 class BucketOut(BaseModel):
@@ -63,8 +73,11 @@ class UsageScope(BaseModel):
     runs: int
     """Finished runs that matched the filters."""
     calls: int
-    """Calls counted (failed calls included)."""
+    """Calls counted (failed calls included, re-scoring calls included)."""
     failed_calls: int
+    rescore_calls: int = 0
+    """Of ``calls``, the calls the latest re-score of a run made (grouped as
+    ``<role> (rescore)``). They are counted with their run, never as a run of their own."""
     attempts: int
     """Attempts in those runs."""
     attempts_without_usage: int
@@ -73,7 +86,12 @@ class UsageScope(BaseModel):
     """Runs written before per-call usage. Their per-model totals are shown as written (a
     missing count was then added as 0); they have no per-attempt or per-scenario figures."""
     unreadable_runs: list[str] = Field(default_factory=list)
-    """Runs whose records could not be read: left out, and named."""
+    """Runs whose records could not be read: left out entirely (no calls, no passed tests,
+    no bucket), and named."""
+    rescored_runs: list[str] = Field(default_factory=list)
+    """Runs whose latest re-score's calls are counted."""
+    unreadable_rescores: list[str] = Field(default_factory=list)
+    """Runs whose latest re-score could not be read: its calls are left out, and named."""
     in_flight_excluded: bool = True
     """Runs still in flight are never counted: their usage is not final."""
 
@@ -107,8 +125,9 @@ class RunCost(BaseModel):
     cost_usd: Measured
     passed_tests: int
     """Scenarios whose verdict is ``passed``."""
-    cost_per_passed_test: float | None
-    """``None`` when nothing passed or nothing was priced."""
+    cost_per_passed_test: Ratio
+    """Over the passed tests whose attempts were measured (all of them in a run written
+    before per-call usage: its totals cover the whole run)."""
     per_call: bool
     """False: written before per-call usage (totals as written)."""
 
@@ -120,11 +139,12 @@ class ScenarioCost(BaseModel):
     attempts_measured: int
     """Attempts with per-call usage; the others are not measured."""
     cost_usd: Measured
-    cost_per_attempt: float | None
-    """Over the measured attempts; ``None`` when none was measured or nothing was priced."""
+    cost_per_attempt: Ratio
+    """Over the measured attempts."""
     passed_runs: int
-    """Runs in which this scenario passed."""
-    cost_per_passed_test: float | None
+    """Runs in which this scenario passed and every attempt of it was measured."""
+    cost_per_passed_test: Ratio
+    """Over ``passed_runs`` (``of``: every run in which it passed)."""
 
 
 class CostAnswer(BaseModel):
@@ -136,7 +156,7 @@ class CostAnswer(BaseModel):
     by_role: list[Series]
     by_model: list[Series]
     total_usd: Measured
-    cost_per_passed_test: float | None
+    cost_per_passed_test: Ratio
     passed_tests: int
     runs: list[RunCost]
     scenarios: list[ScenarioCost]
@@ -165,7 +185,7 @@ class ScenarioTokens(BaseModel):
     attempts: int
     attempts_measured: int
     tokens: Measured
-    tokens_per_attempt: float | None
+    tokens_per_attempt: Ratio
 
 
 class TokensAnswer(BaseModel):

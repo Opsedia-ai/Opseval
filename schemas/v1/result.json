@@ -1,5 +1,33 @@
 {
   "$defs": {
+    "AttemptUsage": {
+      "additionalProperties": false,
+      "description": "The calls made for one attempt outside its record: a re-score's judge calls\n(ADR-0066). A run's own attempt calls live in the attempt's record instead.",
+      "properties": {
+        "attempt_index": {
+          "title": "Attempt Index",
+          "type": "integer"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/UsageEvent"
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "test_id": {
+          "title": "Test Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "test_id",
+        "attempt_index",
+        "events"
+      ],
+      "title": "AttemptUsage",
+      "type": "object"
+    },
     "AttemptVerdict": {
       "additionalProperties": false,
       "properties": {
@@ -1205,6 +1233,13 @@
   "additionalProperties": false,
   "description": "Opseval opseval/v1 result contract. Generated from the Pydantic model; do not edit by hand (run `opseval schemas`).",
   "properties": {
+    "attempt_usage": {
+      "items": {
+        "$ref": "#/$defs/AttemptUsage"
+      },
+      "title": "Attempt Usage",
+      "type": "array"
+    },
     "config_digest": {
       "additionalProperties": true,
       "title": "Config Digest",

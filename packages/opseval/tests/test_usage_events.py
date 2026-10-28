@@ -23,7 +23,7 @@ from opseval.llm import ChatClient, UsageMeter, token_counts
 from opseval.models.record import RunRecord
 from opseval.models.results import ModelUsage, SuiteResult
 from opseval.models.usage import USAGE_ROLES, ModelPrice, PriceTable, UsageEvent, has_tokens
-from opseval.pricing import builtin_prices, price_for, priced, repriced
+from opseval.pricing import builtin_prices, price_for, priced
 from opseval.runner import RunOptions, launch
 from opseval.scoring import ScoringEngine
 from opseval.storage import FileStore
@@ -290,7 +290,8 @@ class TestPrices:
         e = priced(event(input_tokens=1_000_000, output_tokens=0), before)
         assert e.cost_usd == pytest.approx(2.0) and e.price_from == date(2026, 1, 1)
         after = table(*before.prices, tokens_price(date(2026, 6, 1), 1.0, 4.0))
-        assert repriced(e, after).cost_usd == pytest.approx(2.0)
+        same_day = priced(event(input_tokens=1_000_000, output_tokens=0), after)
+        assert same_day.cost_usd == pytest.approx(2.0)
         later = event(at=datetime(2026, 7, 1, tzinfo=UTC), input_tokens=1_000_000, output_tokens=0)
         assert priced(later, after).cost_usd == pytest.approx(1.0)
 

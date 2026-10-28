@@ -264,6 +264,8 @@ export interface RunUsage {
   run: string;
   simulatorTokens: number | null;
   judgeTokens: number | null;
+  simulatorTokensComplete: boolean;
+  judgeTokensComplete: boolean;
   costUsd: number | null;
   costComplete: boolean;
   audioInSeconds: number | null;
@@ -280,10 +282,12 @@ export interface MeasuredOut {
   complete: boolean;
 }
 
+/** A sum over the measured units of a denominator. ``value`` null: not measured. ``complete`` false: the numerator was a floor, so the ratio is too (drawn with "≥"). */
 export interface RatioOut {
   value: number | null;
   measured: number;
   of: number;
+  complete: boolean;
 }
 
 export interface UsageBucket {
@@ -306,8 +310,11 @@ export interface UsageScopeOut {
   failedCalls: number;
   attempts: number;
   attemptsWithoutUsage: number;
+  rescoreCalls: number;
   legacyRuns: string[];
   unreadableRuns: string[];
+  rescoredRuns: string[];
+  unreadableRescores: string[];
   inFlightExcluded: boolean;
 }
 
@@ -333,7 +340,7 @@ export interface RunCostOut {
   startedAt: string;
   costUsd: MeasuredOut;
   passedTests: number;
-  costPerPassedTest: number | null;
+  costPerPassedTest: RatioOut;
   perCall: boolean;
 }
 
@@ -342,9 +349,9 @@ export interface ScenarioCostOut {
   attempts: number;
   attemptsMeasured: number;
   costUsd: MeasuredOut;
-  costPerAttempt: number | null;
+  costPerAttempt: RatioOut;
   passedRuns: number;
-  costPerPassedTest: number | null;
+  costPerPassedTest: RatioOut;
 }
 
 /** Evaluation spend (ADR-0066): never the agent's own cost, never $0 for "no price". */
@@ -356,7 +363,7 @@ export interface CostDashboard {
   byRole: UsageSeries[];
   byModel: UsageSeries[];
   totalUsd: MeasuredOut;
-  costPerPassedTest: number | null;
+  costPerPassedTest: RatioOut;
   passedTests: number;
   runs: RunCostOut[];
   scenarios: ScenarioCostOut[];
@@ -376,7 +383,7 @@ export interface ScenarioTokensOut {
   attempts: number;
   attemptsMeasured: number;
   tokens: MeasuredOut;
-  tokensPerAttempt: number | null;
+  tokensPerAttempt: RatioOut;
 }
 
 export interface TokensDashboard {

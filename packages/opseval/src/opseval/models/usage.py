@@ -94,6 +94,16 @@ class UsageEvent(BaseModel):
         return self
 
 
+class AttemptUsage(BaseModel):
+    """The calls made for one attempt outside its record: a re-score's judge calls
+    (ADR-0066). A run's own attempt calls live in the attempt's record instead."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    test_id: str
+    attempt_index: int
+    events: tuple[UsageEvent, ...]
+
+
 PriceUnit = Literal["tokens", "characters", "seconds"]
 
 

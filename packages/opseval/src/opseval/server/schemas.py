@@ -306,6 +306,10 @@ class RunUsage(Api):
     run: str
     simulator_tokens: int | None
     judge_tokens: int | None
+    # True only when every simulator (judge) model's calls reported their tokens; false with a
+    # number: the number is a floor ("≥"), what the models that reported them used (ADR-0066)
+    simulator_tokens_complete: bool = False
+    judge_tokens_complete: bool = False
     cost_usd: float | None  # the known cost; None when no model in the run has a price
     cost_complete: bool = False  # True only when every model in the run has a price
     audio_in_seconds: float | None = None  # STT audio heard in the run; None = not measured
@@ -325,9 +329,13 @@ class MeasuredOut(Api):
 
 
 class RatioOut(Api):
+    """A sum over the measured units of a denominator. ``value`` null: not measured.
+    ``complete`` false: the numerator was a floor, so the ratio is too (drawn with "≥")."""
+
     value: float | None
-    measured: int
-    of: int
+    measured: int  # units of the denominator measured (and divided by)
+    of: int  # units there were
+    complete: bool
 
 
 class UsageBucket(Api):
@@ -351,8 +359,11 @@ class UsageScopeOut(Api):
     failed_calls: int
     attempts: int
     attempts_without_usage: int
+    rescore_calls: int  # of calls, those a run's latest re-score made
     legacy_runs: list[str]  # written before per-call usage: per-model totals as written
-    unreadable_runs: list[str]  # records that could not be read: left out, and named
+    unreadable_runs: list[str]  # records that could not be read: left out entirely, and named
+    rescored_runs: list[str]  # runs whose latest re-score's calls are counted
+    unreadable_rescores: list[str]  # a re-score that could not be read: its calls left out
     in_flight_excluded: bool
 
 
@@ -378,7 +389,7 @@ class RunCostOut(Api):
     started_at: str
     cost_usd: MeasuredOut
     passed_tests: int
-    cost_per_passed_test: float | None
+    cost_per_passed_test: RatioOut
     per_call: bool  # false: written before per-call usage
 
 
@@ -387,9 +398,9 @@ class ScenarioCostOut(Api):
     attempts: int
     attempts_measured: int
     cost_usd: MeasuredOut
-    cost_per_attempt: float | None
-    passed_runs: int
-    cost_per_passed_test: float | None
+    cost_per_attempt: RatioOut
+    passed_runs: int  # runs it passed in with every attempt measured
+    cost_per_passed_test: RatioOut
 
 
 class CostDashboard(Api):
@@ -402,7 +413,7 @@ class CostDashboard(Api):
     by_role: list[UsageSeries]
     by_model: list[UsageSeries]
     total_usd: MeasuredOut
-    cost_per_passed_test: float | None
+    cost_per_passed_test: RatioOut
     passed_tests: int
     runs: list[RunCostOut]
     scenarios: list[ScenarioCostOut]
@@ -422,7 +433,7 @@ class ScenarioTokensOut(Api):
     attempts: int
     attempts_measured: int
     tokens: MeasuredOut
-    tokens_per_attempt: float | None
+    tokens_per_attempt: RatioOut
 
 
 class TokensDashboard(Api):

@@ -3,8 +3,9 @@
 
 ``builtin.yaml`` ships with Opseval and replaces the old hard-coded ``llm.PRICES``. Every row
 has an ``effective_from`` date; a call is priced with the newest matching row in force on the
-day it was made, so a price added later never changes what an earlier run cost. A model with
-no row has no price: ``None``, never $0. A cost the provider reported itself wins and is
+day it was made, and the cost is stored with the call: it is never recomputed, so a price
+added later (whatever its ``effective_from``) never changes what an earlier run cost. A model
+with no row has no price: ``None``, never $0. A cost the provider reported itself wins and is
 labelled ``provider``. Per-project price overrides need the database and come in D2.
 """
 
@@ -108,12 +109,4 @@ def priced(
     )
 
 
-def repriced(event: UsageEvent, table: PriceTable | None = None) -> UsageEvent:
-    """The event's cost recomputed from its counts with the price in force when it was made
-    (ADR-0066). A provider-reported cost is kept as it was."""
-    if event.cost_source == "provider":
-        return event
-    return priced(event, table)
-
-
-__all__ = ["builtin_prices", "price_for", "priced", "repriced"]
+__all__ = ["builtin_prices", "price_for", "priced"]

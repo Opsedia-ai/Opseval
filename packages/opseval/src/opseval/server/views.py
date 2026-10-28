@@ -307,21 +307,28 @@ def _count(values: list[int | None]) -> int | None:
 def usage(store: FileStore) -> list[s.RunUsage]:
     """Per run: tokens per LLM role, speech audio and characters, and the cost. The cost is
     what the priced models cost, with ``cost_complete`` saying whether every model was priced:
-    one unpriced model makes the total a floor, never hides the part that is known."""
+    one unpriced model makes the total a floor, never hides the part that is known. Token
+    totals carry the same flag (``*_tokens_complete``). Costs are the ones stored with each
+    call when it was made, as on the dashboards (ADR-0066)."""
     rows: list[s.RunUsage] = []
     for r in load_results(store):
 
-        def tokens(role: str, r: SuiteResult = r) -> int | None:
-            hits = [u for u in r.usage if u.role == role]
-            return _count([_tokens(u) for u in hits]) if hits else None
+        def tokens(role: str, r: SuiteResult = r) -> tuple[int | None, bool]:
+            """The role's tokens over the models that reported them, and whether every model
+            did (a model whose calls did not all report them is left out: a floor)."""
+            counts = [_tokens(u) for u in r.usage if u.role == role]
+            return _count(counts), bool(counts) and None not in counts
 
         costs = [u.cost_usd for u in r.usage]
         known = _total(costs)
+        simulator, judge = tokens("simulator"), tokens("judge")
         rows.append(
             s.RunUsage(
                 run=r.run_id,
-                simulator_tokens=tokens("simulator"),
-                judge_tokens=tokens("judge"),
+                simulator_tokens=simulator[0],
+                simulator_tokens_complete=simulator[1],
+                judge_tokens=judge[0],
+                judge_tokens_complete=judge[1],
                 cost_usd=round(known, 4) if known is not None else None,
                 cost_complete=bool(costs) and all(c is not None for c in costs),
                 audio_in_seconds=_total([u.audio_in_seconds for u in r.usage]),

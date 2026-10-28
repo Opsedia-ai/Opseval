@@ -18,7 +18,7 @@ from opseval.models.preflight import PreflightReport
 from opseval.models.record import TerminalState
 from opseval.models.scenario import Criticality
 from opseval.models.stop import StopPolicy
-from opseval.models.usage import UsageEvent, UsageReported
+from opseval.models.usage import AttemptUsage, UsageEvent, UsageReported
 
 
 class ScoreStatus(StrEnum):
@@ -317,6 +317,9 @@ class SuiteResult(BaseModel):
     usage: list[ModelUsage] = Field(default_factory=list)
     usage_events: list[UsageEvent] = Field(default_factory=list)
     """Calls made outside any attempt (ADR-0066). An attempt's own calls live in its record."""
+    attempt_usage: list[AttemptUsage] = Field(default_factory=list)
+    """A re-score's calls, per attempt it re-graded (ADR-0066). Empty on a run, whose attempts
+    keep their calls in their records."""
     config_digest: dict[str, Any] = Field(default_factory=dict)
     load_errors: list[str] = Field(default_factory=list)
     rescore: RescoreInfo | None = None
