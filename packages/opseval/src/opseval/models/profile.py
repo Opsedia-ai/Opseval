@@ -137,6 +137,82 @@ class Probe(BaseModel):
     timeout_seconds: float = Field(default=10.0, gt=0, le=120)
 
 
+AUDIO_RATES_ALLOWED: tuple[int, ...] = (8_000, 16_000, 22_050, 24_000, 44_100, 48_000)
+"""Mirrors ``opseval.audio.RATES`` (models import nothing else in opseval; a test keeps them
+equal)."""
+
+
+class AudioEnvelope(BaseModel):
+    """How an ``audio-ws`` agent frames its stream (ADR-0053). Every event is a JSON object
+    whose ``type_field`` names it; audio may also arrive as binary WebSocket frames."""
+
+    model_config = ConfigDict(extra="forbid")
+    type_field: str = "type"
+    audio_event: str = "audio"
+    """The event carrying a chunk of audio, base64 in ``audio_field``."""
+    audio_field: str = "audio"
+    binary: bool = False
+    """Send the caller's audio as binary WebSocket frames instead of base64 JSON. Binary
+    frames from the agent are always read as audio."""
+    start_frame: dict[str, Any] | None = None
+    """Sent once when the stream opens (``{codec}`` and ``{rate}`` are substituted)."""
+    caller_turn_end_event: str | None = "end_of_turn"
+    """Sent when the caller has finished speaking; ``null`` sends nothing (the agent detects
+    the end of the caller's turn itself)."""
+    speech_start_event: str | None = "speech_start"
+    speech_end_event: str | None = "speech_end"
+    """The agent's own end of turn. Without it the bridge detects the end from silence."""
+    mark_event: str | None = "mark"
+    mark_name_field: str = "name"
+    transcript_event: str | None = "transcript"
+    """The agent's own transcript of what it said, when it sends one (kept as evidence; the
+    text scorers read Opseval's own STT)."""
+    transcript_text_field: str = "text"
+    dtmf_event: str | None = "dtmf"
+    dtmf_digits_field: str = "digits"
+    transfer_event: str | None = "transfer"
+    transfer_to_field: str = "to"
+    hangup_event: str | None = "hangup"
+
+
+class AudioHttp(BaseModel):
+    """How an ``audio-http`` agent takes and returns a turn (ADR-0053)."""
+
+    model_config = ConfigDict(extra="forbid")
+    request_format: Literal["wav", "raw"] = "wav"
+    """The caller's turn as a WAV file, or raw bytes in the profile's codec and rate."""
+    session_header: str = "X-Opseval-Session"
+    """A header carrying one id per attempt, so the agent can keep the conversation."""
+
+
+class AudioConfig(BaseModel):
+    """A speaking agent (ADR-0053): what goes over the wire and when a turn ends."""
+
+    model_config = ConfigDict(extra="forbid")
+    codec: Literal["pcm16", "mulaw", "alaw"] = "pcm16"
+    rate: int = 16_000
+    end_of_turn_silence_ms: int = Field(default=800, ge=50, le=30_000)
+    """Without the agent's own end-of-speech event, this much silence after it spoke ends its
+    turn."""
+    max_turn_seconds: float = Field(default=60.0, gt=0, le=600)
+    """An agent that speaks longer than this in one turn never ended it: its fault
+    (a ``TransportTimeout``)."""
+    silence_dbfs: float = Field(default=-50.0, le=0)
+    """Below this level a chunk is silence. Silence is not an empty transcript (ADR-0053)."""
+    chunk_ms: int = Field(default=20, ge=5, le=1000)
+    """How much caller audio goes in one chunk."""
+    language: str | None = None
+    """The language the STT hears; the persona's language when unset."""
+    envelope: AudioEnvelope = Field(default_factory=AudioEnvelope)
+    http: AudioHttp = Field(default_factory=AudioHttp)
+
+    @model_validator(mode="after")
+    def _rate(self) -> AudioConfig:
+        if self.rate not in AUDIO_RATES_ALLOWED:
+            raise ValueError(f"audio.rate {self.rate} is not one of {AUDIO_RATES_ALLOWED}")
+        return self
+
+
 class SutProfile(BaseModel):
     """Maps an agent's wire protocol onto Opseval's canonical model."""
 
@@ -199,6 +275,9 @@ class SutProfile(BaseModel):
     conversation starts (FR-RUN-04's PROBES state). Graded by ``protocol.probes_passed``;
     they never abort the conversation, so a protocol fault and its consequences are both
     visible in one record."""
+    audio: AudioConfig | None = None
+    """A speaking agent, reached over ``audio-http`` or ``audio-ws`` through the voice bridge
+    (ADR-0053). Its turns are spoken; the transcript becomes each reply's ``text``."""
 
     # --- conversation model -----------------------------------------------------------
     phases: list[str] = Field(default_factory=list)
@@ -240,6 +319,9 @@ class SutProfile(BaseModel):
                 "reconnect.resume_session_frame needs session_id_field: a session can only be "
                 "resumed if the agent tells Opseval its id"
             )
+        if self.audio is not None and self.probes:
+            # A probe is a raw JSON frame; a speaking agent is reached through audio.
+            raise ValueError("probes are JSON frames: a voice profile (audio:) cannot send them")
         for name, spec in self.checkpoints.items():
             if spec.phase is not None and self.phases and spec.phase not in self.phases:
                 raise ValueError(f"checkpoint {name!r} refers to unknown phase {spec.phase!r}")

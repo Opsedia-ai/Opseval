@@ -30,6 +30,14 @@ UNREAD_REPLIES = "protocol.replies_read"
 """The always-on harness check that the profile read the agent's replies (ADR-0042). Named
 here, in the models, so the scorer, the engine and the verdict rules share one spelling."""
 
+VOICE_INTELLIGIBLE = "voice.intelligible"
+"""The always-on check for voice attempts (ADR-0053): agent speech with energy that no STT
+could read, while the STT canary proved Opseval could hear, fails it (output axis)."""
+
+ASR_NO_TRANSCRIPT = "ASR_NO_TRANSCRIPT"
+"""The reason code of a text-reading score that could not be measured because Opseval's own
+listening was proven broken on that attempt (ADR-0053)."""
+
 
 class Axis(StrEnum):
     OUTPUT = "output"

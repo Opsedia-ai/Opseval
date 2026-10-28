@@ -1,0 +1,16 @@
+# SUT profile for the demo's speaking refund agent (ADR-0053). It is reached over audio-ws or
+# audio-http through the voice bridge: its turns are spoken, and Opseval's STT turns them into
+# the text every scorer reads.
+name: voice-refund-agent
+description: Speaking refund agent used by `opseval demo --voice` (synthetic voices).
+
+audio:
+  codec: mulaw            # a phone line: μ-law at 8 kHz
+  rate: 8000
+  end_of_turn_silence_ms: 600
+  max_turn_seconds: 30
+  envelope:
+    start_frame: {type: start, codec: "{codec}", rate: "{rate}"}
+
+user_message_frame: {type: user_message, text: "{text}"}
+turn_quiet_ms: 300

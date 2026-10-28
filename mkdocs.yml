@@ -26,6 +26,7 @@ nav:
       - Cookbook: guide/cookbook.md
       - Gate releases in CI: guide/ci.md
       - Server mode (preview): guide/server-mode.md
+      - Voice agents (preview): guide/voice.md
   - Reference:
       - Scorers: reference/scorers.md
       - Settings: reference/settings.md

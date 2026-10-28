@@ -45,6 +45,8 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_STT_SECOND_URL` | text | unset | Base URL of the second STT. Allowlisted and preflighted like the first. |
 | `OPSEVAL_STT_SECOND_KEY` | secret | unset (secret) | API key for the second STT, if it needs one. |
 | `OPSEVAL_STT_SECOND_MODEL` | text | unset | Model of the second STT. |
+| `OPSEVAL_RECORD_AUDIO` | `files` \| `hashes` | `files` | What a voice run keeps of each spoken turn (ADR-0053). ``files``: one WAV per speaker per turn under the run folder's ``audio/``, which needs ``OPSEVAL_AUDIO_ENCRYPTION_KEY`` (a voice can be biometric data), so without the key a voice run is refused (exit 3). ``hashes``: no bytes at all, only each turn's SHA-256, length, codec, rate and duration. |
+| `OPSEVAL_AUDIO_ENCRYPTION_KEY` | secret | unset (secret) | The key that encrypts recorded audio at rest (ADR-0053), separate from the key that encrypts agent credentials. Encryption arrives in the next voice step: until then a run with this set is refused (exit 3); use ``OPSEVAL_RECORD_AUDIO=hashes``. |
 | `OPSEVAL_OTLP_SPANS_PATH` | text | unset | OTLP-JSON spans (a file or folder) for `traces.source: otlp-file` (ADR-0028). |
 | `OPSEVAL_LANGFUSE_HOST` | text | unset | Langfuse base URL, for trace-backed tool checks and score pushing. Must be allowlisted. |
 | `OPSEVAL_LANGFUSE_PUBLIC_KEY` | text | unset | Langfuse public key. |

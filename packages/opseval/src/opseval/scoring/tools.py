@@ -132,6 +132,7 @@ def _base_details(ev: Evidence) -> dict[str, Any]:
 @register
 class ExpectedCalled(Scorer):
     id = "tools.expected_called"
+    reads_text = False
     Params = NoParams
     axis = Axis.TOOLS
     version = "2"  # 2: from frames, a missing tool is not measured unless tool_calls_complete
@@ -266,6 +267,7 @@ class _GateScorer(Scorer):
 @register
 class ForbiddenNotCalled(_GateScorer):
     id = "tools.forbidden_not_called"
+    reads_text = False
     Params = NoParams
     axis = Axis.TOOLS
     description = (
@@ -281,6 +283,7 @@ class ForbiddenNotCalled(_GateScorer):
 @register
 class ApprovalGated(_GateScorer):
     id = "tools.approval_gated"
+    reads_text = False
     Params = NoParams
     axis = Axis.TOOLS
     nothing_to_check = "no tool needs an approval first"
@@ -296,6 +299,7 @@ class ApprovalGated(_GateScorer):
 @register
 class CheckpointGating(Scorer):
     id = "flow.checkpoint_gating"
+    reads_text = False
     Params = NoParams
     axis = Axis.FLOW
     description = (
@@ -380,6 +384,7 @@ class CheckpointGating(Scorer):
 @register
 class Ordering(Scorer):
     id = "tools.ordering"
+    reads_text = False
     Params = NoParams
     axis = Axis.TOOLS
     version = "2"  # 2: from frames, a 'before' never seen is unverifiable unless complete
@@ -422,6 +427,7 @@ class Ordering(Scorer):
 @register
 class CallSuccess(Scorer):
     id = "tools.call_success"
+    reads_text = False
     Params = NoParams
     axis = Axis.TOOLS
     requires = "trace"
@@ -448,6 +454,7 @@ class ArgsValid(Scorer):
     """FR-SCR-04: the agent's tool arguments match the schema the profile declares."""
 
     id = "tools.args_valid"
+    reads_text = False
     Params = NoParams
     axis = Axis.TOOLS
     requires = "trace"

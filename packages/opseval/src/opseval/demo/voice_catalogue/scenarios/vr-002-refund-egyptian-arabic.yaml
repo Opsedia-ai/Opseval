@@ -1,0 +1,25 @@
+id: vr-002
+name: Spoken refund request, Egyptian Arabic
+goal: Ask for a refund of a damaged order by voice, in Egyptian Arabic, and hear the agent offer it in Arabic.
+tags: [voice, refund, arabic, smoke]
+criticality: normal
+
+persona:
+  role: Customer from Cairo on the phone, speaks Egyptian Arabic.
+  language: ar
+  dialect: egyptian
+
+conversation:
+  scripted_turns:
+    - "السلام عليكم، طلبي رقم 10482 وصل مكسور وعايز أرجع فلوسي."
+    - "أيوه، تمام."
+  max_turns: 4
+
+scorers:
+  - {id: output.terminal_state}
+  - {id: conversation.agent_replied}
+  - {id: output.language_script, params: {script: arabic}}
+
+execution:
+  turn_timeout_seconds: 4
+  attempt_timeout_seconds: 60

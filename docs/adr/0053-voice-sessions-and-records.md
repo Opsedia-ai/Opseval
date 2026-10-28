@@ -188,3 +188,73 @@ PDPL, the UAE PDPL and China's PIPL.
 - The default energy threshold, end-of-turn silence and `OPSEVAL_STT_CANARY_MAX_WER` per
   language. They are calibrated per language pack (ADR-0059).
 - Consent records per recording (`audio_assets.consent_basis`, ADR-0051).
+
+## Implementation (V0c part 1, 2026-10-28)
+
+Built:
+
+- **The bridge** (`opseval/voice/bridge.py`). `VoiceBridge(Session)` wraps an `AudioSession`;
+  `VoiceTransport` opens and starts one per attempt. The driver gained four optional `Session`
+  hooks and nothing else changed in it: `whole_turns` (a spoken turn is one frame, so an empty
+  transcript still answers the turn instead of becoming a turn timeout), `use_harness_clock`
+  (TTS and STT run with the attempt deadline paused, like the simulator), `frame_media` (the
+  `AudioRef`, the `TranscriptInfo` and the latency on the attempt's monotonic clock, from the
+  caller's last sample to the agent's first sample with energy, so STT time never inflates it)
+  and `voice_timeline` (`RunRecord.voice`).
+- **What is spoken.** The bridge finds the `"{text}"` value in the profile's
+  `user_message_frame`. A checkpoint decision sent through `resume_frame` is spoken as its
+  feedback, or as a plain yes or no in the scenario's language. A frame with nothing to say is a
+  `ConfigError`. A voice profile cannot declare probes (they are JSON frames).
+- **End of turn.** The agent's own `speech_end` event, a data message after its speech, or
+  `audio.end_of_turn_silence_ms` of silence (silent chunks or no events) after a chunk with
+  energy (`audio.silence_dbfs`). Silence alone never starts a turn, and is never sent to STT.
+  Data messages (`AgentFrame`: a checkpoint, a result) and DTMF, transfer and hang-up go to the
+  driver as frames, in order around the spoken turn, and to the timeline. A customer turn after
+  the agent hung up is the agent's `TransportTimeout`.
+- **The decision** follows the table above. Its evidence goes into the reply's payload under
+  `_opseval_voice` (level, duration, every transcript tried, `heard: stt | second_stt |
+  unintelligible | asr_failed`, the canary's provider, model, codec, rate, what was said and
+  heard, WER and bound, or its error, and `low_confidence`), so `rescore` decides on exactly
+  what the run saw. "Usable" means at least one letter in the language's script (Latin by
+  default, Arabic for `ar`, CJK for `zh`/`ja`). A second STT that fails is noted and the canary
+  runs; a canary call that fails is unhealthy.
+- **Scoring.** `voice.intelligible` (output axis) is added to the always-on checks for any
+  record with a voice timeline. `Scorer.reads_text` (default `True`, so an unknown plugin errs
+  towards "not measured"; `False` on every built-in that reads no words) decides which scores
+  become `infra_error` `ASR_NO_TRANSCRIPT`, naming the canary, without being run. A turn heard
+  only by the second STT marks every text-reading score degraded; a confidence under
+  `OPSEVAL_STT_MIN_CONFIDENCE` marks every judge score degraded; both with
+  `details.degraded_by`.
+- **Transports.** `audio-ws` (`transport/audio_ws.py`): base64 JSON envelope or binary frames,
+  event names from `audio.envelope`, an optional `start_frame`, `auth_frame` as for websocket,
+  DTMF declared. `audio-http` (`transport/audio_http.py`): one `POST` per caller turn (WAV or
+  raw, one session id per attempt in a header), sent at `end_of_caller_turn` and awaited in
+  `next_event`; WAV, raw or JSON answers; a WAV at another rate is resampled; 5xx is the agent's
+  error frame, 4xx and `NOT_SENT_TIMEOUTS` are transport errors. Both are allowlisted with TLS
+  off loopback (`wss`, `https`).
+- **Storage and privacy** (`voice/recording.py`). One PCM16 WAV per speaker per turn at
+  `audio/<test>/attempt<N>/<n>-<speaker>.wav`, or the hash and metadata alone with
+  `OPSEVAL_RECORD_AUDIO=hashes`. Undecodable agent audio is kept as it came (`.raw`), or as its
+  hash. `check_audio_privacy` refuses at launch (exit 3) a run that would write files, except
+  the demo's synthetic voices. `cryptography` is not in `uv.lock`, so encryption is not built:
+  setting `OPSEVAL_AUDIO_ENCRYPTION_KEY` is refused too, rather than claiming an encryption
+  that did not happen. `storage.LAYOUT` is `opseval-runs/5` (the profile snapshot may carry
+  `audio:`, replies the bridge's evidence); 1–4 are still read.
+- **Launch.** A voice transport needs the profile's `audio:` block and a configured TTS and
+  STT (`runner.speech_kit`, exit 3 otherwise). Preflight runs the speech checks for every
+  scenario. **Deviation from ADR-0054:** a blocking TTS or STT check refuses the run (exit 3)
+  instead of skipping the voice scenarios, because every scenario of a voice run speaks, so the
+  skip would leave nothing measured; per-scenario skips return when a suite can mix text and
+  voice. `opseval preflight --transport audio-ws` runs the same checks.
+- **The demo.** `opseval demo --voice` runs a speaking refund agent (English and Egyptian
+  Arabic) over `audio-ws` (or `--voice-transport audio-http`) at μ-law 8 kHz, with fake
+  OpenAI-compatible TTS and STT on loopback that encode text reversibly as tones
+  (`demo/tones.py`: sync byte, length, UTF-8, checksum; 16 tones between 600 and 3300 Hz, 20 ms
+  a nibble; noise and a bad checksum read as nothing). Exit codes, in CI's `check` and
+  `container` jobs: `--voice` 0, `--bug silent` 1, `--bug garbled` 1, `--stt-down` 3,
+  `--stt-deaf` 3 (refused at preflight: the canary is heard as nothing).
+
+Left for the next steps: audio encryption at rest (the `opseval[voice]` extra), audio
+retention (`OPSEVAL_AUDIO_RETENTION_DAYS`), the region check, tuning the second STT and the
+per-language thresholds (ADR-0059), the full-duplex driver (barge-in), phone and WebRTC, and
+showing audio and the voice timeline in the report and the console.

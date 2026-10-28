@@ -156,6 +156,7 @@ class Driver:
         self._last_sent_at: float | None = None
         self._used = False
         self._redacted: set[str] = set()
+        self._session: Session | None = None
 
     # --- recording ------------------------------------------------------------------
     def _record(
@@ -172,6 +173,15 @@ class Driver:
         latency = None
         if direction == "received" and self._last_sent_at is not None:
             latency = round((time.monotonic() - self._last_sent_at) * 1000, 1)
+        # A voice session knows what was spoken: the audio, its transcript, and the latency
+        # on the attempt's own clock, which time spent in STT must not inflate (ADR-0053).
+        media = self._session.frame_media(direction, payload) if self._session else None
+        if media is not None:
+            audio = media.audio or audio
+            transcript = media.transcript or transcript
+            at = media.at or at
+            if media.latency_ms is not None and direction == "received":
+                latency = round(media.latency_ms, 1)
         phase = None
         if direction == "received" and self.p.phase_field and isinstance(payload, dict):
             raw = payload.get(self.p.phase_field)
@@ -278,6 +288,8 @@ class Driver:
                 self._deadline = deadline
                 try:
                     session = await self.transport.connect()
+                    self._session = session
+                    session.use_harness_clock(self._off_clock)
                     await self._converse(session)
                 finally:
                     if session is not None:
@@ -335,6 +347,7 @@ class Driver:
             redaction=RedactionInfo(applied=True, found=tuple(sorted(self._redacted))),
             created_artifacts=artifacts,
             artifacts_checked=artifacts_checked,
+            voice=session.voice_timeline() if session else None,
         )
 
     def _note_rate_limit(self, exc: Exception) -> None:
@@ -364,6 +377,22 @@ class Driver:
                 f"the simulator did not answer within {self.simulator_timeout:g}s "
                 "(OPSEVAL_SIMULATOR_TIMEOUT_SECONDS)"
             ) from exc
+        finally:
+            if self._deadline is not None and remaining is not None:
+                self._deadline.reschedule(loop.time() + remaining)
+
+    async def _off_clock(self, call: Awaitable[T]) -> T:
+        """Run one harness call (the voice bridge's TTS or STT) with the attempt deadline
+        paused, as :meth:`_simulate` does for the simulator. The call has its own limit
+        (``OPSEVAL_TTS_TIMEOUT_SECONDS``, ``OPSEVAL_STT_TIMEOUT_SECONDS``, in the speech
+        guard), so it is never the agent's timeout (ADR-0053)."""
+        loop = asyncio.get_running_loop()
+        when = self._deadline.when() if self._deadline is not None else None
+        remaining = None if when is None else when - loop.time()
+        if self._deadline is not None:
+            self._deadline.reschedule(None)
+        try:
+            return await call
         finally:
             if self._deadline is not None and remaining is not None:
                 self._deadline.reschedule(loop.time() + remaining)
@@ -509,7 +538,11 @@ class Driver:
             text = text if isinstance(text, str) else None
             # Transport chatter (e.g. a late resume confirmation) is never the agent's reply.
             if waiting and kind is not FrameKind.HANDSHAKE:
-                waiting = not (session.replies_in_send or self.p.answers(kind, text, payload))
+                waiting = not (
+                    session.replies_in_send
+                    or session.whole_turns
+                    or self.p.answers(kind, text, payload)
+                )
             self._record("received", payload, kind, text)
             if kind is FrameKind.ERROR:
                 raise _Stop(TerminalState.ERROR_FRAME, "the agent sent an error frame")
