@@ -23,6 +23,10 @@ from opseval.models.results import ModelUsage
 # USD per 1M tokens (input, output). Deliberately small; unknown models are "no rate".
 PRICES: dict[str, tuple[float, float]] = {}
 
+# USD per (second of audio, character) for speech models (ADR-0054). Empty on purpose, like
+# PRICES: an unpriced model has cost None ("no price"), never $0.
+SPEECH_PRICES: dict[str, tuple[float | None, float | None]] = {}
+
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 BACKOFF = (1.0, 2.0, 4.0, 8.0, 16.0)
 
@@ -38,17 +42,72 @@ class UsageMeter:
         entry.calls += 1
         entry.rate_limited_calls += rate_limited
         if usage:
-            entry.input_tokens += int(usage.get("prompt_tokens", 0) or 0)
-            entry.output_tokens += int(usage.get("completion_tokens", 0) or 0)
+            entry.input_tokens = (entry.input_tokens or 0) + int(usage.get("prompt_tokens", 0) or 0)
+            entry.output_tokens = (entry.output_tokens or 0) + int(
+                usage.get("completion_tokens", 0) or 0
+            )
         price = PRICES.get(model)
         entry.cost_usd = (
             None
             if price is None
-            else (entry.input_tokens * price[0] + entry.output_tokens * price[1]) / 1_000_000
+            else ((entry.input_tokens or 0) * price[0] + (entry.output_tokens or 0) * price[1])
+            / 1_000_000
+        )
+
+    def record_speech(
+        self,
+        role: str,
+        model: str,
+        *,
+        audio_in_seconds: float | None = None,
+        audio_out_seconds: float | None = None,
+        characters: int | None = None,
+        rate_limited: int = 0,
+    ) -> None:
+        """Count one TTS or STT call (ADR-0054). A count the call did not produce (a failed
+        call has no audio out) adds nothing; a role's counts start at 0 only once one is
+        known, so a role that never sent audio shows "not measured", not 0 s. A speech row
+        has no tokens: they stay ``None``, never 0."""
+        entry = self._speech_entry(role, model)
+        entry.calls += 1
+        entry.rate_limited_calls += rate_limited
+        if audio_in_seconds is not None:
+            entry.audio_in_seconds = (entry.audio_in_seconds or 0.0) + audio_in_seconds
+        if audio_out_seconds is not None:
+            entry.audio_out_seconds = (entry.audio_out_seconds or 0.0) + audio_out_seconds
+        if characters is not None:
+            entry.characters = (entry.characters or 0) + characters
+        entry.cost_usd = speech_cost(model, entry)
+
+    def record_speech_rate_limited(self, role: str, model: str, responses: int) -> None:
+        """Count HTTP 429 answers a speech client received within one call, one per response
+        (as :class:`ChatClient` does), without counting another call."""
+        if responses:
+            self._speech_entry(role, model).rate_limited_calls += responses
+
+    def _speech_entry(self, role: str, model: str) -> ModelUsage:
+        return self.by_key.setdefault(
+            (role, model),
+            ModelUsage(role=role, model=model, input_tokens=None, output_tokens=None),
         )
 
     def snapshot(self) -> list[ModelUsage]:
         return [u.model_copy() for u in self.by_key.values()]
+
+
+def speech_cost(model: str, usage: ModelUsage) -> float | None:
+    """The cost of a speech role's usage so far, or ``None`` when the model has no price or
+    the priced quantity was never counted."""
+    price = SPEECH_PRICES.get(model)
+    if price is None:
+        return None
+    per_second, per_character = price
+    if per_character is not None and usage.characters is not None:
+        return usage.characters * per_character
+    counted = [s for s in (usage.audio_in_seconds, usage.audio_out_seconds) if s is not None]
+    if per_second is not None and counted:
+        return sum(counted) * per_second
+    return None
 
 
 class ChatClient:

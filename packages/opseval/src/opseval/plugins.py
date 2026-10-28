@@ -33,6 +33,11 @@ from opseval.scoring.base import REGISTRY, Scorer
 SCORER_GROUP = "opseval.scorers"
 SINK_GROUP = "opseval.sinks"
 CREDENTIALS_GROUP = "opseval.credentials"
+TTS_GROUP = "opseval.tts"
+STT_GROUP = "opseval.stt"
+TELEPHONY_GROUP = "opseval.telephony"
+"""Reserved for ADR-0056 (phone lines). Nothing loads it yet; naming it now means telephony
+plugins will follow the same loading rule as speech providers, not a new one."""
 VALID_REQUIRES = ("frames", "trace", "llm")
 
 _loaded: set[str] = set()
@@ -43,6 +48,9 @@ _sinks: dict[str, type[Any]] = {}
 
 _credentials: dict[str, type[Any]] = {}
 """Credential provider classes already loaded, by entry-point name."""
+
+_speech: dict[tuple[str, str], type[Any]] = {}
+"""Speech provider classes already loaded, by (group, entry-point name)."""
 
 THIRD_PARTY: dict[str, str] = {}
 """Scorer id -> the distribution that provides it, for ``opseval list-scorers``."""
@@ -257,11 +265,77 @@ def load_credential_provider(name: str, *, group: str = CREDENTIALS_GROUP) -> An
         ) from exc
 
 
+def check_speech_contract(obj: Any, *, group: str, source: str) -> type[Any]:
+    """Validate one TTS or STT provider plugin (ADR-0054). Raises :class:`ConfigError`."""
+    from opseval.speech.base import SpeechToText, TextToSpeech
+
+    base, method = (
+        (TextToSpeech, "synthesize") if group == TTS_GROUP else (SpeechToText, "transcribe")
+    )
+    if not inspect.isclass(obj) or not issubclass(obj, base):
+        raise ConfigError(
+            f"{source}: a {group} plugin must be a class deriving from "
+            f"opseval.speech.{base.__name__}, got {obj!r}"
+        )
+    name = getattr(obj, "name", None)
+    if not isinstance(name, str) or not name or name in ("tts", "stt", "openai"):
+        raise ConfigError(
+            f"{source}: provider {obj.__name__} needs its own 'name' (not the default, and not "
+            "'openai', the built-in)"
+        )
+    if not inspect.iscoroutinefunction(getattr(obj, method, None)):
+        raise ConfigError(f"{source}: provider {name!r} must define 'async def {method}(...)'")
+    if inspect.isabstract(obj):
+        raise ConfigError(f"{source}: provider {name!r} leaves abstract methods unimplemented")
+    return obj
+
+
+def load_speech_provider(group: str, name: str, config: Any, *, setting: str = "") -> Any:
+    """The TTS or STT provider named in ``OPSEVAL_TTS_PROVIDER`` / ``OPSEVAL_STT_PROVIDER``
+    (or ``OPSEVAL_STT_SECOND_PROVIDER``), built from ``config`` (a
+    :class:`~opseval.speech.base.SpeechConfig`).
+
+    Loaded as a credential provider is: only the named plugin is imported, and a name no
+    installed plugin provides, an import error, a contract violation or a constructor that
+    raises is a :class:`ConfigError` (exit 3). Opseval never falls back to another provider:
+    a run that quietly used a different voice or ASR would measure something else.
+    """
+    if group not in (TTS_GROUP, STT_GROUP):
+        raise ConfigError(f"{group!r} is not a speech provider group")
+    setting = setting or ("OPSEVAL_TTS_PROVIDER" if group == TTS_GROUP else "OPSEVAL_STT_PROVIDER")
+    key = (group, name)
+    if key not in _speech:
+        entries = {entry.name: entry for entry in _iter_entry_points(group)}
+        if name not in entries:
+            raise ConfigError(
+                f"{setting} names {name!r}, which no installed {group} plugin provides "
+                f"(installed: {', '.join(sorted(entries)) or 'none'}; built-in: openai)"
+            )
+        entry = entries[name]
+        source = f"{group} plugin {name!r} ({entry.value})"
+        try:
+            obj = entry.load()
+        except Exception as exc:
+            raise ConfigError(
+                f"{source} could not be imported: {type(exc).__name__}: {exc}. "
+                "Fix or uninstall it; Opseval will not run with a broken speech plugin."
+            ) from exc
+        _speech[key] = check_speech_contract(obj, group=group, source=source)
+    try:
+        return _speech[key](config)
+    except Exception as exc:
+        # The type only: a constructor's message may repeat the key it was given.
+        raise ConfigError(
+            f"{group} plugin {name!r} could not be created: {type(exc).__name__}"
+        ) from exc
+
+
 def reset_for_tests() -> None:
     """Forget what discovery has seen (tests only)."""
     _loaded.clear()
     _sinks.clear()
     _credentials.clear()
+    _speech.clear()
     THIRD_PARTY.clear()
 
 
@@ -269,13 +343,18 @@ __all__ = [
     "CREDENTIALS_GROUP",
     "SCORER_GROUP",
     "SINK_GROUP",
+    "STT_GROUP",
+    "TELEPHONY_GROUP",
     "THIRD_PARTY",
+    "TTS_GROUP",
     "VALID_REQUIRES",
     "check_contract",
     "check_credentials_contract",
     "check_sink_contract",
+    "check_speech_contract",
     "load_credential_provider",
     "load_scorers",
     "load_sinks",
+    "load_speech_provider",
     "reset_for_tests",
 ]

@@ -222,7 +222,50 @@ def test_unjudged_run_is_a_gap_in_the_trend_not_zero(client: TestClient) -> None
 def test_usage_unmeasured_is_null(client: TestClient) -> None:
     rows = {r["run"]: r for r in client.get("/api/v1/usage").json()}
     assert rows["r1"]["simulatorTokens"] == 10 and rows["r1"]["judgeTokens"] is None
-    assert rows["r1"]["costUsd"] is None
+    assert rows["r1"]["costUsd"] is None and rows["r1"]["costComplete"] is False
+    assert rows["r1"]["audioInSeconds"] is None and rows["r1"]["characters"] is None
+
+
+def test_usage_with_an_unpriced_model_shows_the_known_cost_as_partial(tmp_path: Path) -> None:
+    """One unpriced model must not hide what the priced ones cost (review of #81), and a
+    speech row carries audio and characters, with no tokens rather than 0."""
+    store = FileStore(tmp_path)
+    run = _result("speech", 1, {"a": VerdictStatus.PASSED})
+    run.usage = [
+        ModelUsage(role="simulator", model="m", input_tokens=5, output_tokens=5, cost_usd=0.5),
+        ModelUsage(role="judge", model="j", input_tokens=1, output_tokens=1),
+        ModelUsage(
+            role="tts",
+            model="tts-1",
+            calls=1,
+            input_tokens=None,
+            output_tokens=None,
+            characters=12,
+            audio_out_seconds=1.5,
+            cost_usd=0.25,
+        ),
+        ModelUsage(
+            role="stt", model="w", input_tokens=None, output_tokens=None, audio_in_seconds=2.0
+        ),
+    ]
+    store.save_result(run)
+    priced = _result("priced", 2, {"a": VerdictStatus.PASSED})
+    priced.usage = [ModelUsage(role="judge", model="j", input_tokens=1, cost_usd=0.1)]
+    store.save_result(priced)
+    app, _cat = app_for(tmp_path, settings=Settings(reports_dir=str(tmp_path)))
+    with connect(app) as c:
+        rows = {r["run"]: r for r in c.get("/api/v1/usage").json()}
+        detail = c.get("/api/v1/runs/speech").json()
+    row = rows["speech"]
+    assert row["costUsd"] == 0.75 and row["costComplete"] is False
+    assert (row["audioInSeconds"], row["audioOutSeconds"], row["characters"]) == (2.0, 1.5, 12)
+    assert row["simulatorTokens"] == 10 and row["judgeTokens"] == 2
+    assert rows["priced"]["costComplete"] is True and rows["priced"]["costUsd"] == 0.1
+    assert rows["priced"]["audioInSeconds"] is None and rows["priced"]["characters"] is None
+    tts = next(u for u in detail["usage"] if u["role"] == "tts")
+    assert tts["inputTokens"] is None and tts["outputTokens"] is None
+    assert tts["characters"] == 12 and tts["audioOutSeconds"] == 1.5
+    assert tts["audioInSeconds"] is None
 
 
 def test_catalogue_endpoints(client: TestClient) -> None:

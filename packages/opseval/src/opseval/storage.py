@@ -58,12 +58,14 @@ def _first_error(exc: Exception) -> str:
 
 LEGACY_LAYOUT = "opseval-runs/1"
 """A folder whose manifest has no layout field predates versioning: layout 1."""
-LAYOUT = "opseval-runs/3"
+LAYOUT = "opseval-runs/4"
 """The layout this version writes. Bump it (and keep reading the old) on any change a reader
 of an older folder, or an older reader of a new folder, could misread or reject. 2: run
 records may carry created_artifacts. 3: frames may carry spoken audio and its transcript,
-records a voice timeline, and the run folder an ``audio/`` folder (ADR-0053)."""
-KNOWN_LAYOUTS = frozenset({LEGACY_LAYOUT, "opseval-runs/2", LAYOUT})
+records a voice timeline, and the run folder an ``audio/`` folder (ADR-0053). 4: a result's
+usage rows may carry speech counts (audio seconds, characters) and ``null`` tokens for a
+speech role (ADR-0054); an older reader (``extra="forbid"``, integer tokens) would reject it."""
+KNOWN_LAYOUTS = frozenset({LEGACY_LAYOUT, "opseval-runs/2", "opseval-runs/3", LAYOUT})
 
 
 class UnknownLayout(ConfigError):

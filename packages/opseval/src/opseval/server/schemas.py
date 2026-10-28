@@ -186,9 +186,12 @@ class UsageOut(Api):
     role: str
     model: str
     calls: int
-    input_tokens: int
-    output_tokens: int
+    input_tokens: int | None  # None: a speech role, which has no tokens (never 0)
+    output_tokens: int | None
     cost_usd: float | None
+    audio_in_seconds: float | None = None  # STT audio heard; None = not measured (ADR-0054)
+    audio_out_seconds: float | None = None  # TTS audio spoken
+    characters: int | None = None  # TTS characters spoken
 
 
 class SinkOut(Api):
@@ -288,7 +291,11 @@ class RunUsage(Api):
     run: str
     simulator_tokens: int | None
     judge_tokens: int | None
-    cost_usd: float | None
+    cost_usd: float | None  # the known cost; None when no model in the run has a price
+    cost_complete: bool = False  # True only when every model in the run has a price
+    audio_in_seconds: float | None = None  # STT audio heard in the run; None = not measured
+    audio_out_seconds: float | None = None  # TTS audio spoken
+    characters: int | None = None  # TTS characters spoken
 
 
 class TrendPoint(Api):

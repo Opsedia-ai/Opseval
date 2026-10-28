@@ -6,6 +6,7 @@ import { CancelRun, StoppedNotice } from "../components/RunControl";
 import { useApi } from "../lib/useApi";
 import type { Gate, RunDetail as Detail, RunProgress, TestResult } from "../lib/types";
 import Transcript from "../components/Transcript";
+import { UsageLine } from "../components/UsageFigures";
 import { ProgressLine, ProgressTable } from "../components/Progress";
 import { AreaPill, Callout, Card, Data, GatePill, Mono, NotMeasured, Page, PageHeader, Pill, ResultBar, Stat, cx } from "../components/ui";
 
@@ -124,7 +125,7 @@ export default function RunDetail() {
           </div>
           <ResultBar passed={r.summary.passed} failed={r.summary.failed} unjudged={r.summary.unjudged} />
           <div className="space-y-3">{r.tests.map((t) => <Scenario key={t.id} run={r.summary.id} t={t} />)}</div>
-          {r.usage.length > 0 && <Card title="Model usage"><ul className="text-sm">{r.usage.map((u) => <li key={u.role} className="flex justify-between py-1"><span>{u.role} · <Mono>{u.model}</Mono></span><span><Mono>{(u.inputTokens + u.outputTokens).toLocaleString()}</Mono> tokens · {u.costUsd === null ? <NotMeasured /> : <Mono>${u.costUsd.toFixed(3)}</Mono>}</span></li>)}</ul></Card>}
+          {r.usage.length > 0 && <Card title="Model usage"><ul className="text-sm">{r.usage.map((u) => <li key={`${u.role}:${u.model}`} className="flex justify-between py-1"><span>{u.role} · <Mono>{u.model}</Mono></span><UsageLine u={u} /></li>)}</ul></Card>}
         </>)}</Data>)}
       </Page>
     </>
