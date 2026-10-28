@@ -21,12 +21,16 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import ClassVar, Literal
 
-from opseval.audio import AudioFormat
+from opseval.audio import AudioFormat, warm
+from opseval.errors import UnsupportedCapability
 from opseval.models.record import TransportEvent
 
 Speaker = Literal["caller", "agent"]
+DTMF = "dtmf"
+"""The capability a transport declares in :attr:`AudioSession.capabilities` when it can
+press keys."""
 
 
 class AttemptClock:
@@ -112,12 +116,19 @@ class AudioSession(ABC):
     """One voice attempt with the agent. A transport creates a fresh one per attempt."""
 
     session_id: str | None = None
+    capabilities: ClassVar[frozenset[str]] = frozenset()
+    """What this transport can do beyond speaking and listening (``{DTMF}``). Declared on
+    the class so a loader can refuse, at load time, a scenario that needs a capability the
+    profile's transport lacks (ADR-0053)."""
 
     def __init__(self, fmt: AudioFormat, clock: AttemptClock | None = None) -> None:
         self.format = fmt
         """What goes over the wire. Events and ``send_audio`` always use PCM16 at
         ``format.rate``; the transport encodes and decodes the wire codec itself."""
         self.clock = clock or AttemptClock()
+        # The codec tables are built here, when the session is made, so the first turn of
+        # the attempt does not pay for them on the agent's clock.
+        warm(fmt.codec)
 
     def transport_events(self) -> tuple[TransportEvent, ...]:
         """Drops, resumes and token refreshes seen by this session (recorded as evidence)."""
@@ -132,8 +143,13 @@ class AudioSession(ABC):
         """Stream one chunk of the caller's speech (PCM16 at ``format.rate``)."""
 
     async def send_dtmf(self, digits: str) -> None:
-        """Press keys. A transport without DTMF says so rather than dropping them."""
-        raise NotImplementedError(f"{type(self).__name__} cannot send DTMF")
+        """Press keys. A transport without DTMF says so rather than dropping them: a
+        configuration problem (exit 3), never the agent's fault. A transport that overrides
+        this declares ``DTMF`` in :attr:`capabilities`."""
+        raise UnsupportedCapability(
+            f"{type(self).__name__} cannot send DTMF; the scenario presses keys, so use a "
+            "transport that declares the 'dtmf' capability"
+        )
 
     @abstractmethod
     async def end_of_caller_turn(self) -> None:
@@ -154,6 +170,7 @@ __all__ = [
     "AgentSpeechEnd",
     "AgentSpeechStart",
     "AgentTranscript",
+    "DTMF",
     "AttemptClock",
     "AudioSession",
     "Dtmf",

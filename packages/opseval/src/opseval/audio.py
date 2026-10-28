@@ -4,7 +4,8 @@
 Voice transports speak PCM16, μ-law or A-law at 8 to 48 kHz. ``audioop`` was removed in
 Python 3.13 and the core runs on 3.11 to 3.13, so the conversions are written here: G.711
 μ-law and A-law, linear resampling, WAV in and out (stdlib ``wave``), and the energy measure
-the voice bridge uses to tell silence from speech.
+the voice bridge uses to tell silence from speech. Transports call :func:`warm` for their
+codec at session start, so the lookup tables are built before the attempt's clock matters.
 
 Everything works on **PCM16 little-endian mono**, the internal format. A decoding problem is
 an :class:`AudioDecodeError`, which a voice transport turns into the agent's fault (it sent
@@ -125,18 +126,34 @@ def _encode_table(codec: Codec) -> bytes:
 
 
 @cache
-def _decode_table(codec: Codec) -> tuple[int, ...]:
+def _decode_table(codec: Codec) -> tuple[bytes, ...]:
+    """Two little-endian PCM16 bytes for every code: 256 entries, 512 bytes in all."""
     to_sample = _mulaw_sample if codec == "mulaw" else _alaw_sample
-    return tuple(to_sample(b) for b in range(256))
+    return tuple(to_sample(b).to_bytes(2, "little", signed=True) for b in range(256))
+
+
+def warm(codec: Codec) -> None:
+    """Build ``codec``'s tables now. The encode table has 65536 entries and takes tens of
+    milliseconds to build, so a voice transport calls this at session start, before the
+    attempt's clock matters, rather than paying for it on the first turn (ADR-0053)."""
+    if codec not in CODECS:
+        raise ValueError(f"unknown codec {codec!r}; one of {', '.join(CODECS)}")
+    if codec != "pcm16":
+        _encode_table(codec)
+        _decode_table(codec)
 
 
 def encode(pcm16: bytes, codec: Codec) -> bytes:
     """PCM16 to ``codec``."""
+    if len(pcm16) % 2:
+        raise AudioDecodeError(f"PCM16 needs an even number of bytes, got {len(pcm16)}")
     if codec == "pcm16":
-        _samples(pcm16)  # validates the length
         return pcm16
-    table = _encode_table(codec)
-    return bytes(table[s & 0xFFFF] for s in _samples(pcm16))
+    unsigned = array("H")
+    unsigned.frombytes(pcm16)
+    if sys.byteorder == "big":
+        unsigned.byteswap()
+    return bytes(map(_encode_table(codec).__getitem__, unsigned))
 
 
 def decode(data: bytes, codec: Codec) -> bytes:
@@ -144,31 +161,99 @@ def decode(data: bytes, codec: Codec) -> bytes:
     if codec == "pcm16":
         _samples(data)
         return data
-    table = _decode_table(codec)
-    return _bytes(array("h", (table[b] for b in data)))
+    return b"".join(map(_decode_table(codec).__getitem__, data))
 
 
 # --- rate, level, length ---------------------------------------------------------------
 
 
+def _check_rate(name: str, rate: int) -> None:
+    if isinstance(rate, bool) or not isinstance(rate, int) or rate <= 0:
+        raise ValueError(f"{name} must be a positive whole number of hertz, got {rate!r}")
+
+
+class Resampler:
+    """Linear-interpolation resampling of a PCM16 stream, chunk by chunk.
+
+    Output sample ``i`` sits at input position ``i * from_rate / to_rate`` exactly: the
+    position is kept as an integer fraction across chunks, so there is no per-chunk rounding
+    drift, and the last input sample of one chunk is interpolated with the first of the next,
+    so there is no discontinuity at a chunk boundary. Feeding a buffer in any number of
+    chunks gives the same bytes as feeding it at once. Good enough for speech that a speech
+    model will hear again; not a mastering resampler.
+    """
+
+    def __init__(self, from_rate: int, to_rate: int) -> None:
+        _check_rate("from_rate", from_rate)
+        _check_rate("to_rate", to_rate)
+        self.from_rate, self.to_rate = from_rate, to_rate
+        g = math.gcd(from_rate, to_rate)
+        self._up, self._down = from_rate // g, to_rate // g  # input step per output sample
+        self._reset()
+
+    def _reset(self) -> None:
+        self._buf = array("h")
+        self._base = 0  # absolute index of self._buf[0]
+        self._total = 0  # input samples fed so far
+        self._next = 0  # index of the next output sample
+
+    def _emit(self, out: array[int], limit: int, last: int) -> None:
+        """Output samples up to index ``limit`` (exclusive), clamping reads at ``last``."""
+        up, down, buf, base = self._up, self._down, self._buf, self._base
+        i = self._next
+        while i < limit:
+            num = i * up
+            left = num // down
+            if left >= last:  # at or past the last sample (only on flush): hold it
+                left, frac = last, 0
+            else:
+                frac = num - left * down
+            a = buf[left - base]
+            if frac:
+                b = buf[left + 1 - base]
+                out.append(round((a * (down - frac) + b * frac) / down))
+            else:
+                out.append(a)
+            i += 1
+        self._next = i
+
+    def feed(self, pcm16: bytes) -> bytes:
+        """Resample one chunk. Returns what can be computed so far; the rest comes with the
+        next chunk or with :meth:`flush`."""
+        samples = _samples(pcm16)
+        if self._up == self._down:
+            return pcm16
+        self._buf.extend(samples)
+        self._total += len(samples)
+        out = array("h")
+        # An output sample needs the input sample after its position.
+        limit = -(-(self._total - 1) * self._down // self._up) if self._total > 1 else 0
+        self._emit(out, limit, self._total - 1)
+        keep_from = min(self._next * self._up // self._down, self._total - 1)
+        drop = max(0, keep_from - self._base)
+        if drop:
+            del self._buf[:drop]
+            self._base += drop
+        return _bytes(out)
+
+    def flush(self) -> bytes:
+        """The end of the stream: the remaining samples, so the whole output is
+        ``round(fed * to_rate / from_rate)`` samples long. The resampler then starts over."""
+        out = array("h")
+        if self._up != self._down and self._total:
+            n = max(1, (2 * self._total * self._down + self._up) // (2 * self._up))
+            self._emit(out, n, self._total - 1)
+        self._reset()
+        return _bytes(out)
+
+
 def resample(pcm16: bytes, from_rate: int, to_rate: int) -> bytes:
-    """Linear interpolation. Good enough for speech that a speech model will hear again;
-    not a mastering resampler."""
+    """A whole buffer through a :class:`Resampler`."""
+    resampler = Resampler(from_rate, to_rate)
     if from_rate == to_rate:
+        _samples(pcm16)  # the even-length check holds on every path
         return pcm16
-    src = _samples(pcm16)
-    if not src:
-        return b""
-    n = max(1, round(len(src) * to_rate / from_rate))
-    step = (len(src) - 1) / (n - 1) if n > 1 else 0.0
-    out = array("h")
-    for i in range(n):
-        pos = i * step
-        left = int(pos)
-        right = min(left + 1, len(src) - 1)
-        frac = pos - left
-        out.append(round(src[left] + (src[right] - src[left]) * frac))
-    return _bytes(out)
+    return resampler.feed(pcm16) + resampler.flush()
 
 
 def duration_ms(pcm16: bytes, rate: int) -> float:
@@ -209,11 +294,21 @@ def from_wav(data: bytes) -> tuple[bytes, int]:
     try:
         with wave.open(io.BytesIO(data), "rb") as src:
             channels, width, rate = src.getnchannels(), src.getsampwidth(), src.getframerate()
-            frames = src.readframes(src.getnframes())
+            declared = src.getnframes()
+            frames = src.readframes(declared)
     except (wave.Error, EOFError) as exc:
         raise AudioDecodeError(f"not a readable WAV file: {exc}") from exc
     if width != 2:
         raise AudioDecodeError(f"WAV must be 16-bit PCM, got {8 * width}-bit")
+    if rate not in RATES:
+        # Refused rather than resampled: the transport decides the rate it speaks.
+        raise AudioDecodeError(f"WAV rate {rate} Hz is not supported; one of {RATES}")
+    if len(frames) % (channels * 2):
+        raise AudioDecodeError(
+            f"WAV data is {len(frames)} bytes, not a whole number of {channels}-channel frames"
+        )
+    if len(frames) != declared * channels * 2:
+        raise AudioDecodeError(f"WAV data is cut short: {declared} frames declared")
     if channels == 1:
         return frames, rate
     samples = _samples(frames)
@@ -234,6 +329,7 @@ __all__ = [
     "AudioDecodeError",
     "AudioFormat",
     "Codec",
+    "Resampler",
     "decode",
     "duration_ms",
     "encode",
@@ -242,4 +338,5 @@ __all__ = [
     "level_dbfs",
     "resample",
     "to_wav",
+    "warm",
 ]
