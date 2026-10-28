@@ -49,7 +49,8 @@ def price_for(
 def _tokens_cost(price: ModelPrice, event: UsageEvent) -> float | None:
     if event.input_tokens is None or event.output_tokens is None:
         return None
-    assert price.input is not None and price.output is not None  # validated per unit
+    if price.input is None or price.output is None:  # refused at load; kept for the types
+        return None
     # A cache or reasoning split the provider did not report is billed at the base rate: the
     # provider reported no discount, so none is assumed.
     cached = 0

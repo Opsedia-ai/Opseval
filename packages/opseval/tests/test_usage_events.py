@@ -420,3 +420,30 @@ async def test_a_run_writes_each_attempts_calls_into_its_record(
         None,  # no call reported its output: not measured, never 0
     )
     assert result.usage_events == []
+
+
+def test_the_report_shows_a_total_not_every_call_reported_as_partial_coverage() -> None:
+    from opseval.models.results import Gate
+    from opseval.reporting import render_html
+
+    meter = UsageMeter(prices=table())
+    meter.record("judge", "m", {"prompt_tokens": 4, "completion_tokens": 1}, 0)
+    meter.record("judge", "m", {"prompt_tokens": 4}, 0)
+    result = SuiteResult(
+        opseval_version="0",
+        run_id="r",
+        suite="s",
+        target="ws://x",
+        profile="p",
+        started_at=WHEN,
+        ended_at=WHEN,
+        tests=[],
+        gate=Gate(status="pass"),
+        exit_code=0,
+        usage=meter.snapshot(),
+    )
+    row = render_html(result, [])
+    row = row[row.index("<td>judge</td>") :].split("</tr>")[0]
+    assert "<td>8</td>" in row  # input: both calls reported it
+    assert "1 of 2 calls reported" in row  # output: no total, never 1
+    assert "no price" in row

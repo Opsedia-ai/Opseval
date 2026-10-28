@@ -18,8 +18,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from datetime import date
 from array import array
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -1158,7 +1158,8 @@ class TestSpeechUsageRows:
         html = render_html(result, [])
         row = html[html.index("<td>tts</td>") :].split("</tr>")[0]
         assert "<td>42</td>" in row and "<td>3.5</td>" in row
-        assert row.count('title="not measured"') == 3  # two token columns and audio in
+        # four token columns (input, cached, output, reasoning) and audio in
+        assert row.count('title="not measured"') == 5
         assert "<td>0</td>" not in row
 
 
