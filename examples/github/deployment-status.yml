@@ -50,6 +50,9 @@ jobs:
           OPSEVAL_AGENT_HOSTS: ${{ vars.OPSEVAL_AGENT_HOSTS }} # e.g. agent.staging.example.com
         run: |
           set -euo pipefail
+          # An unset input is empty, never an unbound-variable abort: that would exit 1, which
+          # reads as the agent failing, when the problem is the workflow's configuration (3).
+          : "${ENVIRONMENT_URL:=}" "${OPSEVAL_AGENT_HOSTS:=}" "${AGENT_PATH:=}"
           if [[ ! "$ENVIRONMENT_URL" =~ ^https://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]]; then
             echo "::error::The deployment has no https:// environment URL; nothing to evaluate."
             exit 3
