@@ -134,3 +134,59 @@ date range.
 - Where a run's cost cap is declared (a suite `stop:` field next to ADR-0035's, or a `run` flag).
 - Exporting dashboards or sharing them outside the console.
 - Currencies other than USD.
+
+## Implementation note: D1 (2026-10-28)
+
+Built, in local (files) mode:
+
+- **Usage events.** `models/usage.py` defines `UsageEvent` and the one list of roles
+  (`UsageRole`). `llm.UsageMeter` keeps one event per call, priced when it is recorded; a
+  call made inside `meter.attempt(scenario, index)` (a context variable, so concurrent lanes
+  and judge ballots stay apart) belongs to that attempt. The runner saves the record before
+  scoring with `usage_events: null`, and again after scoring with every call the attempt paid
+  for, judges included, so a crash while judging leaves "not measured", not a short list. Calls
+  outside any attempt go to `SuiteResult.usage_events`; `rescore` puts its judge calls there.
+  Layout `opseval-runs/6`; layouts 1–5 are read and are "written before per-call usage".
+- **Counts.** `llm.token_counts` reads `prompt_tokens`, `completion_tokens`,
+  `prompt_tokens_details.cached_tokens` and `completion_tokens_details.reasoning_tokens`; a
+  missing or non-count field is `null`, 0 stays 0. A provider-reported `usage.cost` wins
+  (`cost_source: provider`).
+- **Failed calls.** A call that got no usable answer after its retries is an event with
+  `answered: false`, no counts and no cost. It is counted in `ModelUsage.failed_calls` and
+  left out of every total and every `of`, as speech already did (ADR-0054: a failed call
+  produced nothing to count). Otherwise one transient outage would erase a run's token totals.
+- **`ModelUsage`** gains `reasoning_tokens`, `cached_input_tokens`, `failed_calls` and
+  `reported` (how many answered calls reported each count). Per this ADR a total is `null`
+  unless every answered call reported it; `reported: null` marks an old row.
+- **Prices.** `opseval/pricing/builtin.yaml` replaces `llm.PRICES`/`SPEECH_PRICES`: rows with a
+  regex `match`, a unit (tokens per 1M, characters per 1M, seconds per minute) and
+  `effective_from`. The newest row in force on the call's day prices it; an unreported cache
+  or reasoning split is billed at the base rate (no discount was reported); a priced count
+  not reported is `null`. It ships a few OpenAI rows (gpt-4o, gpt-4o-mini, whisper-1, tts-1,
+  tts-1-hd) with their sources, for the maintainers to check and extend. The analytics
+  recompute each event's cost from its counts with the row in force when it was made, so a
+  row added later with a later date never changes an old run.
+- **`opseval.analytics`.** `AnalyticsStore` (protocol), `UsageFilter` and `FileAnalytics`,
+  which answers `cost` and `tokens`: spend by role and by model per day, week or run; cost per
+  run, per scenario, per attempt and per passed test; tokens stacked as input not cached,
+  cached input, output not reasoning and reasoning; per model; tokens per attempt; reasoning
+  share. Every value is `{value, measured, of, complete}`; `of: 0` is "no calls", `measured: 0`
+  with `of > 0` is "not measured", `complete: false` with a value is a floor. Runs written
+  before per-call usage contribute their per-model totals as written and are named in
+  `scope.legacy_runs`. Filters: suite, role, model, since/until, bucket. Organisation,
+  project, task and label need server mode and are **refused** (400
+  `FILTER_NEEDS_SERVER_MODE`), never ignored.
+- **API and console.** `GET /api/v1/analytics/cost` and `/analytics/tokens`; console pages
+  `/cost` and `/tokens`, drawn as in-house SVG (no chart library): a `null` is a gap ("no
+  data"), a partial value hatched and said with "≥" and its coverage, with a table view.
+  The report's usage table shows reasoning and cached tokens and how many calls reported each.
+
+Deferred, as the phasing says or because nothing to build it on exists yet:
+
+- per-project price overrides and the price editor, Latency, Quality, Voice and Usage
+  dashboards, `PgAnalytics` and its golden test against `FileAnalytics` (D2);
+- budgets ("Budgets: one rule") and `skip_kind: budget`: not in D1's list, and where a run's
+  cost cap is declared is not decided;
+- the agent cost series from traces: no trace source carries the agent's token usage yet;
+- the `attacker`, `generator` and `telephony` roles are in the list but nothing calls them yet;
+- custom dashboards (D3).
