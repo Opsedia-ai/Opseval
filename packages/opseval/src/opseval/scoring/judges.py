@@ -28,10 +28,11 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from opseval.errors import HarnessError
+from opseval.langpacks import Spoken, effective_language
 from opseval.llm import ChatClient, model_family
 from opseval.models.record import RunRecord
 from opseval.models.results import Axis, ScoreResult
-from opseval.models.scenario import ScorerSpec
+from opseval.models.scenario import Scenario, ScorerSpec
 from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
 from opseval.scoring.tools import gather
 
@@ -431,13 +432,17 @@ class GoalAchievement(Judge):
         return (*super().rubric(ctx), *refusal)
 
 
-def _language_label(language: str, dialect: str | None) -> str:
-    return f"{language} ({dialect})" if dialect else language
+def _spoken(scenario: Scenario) -> Spoken:
+    """The language the customer writes, resolved once (ADR-0059): the pack an LLM persona is
+    told to write (a declared fallback included), or the declared language of scripted turns.
+    Every spelling of one pack gives the same label, so the same rubric digest."""
+    return effective_language(scenario.persona, scripted=not scenario.conversation.llm_persona)
 
 
 @register
 class LanguageConsistency(Judge):
     id = "judge.language_consistency"
+    version = "3"  # 3: graded against the resolved pack's language (ADR-0059)
     axis = Axis.OUTPUT
     description = "LLM judge: did the agent answer in the customer's language and dialect? (quoted)"
     instructions = (
@@ -466,12 +471,11 @@ class LanguageConsistency(Judge):
     )
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
-        p = ctx.scenario.persona
-        return (p.language, p.dialect or "")
+        spoken = _spoken(ctx.scenario)
+        return (spoken.language, spoken.dialect or "")
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
-        p = ctx.scenario.persona
-        return [f"Expected customer language: {_language_label(p.language, p.dialect)}"]
+        return [f"Expected customer language: {_spoken(ctx.scenario).label}"]
 
     def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
         if not any(who == "agent" for who, _ in record.transcript()):
@@ -482,6 +486,7 @@ class LanguageConsistency(Judge):
 @register
 class PersonaConsistency(Judge):
     id = "judge.persona_consistency"
+    version = "3"  # 3: the customer is held to the pack the simulator was told to write
     axis = Axis.HARNESS
     description = (
         "LLM judge on the HARNESS axis: did the simulated customer stay in character? "
@@ -516,13 +521,8 @@ class PersonaConsistency(Judge):
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
         s = ctx.scenario
-        return (
-            s.persona.role,
-            s.goal,
-            s.conversation.flow,
-            s.persona.language,
-            s.persona.dialect or "",
-        )
+        spoken = _spoken(s)
+        return (s.persona.role, s.goal, s.conversation.flow, spoken.language, spoken.dialect or "")
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
         s = ctx.scenario
@@ -530,7 +530,7 @@ class PersonaConsistency(Judge):
             f"Customer persona: {s.persona.role}",
             f"Customer goal: {s.goal}",
             f"Planned flow: {s.conversation.flow or '(pursue the goal)'}",
-            f"Persona language: {_language_label(s.persona.language, s.persona.dialect)}",
+            f"Persona language: {_spoken(s).label}",
         ]
 
     def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:

@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-28** (`main` with the guided scenario form and the roadmap ADRs 0049–0066; voice foundations, ADR-0053 V0a).
+**As of 2026-10-28** (`main` with the guided scenario form, the roadmap ADRs 0049–0066 and the voice foundations, ADR-0053 V0a; ADR-0059 step 1: unknown persona languages refused at load).
 
 ## Completion
 
@@ -49,7 +49,7 @@ PRD gains it.
 | Analytics interface; ClickHouse optional | [ADR-0052](adr/0052-analytics-store.md) | Missing: the console's views scan `result.json` files |
 | Dashboards: cost, tokens (input, output, reasoning, cached), latency, quality, voice | [ADR-0066](adr/0066-dashboards.md) | Partial: usage and cost per run (input and output tokens only) on the Usage page |
 | Voice evaluation: audio sessions, speech providers, full-duplex driver and metrics, phone, WebRTC | ADRs [0053](adr/0053-voice-sessions-and-records.md)–[0057](adr/0057-webrtc.md) | Partial: the foundations only (V0a): dependency-free audio codecs, the `AudioSession` contract, and audio, transcripts and a voice timeline in the record (layout 3). No voice transport, speech provider or bridge yet |
-| Languages and dialects: MENA, US and Europe, Chinese; unknown languages refused | [ADR-0059](adr/0059-languages-and-dialects.md) | Partial: en and three Arabic packs; any other language becomes English (ATTENTION I14) |
+| Languages and dialects: MENA, US and Europe, Chinese; unknown languages refused | [ADR-0059](adr/0059-languages-and-dialects.md) | Partial: step 1 — a language with no pack is a load error for an LLM persona (`persona.language`, exit 3), never English (scripted turns load with a warning); judges grade against the resolved pack; packs answer to BCP-47 tags (`en`, `ar`, `ar-EG`, `ar-x-gulf`) and every old alias; a dialect falls back only where a pack declares it, with a warning (`opseval.langpacks`, `tests/test_languages.py`); no new packs, voice maps or `language_script` v2 yet |
 | CI/CD anywhere: Marketplace action, example workflows, server reporting, other CI templates | [ADR-0058](adr/0058-ci-cd-anywhere.md) | Partial: the composite GitHub Action; see FR-GATE-03 and FR-GATE-05 |
 | Flexibility ladder L1–L5: datasets, rubric judges, generated scenarios, adaptive attacker, continuous evaluation | ADRs [0060](adr/0060-datasets-and-matrices.md)–[0064](adr/0064-continuous-evaluation.md) | Missing (L0, YAML and the guided form, is ADR-0048) |
 | Protecting `main` | [ADR-0065](adr/0065-protecting-main.md) | Missing: GitHub refuses rulesets on this private repository; soft protection first, rulesets at go-public |
@@ -71,7 +71,7 @@ PRD gains it.
 | FR-CAT-11 | Published JSON Schemas | S | v0.2 | Done | `schemas/v1`, `opseval schemas --check` (ADR-0026) |
 | FR-CAT-12 | Scenario generation | C | v1.x | Missing | Not started (not due) |
 | FR-SIM-01 | LLM persona, seeded, temperature 0 | M | v0.1 | Done | `LLMSimulator`, `attempt_seed` |
-| FR-SIM-02 | Language packs (en, ar) as plugins | M | v0.1 | Partial | en, ar MSA/Egyptian/Gulf ship; not plugins; no code-switching; Arabic packs lack native review |
+| FR-SIM-02 | Language packs (en, ar) as plugins | M | v0.1 | Partial | en, ar MSA/Egyptian/Gulf ship, named by BCP-47 tag or by the old `language` + `dialect` aliases; an unknown language or undeclared dialect is a load error for an LLM persona, never English, while scripted turns (sent as written) load with a warning; judges grade against the resolved pack (ADR-0059 step 1, `tests/test_languages.py`); not plugins; no code-switching; Arabic packs lack native review |
 | FR-SIM-03 | Typing noise | M | v0.1 | Done | `simulator/typing_noise.py` |
 | FR-SIM-04 | Planted injections | M | v0.2 | Done | `conversation.injections` (ADR-0014) |
 | FR-SIM-05 | Checkpoint decisions | M | v0.1 | Done | `Simulator.decide` |

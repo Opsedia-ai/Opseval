@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from opseval.errors import SimulatorError
+from opseval.langpacks import resolve
 from opseval.llm import ChatClient
 from opseval.models.scenario import Decision, DecisionAction, Scenario
-from opseval.simulator.langpacks import resolve
 from opseval.simulator.typing_noise import add_typing_noise
 
 INJECT_RE = re.compile(r"\[INJECT\](.*?)\[/INJECT\]", re.DOTALL)

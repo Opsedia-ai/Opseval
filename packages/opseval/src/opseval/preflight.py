@@ -57,7 +57,7 @@ def _requirements(scenarios: Iterable[Scenario]) -> dict[str, int]:
             counts["llm_scorers"] += 1
         if requires and all(r == "trace" for r in requires):
             counts["traces"] += 1
-        if not scenario.conversation.scripted_turns:
+        if scenario.conversation.llm_persona:
             counts["simulator"] += 1
     return counts
 
@@ -72,7 +72,7 @@ def llm_roles_needed(scenarios: Iterable[Scenario]) -> set[str]:
     for scenario in scenarios:
         if scenario.is_blocked:
             continue
-        if not scenario.conversation.scripted_turns:
+        if scenario.conversation.llm_persona:
             roles.add("simulator")
         if any(
             (cls := REGISTRY.get(spec.id)) is not None and cls.requires == "llm"
