@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-28** (`main` with the guided scenario form and the roadmap ADRs 0049–0066; voice foundations, ADR-0053 V0a).
+**As of 2026-10-28** (`main` with the guided scenario form and the roadmap ADRs 0049–0066; voice foundations, ADR-0053 V0a; GitHub drop-ins, ADR-0058 E1).
 
 ## Completion
 
@@ -36,8 +36,8 @@ They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
 
 ## Planned beyond the PRD (roadmap of 2026-10-28)
 
-The owner asked on 2026-10-28 for the work below. It is planned in ADRs 0049–0066 and **none of
-it is built yet**. These rows are not in the percentage, because the PRD (doc 04) has no rows for
+The owner asked on 2026-10-28 for the work below. It is planned in ADRs 0049–0066 and **most of
+it is not built yet**. These rows are not in the percentage, because the PRD (doc 04) has no rows for
 them yet (ATTENTION D13 and D15). A row moves into the table above, with an `FR-` id, when the
 PRD gains it.
 
@@ -50,7 +50,7 @@ PRD gains it.
 | Dashboards: cost, tokens (input, output, reasoning, cached), latency, quality, voice | [ADR-0066](adr/0066-dashboards.md) | Partial: usage and cost per run (input and output tokens only) on the Usage page |
 | Voice evaluation: audio sessions, speech providers, full-duplex driver and metrics, phone, WebRTC | ADRs [0053](adr/0053-voice-sessions-and-records.md)–[0057](adr/0057-webrtc.md) | Partial: the foundations only (V0a): dependency-free audio codecs, the `AudioSession` contract, and audio, transcripts and a voice timeline in the record (layout 3). No voice transport, speech provider or bridge yet |
 | Languages and dialects: MENA, US and Europe, Chinese; unknown languages refused | [ADR-0059](adr/0059-languages-and-dialects.md) | Partial: en and three Arabic packs; any other language becomes English (ATTENTION I14) |
-| CI/CD anywhere: Marketplace action, example workflows, server reporting, other CI templates | [ADR-0058](adr/0058-ci-cd-anywhere.md) | Partial: the composite GitHub Action; see FR-GATE-03 and FR-GATE-05 |
+| CI/CD anywhere: Marketplace action, example workflows, server reporting, other CI templates | [ADR-0058](adr/0058-ci-cd-anywhere.md) | Partial: E1 built (action source in `integrations/github-action/`, reusable workflow, examples per trigger; see FR-GATE-03); not built: publishing to `opsedia-ai/opseval-action` (Gate 0), server reporting (E2), other CI templates (E3, FR-GATE-05) |
 | Flexibility ladder L1–L5: datasets, rubric judges, generated scenarios, adaptive attacker, continuous evaluation | ADRs [0060](adr/0060-datasets-and-matrices.md)–[0064](adr/0064-continuous-evaluation.md) | Missing (L0, YAML and the guided form, is ADR-0048) |
 | Protecting `main` | [ADR-0065](adr/0065-protecting-main.md) | Missing: GitHub refuses rulesets on this private repository; soft protection first, rulesets at go-public |
 
@@ -114,7 +114,7 @@ PRD gains it.
 | FR-VER-05 | pass^k | S | v0.2 | Done | `_pass_hat_k` |
 | FR-GATE-01 | Exit codes 0/1/2/3 | M | v0.1 | Done | `exit_code`, CI demo checks 0/1/1/3 |
 | FR-GATE-02 | Criticality-aware gate | M | v0.1 | Partial | `release_gate`; per-suite gate policy with presets, recorded in every result (ADR-0032); "Safe to release" only when nothing blocks or warns (ADR-0030); but a policy that ignores unmeasured checks or flakiness can still say "Safe to release" (ATTENTION I27) |
-| FR-GATE-03 | GitHub Action | M | v0.2 | Done | `action.yml`, dogfooded in CI |
+| FR-GATE-03 | GitHub Action | M | v0.2 | Done | composite action (source `integrations/github-action/`, root `action.yml` kept identical by a test until go-public), reusable workflow `opseval-eval.yml` (`workflow_call` only, outputs `exit-code` and `gate`), drop-in examples per trigger in `examples/github/` (pull request, tag gate, release, deployment status, minimal); both action copies and the reusable workflow dogfooded on the demo agent in CI; pinning, permissions, `env:`-only inputs and the deployment URL check tested offline (ADR-0058 E1) |
 | FR-GATE-04 | pytest plugin | S | v0.2 | Partial | `packages/pytest-opseval`; ignores the release gate, so a run that judged nothing is green under pytest (ATTENTION I22) |
 | FR-GATE-05 | Other CI templates | S | v0.5 | Missing | only `opseval summary` |
 | FR-RPT-01 | Offline, RTL-aware HTML report | M | v0.1 | Done | `report.html.j2`; no automated no-network or Arabic rendering test |

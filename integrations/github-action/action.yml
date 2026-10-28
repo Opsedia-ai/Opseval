@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Opseval
+description: >-
+  Run an Opseval suite against a deployed conversational agent, upload the report and
+  JUnit results, and post the release-gate summary on the pull request. The step's exit
+  code is Opseval's: 0 pass · 1 fail · 2 not judged · 3 harness or configuration error.
+author: Opsedia
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  suite:
+    description: Scenario file, directory or suite file to run.
+    required: true
+  profile:
+    description: SUT profile YAML, or builtin:<name>.
+    required: true
+  target:
+    description: Agent URL (ws://, wss://, http(s)://).
+    required: true
+  transport:
+    description: websocket | http-json | openai-chat
+    default: websocket
+  repeats:
+    description: Override the scenarios' repeats (1-20). Empty keeps the scenario values.
+    default: ""
+  filter:
+    description: Newline-separated filters (tag=…, id=…, criticality=…).
+    default: ""
+  extra-args:
+    description: Extra arguments for `opseval run`, space-separated (e.g. --no-traces).
+    default: ""
+  python-version:
+    description: Python version to run Opseval with.
+    default: "3.12"
+  opseval-spec:
+    description: >-
+      What to install, as a pip requirement (e.g. opseval==0.2.0). Empty installs Opseval
+      from this action's own checkout (the same version as the action).
+    default: ""
+  comment:
+    description: Post or update the gate summary as a pull-request comment (needs pull-requests write).
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded artifact (report.html, junit.xml, result.json).
+    default: opseval-report
+  github-token:
+    description: Token for the pull-request comment.
+    default: ${{ github.token }}
+
+outputs:
+  exit-code:
+    description: Opseval's exit code.
+    value: ${{ steps.run.outputs.exit-code }}
+  gate:
+    description: pass or block (empty if no result was produced).
+    value: ${{ steps.run.outputs.gate }}
+  run-dir:
+    description: Folder with the run's records, result.json, report.html and junit.xml.
+    value: ${{ steps.run.outputs.run-dir }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Opseval
+      shell: bash
+      env:
+        OPSEVAL_SPEC: ${{ inputs.opseval-spec }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        venv="$RUNNER_TEMP/opseval-venv"
+        uv venv --quiet --allow-existing "$venv"   # the action may run more than once per job
+        if [ -n "$OPSEVAL_SPEC" ]; then
+          uv pip install --quiet --python "$venv/bin/python" "$OPSEVAL_SPEC"
+        else
+          uv pip install --quiet --python "$venv/bin/python" "$ACTION_PATH/../../packages/opseval"
+        fi
+        echo "$venv/bin" >> "$GITHUB_PATH"
+        "$venv/bin/opseval" --version
+
+    - name: Run Opseval
+      id: run
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        PROFILE: ${{ inputs.profile }}
+        TARGET: ${{ inputs.target }}
+        TRANSPORT: ${{ inputs.transport }}
+        REPEATS: ${{ inputs.repeats }}
+        FILTERS: ${{ inputs.filter }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -uo pipefail
+        reports="$RUNNER_TEMP/opseval-reports-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"
+        mkdir -p "$reports"
+        args=(run "$SUITE" --profile "$PROFILE" --target "$TARGET" --transport "$TRANSPORT" --reports-dir "$reports")
+        if [ -n "$REPEATS" ]; then args+=(--repeats "$REPEATS"); fi
+        while IFS= read -r f; do
+          if [ -n "$f" ]; then args+=(--filter "$f"); fi
+        done <<< "$FILTERS"
+        # Word-split extra args on purpose (they are flags, not a shell command).
+        read -r -a extra <<< "$EXTRA_ARGS"
+        # GitHub runs bash with -e: capture the exit code instead of aborting on it.
+        code=0
+        opseval "${args[@]}" ${extra[@]+"${extra[@]}"} || code=$?
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        run_dir=$(find "$reports" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+        echo "run-dir=$run_dir" >> "$GITHUB_OUTPUT"
+        if [ -n "$run_dir" ] && [ -f "$run_dir/result.json" ]; then
+          gate=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate"]["status"])' "$run_dir/result.json")
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+        fi
+        exit 0
+
+    - name: Upload report
+      id: upload
+      if: always() && steps.run.outputs.run-dir != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ steps.run.outputs.run-dir }}/report.html
+          ${{ steps.run.outputs.run-dir }}/junit.xml
+          ${{ steps.run.outputs.run-dir }}/result.json
+        if-no-files-found: warn
+
+    - name: Gate summary
+      if: always() && steps.run.outputs.run-dir != ''
+      shell: bash
+      env:
+        RUN_DIR: ${{ steps.run.outputs.run-dir }}
+        REPORT_URL: ${{ steps.upload.outputs.artifact-url }}
+        COMMENT: ${{ inputs.comment }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -uo pipefail
+        if [ ! -f "$RUN_DIR/result.json" ]; then
+          echo "::warning::Opseval produced no result.json (see the step log)."
+          exit 0
+        fi
+        summary="$RUNNER_TEMP/opseval-summary.md"
+        if [ -n "$REPORT_URL" ]; then
+          opseval summary "$RUN_DIR" --report-url "$REPORT_URL" > "$summary"
+        else
+          opseval summary "$RUN_DIR" > "$summary"
+        fi
+        cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$COMMENT" != "true" ] || [ -z "$PR_NUMBER" ]; then
+          exit 0
+        fi
+        existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+          --jq '[.[] | select(.body | startswith("<!-- opseval-gate -->"))][0].id // empty' 2>/dev/null | head -n 1)
+        body=$(python3 -c 'import json,sys; print(json.dumps({"body": open(sys.argv[1], encoding="utf-8").read()}))' "$summary")
+        if [ -n "$existing" ]; then
+          echo "$body" | gh api -X PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null \
+            || echo "::warning::Could not update the PR comment (does the token have pull-requests: write?)"
+        else
+          echo "$body" | gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" --input - > /dev/null \
+            || echo "::warning::Could not post the PR comment (does the token have pull-requests: write?)"
+        fi
+
+    - name: Exit with Opseval's exit code
+      shell: bash
+      env:
+        CODE: ${{ steps.run.outputs.exit-code }}
+      run: exit "${CODE:-3}"

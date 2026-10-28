@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Gate every pull request on Opseval, and post the gate summary on the PR.
+# Drop this file in .github/workflows/ and set the paths, the target and the secrets.
+#
+# Exit codes (the step's, and so the job's):
+#   0  pass                                -> the job passes
+#   1  the agent failed                    -> the job fails: blocks the merge
+#   2  not judged (nothing was measured)   -> the job fails: blocks, named "not judged"
+#   3  harness or configuration error      -> the job fails: blocks, named a harness error
+# Do not add continue-on-error or `|| true`: 2 and 3 must never turn green. Make this job a
+# required check to block the merge.
+#
+# Pull requests from forks get no secrets: without a judge key, judge scores are not measured,
+# which can be exit 2. That is the honest answer, not a failure of the agent.
+#
+# opsedia-ai/opseval-action is published at go-public (Gate 0); until then use
+# Opsedia-ai/Opseval@<full commit SHA>. @v1 is for readability: pin a full SHA in production.
+name: Opseval
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # the gate summary comment
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: opsedia-ai/opseval-action@v1
+        env:
+          # Every host that receives the conversation: the agent, the simulator, the judges.
+          OPSEVAL_ALLOWED_HOSTS: agent.staging.example.com,api.openai.com
+          OPSEVAL_SIMULATOR_BASE_URL: ${{ vars.OPSEVAL_SIMULATOR_BASE_URL }}
+          OPSEVAL_SIMULATOR_MODEL: ${{ vars.OPSEVAL_SIMULATOR_MODEL }}
+          OPSEVAL_SIMULATOR_API_KEY: ${{ secrets.OPSEVAL_SIMULATOR_API_KEY }}
+          OPSEVAL_JUDGE_BASE_URL: ${{ vars.OPSEVAL_JUDGE_BASE_URL }}
+          OPSEVAL_JUDGE_MODEL: ${{ vars.OPSEVAL_JUDGE_MODEL }}
+          OPSEVAL_JUDGE_API_KEY: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}
+        with:
+          suite: evals/suites/smoke.yaml
+          profile: evals/profile.yaml
+          target: wss://agent.staging.example.com/ws

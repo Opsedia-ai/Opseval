@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Evaluate a release when it is published, and promote it only if Opseval exits 0.
+# Drop this file in .github/workflows/.
+#
+# Exit codes (the step's, and so the job's):
+#   0  pass                                -> promote runs
+#   1  the agent failed                    -> promote is skipped
+#   2  not judged (nothing was measured)   -> promote is skipped: "not judged", not a failure
+#   3  harness or configuration error      -> promote is skipped: a harness error
+# Do not add continue-on-error, `|| true` or `if: always()`: 2 and 3 must never turn green.
+#
+# opsedia-ai/opseval-action is published at go-public (Gate 0); until then use
+# Opsedia-ai/Opseval@<full commit SHA>. @v1 is for readability: pin a full SHA in production.
+name: Opseval on release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }} # the scenarios as they were released
+          persist-credentials: false
+      - uses: opsedia-ai/opseval-action@v1
+        env:
+          OPSEVAL_ALLOWED_HOSTS: agent.staging.example.com,api.openai.com
+          OPSEVAL_JUDGE_BASE_URL: ${{ vars.OPSEVAL_JUDGE_BASE_URL }}
+          OPSEVAL_JUDGE_MODEL: ${{ vars.OPSEVAL_JUDGE_MODEL }}
+          OPSEVAL_JUDGE_API_KEY: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}
+        with:
+          suite: evals/suites/release.yaml
+          profile: evals/profile.yaml
+          target: wss://agent.staging.example.com/ws
+          comment: "false" # no pull request to comment on
+
+  promote:
+    needs: eval # skipped on exit 1, 2 or 3
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo "Promote the release here."

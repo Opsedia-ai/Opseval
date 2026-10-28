@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Opseval as a reusable workflow (ADR-0058, E1). Call it from a job:
+#
+#   jobs:
+#     eval:
+#       permissions: {contents: read}        # add pull-requests: write for the PR comment
+#       uses: Opsedia-ai/Opseval/.github/workflows/opseval-eval.yml@<sha>
+#       with:
+#         opseval-ref: <sha>                 # the same commit, so the action matches
+#         suite: evals/suites/smoke.yaml
+#         profile: evals/profile.yaml
+#         target: wss://agent.staging.example.com/ws
+#         allowed-hosts: agent.staging.example.com
+#       secrets:
+#         judge-api-key: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}
+#
+# The job fails unless Opseval exits 0, so `needs: eval` blocks whatever comes next on
+# 1 (the agent failed), 2 (not judged) and 3 (harness or configuration error). Nothing here
+# turns 2 or 3 green; read `exit-code` to tell them apart.
+#
+# Permissions: this file declares none on purpose. A called workflow can only lower the
+# caller's token, never raise it, so the caller grants exactly what its use needs:
+# `contents: read`, plus `pull-requests: write` when the gate summary is posted on a PR.
+name: Opseval (reusable)
+on:
+  workflow_call:
+    inputs:
+      suite:
+        description: Scenario file, directory or suite file to run.
+        type: string
+        required: true
+      profile:
+        description: SUT profile YAML, or builtin:<name>.
+        type: string
+        required: true
+      target:
+        description: Agent URL (ws://, wss://, http(s)://). Its host must be in allowed-hosts.
+        type: string
+        required: true
+      transport:
+        description: websocket | http-json | openai-chat
+        type: string
+        default: websocket
+      repeats:
+        description: Override the scenarios' repeats (1-20). Empty keeps the scenario values.
+        type: string
+        default: ""
+      filter:
+        description: Newline-separated filters (tag=…, id=…, criticality=…).
+        type: string
+        default: ""
+      extra-args:
+        description: Extra arguments for `opseval run`, space-separated (e.g. --no-traces).
+        type: string
+        default: ""
+      python-version:
+        description: Python version to run Opseval with.
+        type: string
+        default: "3.12"
+      opseval-spec:
+        description: >-
+          What to install, as a pip requirement (e.g. opseval==0.2.0). Empty installs Opseval
+          from the checkout at opseval-ref (the same version as the action).
+        type: string
+        default: ""
+      comment:
+        description: Post or update the gate summary as a pull-request comment (needs pull-requests write).
+        type: string
+        default: "true"
+      artifact-name:
+        description: Name of the uploaded artifact (report.html, junit.xml, result.json).
+        type: string
+        default: opseval-report
+      allowed-hosts:
+        description: >-
+          OPSEVAL_ALLOWED_HOSTS: comma-separated hosts that may receive the conversation (the
+          agent, the simulator and judge endpoints). Loopback is always allowed.
+        type: string
+        default: ""
+      opseval-ref:
+        description: >-
+          The Opseval commit to take the action from. Pin the same full SHA you call this
+          workflow at. Empty only when the caller is Opseval's own repository.
+        type: string
+        default: ""
+      start-demo-agent:
+        description: >-
+          For testing this workflow: start Opseval's bundled demo refund agent on
+          ws://127.0.0.1:8765 before the run. Nothing else uses it.
+        type: boolean
+        default: false
+    secrets:
+      simulator-api-key:
+        description: OPSEVAL_SIMULATOR_API_KEY, for LLM personas.
+        required: false
+      judge-api-key:
+        description: OPSEVAL_JUDGE_API_KEY, for the LLM judges.
+        required: false
+      agent-token:
+        description: OPSEVAL_STATIC_TOKEN, a bearer token sent to the agent.
+        required: false
+    outputs:
+      exit-code:
+        description: "Opseval's exit code: 0 pass · 1 fail · 2 not judged · 3 harness or configuration error."
+        value: ${{ jobs.eval.outputs.exit-code }}
+      gate:
+        description: pass or block (empty if no result was produced).
+        value: ${{ jobs.eval.outputs.gate }}
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    outputs:
+      # No exit code means the action never ran to the end: a harness or configuration
+      # error (3), as the action itself reports it, never a pass.
+      exit-code: ${{ steps.gate.outputs.exit-code || '3' }}
+      gate: ${{ steps.gate.outputs.gate }}
+    env:
+      OPSEVAL_ALLOWED_HOSTS: ${{ inputs.allowed-hosts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Which Opseval to use
+        env:
+          OPSEVAL_REF: ${{ inputs.opseval-ref }}
+        run: |
+          if [ -z "$OPSEVAL_REF" ] && [ ! -f integrations/github-action/action.yml ]; then
+            echo "::error::Set opseval-ref to the Opseval commit SHA you call this workflow at."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.opseval-ref != '' && 'Opsedia-ai/Opseval' || github.repository }}
+          ref: ${{ inputs.opseval-ref != '' && inputs.opseval-ref || github.sha }}
+          path: .opseval-action
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        if: inputs.start-demo-agent
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Start the demo agent
+        if: inputs.start-demo-agent
+        run: |
+          venv="$RUNNER_TEMP/opseval-demo-venv"
+          uv venv --quiet "$venv"
+          uv pip install --quiet --python "$venv/bin/python" .opseval-action/packages/opseval
+          nohup "$venv/bin/python" -m opseval.demo.refund_agent --port 8765 > "$RUNNER_TEMP/demo-agent.log" 2>&1 &
+          for _ in $(seq 1 50); do
+            if (echo > /dev/tcp/127.0.0.1/8765) 2>/dev/null; then exit 0; fi
+            sleep 0.2
+          done
+          cat "$RUNNER_TEMP/demo-agent.log"
+          echo "::error::The demo agent did not start."
+          exit 1
+      - name: Opseval
+        id: gate
+        uses: ./.opseval-action/integrations/github-action
+        env:
+          OPSEVAL_SIMULATOR_API_KEY: ${{ secrets.simulator-api-key }}
+          OPSEVAL_JUDGE_API_KEY: ${{ secrets.judge-api-key }}
+          OPSEVAL_STATIC_TOKEN: ${{ secrets.agent-token }}
+        with:
+          suite: ${{ inputs.suite }}
+          profile: ${{ inputs.profile }}
+          target: ${{ inputs.target }}
+          transport: ${{ inputs.transport }}
+          repeats: ${{ inputs.repeats }}
+          filter: ${{ inputs.filter }}
+          extra-args: ${{ inputs.extra-args }}
+          python-version: ${{ inputs.python-version }}
+          opseval-spec: ${{ inputs.opseval-spec }}
+          comment: ${{ inputs.comment }}
+          artifact-name: ${{ inputs.artifact-name }}

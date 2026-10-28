@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# The smallest Opseval gate. Drop it in .github/workflows/ and change the three paths.
+# Exit codes: 0 pass · 1 the agent failed · 2 not judged · 3 harness or configuration error.
+# Only 0 passes the job; 1, 2 and 3 all block. Never add continue-on-error: 2 and 3 must not
+# turn green. opsedia-ai/opseval-action is published at go-public (Gate 0); until then use
+# Opsedia-ai/Opseval@<full commit SHA>. Pin a full SHA instead of @v1 in production.
+on: pull_request
+permissions: {contents: read, pull-requests: write}
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - uses: opsedia-ai/opseval-action@v1
+        with: {suite: evals/suites/smoke.yaml, profile: evals/profile.yaml, target: wss://agent.staging.example.com/ws}
+        env: {OPSEVAL_ALLOWED_HOSTS: agent.staging.example.com}

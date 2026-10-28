@@ -144,6 +144,35 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
 - Azure DevOps and Bitbucket templates cannot run in our CI: schema-checked only, as STATUS says.
 - `--server` adds a network dependency to CI, which cannot change a verdict.
 
+## Implementation notes
+
+**E1, 2026-10-28.** Built as decided, with these details:
+
+- `integrations/github-action/action.yml` is the source; the root `action.yml` differs only in
+  the install path (`$ACTION_PATH/packages/opseval` against `$ACTION_PATH/../../packages/opseval`),
+  and `tests/test_github_ci.py` fails on any other difference.
+- The reusable workflow cannot take the action from its own commit: `uses:` takes no
+  expressions, and no context names the called workflow's SHA. It therefore checks Opseval out at
+  the input `opseval-ref` (the same SHA the caller pins) into `.opseval-action/` and runs the action
+  from there. An empty `opseval-ref` is accepted only when the caller is this repository.
+- It declares no permissions. A called workflow can only lower the caller's token, so declaring
+  `pull-requests: write` would make every caller without it (a tag gate) fail. Each caller grants
+  what its use needs, and the examples grant `pull-requests: write` only on `pull_request`.
+- `exit-code` is `3` when the action never ran to the end (for example a failed checkout), as the
+  action itself reports a missing code.
+- A job that calls a workflow has no steps, so the `action` job in `ci.yml` cannot call it, and a
+  failing called workflow fails the whole run (no `continue-on-error` on such a job). The
+  reusable workflow is dogfooded in its own file, `reusable-workflow.yml`, on the healthy demo
+  agent only (exit 0, gate `pass`), started by the boolean input `start-demo-agent`; exit 1 is
+  proven on the action, whose `action` job now runs the source on the healthy agent and the root
+  copy on the buggy one. Keeping it out of `ci.yml` keeps that file's jobs the required checks.
+- The `deployment_status` example checks the URL itself before anything is installed (https,
+  host allowlisted, else exit 3), on top of Opseval's own refusal; the check is tested by running
+  its script.
+- Not built: the `release.yml` job that publishes `opsedia-ai/opseval-action` (off until Gate 0,
+  so it is left for go-public rather than added disabled), and the action repository's README.
+  No `actionlint` run: the tests parse and check the files offline.
+
 ## Not decided here
 
 - Where the image is published at go-public (GHCR or Docker Hub), and listing the GitLab component,

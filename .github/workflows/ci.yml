@@ -125,7 +125,10 @@ jobs:
         run: make audit
 
   action:
-    # Dogfood the composite action (action.yml) against the demo agent.
+    # Dogfood the composite action against the demo agent: its source
+    # (integrations/github-action) on the healthy agent, and the root copy that
+    # Opsedia-ai/Opseval@<sha> users still call on the buggy one (ADR-0058). The reusable
+    # workflow is dogfooded in its own file, reusable-workflow.yml.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -157,7 +160,7 @@ jobs:
           done
       - name: Opseval gate (healthy agent)
         id: healthy
-        uses: ./
+        uses: ./integrations/github-action
         with:
           suite: ${{ env.CATALOGUE }}/suites/smoke.yaml
           profile: ${{ env.CATALOGUE }}/profile.yaml
