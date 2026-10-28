@@ -51,7 +51,17 @@ def relayout(run: Path, layout: str | None, *, started: datetime | None = None) 
 
 def test_a_new_run_records_its_layout(run: Path) -> None:
     assert json.loads((run / "manifest.json").read_text("utf-8"))["layout"] == LAYOUT
-    assert LAYOUT == "opseval-runs/2", "2: records may carry created_artifacts"
+    assert LAYOUT == "opseval-runs/3", (
+        "3: records may carry audio, transcripts and a voice timeline"
+    )
+
+
+def test_a_layout_2_run_is_still_read(run: Path) -> None:
+    relayout(run, "opseval-runs/2")
+    store = FileStore(run.parent)
+    assert store.layout_known(run.name)
+    assert store.load_result(run.name).run_id == run.name
+    assert all(r.voice is None for r in store.load_records(run.name))
 
 
 def test_a_run_from_before_versioning_reads_as_layout_1(run: Path) -> None:
