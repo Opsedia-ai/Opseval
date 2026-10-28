@@ -32,7 +32,10 @@ ADR-0056, WebRTC is ADR-0057, and languages are ADR-0059.
 
 - `start()` opens the call or stream; `close()` ends it.
 - `send_audio(chunk)` streams caller audio (PCM16 at the session's rate); `send_dtmf(digits)`.
-- `events()` yields typed events: `AgentAudio(chunk)`, `AgentSpeechStart`, `AgentSpeechEnd`,
+- `end_of_caller_turn()` says the caller has finished speaking. A request/response transport
+  sends the turn there, and the agent's turn clock starts there (ADR-0042).
+- `next_event(timeout)` returns the next typed event, raising `TransportTimeout` or
+  `TransportClosed` as `Session.receive` does: `AgentAudio(chunk)`, `AgentSpeechStart`, `AgentSpeechEnd`,
   `AgentTranscript(text, final)` when the agent exposes its own ASR, `Dtmf`, `Transfer(to)`,
   `Hangup(by)` and `Mark(name)`.
 - `transport_events()` as on `Session` (drops, resumes, token refreshes).
