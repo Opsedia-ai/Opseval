@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// An example Jenkinsfile using the Opseval shared library (templates/jenkins). Register the
+// library under Manage Jenkins > System > Global Trusted Pipeline Libraries as `opseval`,
+// from your mirror of the Opseval repository with the library path `templates/jenkins/`,
+// pinned to a full commit SHA. The agent needs Docker.
+//
+// The judge key is a Secret text credential (id `opseval-judge-api-key`); the step binds it
+// with withCredentials, so it is masked in the log and never on a command line.
+//
+// The `Evaluate` stage fails on exit 1 (the agent failed), 2 (not judged) and 3 (harness or
+// configuration error), so `Release` runs only when Opseval passed (exit 0).
+@Library('opseval') _
+
+pipeline {
+    agent { label 'docker' }
+    options { timeout(time: 30, unit: 'MINUTES') }
+    stages {
+        stage('Evaluate') {
+            steps {
+                opseval(
+                    suite: 'evals/suites/smoke.yaml',
+                    profile: 'evals/profile.yaml',
+                    target: 'wss://agent.staging.example.com/ws',
+                    allowedHosts: 'agent.staging.example.com,api.openai.com',
+                    judgeBaseUrl: 'https://api.openai.com/v1',
+                    judgeModel: 'gpt-4.1-mini',
+                    judgeApiKeyCredentialsId: 'opseval-judge-api-key',
+                    opsevalEnv: ['OPSEVAL_SIMULATOR_TIMEOUT_SECONDS': '120'],
+                    // Until the image is published: docker build -t opseval . in the Opseval
+                    // repository (on the agent, or pushed to your registry).
+                    image: 'opseval',
+                )
+            }
+        }
+        stage('Release') {
+            when { branch 'main' }
+            steps {
+                sh './scripts/publish.sh'
+            }
+        }
+    }
+}

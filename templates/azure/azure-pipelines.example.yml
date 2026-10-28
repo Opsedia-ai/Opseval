@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# An example azure-pipelines.yml: evaluate the agent on every pull request and on main, and
+# release only when the evaluation passed. The Evaluate job fails on exit 1 (the agent
+# failed), 2 (not judged) and 3 (harness or configuration error), so Release does not run.
+#
+# Secrets: a variable group `opseval-secrets` holding OPSEVAL_JUDGE_API_KEY as a secret (lock
+# icon), or linked to Azure Key Vault. Never a plain variable, never a parameter.
+trigger: [main]
+pr: [main]
+
+resources:
+  repositories:
+    - repository: opseval
+      type: github
+      endpoint: github-opseval           # a GitHub service connection
+      name: Opsedia-ai/Opseval
+      ref: <full commit SHA>             # pin a commit, not a branch
+
+variables:
+  - group: opseval-secrets
+
+stages:
+  - stage: Evaluate
+    jobs:
+      - job: opseval
+        pool: { vmImage: ubuntu-latest }
+        steps:
+          - checkout: self
+          - template: templates/azure/opseval.yml@opseval
+            parameters:
+              suite: evals/suites/smoke.yaml
+              profile: evals/profile.yaml
+              target: wss://agent.staging.example.com/ws
+              allowedHosts: agent.staging.example.com,api.openai.com
+              judgeBaseUrl: https://api.openai.com/v1
+              judgeModel: gpt-4.1-mini
+              opsevalEnv: |
+                OPSEVAL_SIMULATOR_TIMEOUT_SECONDS=120
+              # Until the image is published: docker build -t opseval . in the Opseval
+              # repository, push it to your registry (or ACR), and name it here.
+              image: myregistry.azurecr.io/opseval:0.2.0
+
+  - stage: Release
+    dependsOn: Evaluate                  # skipped unless Opseval exited 0
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: release
+        pool: { vmImage: ubuntu-latest }
+        steps:
+          - script: ./scripts/publish.sh
