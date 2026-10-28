@@ -33,9 +33,12 @@ class HarnessClock(Protocol):
 class FrameMedia:
     """What a voice session knows about a frame beyond its payload: the spoken audio, its
     transcript, when it reached the other side, and the latency measured on the attempt's
-    own monotonic clock (ADR-0053), which STT time must not inflate."""
+    own monotonic clock (ADR-0053), which STT time must not inflate. ``text`` is what was
+    actually spoken for a sent frame (a bare approval is said "Yes, please go ahead."), which
+    replaces the frame's text in the record so a judge reads what the agent heard."""
 
     audio: AudioRef | None = None
+    text: str | None = None
     transcript: TranscriptInfo | None = None
     at: datetime | None = None
     latency_ms: float | None = None
@@ -83,11 +86,15 @@ class Session(ABC):
     """True where ``send`` returns only once the agent has answered (request/response
     transports). The driver then stamps a sent frame when sending began, not after the reply:
     otherwise everything the agent did in reply would be placed before it (ADR-0042)."""
-    whole_turns: ClassVar[bool] = False
-    """True where ``receive`` hands over the agent's whole turn at once (the voice bridge:
-    a spoken turn is one transcribed frame). The first frame that is not transport chatter
-    then answers the turn, even with an empty transcript: whether that silence of words is
-    the agent's fault is ``voice.intelligible``'s question, never a turn timeout's."""
+
+    def ends_turn(self, payload: Any) -> bool:
+        """Whether a received frame ends the wait for the agent's answer although the
+        profile would not call it one (``SutProfile.answers``). The voice bridge says so for
+        a spoken turn, even with an empty transcript (whether those were words is
+        ``voice.intelligible``'s question, never a turn timeout's), and for a hang-up. A
+        notification or a data frame that does not answer never ends the wait here: an agent
+        that sends ``response.created`` and never speaks is the agent's ``TIMEOUT``."""
+        return False
 
     def use_harness_clock(self, clock: HarnessClock) -> None:  # noqa: B027 - optional hook
         """The driver hands over how to run a harness call off the agent's clock. Only a

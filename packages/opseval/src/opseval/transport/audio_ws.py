@@ -58,6 +58,10 @@ class AudioWsSession(AudioSession):
         self._transport = transport
         self._cfg = cfg
         self._conn: ClientConnection | None = None
+        # Messages stamped when they arrive, by a reader that runs for the whole call: the
+        # bridge reads them later (after STT, say), and latency must not count that wait.
+        self._inbox: asyncio.Queue[tuple[float, str | bytes] | TransportClosed] = asyncio.Queue()
+        self._reader: asyncio.Task[None] | None = None
 
     def _require(self) -> ClientConnection:
         if self._conn is None:
@@ -87,6 +91,18 @@ class AudioWsSession(AudioSession):
         if env.start_frame is not None:
             values = {"codec": self._cfg.codec, "rate": self._cfg.rate}
             await self._send_json(render_frame(env.start_frame, values))
+        self._reader = asyncio.create_task(self._read(self._conn))
+
+    async def _read(self, conn: ClientConnection) -> None:
+        """Stamp every message on the attempt's clock the moment it arrives (ADR-0053)."""
+        try:
+            async for data in conn:
+                self._inbox.put_nowait((self.clock.now_ms(), data))
+        except ConnectionClosed as exc:
+            code = exc.rcvd.code if exc.rcvd else None
+            self._inbox.put_nowait(TransportClosed(f"the audio stream closed: {exc}", code))
+            return
+        self._inbox.put_nowait(TransportClosed("the audio stream closed", 1000))
 
     async def send_audio(self, pcm16: bytes) -> None:
         wire = encode(pcm16, self._cfg.codec)
@@ -155,20 +171,25 @@ class AudioWsSession(AudioSession):
         return AgentFrame(at_ms=at, payload=frame)
 
     async def next_event(self, timeout: float) -> VoiceEvent:
-        conn = self._require()
+        self._require()
         try:
-            data = await asyncio.wait_for(conn.recv(), timeout=timeout)
+            item = await asyncio.wait_for(self._inbox.get(), timeout=timeout)
         except TimeoutError as exc:
             raise TransportTimeout(f"nothing from the agent within {timeout:.1f}s") from exc
-        except ConnectionClosed as exc:
-            code = exc.rcvd.code if exc.rcvd else None
-            raise TransportClosed(f"the audio stream closed: {exc}", code) from exc
-        return self._event(self.clock.now_ms(), data)
+        if isinstance(item, TransportClosed):
+            self._inbox.put_nowait(item)  # closed stays closed for every later read
+            raise item
+        at, data = item
+        return self._event(at, data)
 
     async def close(self) -> None:
         if self._conn is not None:
             with contextlib.suppress(WebSocketException):
                 await self._conn.close()
+        if self._reader is not None:
+            self._reader.cancel()
+            with contextlib.suppress(BaseException):
+                await self._reader
 
 
 class AudioWsTransport(AudioTransport):

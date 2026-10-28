@@ -221,14 +221,15 @@ VOICE_ALWAYS_ON = [VOICE_INTELLIGIBLE]
 
 def _voice_degraded(score: ScoreResult, voice: Any) -> ScoreResult:
     """Mark a score degraded when the voice evidence behind it is weak (ADR-0053, ADR-0017):
-    a turn heard only by the second STT degrades every text-reading score, a low transcript
-    confidence every judge score. The reason goes in ``details.degraded_by``."""
+    an unheard turn (graded on the heard ones), a turn heard only by the second STT or in
+    another script degrades every text-reading score, a low transcript confidence every
+    judge score. The reason goes in ``details.degraded_by``."""
     if voice is None or score.status is ScoreStatus.INFRA_ERROR:
         return score
     cls = REGISTRY.get(score.scorer_id)
     if cls is None or not cls.reads_text:
         return score
-    reasons = [voice.text_degraded] if voice.text_degraded else []
+    reasons = [r for r in (voice.unheard, voice.text_degraded) if r]
     if voice.judge_degraded and cls.requires == "llm":
         reasons.append(voice.judge_degraded)
     if not reasons:
@@ -369,23 +370,35 @@ class ScoringEngine:
         always = [*ALWAYS_ON, *(VOICE_ALWAYS_ON if record.voice is not None else [])]
         specs = [s for s in effective_specs(scenario, profile) if s.id not in always]
         specs += [ScorerSpec(id=i) for i in always]
-        from opseval.scoring.voice import voice_findings
+        from opseval.scoring.voice import heard_only, voice_findings
 
         voice = voice_findings(record)
-        scores = await asyncio.gather(*(self._one(record, spec, ctx, voice) for spec in specs))
+        # Some turns heard, some not: the text checks grade the heard ones (ADR-0053).
+        heard = heard_only(record, voice) if voice is not None and voice.unheard else record
+        scores = await asyncio.gather(
+            *(self._one(record, spec, ctx, voice, heard) for spec in specs)
+        )
         return [_voice_degraded(score, voice) for score in scores]
 
     async def _one(
-        self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext, voice: Any = None
+        self,
+        record: RunRecord,
+        spec: ScorerSpec,
+        ctx: ScoringContext,
+        voice: Any = None,
+        heard: RunRecord | None = None,
     ) -> ScoreResult:
         cls = REGISTRY.get(spec.id)
         if cls is None:
             return infra_error(spec.id, Axis.OUTPUT, spec, f"UNKNOWN_SCORER: {spec.id}")
-        if voice is not None and voice.asr_failed and cls.reads_text:
-            # Opseval's own listening was proven broken on this attempt (ADR-0053): what the
-            # agent said is not measured, and the reason names the canary. Never run, so a
-            # judge is not paid to grade a transcript that is not there.
+        if voice is not None and voice.asr_reason and cls.reads_text:
+            # Opseval's own listening was proven broken and no agent turn was heard
+            # (ADR-0053): what the agent said is not measured, and the reason names the
+            # canary. Never run, so a judge is not paid to grade a transcript that is not
+            # there.
             return infra_error(cls.id, cls.axis, spec, voice.asr_reason, version=cls.version)
+        if cls.reads_text and heard is not None:
+            record = heard
         scorer = cls()
         try:
             if cls.requires == "llm":

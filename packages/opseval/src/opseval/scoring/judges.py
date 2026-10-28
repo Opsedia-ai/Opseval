@@ -30,7 +30,7 @@ from typing import Any, ClassVar
 from opseval.errors import HarnessError
 from opseval.langpacks import Spoken, effective_language
 from opseval.llm import ChatClient, model_family
-from opseval.models.record import RunRecord
+from opseval.models.record import VOICE_KEY, RunRecord
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import Scenario, ScorerSpec
 from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
@@ -127,6 +127,22 @@ class Judge(Scorer):
                 f"each with `[redacted:KIND]` (kinds found: {', '.join(record.redaction.found)}). "
                 "Where a marker appears, the speaker did write a credential of that kind at "
                 "that point."
+            )
+        unheard = [
+            f.seq
+            for f in record.frames
+            if f.direction == "received"
+            and isinstance(f.payload, dict)
+            and isinstance(f.payload.get(VOICE_KEY), dict)
+            and f.payload[VOICE_KEY].get("heard") == "asr_failed"
+        ]
+        if unheard:
+            # Without this a judge reads the gap as the agent saying nothing there, and fails
+            # it for Opseval's own speech recognition (ADR-0053).
+            facts.append(
+                f"the agent spoke {len(unheard)} more turn(s) that Opseval's speech recognition "
+                "could not hear; they are left out of the conversation below. The agent did "
+                "speak there, and what it said is unknown: do not read the gap as silence."
             )
         return facts
 

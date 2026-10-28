@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import (
     SCRIPT_EXHAUSTED,
+    VOICE_KEY,
     FrameRecord,
     InterruptRecord,
     RunRecord,
@@ -60,6 +61,14 @@ class LanguageScriptParams(NoParams):
     """Share of agent messages that must be in the script; the threshold when unset."""
 
 
+def _spoken_unheard(frame: FrameRecord) -> bool:
+    """A spoken agent turn Opseval could not hear (its own STT proven broken, ADR-0053):
+    the agent did answer there, so calling it silence would blame it for Opseval's ears."""
+    payload = frame.payload
+    evidence = payload.get(VOICE_KEY) if isinstance(payload, dict) else None
+    return isinstance(evidence, dict) and evidence.get("heard") == "asr_failed"
+
+
 @register
 class NoErrors(Scorer):
     id = "conversation.no_errors"
@@ -107,7 +116,9 @@ class AgentReplied(Scorer):
                 turns.append(frame.seq)
                 answered.append(False)
             elif frame.direction == "received" and turns and not answered[-1]:
-                answered[-1] = ctx.profile.answers(frame.kind, frame.text, frame.payload)
+                answered[-1] = ctx.profile.answers(
+                    frame.kind, frame.text, frame.payload
+                ) or _spoken_unheard(frame)
         if not turns:
             return self.result(spec, 1.0, vacuous=True, note="no customer turn was sent")
         silent = [n for n, ok in enumerate(answered, start=1) if not ok]

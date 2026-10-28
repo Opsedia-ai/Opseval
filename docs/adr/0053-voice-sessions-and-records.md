@@ -132,8 +132,9 @@ Opseval measures which it is:
      fails, with the energy, duration and every transcript as evidence;
   3. otherwise (the canary's WER is over the bound, or the canary call itself failed): every
      text-reading scorer is `infra_error` `ASR_NO_TRANSCRIPT`, and the canary result is named.
-- "Garbage" means no word in the scenario language's script (the test `output.language_script`
-  uses). A low-confidence transcript with words is the confidence row of the table, not this one.
+- "Garbage" means no letter in any script and no digit (amended in review, see "Review of
+  #84" below). A low-confidence transcript with words is the confidence row of the table, not
+  this one.
 - `voice.intelligible` is always on for voice attempts and sits on the `output` axis. Every
   canary call and its WER go into the record, so `rescore` sees the same evidence.
 - A canary that is unhealthy while transcripts are not empty marks the attempt's judge scores
@@ -196,7 +197,8 @@ Built:
 - **The bridge** (`opseval/voice/bridge.py`). `VoiceBridge(Session)` wraps an `AudioSession`;
   `VoiceTransport` opens and starts one per attempt. The driver gained four optional `Session`
   hooks and nothing else changed in it: `whole_turns` (a spoken turn is one frame, so an empty
-  transcript still answers the turn instead of becoming a turn timeout), `use_harness_clock`
+  transcript still answers the turn instead of becoming a turn timeout; now `ends_turn`, see
+  the review below), `use_harness_clock`
   (TTS and STT run with the attempt deadline paused, like the simulator), `frame_media` (the
   `AudioRef`, the `TranscriptInfo` and the latency on the attempt's monotonic clock, from the
   caller's last sample to the agent's first sample with energy, so STT time never inflates it)
@@ -216,7 +218,7 @@ Built:
   unintelligible | asr_failed`, the canary's provider, model, codec, rate, what was said and
   heard, WER and bound, or its error, and `low_confidence`), so `rescore` decides on exactly
   what the run saw. "Usable" means at least one letter in the language's script (Latin by
-  default, Arabic for `ar`, CJK for `zh`/`ja`). A second STT that fails is noted and the canary
+  default, Arabic for `ar`, CJK for `zh`/`ja`; superseded in review: any letter or digit). A second STT that fails is noted and the canary
   runs; a canary call that fails is unhealthy.
 - **Scoring.** `voice.intelligible` (output axis) is added to the always-on checks for any
   record with a voice timeline. `Scorer.reads_text` (default `True`, so an unknown plugin errs
@@ -253,6 +255,57 @@ Built:
   a nibble; noise and a bad checksum read as nothing). Exit codes, in CI's `check` and
   `container` jobs: `--voice` 0, `--bug silent` 1, `--bug garbled` 1, `--stt-down` 3,
   `--stt-deaf` 3 (refused at preflight: the canary is heard as nothing).
+
+### Review of #84 (2026-10-28)
+
+- **Usable is script-free.** A transcript is usable when it has a letter in any Unicode script
+  (Latin, Arabic, CJK, kana, Hangul, Cyrillic, Hebrew, Devanagari, Thai, Greek, …) or a digit.
+  A per-language script list decided the agent's fault from a gap in Opseval's own table: a
+  Korean agent heard perfectly was "unintelligible". The expected script (`SCRIPTS`) is only an
+  annotation: `off_script` in the evidence degrades the text scores, never fails the agent.
+- **What ends the agent's turn.** `whole_turns` is replaced by `Session.ends_turn(payload)`:
+  the bridge's spoken turn (even with an empty transcript) and a hang-up end the driver's wait;
+  any other frame ends it only if `SutProfile.answers` says so (a checkpoint, a result, an
+  error, words). A notification or data frame before speech (`response.created`) is recorded
+  and the wait goes on, under the turn's own timeout: an agent that never speaks after it is
+  the agent's `TIMEOUT`. After speech, only an answering frame ends the speech early.
+- **A hang-up ends the call.** None of `TerminalState` names "the agent ended the call", and a
+  new value would move every reader for one case, so it ends the way a text agent that stops
+  answering does. After a hang-up the bridge never reads the line again: the connection
+  closing is not a `TRANSPORT_FAILURE`. The driver's quiet window ends; if the customer
+  considers the goal reached (or the script is done) the attempt is `GOAL_REACHED`, and if it
+  still had something to say, the next turn is the agent's `TIMEOUT` ("the agent hung up").
+  Either way it is judged, never "not measured".
+- **`max_turn_seconds` by the audio's length too.** The bridge sums the agent audio of a turn
+  at the session's rate; that or the wall clock, whichever trips first, raises
+  `TurnNeverEnded` (a `TransportTimeout`: the agent's fault) before STT, so the STT never gets
+  more than `max_turn_seconds` of audio (an `audio-http` answer of ten minutes arrives at once
+  and never trips the clock). Silence before speech that long is dropped, not sent. The driver
+  ends the attempt on it even in its quiet window, where an ordinary timeout means "the turn is
+  over".
+- **One unheard turn voids only itself.** `ASR_NO_TRANSCRIPT` is per turn. With some agent
+  turns heard and some `asr_failed`, the text-reading scorers (`Scorer.reads_text`) grade a
+  copy of the record whose unheard turns have no text (`scoring.voice.heard_only`), and their
+  scores are degraded naming the unheard turns and the canary; a judge gets a harness fact
+  saying the agent spoke turns Opseval could not hear, so the gap is not read as silence;
+  `conversation.agent_replied` counts an unheard spoken turn as an answer. A failure in a heard
+  turn (a credential leaked in turn 2 with turn 5 unheard) still fails. Only when no agent turn
+  was heard are the text-reading scores `infra_error` `ASR_NO_TRANSCRIPT`.
+  `voice.intelligible` (v2) grades the measured turns, degraded when some were not.
+- **Latency on the arrival clock.** `audio-ws` reads the socket in a task of its own and stamps
+  each message when it arrives; `audio-http` stamps the answer when the response came. The
+  caller's end is taken when its last sample was sent, and cleared at the start of each caller
+  turn. Agent speech that began before the caller finished is a barge-in: a `barge_in` timeline
+  event and a latency of `None` (not measured), never `0.0`. A voice frame's latency is always
+  the session's own, so the driver's clock (which would count STT) is never used for one.
+- **Also:** `audio-http` keeps the rest of a JSON answer as a data frame after the speech (so
+  a checkpoint or a committed outcome is seen and the commit guard holds); a checkpoint
+  decision with feedback is spoken "Yes. <feedback>" / "No. <feedback>" and every spoken
+  decision becomes the sent frame's `text` (`FrameMedia.text`); undecodable audio fails
+  `voice.intelligible` with its reason and size; a voice profile without an exact `"{text}"` in
+  `user_message_frame` or `"{action}"`/`"{feedback}"` in `resume_frame` fails to load; the
+  runner closes the speech kit whatever happens; one driver helper pauses the attempt
+  deadline for the simulator and for TTS/STT.
 
 Left for the next steps: audio encryption at rest (the `opseval[voice]` extra), audio
 retention (`OPSEVAL_AUDIO_RETENTION_DAYS`), the region check, tuning the second STT and the

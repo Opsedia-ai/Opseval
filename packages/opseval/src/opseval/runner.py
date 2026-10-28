@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import socket
 import time
@@ -555,6 +556,24 @@ async def launch(
     log: Callable[[str], None] = lambda _msg: None,
 ) -> SuiteResult:
     """Load, run, score and persist a suite. Raises ConfigError for exit code 3."""
+    kits: list[SpeechKit] = []
+    try:
+        return await _launch(catalogue_target, options, settings, log=log, kits=kits)
+    finally:
+        # The speech providers' HTTP clients, closed however the run ended.
+        for kit in kits:
+            with contextlib.suppress(Exception):  # closing must never change the outcome
+                await kit.aclose()
+
+
+async def _launch(
+    catalogue_target: str | Path,
+    options: RunOptions,
+    settings: Settings | None,
+    *,
+    log: Callable[[str], None],
+    kits: list[SpeechKit],
+) -> SuiteResult:
     settings = settings or Settings()
     # Before the catalogue is validated, so a suite may name a plugin's scorer and a
     # broken plugin is reported rather than becoming an UNKNOWN_SCORER later.
@@ -603,6 +622,7 @@ async def launch(
         # could not speak or listen, is refused here (exit 3, ADR-0053).
         audio_mode = check_audio_privacy(settings, synthetic=options.synthetic_voices)
         kit = speech_kit(settings, profile, meter)
+        kits.append(kit)
     make_transport = build_transport_factory(options, settings, kit=kit)
     trace_source = build_trace_source(options, settings, profile)
     roles = llm_roles_needed(catalogue.scenarios)

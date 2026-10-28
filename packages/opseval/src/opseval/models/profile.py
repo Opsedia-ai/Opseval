@@ -213,6 +213,26 @@ class AudioConfig(BaseModel):
         return self
 
 
+def placeholder_path(template: Any, name: str, at: str = "") -> str | None:
+    """The dotted path of the exact ``"{name}"`` value in a frame template, or ``None``.
+
+    The voice bridge reads the customer's words back out of a rendered frame at that path
+    (ADR-0053), so only a whole-value placeholder counts: ``"Say: {text}"`` would put words
+    the customer never said into the agent's ear."""
+    if template == "{" + name + "}":
+        return at
+    items: list[tuple[str, Any]] = []
+    if isinstance(template, dict):
+        items = [(str(k), v) for k, v in template.items()]
+    elif isinstance(template, list):
+        items = [(str(i), v) for i, v in enumerate(template)]
+    for key, value in items:
+        found = placeholder_path(value, name, f"{at}.{key}" if at else key)
+        if found is not None:
+            return found
+    return None
+
+
 class SutProfile(BaseModel):
     """Maps an agent's wire protocol onto Opseval's canonical model."""
 
@@ -319,13 +339,34 @@ class SutProfile(BaseModel):
                 "reconnect.resume_session_frame needs session_id_field: a session can only be "
                 "resumed if the agent tells Opseval its id"
             )
-        if self.audio is not None and self.probes:
-            # A probe is a raw JSON frame; a speaking agent is reached through audio.
-            raise ValueError("probes are JSON frames: a voice profile (audio:) cannot send them")
+        if self.audio is not None:
+            self._check_voice()
         for name, spec in self.checkpoints.items():
             if spec.phase is not None and self.phases and spec.phase not in self.phases:
                 raise ValueError(f"checkpoint {name!r} refers to unknown phase {spec.phase!r}")
         return self
+
+    def _check_voice(self) -> None:
+        """A voice profile's frames must say where the customer's words are, because the
+        bridge speaks them (ADR-0053). Found at load time, so ``opseval validate`` fails
+        instead of every attempt ending in a configuration error mid-run."""
+        if self.probes:
+            # A probe is a raw JSON frame; a speaking agent is reached through audio.
+            raise ValueError("probes are JSON frames: a voice profile (audio:) cannot send them")
+        if placeholder_path(self.user_message_frame, "text") is None:
+            raise ValueError(
+                'a voice profile (audio:) needs a value that is exactly "{text}" in '
+                "user_message_frame: the voice bridge speaks the customer's words from there"
+            )
+        if (
+            placeholder_path(self.resume_frame, "action") is None
+            and placeholder_path(self.resume_frame, "feedback") is None
+        ):
+            raise ValueError(
+                'a voice profile (audio:) needs a value that is exactly "{action}" or '
+                '"{feedback}" in resume_frame: the voice bridge speaks a checkpoint decision '
+                "from there"
+            )
 
     def classify(self, payload: object) -> FrameKind:
         """Classify a decoded inbound frame. Never raises."""

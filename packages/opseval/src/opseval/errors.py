@@ -38,6 +38,13 @@ class TransportTimeout(OpsevalError):
     """The system under test did not answer in time. This *does* count against the agent."""
 
 
+class TurnNeverEnded(TransportTimeout):
+    """The agent kept talking past the turn's limit (a voice agent past
+    ``audio.max_turn_seconds``, ADR-0053). The agent's fault, like any timeout, and it ends
+    the attempt wherever it happens: in the driver's quiet window an ordinary timeout means
+    "the turn is over", which this must never be read as."""
+
+
 class TransportClosed(TransportError):
     """The connection closed unexpectedly."""
 

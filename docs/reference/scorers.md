@@ -25,7 +25,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 | `output.required_fields` | frames | 2 | `checkpoint*, fields*` | A checkpoint payload carries every listed field, present and not empty (params: checkpoint, fields; checks the approved occurrence, else the last one). |
 | `output.terminal_state` | frames | 2 | none | The conversation ended where the scenario's stop_at says it should. |
 | `protocol.probes_passed` | frames | 1 | none | Every protocol probe the profile declares got the answer it expects. |
-| `voice.intelligible` | frames | 1 | none | Always on for voice. Fails when the agent spoke with energy that no STT could read while the STT canary proved Opseval could hear; not measured when the canary failed. |
+| `voice.intelligible` | frames | 2 | none | Always on for voice. Fails when the agent spoke with energy that no STT could read while the STT canary proved Opseval could hear, or sent audio that cannot be decoded; an unheard turn (the canary failed) is left out and degrades it, and with no turn heard it is not measured. |
 
 ## flow
 

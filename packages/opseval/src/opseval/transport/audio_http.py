@@ -6,7 +6,9 @@ Each caller turn is one ``POST`` of the whole turn, as a WAV file (``audio/wav``
 bytes in the profile's codec and rate (``audio.http.request_format``), with one id per
 attempt in ``audio.http.session_header`` so the agent can keep the conversation. The answer
 is audio (``audio/wav``, or raw bytes in the profile's codec for any other audio type) or a
-JSON object ``{"audio": "<base64 wav or raw>", "transcript": "..."}``.
+JSON object ``{"audio": "<base64 wav or raw>", "transcript": "..."}``, whose other fields
+(a checkpoint, a result, an outcome, a phase) reach the driver as a data frame after the
+speech.
 
 The request is sent when the caller's turn ends (``end_of_caller_turn``: the agent's clock
 starts there, ADR-0042), and ``next_event`` waits for the answer. Faults follow the one rule
@@ -72,7 +74,7 @@ class AudioHttpSession(AudioSession):
         self._cfg = cfg
         self._default_timeout = default_timeout
         self._buffer: list[bytes] = []
-        self._pending: asyncio.Task[httpx.Response] | None = None
+        self._pending: asyncio.Task[tuple[httpx.Response, float]] | None = None
         self._events: deque[VoiceEvent] = deque()
         self.session_id = uuid.uuid4().hex
 
@@ -94,10 +96,12 @@ class AudioHttpSession(AudioSession):
         body, ctype = self._body()
         headers = {"content-type": ctype, self._cfg.http.session_header: self.session_id or ""}
 
-        async def post() -> httpx.Response:
-            return await self._client.post(
+        async def post() -> tuple[httpx.Response, float]:
+            resp = await self._client.post(
                 self._url, content=body, headers=headers, timeout=turn_timeout(limit)
             )
+            # Stamped when the answer arrived, not when the bridge got round to reading it.
+            return resp, self.clock.now_ms()
 
         self._events.clear()
         self._pending = asyncio.create_task(post())
@@ -120,8 +124,7 @@ class AudioHttpSession(AudioSession):
         ]
         return [*events, AgentSpeechEnd(at_ms=at)]
 
-    def _answer(self, resp: httpx.Response) -> list[VoiceEvent]:
-        at = self.clock.now_ms()
+    def _answer(self, resp: httpx.Response, at: float) -> list[VoiceEvent]:
         if resp.status_code >= 500:
             # The agent answered, with an error: agent behaviour, not harness noise.
             return [
@@ -155,7 +158,13 @@ class AudioHttpSession(AudioSession):
                         at_ms=at, data=raw.encode("utf-8", "replace"), reason=f"not base64: {exc}"
                     )
                 ]
-            return [*events, *self._audio(at, data, data[:4] == b"RIFF")]
+            spoken = self._audio(at, data, data[:4] == b"RIFF")
+            # Everything else in the answer (a checkpoint, a result, an outcome, a phase) is
+            # the agent's data message, handed to the driver after the speech: dropping it
+            # would hide a checkpoint, and with it the commit guard (ADR-0008).
+            rest = {k: v for k, v in body.items() if k not in ("audio", "transcript")}
+            data_frame: list[VoiceEvent] = [AgentFrame(at_ms=at, payload=rest)] if rest else []
+            return [*events, *spoken, *data_frame]
         if not resp.content:
             return [AgentSpeechEnd(at_ms=at)]  # an empty answer: no speech, so no turn
         return self._audio(at, resp.content, ctype in ("audio/wav", "audio/x-wav", "audio/wave"))
@@ -167,7 +176,7 @@ class AudioHttpSession(AudioSession):
         if task is None:
             raise TransportTimeout("the agent has nothing further for this turn")
         try:
-            resp = await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+            resp, at = await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
         except TimeoutError as exc:
             raise TransportTimeout(f"the agent did not answer within {timeout:.1f}s") from exc
         except NOT_SENT_TIMEOUTS as exc:
@@ -180,7 +189,7 @@ class AudioHttpSession(AudioSession):
             self._pending = None
             raise TransportError(f"HTTP request to {self._url} failed: {exc}") from exc
         self._pending = None
-        self._events.extend(self._answer(resp))
+        self._events.extend(self._answer(resp, at))
         if not self._events:
             raise TransportTimeout("the agent sent nothing")
         return self._events.popleft()

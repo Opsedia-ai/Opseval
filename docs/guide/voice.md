@@ -44,6 +44,13 @@ audio:
 user_message_frame: {type: user_message, text: "{text}"}
 ```
 
+The bridge speaks the customer's words from the value that is exactly `"{text}"` in
+`user_message_frame`, and a checkpoint decision from the `"{action}"` or `"{feedback}"` value in
+`resume_frame` (the default has both). A voice profile without them fails to load, so
+`opseval validate` catches it. A decision is said as a caller would say it, in the scenario's
+language: "Yes, please go ahead.", "No.", "Yes. <feedback>" or "No. <feedback>", and those
+words are what the record and the judges see.
+
 ```bash
 export OPSEVAL_ALLOWED_HOSTS=agent.example.com,api.openai.com
 export OPSEVAL_TTS_URL=https://api.openai.com OPSEVAL_TTS_MODEL=gpt-4o-mini-tts
@@ -60,21 +67,31 @@ opseval run suites/voice.yaml --profile profile.yaml --transport audio-ws --targ
   are frames that the profile classifies as usual.
 - `audio-http` sends each caller turn as one `POST` (a WAV file, or raw bytes with
   `http.request_format: raw`) and reads the answer as audio, or as JSON
-  `{"audio": "<base64>", "transcript": "…"}`.
+  `{"audio": "<base64>", "transcript": "…"}`. Any other field of that JSON (a checkpoint, a
+  result, an outcome, a phase) is a data frame after the speech, classified as usual, so
+  checkpoints and the commit guard work as on a text agent.
+
+The agent's turn ends with its speech (its own end-of-speech event, or
+`end_of_turn_silence_ms` of silence), a checkpoint, a result, an error or a hang-up. A
+notification such as `response.created` is recorded but does not end the wait: an agent that
+sends one and never speaks has timed out.
 
 ## How a spoken turn is judged
 
 | What happened | Result |
 |---|---|
 | The agent says nothing, or only silence, in time | the agent's timeout (exit 1) |
-| It speaks past `audio.max_turn_seconds` | the agent's timeout |
+| It speaks past `audio.max_turn_seconds` (by the clock, or by the length of the audio it sent) | the agent's timeout |
+| It hangs up while the customer still had something to say | the agent's timeout (a hang-up is never "not judged") |
 | TTS or STT down, failing or over its own time limit | not judged (exit 3) |
-| The agent's audio cannot be decoded | an error frame: the agent's fault |
+| The agent's audio cannot be decoded | an error frame, and `voice.intelligible` fails: the agent's fault |
 | It spoke, and the STT heard nothing usable | Opseval checks its own hearing first (below) |
 | The transcript's confidence is under `OPSEVAL_STT_MIN_CONFIDENCE` | judge scores are marked degraded |
 
-If the agent spoke but the transcript is empty or has no word in the scenario's language, it
-could be the agent's fault (garbled speech) or Opseval's (a broken STT). Opseval checks which:
+If the agent spoke but the transcript has no letter (in any script) and no digit, it could be
+the agent's fault (garbled speech) or Opseval's (a broken STT). Opseval checks which. (Words in
+another script than the scenario language's are heard; the text scores are only marked
+degraded.)
 
 1. A second STT (`OPSEVAL_STT_SECOND_*`), if configured, hears the same audio. If it can read
    it, its transcript is used and the text scores are marked degraded.
@@ -82,8 +99,15 @@ could be the agent's fault (garbled speech) or Opseval's (a broken STT). Opseval
    for word, goes through the same STT and codec. If the STT gets it right (word error rate at
    most `OPSEVAL_STT_CANARY_MAX_WER`), Opseval can hear, so the agent's audio is the problem:
    `voice.intelligible` fails, with the level, length and every transcript as evidence.
-3. If the canary fails too, Opseval's listening is broken: every check that reads the agent's
-   words is *not measured* (`ASR_NO_TRANSCRIPT`), and the reason names the canary.
+3. If the canary fails too, Opseval's listening is broken for that turn. The checks that read
+   the agent's words grade the turns that were heard and are marked degraded, naming the
+   unheard ones; a judge is told which turns are missing. A failure in a heard turn (a leaked
+   credential, say) still fails. Only when no agent turn was heard at all are those checks
+   *not measured* (`ASR_NO_TRANSCRIPT`), with the reason naming the canary.
+
+Latency is measured from the caller's last sample to the agent's first sample with energy,
+when it arrived. Speech that began before the caller finished is a barge-in: that turn's
+latency is not measured, never 0.
 
 Preflight runs the same canary before the first call. A voice run whose TTS or STT is down, or
 cannot hear the canary, is refused with exit 3: every scenario of a voice run speaks, so nothing
