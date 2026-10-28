@@ -23,7 +23,7 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_JUDGE_CONCURRENCY` | integer | `4` | How many judge ballots may be in flight at once. |
 | `OPSEVAL_JUDGE_INDEPENDENCE` | `error` \| `warn` \| `off` | `error` | What to do when a judge and the model it grades share a vendor family (ADR-0016). ``error`` refuses the run at launch (exit 3), ``warn`` scores but marks the results degraded, ``off`` skips the check. |
 | `OPSEVAL_TTS_PROVIDER` | text | `openai` | The text-to-speech provider: ``openai`` (the built-in OpenAI-compatible ``/v1/audio/speech`` client) or the name of an ``opseval.tts`` plugin. Only the named one is imported; a name nothing provides is refused (exit 3), never replaced by another. |
-| `OPSEVAL_TTS_URL` | text | unset | Base URL of the TTS provider (``{url}/v1/audio/speech``). Its host must be allowlisted, and use TLS unless it is loopback. |
+| `OPSEVAL_TTS_URL` | text | unset | Base URL of the TTS provider (``{url}/v1/audio/speech`` for the built-in). Required for every provider, plugin included; its host must be allowlisted, and use TLS unless it is loopback. |
 | `OPSEVAL_TTS_KEY` | secret | unset (secret) | API key for the TTS provider, if it needs one. |
 | `OPSEVAL_TTS_MODEL` | text | unset | TTS model, such as ``tts-1`` or ``gpt-4o-mini-tts``. |
 | `OPSEVAL_TTS_VOICE_MAP` | dict | `{}` | JSON object from a persona's voice name, or a language tag, to the provider's voice: ``{"calm_female": "nova", "ar": "onyx", "default": "alloy"}``. A voice is looked up by persona voice, then language, then ``default``; an unmapped persona voice is sent as is. |
@@ -31,14 +31,15 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_TTS_PCM_RATE` | integer | `24000` | The sample rate of raw ``pcm`` TTS audio (OpenAI sends 24 kHz). |
 | `OPSEVAL_TTS_TIMEOUT_SECONDS` | number | `30.0` | The most one TTS call may take, retries included. Off the agent's clock; overrunning it is a harness error (``TtsError``), never the agent's timeout. |
 | `OPSEVAL_STT_PROVIDER` | text | `openai` | The speech-to-text provider: ``openai`` (the built-in OpenAI-compatible ``/v1/audio/transcriptions`` client) or the name of an ``opseval.stt`` plugin. |
-| `OPSEVAL_STT_URL` | text | unset | Base URL of the STT provider (``{url}/v1/audio/transcriptions``). Allowlisted, TLS off loopback. |
+| `OPSEVAL_STT_URL` | text | unset | Base URL of the STT provider (``{url}/v1/audio/transcriptions`` for the built-in). Required for every provider, plugin included. Allowlisted, TLS off loopback. |
 | `OPSEVAL_STT_KEY` | secret | unset (secret) | API key for the STT provider, if it needs one. |
 | `OPSEVAL_STT_MODEL` | text | unset | STT model, such as ``whisper-1``. |
 | `OPSEVAL_STT_TIMEOUT_SECONDS` | number | `60.0` | The most one STT call may take, retries included. Off the agent's clock; overrunning it is a harness error (``SttError``), never the agent's timeout (ADR-0053). |
 | `OPSEVAL_STT_MIN_CONFIDENCE` | number | `0.5` | A transcript below this confidence marks the attempt's judge scores degraded (ADR-0053). A provider that reports no confidence is not measured, never 1.0. |
 | `OPSEVAL_STT_CANARY_MAX_WER` | number | `0.25` | The STT health canary is healthy when its word error rate is at most this (ADR-0053). Calibrated per language pack later (ADR-0059). |
-| `OPSEVAL_STT_CANARY_WAV` | text | unset | A WAV of known speech for the STT canary when no TTS is configured to make one. Its words go in ``OPSEVAL_STT_CANARY_TEXT``. Without either, the canary is not run. |
+| `OPSEVAL_STT_CANARY_WAV` | text | unset | A WAV of known speech for the STT canary when no TTS is configured to make one. Its words go in ``OPSEVAL_STT_CANARY_TEXT`` and its language in ``OPSEVAL_STT_CANARY_LANGUAGE``; one without the others is refused (exit 3). Without a TTS or this WAV, the canary is not run. |
 | `OPSEVAL_STT_CANARY_TEXT` | text | unset | What ``OPSEVAL_STT_CANARY_WAV`` says, word for word. |
+| `OPSEVAL_STT_CANARY_LANGUAGE` | text | unset | The language ``OPSEVAL_STT_CANARY_WAV`` is spoken in, as a BCP-47 tag (``en``, ``ar-EG``). The STT is asked to hear the canary in this language, not the scenario's. |
 | `OPSEVAL_STT_SECOND_PROVIDER` | text | unset | An optional second STT check (ADR-0053): ``openai`` or an ``opseval.stt`` plugin. It must differ from the first in provider or model, or the run is refused (exit 3): the same STT twice proves nothing. Setting a second URL or model alone implies ``openai``. |
 | `OPSEVAL_STT_SECOND_URL` | text | unset | Base URL of the second STT. Allowlisted and preflighted like the first. |
 | `OPSEVAL_STT_SECOND_KEY` | secret | unset (secret) | API key for the second STT, if it needs one. |

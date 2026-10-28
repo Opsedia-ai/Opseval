@@ -42,13 +42,16 @@ class UsageMeter:
         entry.calls += 1
         entry.rate_limited_calls += rate_limited
         if usage:
-            entry.input_tokens += int(usage.get("prompt_tokens", 0) or 0)
-            entry.output_tokens += int(usage.get("completion_tokens", 0) or 0)
+            entry.input_tokens = (entry.input_tokens or 0) + int(usage.get("prompt_tokens", 0) or 0)
+            entry.output_tokens = (entry.output_tokens or 0) + int(
+                usage.get("completion_tokens", 0) or 0
+            )
         price = PRICES.get(model)
         entry.cost_usd = (
             None
             if price is None
-            else (entry.input_tokens * price[0] + entry.output_tokens * price[1]) / 1_000_000
+            else ((entry.input_tokens or 0) * price[0] + (entry.output_tokens or 0) * price[1])
+            / 1_000_000
         )
 
     def record_speech(
@@ -63,8 +66,9 @@ class UsageMeter:
     ) -> None:
         """Count one TTS or STT call (ADR-0054). A count the call did not produce (a failed
         call has no audio out) adds nothing; a role's counts start at 0 only once one is
-        known, so a role that never sent audio shows "not measured", not 0 s."""
-        entry = self.by_key.setdefault((role, model), ModelUsage(role=role, model=model))
+        known, so a role that never sent audio shows "not measured", not 0 s. A speech row
+        has no tokens: they stay ``None``, never 0."""
+        entry = self._speech_entry(role, model)
         entry.calls += 1
         entry.rate_limited_calls += rate_limited
         if audio_in_seconds is not None:
@@ -74,6 +78,18 @@ class UsageMeter:
         if characters is not None:
             entry.characters = (entry.characters or 0) + characters
         entry.cost_usd = speech_cost(model, entry)
+
+    def record_speech_rate_limited(self, role: str, model: str, responses: int) -> None:
+        """Count HTTP 429 answers a speech client received within one call, one per response
+        (as :class:`ChatClient` does), without counting another call."""
+        if responses:
+            self._speech_entry(role, model).rate_limited_calls += responses
+
+    def _speech_entry(self, role: str, model: str) -> ModelUsage:
+        return self.by_key.setdefault(
+            (role, model),
+            ModelUsage(role=role, model=model, input_tokens=None, output_tokens=None),
+        )
 
     def snapshot(self) -> list[ModelUsage]:
         return [u.model_copy() for u in self.by_key.values()]

@@ -10,9 +10,14 @@ rather than how a provider likes to spell it:
 2. casefold;
 3. Arabic diacritics (harakat, shadda, sukun: combining marks, category ``Mn``) and the tatweel
    (U+0640) are removed, because ASR output adds or drops them at will;
-4. punctuation of every script (Unicode category ``P*``: ``.,!?`` as well as the Arabic comma
+4. Arabic letters whose spelling ASR output does not settle are folded to one form
+   (ASR-orthography folding): the hamza-carrying and wasla alefs ``أ إ آ ٱ`` to ``ا``,
+   teh marbuta ``ة`` to ``ه``, alef maksura ``ى`` to ``ي``, and the hamza seats ``ؤ`` to ``و``
+   and ``ئ`` to ``ي``. Whisper writes "اريد" for "أريد" as often as not; that is spelling,
+   not mishearing. Only these Arabic letters are touched; no other script is;
+5. punctuation of every script (Unicode category ``P*``: ``.,!?`` as well as the Arabic comma
    ``،``, semicolon ``؛`` and question mark ``؟``) becomes a space;
-5. split on whitespace.
+6. split on whitespace.
 
 Digits are not spelled out ("4" and "four" differ): a canary phrase is written without digits.
 """
@@ -23,10 +28,24 @@ import unicodedata
 
 TATWEEL = "ـ"
 
+ARABIC_FOLDING = str.maketrans(
+    {
+        "أ": "ا",  # U+0623 alef with hamza above
+        "إ": "ا",  # U+0625 alef with hamza below
+        "آ": "ا",  # U+0622 alef with madda
+        "ٱ": "ا",  # U+0671 alef wasla
+        "ة": "ه",  # U+0629 teh marbuta
+        "ى": "ي",  # U+0649 alef maksura
+        "ؤ": "و",  # U+0624 waw with hamza
+        "ئ": "ي",  # U+0626 yeh with hamza
+    }
+)
+"""ASR-orthography folding: Arabic spellings an STT writes either way (ADR-0054)."""
+
 
 def normalise(text: str) -> list[str]:
     """The words of ``text`` as the WER compares them."""
-    folded = unicodedata.normalize("NFKC", text).casefold()
+    folded = unicodedata.normalize("NFKC", text).casefold().translate(ARABIC_FOLDING)
     kept: list[str] = []
     for char in folded:
         category = unicodedata.category(char)
@@ -66,4 +85,4 @@ def word_error_rate(reference: str, hypothesis: str) -> float:
     return edit_distance(ref, hyp) / len(ref)
 
 
-__all__ = ["edit_distance", "normalise", "word_error_rate"]
+__all__ = ["ARABIC_FOLDING", "edit_distance", "normalise", "word_error_rate"]

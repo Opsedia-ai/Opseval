@@ -12,7 +12,8 @@ provider so that the one rule holds whatever the provider does:
   ``OPSEVAL_STT_TIMEOUT_SECONDS``), retries included, off the agent's clock.
 - **The answer is checked.** TTS that returns no audio, or STT that returns something that is
   not a :class:`Transcript` or a confidence outside 0 to 1, is the provider's failure.
-- **Usage is counted** per role and model: characters and audio seconds, rate-limited calls.
+- **Usage is counted** per role and model: every call, the characters and audio seconds of
+  the calls that succeeded (a failed call produced nothing to count), and each 429.
 
 The guard also resolves the persona's voice through ``OPSEVAL_TTS_VOICE_MAP``.
 """
@@ -27,8 +28,10 @@ from opseval.errors import (
     RateLimited,
     SttError,
     SttRateLimited,
+    SttRequestError,
     TtsError,
     TtsRateLimited,
+    TtsRequestError,
 )
 from opseval.llm import UsageMeter
 from opseval.speech.base import Audio, SpeechConfig, SpeechToText, TextToSpeech, Transcript
@@ -41,9 +44,13 @@ def _harness_error(
     trusted: bool,
     plain: type[TtsError] | type[SttError],
     limited: type[TtsError] | type[SttError],
+    rejected: type[TtsError] | type[SttError],
 ) -> HarnessError:
     """What a provider's failure becomes. A built-in's own ``TtsError``/``SttError`` keeps
-    its message (Opseval wrote it); anything from a plugin is renamed to its type only."""
+    its message (Opseval wrote it); anything from a plugin is renamed to its type only. A
+    plugin's rate limit stays ``RateLimited`` and its rejected request (``*RequestError``:
+    the configuration is wrong) stays a request error, so preflight can tell an outage from a
+    configuration Opseval must refuse."""
     what = config.label or config.role
     if trusted and isinstance(exc, plain):
         return exc
@@ -52,8 +59,19 @@ def _harness_error(
             f"{what} provider {config.provider!r} timed out (limit "
             f"{config.timeout_seconds:g} s, OPSEVAL_{config.role.upper()}_TIMEOUT_SECONDS)"
         )
-    cls = limited if isinstance(exc, RateLimited) else plain
+    if isinstance(exc, RateLimited):
+        cls = limited
+    elif isinstance(exc, rejected):
+        cls = rejected
+    else:
+        cls = plain
     return cls(f"{what} provider {config.provider!r} failed: {type(exc).__name__}")
+
+
+def _plugin_429(error: HarnessError | None, trusted: bool) -> int:
+    """A plugin's rate limit counts as one 429: the guard cannot see its responses. The
+    built-in client counts each 429 response itself, so the guard adds none for it."""
+    return int(not trusted and isinstance(error, RateLimited))
 
 
 def resolve_voice(voice_map: dict[str, str], voice: str | None, language: str) -> str | None:
@@ -89,34 +107,43 @@ class GuardedTextToSpeech:
 
     async def synthesize(self, text: str, *, voice: str | None, language: str) -> Audio:
         resolved = resolve_voice(dict(self.config.voice_map), voice, language)
-        audio: Audio | None = None
-        rate_limited = 0
         try:
             async with asyncio.timeout(self.config.timeout_seconds):
                 audio = await self.provider.synthesize(text, voice=resolved, language=language)
         except Exception as exc:
             error = _harness_error(
-                exc, self.config, trusted=self.trusted, plain=TtsError, limited=TtsRateLimited
+                exc,
+                self.config,
+                trusted=self.trusted,
+                plain=TtsError,
+                limited=TtsRateLimited,
+                rejected=TtsRequestError,
             )
-            rate_limited = int(isinstance(error, RateLimited))
+            self._failed(error)
             if error is exc:
                 raise
             raise error from exc
-        finally:
-            self._meter.record_speech(
-                "tts",
-                self.config.model_label,
-                characters=len(text),
-                audio_out_seconds=audio.seconds if isinstance(audio, Audio) else None,
-                rate_limited=rate_limited,
-            )
         if not isinstance(audio, Audio):
+            self._failed(None)
             raise TtsError(
                 f"TTS provider {self.config.provider!r} returned {type(audio).__name__}, not Audio"
             )
         if not audio.pcm16:
+            self._failed(None)
             raise TtsError(f"TTS provider {self.config.provider!r} returned no audio")
+        # Only a call that produced audio counts its characters and seconds.
+        self._meter.record_speech(
+            "tts",
+            self.config.model_label,
+            characters=len(text),
+            audio_out_seconds=audio.seconds,
+        )
         return audio
+
+    def _failed(self, error: HarnessError | None) -> None:
+        self._meter.record_speech(
+            "tts", self.config.model_label, rate_limited=_plugin_429(error, self.trusted)
+        )
 
     async def aclose(self) -> None:
         try:
@@ -151,41 +178,50 @@ class GuardedSpeechToText:
     async def transcribe(
         self, audio: Audio, *, language: str, hint: str | None = None
     ) -> Transcript:
-        rate_limited = 0
         what = self.config.label or "stt"
         try:
             async with asyncio.timeout(self.config.timeout_seconds):
                 transcript = await self.provider.transcribe(audio, language=language, hint=hint)
         except Exception as exc:
             error = _harness_error(
-                exc, self.config, trusted=self.trusted, plain=SttError, limited=SttRateLimited
+                exc,
+                self.config,
+                trusted=self.trusted,
+                plain=SttError,
+                limited=SttRateLimited,
+                rejected=SttRequestError,
             )
-            rate_limited = int(isinstance(error, RateLimited))
+            self._failed(error)
             if error is exc:
                 raise
             raise error from exc
-        finally:
-            self._meter.record_speech(
-                "stt",
-                self.config.model_label,
-                audio_in_seconds=audio.seconds,
-                rate_limited=rate_limited,
-            )
         if not isinstance(transcript, Transcript) or not isinstance(transcript.text, str):
+            self._failed(None)
             raise SttError(
                 f"{what} provider {self.config.provider!r} returned "
                 f"{type(transcript).__name__}, not a Transcript"
             )
         confidence = transcript.confidence
-        if confidence is not None and not (
-            isinstance(confidence, int | float)
-            and math.isfinite(confidence)
-            and 0 <= confidence <= 1
+        if confidence is not None and (
+            # bool is an int to Python, but True is not a confidence of 1.0
+            isinstance(confidence, bool)
+            or not isinstance(confidence, int | float)
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
         ):
+            self._failed(None)
             raise SttError(
-                f"{what} provider {self.config.provider!r} reported a confidence outside 0 to 1"
+                f"{what} provider {self.config.provider!r} reported a confidence that is not a "
+                "number from 0 to 1"
             )
+        # Only a call that was heard counts its audio seconds.
+        self._meter.record_speech("stt", self.config.model_label, audio_in_seconds=audio.seconds)
         return transcript
+
+    def _failed(self, error: HarnessError | None) -> None:
+        self._meter.record_speech(
+            "stt", self.config.model_label, rate_limited=_plugin_429(error, self.trusted)
+        )
 
     async def aclose(self) -> None:
         try:

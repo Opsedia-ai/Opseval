@@ -192,9 +192,13 @@ class ModelUsage(BaseModel):
     role: str
     model: str
     calls: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = 0
+    """Tokens sent to an LLM role. ``None`` for a speech role (TTS, STT), which has no tokens:
+    not measured, never 0 (ADR-0054). LLM rows, and every result written before, keep 0."""
+    output_tokens: int | None = 0
+    """Tokens an LLM role returned; ``None`` for a speech role."""
     rate_limited_calls: int = 0
+    """HTTP 429 answers received, one per response (a call retried three times counts 3)."""
     cost_usd: float | None = None  # None = no price known, never 0
     audio_in_seconds: float | None = None
     """Audio sent to a speech-to-text role (ADR-0054). None for a role that sends none, and
@@ -202,7 +206,8 @@ class ModelUsage(BaseModel):
     audio_out_seconds: float | None = None
     """Audio a text-to-speech role returned."""
     characters: int | None = None
-    """Characters a text-to-speech role was asked to synthesise."""
+    """Characters a text-to-speech role synthesised. Audio seconds and characters count only
+    calls that succeeded: a failed call produced nothing to count."""
 
 
 class Gate(BaseModel):

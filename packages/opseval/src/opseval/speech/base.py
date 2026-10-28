@@ -75,9 +75,12 @@ class SpeechConfig:
     """What a provider is built from: the settings for its role, already allowlist-checked.
 
     A plugin receives this in its constructor and must send conversation content only to
-    ``url``, the one host Opseval checked. ``secret`` reads any other secret by name the way
-    a tenant's ``token_env`` is read (environment first, then ``.env``), because no module
-    but :mod:`opseval.config` reads the environment.
+    ``url``, the one host Opseval checked (every provider has one: a plugin without a URL is
+    refused). ``secret`` reads another secret of *this provider's own settings* by name
+    (``OPSEVAL_TTS_*`` for the TTS, ``OPSEVAL_STT_*`` for the STT, ``OPSEVAL_STT_SECOND_*``
+    for the second STT) the way a tenant's ``token_env`` is read (environment first, then
+    ``.env``), because no module but :mod:`opseval.config` reads the environment. Any other
+    name raises :class:`~opseval.errors.ConfigError`.
     """
 
     role: SpeechRole

@@ -171,3 +171,52 @@ Built in `opseval/speech/`, with no voice bridge, transport or driver change yet
 Not built yet: the region check (needs ADR-0049's tasks), the `opseval.testing` contract kit
 for speech plugins, skipping voice scenarios on a speech outage (needs voice scenarios, V0c),
 and the fault-injection rows that need the bridge.
+
+### Review of #81 (2026-10-28)
+
+- **Retries fit inside the limit.** The built-in client sets a deadline when a call starts, a
+  little before the guard's own timeout (5 % of the limit, at most 0.5 s). Each request may take
+  the smaller of what is left and half the limit, so a hanging request leaves time for a retry.
+  No wait between retries runs past the deadline: a `Retry-After` (or backoff) longer than what
+  is left ends the call at once. A call that reaches its deadline after a 429 or 503 is
+  `TtsRateLimited`/`SttRateLimited` ("rate limited or unavailable … last HTTP 429"), not a plain
+  timeout, so `stop_on_rate_limit` sees it. One that never got an answer is a plain
+  `TtsError`/`SttError`.
+- **The canary carries its own language.** `canary_phrase(language)` returns the phrase and the
+  language it is in: the pack's phrase for `en` and `ar` (`ar-EG` uses `ar`), else English
+  *with* `en`. The TTS speaks it and the STT hears it in that language, never the scenario's,
+  so a French suite does not ask an STT to hear English words as French. An operator canary
+  needs `OPSEVAL_STT_CANARY_WAV`, `OPSEVAL_STT_CANARY_TEXT` and `OPSEVAL_STT_CANARY_LANGUAGE`
+  (BCP-47) together; any one without the others is a `ConfigError` (exit 3).
+- **Arabic ASR-orthography folding in the WER.** `أ إ آ ٱ` become `ا`, `ة` becomes `ه`, `ى`
+  becomes `ي`, `ؤ` becomes `و` and `ئ` becomes `ي`, on both sides. These are spellings an STT
+  writes either way, not mishearings. Only these Arabic letters are touched.
+- **Speech usage.** A speech row's `input_tokens`/`output_tokens` are `None`, never 0. LLM rows
+  and older results keep 0. Audio seconds and characters count only calls that succeeded. Each
+  429 response counts once in `rate_limited_calls`, as `ChatClient` counts them; a plugin's
+  rate limit counts once. The report's usage table and the console API (`UsageOut`,
+  `RunUsage`) show audio heard, audio spoken and characters, with `null` drawn as not
+  measured. `RunUsage.costUsd` is the cost of the priced models and `costComplete` says
+  whether every model was priced, so one unpriced model makes the total a floor instead of
+  hiding the known part. The total is computed on the server. `storage.LAYOUT` is now
+  `opseval-runs/4`, because an older reader would reject the new usage fields; layouts 1–3
+  are still read.
+- **No body in errors.** A rejection or outage names the HTTP status and, when the provider
+  declares one, its error code or type, only if it matches `^[a-z0-9_.-]{1,64}$`. The body
+  itself never appears, because it may echo the text to speak or the key. A non-audio content
+  type is named only when it is a plain media type.
+- **Every provider needs a URL.** A plugin with no `OPSEVAL_TTS_URL`/`OPSEVAL_STT_URL`/
+  `OPSEVAL_STT_SECOND_URL` is refused (exit 3), because a plugin with no URL could send
+  conversation content to a host nobody checked. `SpeechConfig.secret` reads only that
+  provider's own settings' names: `OPSEVAL_TTS_*` for the TTS, `OPSEVAL_STT_*` but not
+  `OPSEVAL_STT_SECOND_*` for the STT, and `OPSEVAL_STT_SECOND_*` for the second STT. Any other
+  name is a `ConfigError`.
+- **A rejection is configuration, not an outage.** In preflight a `TtsRequestError`/
+  `SttRequestError` (401, 403, 400, no voice mapped) raises `ConfigError` (exit 3, "Nothing
+  was run"), as an unreachable agent does. Skipping the voice scenarios would only be a gate
+  warning. An outage (5xx, 429, timeouts) stays `unavailable`. The guard keeps a plugin's
+  `*RequestError` a request error, with its type only.
+- **Preflight shares the canary.** The canary is synthesised once, and the same audio goes to
+  the STT and the second STT. The settings (URLs, allowlist, second STT, operator canary) are
+  checked once, in `speech.providers.check_speech_settings`.
+- The guard refuses a `bool` confidence: `True` is an `int` to Python, not a confidence of 1.0.

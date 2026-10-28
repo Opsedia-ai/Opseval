@@ -11,8 +11,9 @@ import StopEditor, { NEVER, budget, stopFields } from "../components/StopEditor"
 import { CancelRun, StoppedNotice } from "../components/RunControl";
 import { Cell } from "../components/ScenarioTrend";
 import { Warnings } from "../components/Warnings";
+import { Amount, Cost, UsageLine } from "../components/UsageFigures";
 import { MemoryRouter } from "react-router-dom";
-import type { Gate, RunProgress, TranscriptEntry, TrendCell } from "../lib/types";
+import type { Gate, RunProgress, TranscriptEntry, TrendCell, Usage } from "../lib/types";
 
 const tone = (el: Element | null | undefined) => el?.getAttribute("data-tone");
 
@@ -192,5 +193,35 @@ describe("scenario warnings (FR-AUT)", () => {
 
   it("no warnings, no panel", () => {
     expect(render(<Warnings items={[]} />).container.textContent).toBe("");
+  });
+});
+
+describe("usage figures", () => {
+  const speech: Usage = {
+    role: "tts", model: "tts-1", calls: 2, inputTokens: null, outputTokens: null, costUsd: null,
+    audioInSeconds: null, audioOutSeconds: 3.5, characters: 42,
+  };
+
+  it("a speech row shows audio and characters, and never tokens as 0", () => {
+    const { container } = render(<UsageLine u={speech} />);
+    expect(container.textContent).toContain("3.5 s spoken");
+    expect(container.textContent).toContain("42 characters");
+    expect(container.textContent).not.toMatch(/\b0 tokens/);
+    expect(container.textContent).not.toContain("tokens");
+  });
+
+  it("an unmeasured amount is drawn as not measured, never 0", () => {
+    const { container } = render(<Amount v={null} />);
+    expect(container.textContent).toBe("—");
+    expect(tone(container.querySelector("span"))).toBe("mute");
+  });
+
+  it("a cost over unpriced models is a floor, named partial", () => {
+    const partial = render(<Cost usd={0.75} complete={false} />).container;
+    expect(partial.textContent).toContain("≥ $0.75");
+    expect(partial.textContent).toContain("partial");
+    const whole = render(<Cost usd={0.75} complete />).container;
+    expect(whole.textContent).toBe("$0.75");
+    expect(render(<Cost usd={null} complete={false} />).container.textContent).toBe("not measured");
   });
 });

@@ -75,8 +75,9 @@ class Settings(BaseSettings):
     ``/v1/audio/speech`` client) or the name of an ``opseval.tts`` plugin. Only the named one
     is imported; a name nothing provides is refused (exit 3), never replaced by another."""
     tts_url: str | None = None
-    """Base URL of the TTS provider (``{url}/v1/audio/speech``). Its host must be allowlisted,
-    and use TLS unless it is loopback."""
+    """Base URL of the TTS provider (``{url}/v1/audio/speech`` for the built-in). Required for
+    every provider, plugin included; its host must be allowlisted, and use TLS unless it is
+    loopback."""
     tts_key: SecretStr | None = None
     """API key for the TTS provider, if it needs one."""
     tts_model: str | None = None
@@ -97,8 +98,8 @@ class Settings(BaseSettings):
     """The speech-to-text provider: ``openai`` (the built-in OpenAI-compatible
     ``/v1/audio/transcriptions`` client) or the name of an ``opseval.stt`` plugin."""
     stt_url: str | None = None
-    """Base URL of the STT provider (``{url}/v1/audio/transcriptions``). Allowlisted, TLS off
-    loopback."""
+    """Base URL of the STT provider (``{url}/v1/audio/transcriptions`` for the built-in).
+    Required for every provider, plugin included. Allowlisted, TLS off loopback."""
     stt_key: SecretStr | None = None
     """API key for the STT provider, if it needs one."""
     stt_model: str | None = None
@@ -114,9 +115,14 @@ class Settings(BaseSettings):
     Calibrated per language pack later (ADR-0059)."""
     stt_canary_wav: str | None = None
     """A WAV of known speech for the STT canary when no TTS is configured to make one. Its
-    words go in ``OPSEVAL_STT_CANARY_TEXT``. Without either, the canary is not run."""
+    words go in ``OPSEVAL_STT_CANARY_TEXT`` and its language in
+    ``OPSEVAL_STT_CANARY_LANGUAGE``; one without the others is refused (exit 3). Without a
+    TTS or this WAV, the canary is not run."""
     stt_canary_text: str | None = None
     """What ``OPSEVAL_STT_CANARY_WAV`` says, word for word."""
+    stt_canary_language: str | None = None
+    """The language ``OPSEVAL_STT_CANARY_WAV`` is spoken in, as a BCP-47 tag (``en``,
+    ``ar-EG``). The STT is asked to hear the canary in this language, not the scenario's."""
     stt_second_provider: str | None = None
     """An optional second STT check (ADR-0053): ``openai`` or an ``opseval.stt`` plugin. It
     must differ from the first in provider or model, or the run is refused (exit 3): the same

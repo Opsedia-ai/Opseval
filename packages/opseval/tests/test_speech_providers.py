@@ -46,12 +46,20 @@ from opseval.models.preflight import CheckStatus
 from opseval.models.profile import SutProfile
 from opseval.models.results import ModelUsage
 from opseval.plugins import STT_GROUP, TELEPHONY_GROUP, TTS_GROUP, reset_for_tests
-from opseval.preflight import canary_phrase, check_stt, check_tts, preflight, speech_checks
+from opseval.preflight import (
+    CANARY_PHRASES,
+    canary_phrase,
+    check_stt,
+    check_tts,
+    preflight,
+    speech_checks,
+)
 from opseval.speech import Audio, SpeechConfig, SpeechToText, TextToSpeech, Transcript
 from opseval.speech import openai as builtin
 from opseval.speech.guard import GuardedSpeechToText, GuardedTextToSpeech, resolve_voice
 from opseval.speech.providers import (
     check_second_stt,
+    check_speech_settings,
     second_speech_to_text,
     speech_to_text,
     text_to_speech,
@@ -260,7 +268,10 @@ class TestTextToSpeech:
             await tts(meter=meter).synthesize("abc", voice=None, language="en")
         assert isinstance(caught.value, RateLimited | TtsError)
         (usage,) = meter.snapshot()
-        assert usage.rate_limited_calls == 1 and usage.audio_out_seconds is None
+        # one per 429 response, as ChatClient counts them; the failed call spoke nothing
+        assert usage.calls == 1 and usage.rate_limited_calls == 6
+        assert usage.audio_out_seconds is None and usage.characters is None
+        assert (usage.input_tokens, usage.output_tokens) == (None, None)
 
     async def test_another_4xx_fails_at_once(self, server: FakeSpeechServer) -> None:
         server.tts = "400"
@@ -360,7 +371,9 @@ class TestSpeechToText:
         assert isinstance(caught.value, HarnessError)
         assert not isinstance(caught.value, TransportTimeout)
         (usage,) = meter.snapshot()
-        assert usage.role == "stt" and usage.audio_in_seconds == pytest.approx(0.5)
+        # a failed call is counted, but heard nothing: no audio seconds
+        assert usage.role == "stt" and usage.calls == 1 and usage.audio_in_seconds is None
+        assert usage.rate_limited_calls == (6 if mode == "429" else 0)
 
     async def test_a_rejected_request_fails_at_once(self, server: FakeSpeechServer) -> None:
         server.stt = "401"
@@ -621,11 +634,11 @@ class TestPlugins:
             FakeEntryPoint("other", RuntimeError("must not be imported")),
         )
         AcmeStt.built.clear()
-        client = stt(settings(stt_provider="acme", stt_url=None, stt_model="acme-1"))
+        client = stt(settings(stt_provider="acme", stt_model="acme-1"))
         assert not client.trusted
         assert (await client.transcribe(AUDIO, language="en")).text == "heard"
         (config,) = AcmeStt.built
-        assert config.key == SECRET and config.model == "acme-1" and config.url is None
+        assert config.key == SECRET and config.model == "acme-1" and config.url == STT_URL
         assert SECRET not in repr(config)
 
     async def test_a_tts_plugin(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -640,7 +653,7 @@ class TestPlugins:
 
     def test_the_second_stt_names_its_own_setting(self, monkeypatch: pytest.MonkeyPatch) -> None:
         install(monkeypatch, STT_GROUP)
-        s = settings(stt_second_provider="gcc")
+        s = settings(stt_second_provider="gcc", stt_second_url="http://127.0.0.1:9103")
         with pytest.raises(ConfigError, match="OPSEVAL_STT_SECOND_PROVIDER names 'gcc'"):
             second_speech_to_text(s, UsageMeter())
 
@@ -720,13 +733,13 @@ class TestPreflight:
         assert tts_check.status is CheckStatus.OK and tts_check.needed_by == 2
         assert stt_check.status is CheckStatus.OK, stt_check.detail
         assert "WER 0.00" in stt_check.detail
-        assert server.last_spoken == canary_phrase("en")
+        assert server.last_spoken == canary_phrase("en")[0]
 
     async def test_an_arabic_canary(self, server: FakeSpeechServer) -> None:
         server.heard = "أُرِيدُ أن أعرف، حالة طلب الاسترداد؟"  # diacritics and Arabic punctuation
         check = await check_stt(settings(), 1, language="ar-EG")
         assert check.status is CheckStatus.OK, check.detail
-        assert server.last_spoken == canary_phrase("ar")
+        assert server.last_spoken == canary_phrase("ar")[0]
 
     async def test_a_deaf_stt_is_unavailable_not_an_agent_failure(
         self, server: FakeSpeechServer
@@ -755,14 +768,24 @@ class TestPreflight:
         wav = tmp_path / "canary.wav"
         wav.write_bytes(codecs.to_wav(tone(), 16_000))
         server.heard = "Hello, world!"
-        s = settings(tts_url=None, stt_canary_wav=str(wav), stt_canary_text="hello world")
+        s = settings(
+            tts_url=None,
+            stt_canary_wav=str(wav),
+            stt_canary_text="hello world",
+            stt_canary_language="en",
+        )
         check = await check_stt(s, 1)
         assert check.status is CheckStatus.OK, check.detail
 
     async def test_an_unreadable_operator_wav_is_named(
         self, server: FakeSpeechServer, tmp_path: Path
     ) -> None:
-        s = settings(tts_url=None, stt_canary_wav=str(tmp_path / "x.wav"), stt_canary_text="x")
+        s = settings(
+            tts_url=None,
+            stt_canary_wav=str(tmp_path / "x.wav"),
+            stt_canary_text="x",
+            stt_canary_language="en",
+        )
         check = await check_stt(s, 1)
         assert check.status is CheckStatus.UNVERIFIED and "could not be read" in check.detail
 
@@ -840,3 +863,479 @@ class TestWordErrorRate:
     def test_edit_distance(self) -> None:
         assert edit_distance([], ["a"]) == 1
         assert edit_distance(["a", "b"], ["b", "a"]) == 2
+
+
+# --- review of #81 --------------------------------------------------------------------
+
+
+Handler = Any
+
+
+def serve(monkeypatch: pytest.MonkeyPatch, handler: Handler) -> list[httpx.Request]:
+    """Route the built-in clients to ``handler`` (sync or async); returns the requests."""
+    seen: list[httpx.Request] = []
+
+    async def record(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        answer = handler(request, len(seen))
+        if asyncio.iscoroutine(answer):
+            answer = await answer
+        assert isinstance(answer, httpx.Response)
+        return answer
+
+    monkeypatch.setattr(
+        builtin,
+        "new_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(record)),
+    )
+    return seen
+
+
+def real_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(builtin, "backoff_sleep", asyncio.sleep)
+
+
+def wav_response() -> httpx.Response:
+    return httpx.Response(
+        200, content=codecs.to_wav(tone(), 16_000), headers={"content-type": "audio/wav"}
+    )
+
+
+class TestRetryBudget:
+    """Retries fit inside the call's own limit, and a busy provider reads as rate limited."""
+
+    async def test_a_provider_that_keeps_answering_429_is_rate_limited_within_the_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_waits(monkeypatch)
+        seen = serve(
+            monkeypatch,
+            lambda _r, _n: httpx.Response(429, headers={"retry-after": "0.2"}),
+        )
+        meter = UsageMeter()
+        client = tts(settings(tts_timeout_seconds=1.0), meter)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(TtsRateLimited, match=r"rate limited or unavailable.*last HTTP 429"):
+            await client.synthesize("hello", voice=None, language="en")
+        assert loop.time() - started < 1.0, "the guard's own timeout must not be what fires"
+        assert 2 <= len(seen) < 6, "it gave up on the deadline, not on the retry count"
+        (usage,) = meter.snapshot()
+        assert usage.rate_limited_calls == len(seen) and usage.calls == 1
+
+    async def test_a_retry_after_longer_than_the_limit_is_not_slept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_waits(monkeypatch)
+        seen = serve(monkeypatch, lambda _r, _n: httpx.Response(503, headers={"retry-after": "60"}))
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(SttRateLimited, match="last HTTP 503") as caught:
+            await stt(settings(stt_timeout_seconds=5.0)).transcribe(AUDIO, language="en")
+        assert loop.time() - started < 1.0 and len(seen) == 1
+        assert isinstance(caught.value, RateLimited) and "timed out" not in str(caught.value)
+
+    async def test_a_hanging_request_is_retried_while_time_remains(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def hang_once(_request: httpx.Request, n: int) -> httpx.Response:
+            if n == 1:
+                await asyncio.sleep(30)
+            return wav_response()
+
+        seen = serve(monkeypatch, hang_once)
+        # 2.5 s limit: each request may take half (1.25 s), leaving time for a retry.
+        audio = await tts(settings(tts_timeout_seconds=2.5)).synthesize(
+            "hello", voice=None, language="en"
+        )
+        assert audio.pcm16 and len(seen) == 2
+
+    async def test_a_provider_that_never_answers_is_a_plain_harness_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def hang(_request: httpx.Request, _n: int) -> httpx.Response:
+            await asyncio.sleep(30)
+            raise AssertionError("unreachable")
+
+        serve(monkeypatch, hang)
+        with pytest.raises(TtsError, match="did not answer within its time limit") as caught:
+            await tts(settings(tts_timeout_seconds=1.0)).synthesize("a", voice=None, language="en")
+        assert not isinstance(caught.value, RateLimited | TransportTimeout)
+
+
+class TestCanaryLanguage:
+    def test_a_language_with_a_pack_has_its_own_phrase(self) -> None:
+        assert canary_phrase("ar-EG") == (CANARY_PHRASES["ar"], "ar")
+        assert canary_phrase("en-GB") == (CANARY_PHRASES["en"], "en")
+
+    def test_another_language_falls_back_to_english_spoken_as_english(self) -> None:
+        assert canary_phrase("fr-FR") == (CANARY_PHRASES["en"], "en")
+
+    async def test_a_french_suite_hears_the_english_canary_in_english(
+        self, server: FakeSpeechServer
+    ) -> None:
+        tts_check, stt_check = await speech_checks(settings(), 1, language="fr")
+        assert tts_check.status is CheckStatus.OK
+        assert stt_check.status is CheckStatus.OK, stt_check.detail
+        assert server.last_spoken == CANARY_PHRASES["en"]
+        transcription = next(r for r in server.requests if r.url.path.endswith("transcriptions"))
+        assert b'name="language"\r\n\r\nen\r\n' in transcription.content
+
+    async def test_an_arabic_suite_hears_it_in_arabic(self, server: FakeSpeechServer) -> None:
+        await speech_checks(settings(), 1, language="ar-EG")
+        transcription = next(r for r in server.requests if r.url.path.endswith("transcriptions"))
+        assert b'name="language"\r\n\r\nar\r\n' in transcription.content
+
+    async def test_an_operator_wav_is_heard_in_its_own_language(
+        self, server: FakeSpeechServer, tmp_path: Path
+    ) -> None:
+        wav = tmp_path / "canary.wav"
+        wav.write_bytes(codecs.to_wav(tone(), 16_000))
+        server.heard = "اريد ان اعرف"
+        s = settings(
+            tts_url=None,
+            stt_canary_wav=str(wav),
+            stt_canary_text="أريد أن أعرف",
+            stt_canary_language="ar",
+        )
+        (_tts, check) = await speech_checks(s, 1, language="en")
+        assert check.status is CheckStatus.OK, check.detail
+        assert b'name="language"\r\n\r\nar\r\n' in server.requests[0].content
+
+    @pytest.mark.parametrize(
+        ("extra", "missing"),
+        [
+            ({"stt_canary_text": "hello"}, "OPSEVAL_STT_CANARY_LANGUAGE"),
+            ({"stt_canary_language": "en"}, "OPSEVAL_STT_CANARY_TEXT"),
+            ({}, "OPSEVAL_STT_CANARY_TEXT, OPSEVAL_STT_CANARY_LANGUAGE"),
+        ],
+    )
+    async def test_an_operator_wav_without_its_words_or_language_is_refused(
+        self, server: FakeSpeechServer, tmp_path: Path, extra: dict[str, str], missing: str
+    ) -> None:
+        s = settings(tts_url=None, stt_canary_wav=str(tmp_path / "c.wav"), **extra)
+        with pytest.raises(ConfigError, match=f"missing {missing}"):
+            await speech_checks(s, 1)
+        assert server.requests == []
+
+    def test_the_language_must_be_a_language_tag(self, tmp_path: Path) -> None:
+        s = settings(
+            stt_canary_wav=str(tmp_path / "c.wav"),
+            stt_canary_text="hello",
+            stt_canary_language="english please",
+        )
+        with pytest.raises(ConfigError, match="BCP-47"):
+            check_speech_settings(s)
+
+
+class TestArabicFolding:
+    def test_hamza_spellings_are_not_errors(self) -> None:
+        assert word_error_rate("أريد أن أعرف حالة الطلب", "اريد ان اعرف حاله الطلب") == 0.0
+
+    @pytest.mark.parametrize(
+        ("written", "heard"),
+        [
+            ("إلى", "الي"),  # hamza below, alef maksura
+            ("آخر", "اخر"),  # madda
+            ("ٱلكتاب", "الكتاب"),  # wasla
+            ("مسؤول", "مسوول"),  # waw with hamza
+            ("رئيس", "رييس"),  # yeh with hamza
+            ("مدرسة", "مدرسه"),  # teh marbuta
+        ],
+    )
+    def test_each_folded_letter(self, written: str, heard: str) -> None:
+        assert word_error_rate(written, heard) == 0.0
+
+    def test_a_real_difference_still_counts(self) -> None:
+        assert word_error_rate("أريد", "أراد") == 1.0
+
+    def test_no_other_script_is_folded(self) -> None:
+        assert normalise("café naïve") == ["café", "naïve"]
+
+
+class TestSpeechUsageRows:
+    def test_a_speech_row_has_no_tokens_an_llm_row_has_zero(self) -> None:
+        meter = UsageMeter()
+        meter.record_speech("tts", "tts-1", characters=3, audio_out_seconds=0.5)
+        meter.record("judge", "gpt", None, 0)
+        rows = {u.role: u for u in meter.snapshot()}
+        assert (rows["tts"].input_tokens, rows["tts"].output_tokens) == (None, None)
+        assert (rows["judge"].input_tokens, rows["judge"].output_tokens) == (0, 0)
+
+    def test_an_old_row_without_the_fields_still_reads_with_zero_tokens(self) -> None:
+        usage = ModelUsage.model_validate({"role": "judge", "model": "m", "calls": 1})
+        assert (usage.input_tokens, usage.output_tokens) == (0, 0)
+
+    async def test_a_call_after_one_429_counts_the_429_and_what_it_spoke(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        serve(
+            monkeypatch,
+            lambda _r, n: httpx.Response(429) if n == 1 else wav_response(),
+        )
+        meter = UsageMeter()
+        await tts(meter=meter).synthesize("hello", voice=None, language="en")
+        (usage,) = meter.snapshot()
+        assert (usage.calls, usage.rate_limited_calls, usage.characters) == (1, 1, 5)
+        assert usage.audio_out_seconds == pytest.approx(0.5)
+
+    async def test_a_failed_call_counts_no_characters(self, server: FakeSpeechServer) -> None:
+        server.tts = "500"
+        meter = UsageMeter()
+        with pytest.raises(TtsError):
+            await tts(meter=meter).synthesize("hello", voice=None, language="en")
+        (usage,) = meter.snapshot()
+        assert usage.calls == 1 and usage.characters is None and usage.audio_out_seconds is None
+
+    async def test_a_plugins_rate_limit_counts_once(self) -> None:
+        class Limited(SttError, RateLimited):
+            pass
+
+        class Plugin(Raises):
+            error = Limited("429")
+
+        meter = UsageMeter()
+        config = SpeechConfig(
+            role="stt", provider="raises", url=STT_URL, model="m", timeout_seconds=5
+        )
+        with pytest.raises(SttRateLimited):
+            await GuardedSpeechToText(Plugin(config), config, meter).transcribe(
+                AUDIO, language="en"
+            )
+        (usage,) = meter.snapshot()
+        assert usage.rate_limited_calls == 1 and usage.audio_in_seconds is None
+
+    def test_the_report_shows_speech_counts_and_no_tokens_as_not_measured(self) -> None:
+        from datetime import UTC, datetime
+
+        from opseval.models.results import Gate, SuiteResult
+        from opseval.reporting import render_html
+
+        when = datetime(2026, 10, 1, tzinfo=UTC)
+        result = SuiteResult(
+            opseval_version="0",
+            run_id="r",
+            suite="s",
+            target="ws://x",
+            profile="p",
+            started_at=when,
+            ended_at=when,
+            tests=[],
+            gate=Gate(status="pass"),
+            exit_code=0,
+        )
+        result.usage = [
+            ModelUsage(
+                role="tts",
+                model="tts-1",
+                calls=2,
+                input_tokens=None,
+                output_tokens=None,
+                characters=42,
+                audio_out_seconds=3.5,
+            )
+        ]
+        html = render_html(result, [])
+        row = html[html.index("<td>tts</td>") :].split("</tr>")[0]
+        assert "<td>42</td>" in row and "<td>3.5</td>" in row
+        assert row.count('title="not measured"') == 3  # two token columns and audio in
+        assert "<td>0</td>" not in row
+
+
+class TestNoBodyInErrors:
+    async def test_a_rejection_names_the_status_and_a_safe_code_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = {"error": {"code": "invalid_voice", "message": f"bad key {SECRET}: hello there"}}
+        serve(monkeypatch, lambda _r, _n: httpx.Response(400, json=body))
+        with pytest.raises(TtsRequestError) as caught:
+            await tts().synthesize("hello there", voice=None, language="en")
+        message = str(caught.value)
+        assert "HTTP 400 (invalid_voice)" in message
+        assert SECRET not in message and "hello there" not in message
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"error": {"code": f"Key {SECRET}", "type": "x" * 65}},
+            {"code": "Has Spaces"},
+            [SECRET],
+        ],
+    )
+    async def test_an_unsafe_code_is_left_out(
+        self, monkeypatch: pytest.MonkeyPatch, body: Any
+    ) -> None:
+        serve(monkeypatch, lambda _r, _n: httpx.Response(401, json=body))
+        with pytest.raises(SttRequestError) as caught:
+            await stt().transcribe(AUDIO, language="en")
+        assert str(caught.value).startswith("STT provider rejected the request: HTTP 401 (check")
+        assert SECRET not in str(caught.value)
+
+    async def test_an_outage_message_carries_no_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        serve(monkeypatch, lambda _r, _n: httpx.Response(500, text=f"echo {SECRET} hello"))
+        with pytest.raises(TtsError) as caught:
+            await tts().synthesize("hello", voice=None, language="en")
+        assert SECRET not in str(caught.value) and "echo" not in str(caught.value)
+
+    async def test_a_non_audio_content_type_is_named_only_when_plain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        serve(
+            monkeypatch,
+            lambda _r, _n: httpx.Response(
+                200, content=b"x", headers={"content-type": f"text/{SECRET}!"}
+            ),
+        )
+        with pytest.raises(TtsError, match="a non-audio type") as caught:
+            await tts().synthesize("hello", voice=None, language="en")
+        assert SECRET not in str(caught.value)
+
+
+class TestPluginLimits:
+    def test_a_plugin_without_a_url_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        install(monkeypatch, TTS_GROUP, FakeEntryPoint("acme", AcmeTts))
+        with pytest.raises(ConfigError, match="has no URL: set OPSEVAL_TTS_URL"):
+            text_to_speech(settings(tts_provider="acme", tts_url=None), UsageMeter())
+
+    def test_preflight_refuses_it_before_anything_is_sent(self) -> None:
+        with pytest.raises(ConfigError, match="OPSEVAL_STT_URL"):
+            check_speech_settings(settings(stt_provider="acme", stt_url=None))
+
+    def test_a_plugin_reads_only_its_own_settings_secrets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPSEVAL_TTS_ACME_REGION_KEY", "region-secret")
+        monkeypatch.setenv("OPSEVAL_JUDGE_API_KEY", SECRET)
+        install(monkeypatch, TTS_GROUP, FakeEntryPoint("acme", AcmeTts))
+        client = tts(settings(tts_provider="acme"))
+        read = client.config.secret
+        assert read("OPSEVAL_TTS_ACME_REGION_KEY") == "region-secret"
+        for other in ("OPSEVAL_JUDGE_API_KEY", "OPSEVAL_STT_KEY", "HOME", "opseval_tts_x"):
+            with pytest.raises(ConfigError, match=r"only secrets named OPSEVAL_TTS_\*"):
+                read(other)
+
+    def test_the_first_stt_cannot_read_the_second_ones_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install(monkeypatch, STT_GROUP, FakeEntryPoint("acme", AcmeStt))
+        client = stt(settings(stt_provider="acme"))
+        with pytest.raises(ConfigError, match="not OPSEVAL_STT_SECOND"):
+            client.config.secret("OPSEVAL_STT_SECOND_KEY")
+        assert client.config.secret("OPSEVAL_STT_UNSET_THING") is None
+        second = second_speech_to_text(
+            settings(stt_second_url="http://127.0.0.1:9103", stt_second_model="v3"),
+            UsageMeter(),
+        )
+        assert second is not None
+        with pytest.raises(ConfigError):
+            second.config.secret("OPSEVAL_STT_KEY")
+
+    def test_a_constructor_reading_another_secret_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class Greedy(AcmeStt):
+            def __init__(self, config: SpeechConfig) -> None:
+                super().__init__(config)
+                config.secret("OPSEVAL_LANGFUSE_SECRET_KEY")
+
+        install(monkeypatch, STT_GROUP, FakeEntryPoint("acme", Greedy))
+        with pytest.raises(ConfigError, match="could not be created: ConfigError"):
+            speech_to_text(settings(stt_provider="acme"), UsageMeter())
+
+
+class TestPreflightRefusals:
+    @pytest.mark.parametrize("status", ["401", "403", "400"])
+    async def test_a_tts_that_rejects_opsevals_request_refuses_the_run(
+        self, server: FakeSpeechServer, status: str
+    ) -> None:
+        server.tts = status
+        with pytest.raises(ConfigError, match=f"the TTS rejected.*HTTP {status}"):
+            await speech_checks(settings(), 1)
+
+    async def test_an_stt_that_rejects_it_refuses_the_run(self, server: FakeSpeechServer) -> None:
+        server.stt = "401"
+        with pytest.raises(ConfigError, match="the STT rejected.*HTTP 401"):
+            await check_stt(settings(), 1)
+
+    async def test_no_voice_mapped_refuses_the_run(self, server: FakeSpeechServer) -> None:
+        with pytest.raises(ConfigError, match="OPSEVAL_TTS_VOICE_MAP"):
+            await check_tts(settings(tts_voice_map={}), 1)
+
+    async def test_a_plugins_rejection_stays_a_rejection(self) -> None:
+        class Rejects(Raises):
+            error = SttRequestError(f"bad key {SECRET}")
+
+        config = SpeechConfig(
+            role="stt", provider="raises", url=STT_URL, model="m", timeout_seconds=5
+        )
+        with pytest.raises(SttRequestError) as caught:
+            await GuardedSpeechToText(Rejects(config), config).transcribe(AUDIO, language="en")
+        assert SECRET not in str(caught.value)
+
+    @pytest.mark.parametrize("status", ["429", "503"])
+    async def test_an_outage_stays_unavailable(self, server: FakeSpeechServer, status: str) -> None:
+        server.stt = status
+        check = await check_stt(settings(), 1)
+        assert check.status is CheckStatus.UNAVAILABLE
+
+    async def test_a_rejection_stops_the_whole_preflight(self, server: FakeSpeechServer) -> None:
+        server.tts = "401"
+        with pytest.raises(ConfigError, match="Nothing was run"):
+            await preflight(
+                [],
+                SutProfile(name="p"),
+                settings(),
+                target="",
+                transport="python",
+                voice_scenarios=1,
+            )
+
+
+class TestPreflightSharing:
+    async def test_the_canary_is_spoken_once_and_both_stts_hear_the_same_audio(
+        self, server: FakeSpeechServer
+    ) -> None:
+        s = settings(stt_second_url="http://127.0.0.1:9103", stt_second_model="large-v3")
+        checks = await speech_checks(s, 1)
+        assert [c.status for c in checks] == [CheckStatus.OK] * 3
+        spoken = [r for r in server.requests if r.url.path == "/v1/audio/speech"]
+        heard = [r for r in server.requests if r.url.path == "/v1/audio/transcriptions"]
+        assert len(spoken) == 1 and len(heard) == 2
+
+        def wav(request: httpx.Request) -> bytes:
+            return request.content.split(b"RIFF", 1)[1].split(b"\r\n--", 1)[0]
+
+        assert wav(heard[0]) == wav(heard[1])
+
+    async def test_the_settings_are_checked_once_per_preflight(
+        self, server: FakeSpeechServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.speech import providers
+
+        calls: list[Settings] = []
+        real = providers.check_speech_settings
+
+        def counting(s: Settings) -> None:
+            calls.append(s)
+            real(s)
+
+        monkeypatch.setattr(providers, "check_speech_settings", counting)
+        await preflight(
+            [], SutProfile(name="p"), settings(), target="", transport="python", voice_scenarios=1
+        )
+        assert len(calls) == 1
+
+
+class TestBoolConfidence:
+    @pytest.mark.parametrize("value", [True, False])
+    async def test_a_bool_is_not_a_confidence(self, value: bool) -> None:
+        class Plugin(SpeechToText):
+            name = "odd"
+
+            async def transcribe(
+                self, audio: Audio, *, language: str, hint: str | None = None
+            ) -> Transcript:
+                return Transcript("x", "odd", "m", confidence=value)
+
+        with pytest.raises(SttError, match="confidence"):
+            await guarded(Plugin).transcribe(AUDIO, language="en")
