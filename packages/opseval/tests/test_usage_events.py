@@ -10,17 +10,23 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from opseval.config import Settings
+from opseval.demo.refund_agent import run_agent
 from opseval.errors import LLMInfraError
 from opseval.llm import ChatClient, UsageMeter, token_counts
 from opseval.models.record import RunRecord
 from opseval.models.results import ModelUsage, SuiteResult
 from opseval.models.usage import ModelPrice, PriceTable, UsageEvent
 from opseval.pricing import builtin_prices, price_for, priced, repriced
+from opseval.runner import RunOptions, launch
+from opseval.scoring import ScoringEngine
+from opseval.storage import FileStore
 
 WHEN = datetime(2026, 3, 1, 12, tzinfo=UTC)
 
@@ -370,3 +376,47 @@ class TestOldFiles:
         }
         result = SuiteResult.model_validate(old)
         assert result.usage_events == [] and result.usage[0].reported is None
+
+
+# --- a run ----------------------------------------------------------------------------
+
+
+async def test_a_run_writes_each_attempts_calls_into_its_record(
+    cat_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Calls made while scoring an attempt (the judges) land in that attempt's record, and
+    the result folds every call per role and model (ADR-0066)."""
+    meters: list[UsageMeter] = []
+
+    class Meter(UsageMeter):
+        def __init__(self, **kw: Any) -> None:
+            super().__init__(**kw)
+            meters.append(self)
+
+    real = ScoringEngine.score
+
+    async def score(self: ScoringEngine, record: Any, scenario: Any, profile: Any) -> Any:
+        meters[0].record("judge", "j", {"prompt_tokens": record.attempt_index + 1}, 0)
+        return await real(self, record, scenario, profile)
+
+    monkeypatch.setattr("opseval.runner.UsageMeter", Meter)
+    monkeypatch.setattr(ScoringEngine, "score", score)
+    async with run_agent() as url:
+        result = await launch(
+            cat_dir / "suites" / "smoke.yaml",
+            RunOptions(target=url, profile=cat_dir / "profile.yaml", repeats=2),
+            Settings(reports_dir=str(tmp_path), allowed_hosts="127.0.0.1"),
+        )
+    records = FileStore(tmp_path).load_records(result.run_id)
+    assert records
+    for r in records:
+        assert r.usage_events is not None
+        assert [e.input_tokens for e in r.usage_events] == [r.attempt_index + 1]
+    (row,) = result.usage
+    assert (row.role, row.calls, row.input_tokens, row.output_tokens) == (
+        "judge",
+        len(records),
+        sum(r.attempt_index + 1 for r in records),
+        None,  # no call reported its output: not measured, never 0
+    )
+    assert result.usage_events == []
