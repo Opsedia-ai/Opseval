@@ -34,6 +34,10 @@ class Settings(BaseSettings):
 
     allowed_hosts: str = ""
     """Comma-separated hostnames that may receive credentials or conversations."""
+    dotenv: bool = True
+    """Read ``.env`` from the working directory. Set ``OPSEVAL_DOTENV=false`` in the real
+    environment (a ``.env`` cannot switch itself off) to ignore it, as the GitHub action does
+    unless asked, so a checked-out repository cannot configure the run (ADR-0058)."""
 
     # System under test
     static_token: SecretStr | None = None
@@ -171,6 +175,8 @@ class Settings(BaseSettings):
     localhost needs TLS (``?ssl=require``, ``verify-ca`` or ``verify-full``)."""
 
     def __init__(self, **values: Any) -> None:
+        if "_env_file" not in values and _dotenv_off():
+            values["_env_file"] = None
         super().__init__(**values)
         # The .env this instance was actually built from: an explicit ``_env_file`` (None
         # included) wins over the class default, so secret_named reads the same file.
@@ -198,6 +204,12 @@ class Settings(BaseSettings):
 
     def allowlist(self) -> set[str]:
         return {h.strip().lower() for h in self.allowed_hosts.split(",") if h.strip()}
+
+
+def _dotenv_off() -> bool:
+    """``OPSEVAL_DOTENV`` set false in the real environment: no ``.env`` is read at all."""
+    flag = os.environ.get("OPSEVAL_DOTENV", "").strip().lower()
+    return flag in {"0", "false", "no", "off"}
 
 
 SECRET_FIELDS = (

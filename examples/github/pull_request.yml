@@ -11,8 +11,12 @@
 # Do not add continue-on-error or `|| true`: 2 and 3 must never turn green. Make this job a
 # required check to block the merge.
 #
-# Pull requests from forks get no secrets: without a judge key, judge scores are not measured,
-# which can be exit 2. That is the honest answer, not a failure of the agent.
+# Pull requests from forks get no secrets (repository variables they do get). So each LLM
+# endpoint below is configured only when its key is there: on a fork PR nothing is sent to an
+# LLM, scenarios with an LLM persona are skipped and judge checks are not measured, and the run
+# ends 2 (not judged), or 1 if a scripted scenario still fails a deterministic check. Had the
+# endpoint and model been set without the key, every LLM request would be refused: exit 3, a
+# harness error. Neither is a failure of the agent. (A keyless local endpoint needs no guard.)
 #
 # opsedia-ai/opseval-action is published at go-public (Gate 0); until then use
 # Opsedia-ai/Opseval@<full commit SHA>. @v1 is for readability: pin a full SHA in production.
@@ -35,11 +39,12 @@ jobs:
         env:
           # Every host that receives the conversation: the agent, the simulator, the judges.
           OPSEVAL_ALLOWED_HOSTS: agent.staging.example.com,api.openai.com
-          OPSEVAL_SIMULATOR_BASE_URL: ${{ vars.OPSEVAL_SIMULATOR_BASE_URL }}
-          OPSEVAL_SIMULATOR_MODEL: ${{ vars.OPSEVAL_SIMULATOR_MODEL }}
+          # An endpoint only with its key (see the fork note above).
+          OPSEVAL_SIMULATOR_BASE_URL: ${{ secrets.OPSEVAL_SIMULATOR_API_KEY != '' && vars.OPSEVAL_SIMULATOR_BASE_URL || '' }}
+          OPSEVAL_SIMULATOR_MODEL: ${{ secrets.OPSEVAL_SIMULATOR_API_KEY != '' && vars.OPSEVAL_SIMULATOR_MODEL || '' }}
           OPSEVAL_SIMULATOR_API_KEY: ${{ secrets.OPSEVAL_SIMULATOR_API_KEY }}
-          OPSEVAL_JUDGE_BASE_URL: ${{ vars.OPSEVAL_JUDGE_BASE_URL }}
-          OPSEVAL_JUDGE_MODEL: ${{ vars.OPSEVAL_JUDGE_MODEL }}
+          OPSEVAL_JUDGE_BASE_URL: ${{ secrets.OPSEVAL_JUDGE_API_KEY != '' && vars.OPSEVAL_JUDGE_BASE_URL || '' }}
+          OPSEVAL_JUDGE_MODEL: ${{ secrets.OPSEVAL_JUDGE_API_KEY != '' && vars.OPSEVAL_JUDGE_MODEL || '' }}
           OPSEVAL_JUDGE_API_KEY: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}
         with:
           suite: evals/suites/smoke.yaml

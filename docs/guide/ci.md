@@ -47,9 +47,24 @@ summary to the job summary. Make the job a required check to block a merge.
 
 Its inputs are `suite`, `profile`, `target`, `transport`, `repeats`, `filter`, `extra-args`,
 `python-version`, `opseval-spec` (a pip requirement such as `opseval==0.2.0`), `comment`,
-`artifact-name` and `github-token`. Its outputs are `exit-code`, `gate` (`pass` or `block`) and
-`run-dir`. Settings such as the judge's endpoint and key go in `env:` as `OPSEVAL_*` variables
-(see [Settings](../reference/settings.md)). The PR comment needs `pull-requests: write`.
+`artifact-name`, `read-dotenv` and `github-token`. Its outputs are `exit-code`, `gate` (`pass` or
+`block`) and `run-dir`. Settings such as the judge's endpoint and key go in `env:` as `OPSEVAL_*`
+variables (see [Settings](../reference/settings.md)). The PR comment needs `pull-requests: write`.
+
+The checked-out repository cannot configure the run. Opseval is installed into a virtualenv in
+`$RUNNER_TEMP` with no uv configuration from the workspace (`UV_NO_CONFIG=1`, no cache), and it
+reads no `.env` from the workspace (`OPSEVAL_DOTENV=false`) unless you set `read-dotenv: "true"`.
+A failure while writing the job summary or the PR comment is a warning, never the result: the
+last step always exits with Opseval's own code, and with 3 if Opseval never finished.
+
+On a pull request from a fork, GitHub passes repository variables but no secrets.
+`pull_request.yml` therefore sets each LLM endpoint only when its key is there:
+
+- with neither endpoint nor key, nothing is sent to an LLM: scenarios with an LLM persona are
+  skipped and judge checks are not measured, so the run is exit 2 (not judged), or 1 if a
+  scripted scenario still fails a deterministic check;
+- with the endpoint and model set but the key missing, every LLM request would be refused:
+  exit 3, a harness error.
 
 ### The reusable workflow
 
@@ -66,15 +81,26 @@ jobs:
       suite: evals/suites/release.yaml
       profile: evals/profile.yaml
       target: wss://agent.staging.example.com/ws
-      allowed-hosts: agent.staging.example.com
+      allowed-hosts: agent.staging.example.com,api.openai.com
+      judge-base-url: https://api.openai.com/v1
+      judge-model: gpt-4.1-mini
+      opseval-env: |             # any other non-secret setting, one per line
+        OPSEVAL_SIMULATOR_TIMEOUT_SECONDS=120
     secrets:
       judge-api-key: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}
   release:
     needs: eval                   # skipped on exit 1, 2 or 3
 ```
 
-- Inputs: the action's (except `github-token`), plus `allowed-hosts` (`OPSEVAL_ALLOWED_HOSTS`)
-  and `opseval-ref`.
+- Inputs: the action's (except `github-token`), plus `allowed-hosts` (`OPSEVAL_ALLOWED_HOSTS`),
+  `opseval-ref`, `simulator-base-url`, `simulator-model`, `judge-base-url`, `judge-model` and
+  `opseval-env`. A caller's `env:` does not reach a called workflow, so settings come in as inputs.
+- `opseval-ref` must be a full 40-character commit SHA; a branch, a tag or a short SHA is exit 3.
+- `opseval-env` takes one `OPSEVAL_NAME=value` per line (blank lines and `#` comments are
+  skipped). A secret setting (pass it through `secrets:`), a setting that has its own input, a
+  duplicate, or a line of any other shape is exit 3, and then nothing is set.
+- A simulator or judge key without both its base URL and its model is exit 3: nothing would use
+  it.
 - Secrets: `simulator-api-key`, `judge-api-key` and `agent-token` (`OPSEVAL_STATIC_TOKEN`), all
   optional.
 - Outputs: `exit-code` and `gate`. If the action never ran to the end, `exit-code` is `3`.
@@ -85,8 +111,14 @@ jobs:
 
 `deployment-status.yml` runs only when `github.event.deployment_status.state == 'success'`. The
 deployment's `environment_url` reaches the script through `env:`, never pasted into it. It must
-be `https://`, and its host must already be in `OPSEVAL_ALLOWED_HOSTS`. A deployment to a host
-nobody allowlisted is exit 3, never a run.
+be `https://`, and its host must be in the repository variable `OPSEVAL_AGENT_HOSTS`: the hosts
+agents are deployed to, kept apart from `OPSEVAL_ALLOWED_HOSTS` so that allowlisting an LLM
+endpoint never makes it a deployment target. Unset, or a host not in it, is exit 3, never a run.
+
+A `deployment_status` run has the repository's secrets, while the deployed commit may be anyone's
+(a preview of a fork's pull request). So the example runs only for one named environment that
+trusted refs alone deploy to, checks the deployed commit out into `deployed/` for its scenarios
+and profile, and never installs or runs anything from it.
 
 ## Other CI systems
 

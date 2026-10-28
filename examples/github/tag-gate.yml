@@ -12,6 +12,11 @@
 # The reusable workflow lives in Opseval's main repository. Replace both <sha> with the same
 # full Opseval commit SHA: the first picks the workflow, opseval-ref the action it runs.
 # (Until go-public (Gate 0) the repository is private, so this works only inside it.)
+#
+# This job's `env:` would not reach a called workflow: settings go in as inputs. The four
+# endpoint inputs below, and `opseval-env` (one OPSEVAL_NAME=value per line) for any other
+# non-secret setting. Keys go only through `secrets:`; a key given without its base URL and
+# model is refused (exit 3), since nothing would use it.
 name: Release
 on:
   push:
@@ -29,6 +34,12 @@ jobs:
       profile: evals/profile.yaml
       target: wss://agent.staging.example.com/ws
       allowed-hosts: agent.staging.example.com,api.openai.com
+      simulator-base-url: ${{ vars.OPSEVAL_SIMULATOR_BASE_URL }}
+      simulator-model: ${{ vars.OPSEVAL_SIMULATOR_MODEL }}
+      judge-base-url: ${{ vars.OPSEVAL_JUDGE_BASE_URL }}
+      judge-model: ${{ vars.OPSEVAL_JUDGE_MODEL }}
+      opseval-env: |
+        OPSEVAL_SIMULATOR_TIMEOUT_SECONDS=120
     secrets:
       simulator-api-key: ${{ secrets.OPSEVAL_SIMULATOR_API_KEY }}
       judge-api-key: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}

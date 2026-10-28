@@ -45,6 +45,11 @@ inputs:
   artifact-name:
     description: Name of the uploaded artifact (report.html, junit.xml, result.json).
     default: opseval-report
+  read-dotenv:
+    description: >-
+      "true" lets Opseval read a .env file in the workspace. Off by default: a checked-out
+      repository must not be able to configure the run (OPSEVAL_DOTENV=false).
+    default: "false"
   github-token:
     description: Token for the pull-request comment.
     default: ${{ github.token }}
@@ -63,24 +68,38 @@ outputs:
 runs:
   using: composite
   steps:
+    # Installed outside the workspace and with no uv configuration from it: a checked-out
+    # repository (a pull request's, a deployment's) must not pick the index, the Python or
+    # the cache that Opseval is installed from.
     - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         python-version: ${{ inputs.python-version }}
+        working-directory: ${{ runner.temp }}
+        enable-cache: "false"
+        ignore-empty-workdir: "true"
 
     - name: Install Opseval
       shell: bash
+      working-directory: ${{ runner.temp }}
       env:
         OPSEVAL_SPEC: ${{ inputs.opseval-spec }}
         ACTION_PATH: ${{ github.action_path }}
+        UV_NO_CONFIG: "1"
       run: |
         set -euo pipefail
         venv="$RUNNER_TEMP/opseval-venv"
         uv venv --quiet --allow-existing "$venv"   # the action may run more than once per job
         if [ -n "$OPSEVAL_SPEC" ]; then
-          uv pip install --quiet --python "$venv/bin/python" "$OPSEVAL_SPEC"
+          source="$OPSEVAL_SPEC"
+        elif [ -d "$ACTION_PATH/packages/opseval" ]; then
+          source="$ACTION_PATH/packages/opseval"        # the root action.yml
+        elif [ -d "$ACTION_PATH/../../packages/opseval" ]; then
+          source="$ACTION_PATH/../../packages/opseval"  # integrations/github-action
         else
-          uv pip install --quiet --python "$venv/bin/python" "$ACTION_PATH/../../packages/opseval"
+          echo "::error::No Opseval next to the action; set opseval-spec (e.g. opseval==0.2.0)."
+          exit 3
         fi
+        uv pip install --quiet --python "$venv/bin/python" "$source"
         echo "$venv/bin" >> "$GITHUB_PATH"
         "$venv/bin/opseval" --version
 
@@ -95,8 +114,10 @@ runs:
         REPEATS: ${{ inputs.repeats }}
         FILTERS: ${{ inputs.filter }}
         EXTRA_ARGS: ${{ inputs.extra-args }}
+        READ_DOTENV: ${{ inputs.read-dotenv }}
       run: |
         set -uo pipefail
+        if [ "$READ_DOTENV" = "true" ]; then export OPSEVAL_DOTENV=true; else export OPSEVAL_DOTENV=false; fi
         reports="$RUNNER_TEMP/opseval-reports-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"
         mkdir -p "$reports"
         args=(run "$SUITE" --profile "$PROFILE" --target "$TARGET" --transport "$TRANSPORT" --reports-dir "$reports")
@@ -113,8 +134,11 @@ runs:
         run_dir=$(find "$reports" -mindepth 1 -maxdepth 1 -type d | head -n 1)
         echo "run-dir=$run_dir" >> "$GITHUB_OUTPUT"
         if [ -n "$run_dir" ] && [ -f "$run_dir/result.json" ]; then
-          gate=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate"]["status"])' "$run_dir/result.json")
-          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          if gate=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate"]["status"])' "$run_dir/result.json"); then
+            echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Could not read the gate from result.json; the exit code still stands."
+          fi
         fi
         exit 0
 
@@ -130,6 +154,8 @@ runs:
           ${{ steps.run.outputs.run-dir }}/result.json
         if-no-files-found: warn
 
+    # Reporting never decides anything: every lookup here warns and carries on, so a broken
+    # comment cannot stop the next step from exiting with Opseval's code.
     - name: Gate summary
       if: always() && steps.run.outputs.run-dir != ''
       shell: bash
@@ -140,25 +166,33 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
+        OPSEVAL_DOTENV: "false"
       run: |
-        set -uo pipefail
+        set +e -uo pipefail
         if [ ! -f "$RUN_DIR/result.json" ]; then
           echo "::warning::Opseval produced no result.json (see the step log)."
           exit 0
         fi
         summary="$RUNNER_TEMP/opseval-summary.md"
-        if [ -n "$REPORT_URL" ]; then
-          opseval summary "$RUN_DIR" --report-url "$REPORT_URL" > "$summary"
-        else
-          opseval summary "$RUN_DIR" > "$summary"
+        url_args=()
+        if [ -n "$REPORT_URL" ]; then url_args=(--report-url "$REPORT_URL"); fi
+        if ! opseval summary "$RUN_DIR" ${url_args[@]+"${url_args[@]}"} > "$summary"; then
+          echo "::warning::Could not write the gate summary; the exit code still stands."
+          exit 0
         fi
         cat "$summary" >> "$GITHUB_STEP_SUMMARY"
         if [ "$COMMENT" != "true" ] || [ -z "$PR_NUMBER" ]; then
           exit 0
         fi
-        existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-          --jq '[.[] | select(.body | startswith("<!-- opseval-gate -->"))][0].id // empty' 2>/dev/null | head -n 1)
-        body=$(python3 -c 'import json,sys; print(json.dumps({"body": open(sys.argv[1], encoding="utf-8").read()}))' "$summary")
+        if ! existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+          --jq '[.[] | select(.body | startswith("<!-- opseval-gate -->"))][0].id // empty' | head -n 1); then
+          echo "::warning::Could not list the PR comments (does the token have pull-requests: write?)"
+          exit 0
+        fi
+        if ! body=$(python3 -c 'import json,sys; print(json.dumps({"body": open(sys.argv[1], encoding="utf-8").read()}))' "$summary"); then
+          echo "::warning::Could not prepare the PR comment."
+          exit 0
+        fi
         if [ -n "$existing" ]; then
           echo "$body" | gh api -X PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null \
             || echo "::warning::Could not update the PR comment (does the token have pull-requests: write?)"
@@ -166,9 +200,18 @@ runs:
           echo "$body" | gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" --input - > /dev/null \
             || echo "::warning::Could not post the PR comment (does the token have pull-requests: write?)"
         fi
+        exit 0
 
+    # Always, so nothing above can skip it: it re-exits with the recorded code, which keeps
+    # 1, 2 and 3 failing; no code at all (the install or the run never finished) is 3.
     - name: Exit with Opseval's exit code
+      if: always()
       shell: bash
       env:
         CODE: ${{ steps.run.outputs.exit-code }}
-      run: exit "${CODE:-3}"
+      run: |
+        case "$CODE" in
+          0|1|2|3) exit "$CODE" ;;
+          "") echo "::error::Opseval did not finish (see the steps above): a harness error."; exit 3 ;;
+          *) exit "$CODE" ;;
+        esac

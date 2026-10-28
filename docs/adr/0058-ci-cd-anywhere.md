@@ -148,27 +148,63 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
 
 **E1, 2026-10-28.** Built as decided, with these details:
 
-- `integrations/github-action/action.yml` is the source; the root `action.yml` differs only in
-  the install path (`$ACTION_PATH/packages/opseval` against `$ACTION_PATH/../../packages/opseval`),
-  and `tests/test_github_ci.py` fails on any other difference.
+- `integrations/github-action/action.yml` is the source; the root `action.yml` is a byte-for-byte
+  copy (tested). The install step finds Opseval next to whichever copy runs
+  (`$ACTION_PATH/packages/opseval`, else `$ACTION_PATH/../../packages/opseval`, else exit 3 asking
+  for `opseval-spec`).
 - The reusable workflow cannot take the action from its own commit: `uses:` takes no
   expressions, and no context names the called workflow's SHA. It therefore checks Opseval out at
   the input `opseval-ref` (the same SHA the caller pins) into `.opseval-action/` and runs the action
-  from there. An empty `opseval-ref` is accepted only when the caller is this repository.
+  from there. `opseval-ref` must be a full 40-character lowercase SHA (a branch, a tag or a short
+  SHA is exit 3). An empty one is accepted only when `github.repository` is `Opsedia-ai/Opseval`,
+  and then the workspace's own `integrations/github-action` runs with no second clone.
 - It declares no permissions. A called workflow can only lower the caller's token, so declaring
   `pull-requests: write` would make every caller without it (a tag gate) fail. Each caller grants
   what its use needs, and the examples grant `pull-requests: write` only on `pull_request`.
 - `exit-code` is `3` when the action never ran to the end (for example a failed checkout), as the
   action itself reports a missing code.
+
+**Review of #80, 2026-10-28.**
+
+- Settings for a called workflow. A caller's `env:` never reaches a called workflow, so the
+  reusable workflow takes `simulator-base-url`, `simulator-model`, `judge-base-url` and
+  `judge-model`, plus `opseval-env`: one `OPSEVAL_NAME=value` per line for any other non-secret
+  setting. A line must match `^OPSEVAL_[A-Z0-9_]+=`; a secret setting (every name in
+  `config.SECRET_FIELDS`, kept equal by a test), a setting with its own input, a duplicate or a
+  carriage return is exit 3, and nothing is written to `$GITHUB_ENV` unless every line passes.
+  Values arrive through `env:` and are split on newlines, so a value can never add a line. Keys
+  stay `secrets:`. A simulator or judge key with no base URL and model is exit 3: the run would
+  never use it, and the caller would believe the judges ran.
+- The install ignores the workspace. `setup-uv` runs in `$RUNNER_TEMP` with its cache off, and
+  `uv venv`/`uv pip install` run there with `UV_NO_CONFIG=1`, so a checked-out repository's
+  `uv.toml`, `pyproject.toml` or `.python-version` cannot choose the index, the Python or the cache
+  Opseval is installed from. Opseval itself reads no workspace `.env` in the action: a new setting,
+  `OPSEVAL_DOTENV=false` (read from the real environment only; a `.env` cannot switch itself off),
+  stops `Settings` and `secret_named` from reading one, and the action sets it unless the input
+  `read-dotenv: "true"`. Running from another directory was the alternative; it would have changed
+  what every relative path in `extra-args`, a profile or a setting means.
+- Reporting never decides. The summary and comment step runs with `set +e` and turns every
+  failure (the summary, listing comments, posting) into a warning; the exit step is
+  `if: always()` and re-exits with the recorded code, so 1, 2 and 3 stay failures and a missing
+  code is 3.
+- `pull_request.yml` sets each LLM endpoint only when its key is there. A fork PR has repository
+  variables but no secrets: with the endpoint and no key every LLM request would be refused
+  (exit 3); with neither, LLM personas are skipped and judges unmeasured (exit 2, or 1 if a
+  scripted scenario fails).
+- `deployment-status.yml` checks the deployed host against `OPSEVAL_AGENT_HOSTS`, a repository
+  variable of its own (unset is exit 3), so allowlisting an LLM endpoint never makes it a valid
+  deployment target. It runs only for one named environment that trusted refs alone deploy to, and
+  checks the deployed commit out into `deployed/` as data (scenarios and profile) only.
 - A job that calls a workflow has no steps, so the `action` job in `ci.yml` cannot call it, and a
   failing called workflow fails the whole run (no `continue-on-error` on such a job). The
   reusable workflow is dogfooded in its own file, `reusable-workflow.yml`, on the healthy demo
-  agent only (exit 0, gate `pass`), started by the boolean input `start-demo-agent`; exit 1 is
+  agent only (exit 0, gate `pass`), started by the boolean input `start-demo-agent` (installed once
+  into the venv the action then reuses); exit 1 is
   proven on the action, whose `action` job now runs the source on the healthy agent and the root
   copy on the buggy one. Keeping it out of `ci.yml` keeps that file's jobs the required checks.
 - The `deployment_status` example checks the URL itself before anything is installed (https,
-  host allowlisted, else exit 3), on top of Opseval's own refusal; the check is tested by running
-  its script.
+  host in `OPSEVAL_AGENT_HOSTS`, else exit 3), on top of Opseval's own refusal; the check is tested
+  by running its script.
 - Not built: the `release.yml` job that publishes `opsedia-ai/opseval-action` (off until Gate 0,
   so it is left for go-public rather than added disabled), and the action repository's README.
   No `actionlint` run: the tests parse and check the files offline.

@@ -12,8 +12,17 @@
 # Do not add continue-on-error or `|| true`: 2 and 3 must never turn green.
 #
 # The deployment's URL is never trusted as is: it reaches the script only through env:, must
-# be https://, and its host must already be in OPSEVAL_ALLOWED_HOSTS. Opseval refuses a host
-# that is not (exit 3) too; the check here only says so before anything is installed.
+# be https://, and its host must be in the repository variable OPSEVAL_AGENT_HOSTS: the hosts
+# you deploy agents to, a list of its own, so that allowlisting an LLM endpoint for the
+# conversation never makes it a valid deployment target. Unset is exit 3, never a run.
+# Opseval then refuses a host outside OPSEVAL_ALLOWED_HOSTS (exit 3) as usual.
+#
+# Trust model: a deployment_status run has this repository's secrets, and the deployed commit
+# may be anyone's (a preview of a fork's pull request). So use it only for an environment that
+# trusted refs alone deploy to (the `if:` names it; per-PR preview environments never match),
+# check the deployed commit out into a subdirectory for its scenarios and profile only, and
+# never install or run anything from it: the action comes from its own pinned repository and
+# ignores the checkout's .env and uv settings.
 #
 # opsedia-ai/opseval-action is published at go-public (Gate 0); until then use
 # Opsedia-ai/Opseval@<full commit SHA>. @v1 is for readability: pin a full SHA in production.
@@ -24,8 +33,9 @@ permissions:
   contents: read
 jobs:
   eval:
-    # Only a finished, successful deployment: not pending, in_progress, failure or error.
-    if: github.event.deployment_status.state == 'success'
+    # Only a finished, successful deployment (not pending, in_progress, failure or error) to
+    # the environment that only trusted refs deploy to. Change `staging` to yours.
+    if: github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'staging'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,6 +47,7 @@ jobs:
         id: target
         env:
           ENVIRONMENT_URL: ${{ github.event.deployment_status.environment_url }}
+          OPSEVAL_AGENT_HOSTS: ${{ vars.OPSEVAL_AGENT_HOSTS }} # e.g. agent.staging.example.com
         run: |
           set -euo pipefail
           if [[ ! "$ENVIRONMENT_URL" =~ ^https://([A-Za-z0-9.-]+)(:[0-9]+)?(/.*)?$ ]]; then
@@ -45,20 +56,25 @@ jobs:
           fi
           host=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
           port="${BASH_REMATCH[2]}"
+          if [ -z "${OPSEVAL_AGENT_HOSTS// /}" ]; then
+            echo "::error::Set the repository variable OPSEVAL_AGENT_HOSTS to the hosts agents are deployed to."
+            exit 3
+          fi
           allowed=no
-          IFS=',' read -r -a hosts <<< "$OPSEVAL_ALLOWED_HOSTS"
+          IFS=',' read -r -a hosts <<< "$OPSEVAL_AGENT_HOSTS"
           for h in "${hosts[@]}"; do
             h=$(printf '%s' "$h" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
             if [ "$h" = "$host" ]; then allowed=yes; fi
           done
           if [ "$allowed" != yes ]; then
-            echo "::error::$host is not in OPSEVAL_ALLOWED_HOSTS; refusing to send it a conversation."
+            echo "::error::$host is not in OPSEVAL_AGENT_HOSTS; refusing to send it a conversation."
             exit 3
           fi
           echo "target=wss://$host$port$AGENT_PATH" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.deployment.sha }} # the scenarios of the deployed commit
+          path: deployed # data only: nothing is installed or run from it
           persist-credentials: false
       - uses: opsedia-ai/opseval-action@v1
         env:
@@ -66,7 +82,7 @@ jobs:
           OPSEVAL_JUDGE_MODEL: ${{ vars.OPSEVAL_JUDGE_MODEL }}
           OPSEVAL_JUDGE_API_KEY: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}
         with:
-          suite: evals/suites/smoke.yaml
-          profile: evals/profile.yaml
+          suite: deployed/evals/suites/smoke.yaml
+          profile: deployed/evals/profile.yaml
           target: ${{ steps.target.outputs.target }}
           comment: "false" # no pull request to comment on

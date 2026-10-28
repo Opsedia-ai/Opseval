@@ -10,6 +10,7 @@ with each run. Any host that receives a conversation or a key must also be liste
 | Variable | Type | Default | What it does |
 |---|---|---|---|
 | `OPSEVAL_ALLOWED_HOSTS` | text | empty | Comma-separated hostnames that may receive credentials or conversations. |
+| `OPSEVAL_DOTENV` | bool | `True` | Read ``.env`` from the working directory. Set ``OPSEVAL_DOTENV=false`` in the real environment (a ``.env`` cannot switch itself off) to ignore it, as the GitHub action does unless asked, so a checked-out repository cannot configure the run (ADR-0058). |
 | `OPSEVAL_STATIC_TOKEN` | secret | unset (secret) | A bearer token sent to the agent as is, when the profile does not mint its own. |
 | `OPSEVAL_TOKEN_SIGNING_KEY` | secret | unset (secret) | The HS256 key for profiles that mint short-lived tokens per attempt (ADR-0012). |
 | `OPSEVAL_CREDENTIALS` | text | empty | A credential provider plugin to supply the agent's tokens, by entry-point name (``opseval.credentials``, ADR-0046). Installing one changes nothing until it is named here. It replaces ``OPSEVAL_STATIC_TOKEN``; a tenant's own ``token_env`` still wins. |
