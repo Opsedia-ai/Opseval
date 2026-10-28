@@ -31,8 +31,9 @@ from typing import Any
 
 import yaml
 from pydantic import ValidationError
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from opseval.catalogue import KnownScorers, load_catalogue, load_profile, suite_files
@@ -382,8 +383,9 @@ async def ensure_task(
     """Create task ``slug`` in an existing project, unless it is there; ``(task, created)``.
 
     Asking for a kind or modality the existing task does not have is an error, not a silent
-    no-op: the caller would believe the task is what they asked for. So is an archived task:
-    nothing can be pushed to it, and only `task unarchive` brings it back."""
+    no-op: the caller would believe the task is what they asked for. An archived task that is
+    otherwise what was asked for is found, not an error (``archived_at`` tells the caller);
+    nothing can be pushed to it until `task unarchive`."""
     check_task_slug(slug)
     for value, check in ((kind, check_kind), (modality, check_modality)):
         if value is not None:
@@ -409,11 +411,6 @@ async def ensure_task(
         raise ConfigError(f"task {slug!r} could not be created in {_ref(project_ref)}")
     if created:
         return task, True
-    if task.archived_at is not None:
-        raise ConfigError(
-            f"task {slug!r} already exists in {_ref(project_ref)} and is archived; "
-            f"`opseval task unarchive {slug} --project {_ref(project_ref)}` brings it back"
-        )
     asked: list[tuple[str, str | None, str | None]] = [
         (field, have, want)
         for field, have, want in (("kind", task.kind, kind), ("modality", task.modality, modality))
@@ -458,11 +455,11 @@ async def list_tasks(
         query = query.where(Task.archived_at.is_(None))
     tasks = list(await session.scalars(query))
     linked = {t.profile_item_id for t in tasks} | {t.default_suite_item_id for t in tasks}
-    # Keyed by (item, task): a name is shown only for an item of the task that links it.
-    names = {
-        (i.id, i.task_id): i.name
-        for i in await session.scalars(
-            select(CatalogueItem).where(
+    # The keys make every linked item one of its own task's, so the id is enough.
+    names: dict[uuid.UUID | None, str] = {
+        item_id: name
+        for item_id, name in await session.execute(
+            select(CatalogueItem.id, CatalogueItem.name).where(
                 CatalogueItem.project_id == project.id,
                 CatalogueItem.id.in_([i for i in linked if i]),
             )
@@ -484,10 +481,8 @@ async def list_tasks(
             modality=t.modality,
             region=t.region,
             archived_at=t.archived_at,
-            profile=names.get((t.profile_item_id, t.id)) if t.profile_item_id else None,
-            default_suite=(
-                names.get((t.default_suite_item_id, t.id)) if t.default_suite_item_id else None
-            ),
+            profile=names.get(t.profile_item_id),
+            default_suite=names.get(t.default_suite_item_id),
             items=counts.get(t.id, 0),
         )
         for t in tasks
@@ -505,9 +500,9 @@ async def update_task(
     default_suite: str | None = None,
 ) -> Task:
     """Change what an operator may change: kind, modality, name, region, the default suite
-    (a suite of this task, by name). An archived task is refused, as a push is: unarchive it
-    first."""
-    await _lock(session, task, write=True)
+    (a suite of this task, by name). An archived task can be changed too: this is the task's
+    description, not its catalogue, which stays closed to pushes and label moves."""
+    await session.execute(_lock_clause(task, write=True))
     if kind is not None:
         task.kind = check_kind(kind)
     if modality is not None:
@@ -517,10 +512,8 @@ async def update_task(
     if region is not None:
         task.region = region or None
     if default_suite is not None:
-        task.default_suite_item_id = _link(
-            task, await _item(session, task, "suite", default_suite), "suite"
-        )
-    await session.flush()
+        task.default_suite_item_id = (await _item(session, task, "suite", default_suite)).id
+    await _flush_links(session, task)
     return task
 
 
@@ -528,7 +521,7 @@ async def archive_task(session: AsyncSession, task: Task, *, archived: bool = Tr
     """Hide a task, or bring it back. Nothing is deleted: its versions, labels and (later)
     runs stay, and it can still be listed and pulled. An archived task takes no push and no
     label move, so nothing changes under a task nobody is looking at."""
-    await session.execute(select(Task.id).where(Task.id == task.id).with_for_update(key_share=True))
+    await session.execute(_lock_clause(task, write=True))
     task.archived_at = datetime.now(UTC) if archived else None
     await session.flush()
     return task
@@ -550,15 +543,19 @@ async def _lock(session: AsyncSession, task: Task, *, write: bool) -> None:
 
     A write reads ``archived_at`` under the lock, so an archive that commits first is seen.
     """
-    clause = select(Task.archived_at).where(Task.id == task.id)
-    lock = clause.with_for_update(key_share=True) if write else clause.with_for_update(read=True)
-    archived_at = await session.scalar(lock)
+    archived_at = await session.scalar(_lock_clause(task, write=write))
     if write and archived_at is not None:
         ref = await _task_project(session, task)
         raise ConfigError(
             f"task {task.slug!r} is archived; nothing in it can be pushed, labelled or "
             f"changed (`opseval task unarchive {task.slug} --project {ref}` brings it back)"
         )
+
+
+def _lock_clause(task: Task, *, write: bool) -> Select[datetime | None]:
+    """The task row lock (see :func:`_lock`), reading ``archived_at``."""
+    clause = select(Task.archived_at).where(Task.id == task.id)
+    return clause.with_for_update(key_share=True) if write else clause.with_for_update(read=True)
 
 
 async def _task_project(session: AsyncSession, task: Task) -> str:
@@ -573,12 +570,29 @@ async def _task_project(session: AsyncSession, task: Task) -> str:
     return f"{row[0]}/{row[1]}"
 
 
-def _link(task: Task, item: CatalogueItem, kind: str) -> uuid.UUID:
-    """An item a task may link as its profile or default suite: its own, of ``kind``. The
-    database refuses anything else too (a composite key and a trigger); this names it."""
-    if item.task_id != task.id or item.kind != kind:  # pragma: no cover - callers select so
-        raise ConfigError(f"{item.kind} {item.name!r} is not a {kind} of task {task.slug!r}")
-    return item.id
+LINK_RULES = (
+    "fk_tasks_profile_item_id_catalogue_items",
+    "fk_tasks_default_suite_item_id_catalogue_items",
+    "ck_tasks_profile_item_kind",
+    "ck_tasks_default_suite_item_kind",
+)
+"""What the database calls the rule that a task links only its own items, of the right kind."""
+
+
+async def _flush_links(session: AsyncSession, task: Task) -> None:
+    """Write a task's changed links. The callers only ever pick the task's own items of the
+    right kind; should one not, the database refuses it, and this names the rule."""
+    slug = task.slug  # read now: a failed flush expires the row
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        rule = next((r for r in LINK_RULES if r in str(exc.orig)), None)
+        if rule is None:
+            raise
+        raise ConfigError(
+            f"task {slug!r} may link only its own profile and suite, of those kinds "
+            f"(the database refused it: {rule})"
+        ) from exc
 
 
 async def _latest_versions(
@@ -692,7 +706,8 @@ async def push(
         current[item.id] = version.id
     profiles = [items[(f.kind, f.name)] for f in files if f.kind == "profile"]
     if profiles:  # read_folder always yields exactly one
-        task.profile_item_id = _link(task, profiles[0], "profile")
+        task.profile_item_id = profiles[0].id
+    await _flush_links(session, task)
     others = [i for i in items.values() if i.id not in current]
     await _move_label(session, LATEST, current, others)
     if label is not None:

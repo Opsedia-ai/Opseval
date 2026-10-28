@@ -9,7 +9,14 @@ labels that point at one version each, the way Langfuse versions prompts: ``prod
 what a run fetches when it names no label, and ``latest`` is the catalogue as last pushed.
 
 Migrations in ``migrations/versions`` create exactly this; a test compares the two, so they
-cannot drift.
+cannot drift. The one piece a foreign key cannot say, the kind of a task's linked items, is a
+trigger: :func:`install_link_kinds` creates it, from ``metadata.create_all`` (an event on the
+``tasks`` table) and from migration ``0003`` alike.
+
+Deleting rows: a task's links to its items are ``NO ACTION`` keys, so an item a task links (its
+profile or default suite) cannot be deleted on its own; clear the link first. Nothing in the
+store deletes an item today: items go only with their task or project, which removes both rows
+in one statement.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
+    Connection,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -28,7 +36,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -51,6 +61,68 @@ MODALITIES = ("text", "audio_file", "audio_stream", "telephony", "webrtc")
 
 def _one_of(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({', '.join(repr(v) for v in values)})"
+
+
+LINK_KINDS = "opseval_task_link_kinds"
+"""The trigger (and its function) that checks the kind of a task's linked items."""
+LINK_COLUMNS = {"profile_item_id": "profile", "default_suite_item_id": "suite"}
+"""A task's links to its own items, and the kind each must have."""
+_LINK_KINDS_FUNCTION = """
+CREATE FUNCTION {schema}.opseval_task_link_kinds() RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM {schema}.catalogue_items WHERE id = NEW.profile_item_id AND kind <> 'profile'
+  ) THEN
+    RAISE EXCEPTION '%: tasks.profile_item_id must name an item of kind profile',
+      'ck_tasks_profile_item_kind'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ck_tasks_profile_item_kind';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM {schema}.catalogue_items WHERE id = NEW.default_suite_item_id AND kind <> 'suite'
+  ) THEN
+    RAISE EXCEPTION '%: tasks.default_suite_item_id must name an item of kind suite',
+      'ck_tasks_default_suite_item_kind'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ck_tasks_default_suite_item_kind';
+  END IF;
+  RETURN NEW;
+END
+$$
+"""
+"""The kind half of the links: a foreign key cannot say it, and a trigger is cheap here (a
+task's links change once per push). An item's kind never changes, so tasks are enough.
+
+The function's own ``search_path`` is the catalogue only, and every table is named with the
+schema the tables were created in: a caller's ``search_path`` can never point it at a look-alike
+``catalogue_items``. As it stands this is what migration ``0003`` installs; changing it needs a
+new migration, never an edit here alone."""
+
+
+def _schema(connection: Connection) -> str:
+    """The schema the tables are being created in, quoted for SQL."""
+    schema = connection.scalar(text("SELECT current_schema()"))
+    if not schema:
+        raise RuntimeError("no current schema (an empty search_path): cannot create the tables")
+    return str(connection.dialect.identifier_preparer.quote_identifier(schema))
+
+
+def install_link_kinds(connection: Connection) -> None:
+    """Create the kind trigger on ``tasks`` in the current schema."""
+    schema = _schema(connection)
+    connection.execute(text(_LINK_KINDS_FUNCTION.format(schema=schema)))
+    connection.execute(
+        text(
+            f"CREATE TRIGGER {LINK_KINDS} BEFORE INSERT OR UPDATE OF {', '.join(LINK_COLUMNS)} "
+            f"ON {schema}.tasks FOR EACH ROW EXECUTE FUNCTION {schema}.{LINK_KINDS}()"
+        )
+    )
+
+
+def drop_link_kinds(connection: Connection) -> None:
+    """Remove what :func:`install_link_kinds` created."""
+    schema = _schema(connection)
+    connection.execute(text(f"DROP TRIGGER IF EXISTS {LINK_KINDS} ON {schema}.tasks"))
+    connection.execute(text(f"DROP FUNCTION IF EXISTS {schema}.{LINK_KINDS}()"))
 
 
 class Base(DeclarativeBase):
@@ -104,7 +176,7 @@ class Task(Base):
         # NO ACTION rather than SET NULL: Postgres before 15 cannot null one column of a
         # composite key, and nothing deletes an item except with its task (the cascade
         # removes both rows in one statement, which NO ACTION checks only at its end).
-        # The item's kind is checked by a trigger the migration installs.
+        # The item's kind is checked by a trigger (install_link_kinds, attached below).
         ForeignKeyConstraint(
             ["profile_item_id", "id"],
             ["catalogue_items.id", "catalogue_items.task_id"],
@@ -136,6 +208,18 @@ class Task(Base):
     """Where the task's data may live (matters once audio is stored, ADR-0053)."""
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = _created()
+
+
+def _after_create(_target: object, connection: Connection, **_kw: Any) -> None:
+    install_link_kinds(connection)
+
+
+def _before_drop(_target: object, connection: Connection, **_kw: Any) -> None:
+    drop_link_kinds(connection)
+
+
+event.listen(Task.__table__, "after_create", _after_create)
+event.listen(Task.__table__, "before_drop", _before_drop)
 
 
 class CatalogueItem(Base):

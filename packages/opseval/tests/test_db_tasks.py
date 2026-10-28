@@ -42,7 +42,7 @@ from opseval.db.catalogue_store import (
     update_task,
 )
 from opseval.db.engine import make_engine, sessions
-from opseval.db.schema import CatalogueItem, Task
+from opseval.db.schema import LINK_KINDS, Base, CatalogueItem, Task
 from opseval.demo import catalogue_dir
 from opseval.errors import ConfigError
 from opseval.scoring import INVARIANTS, REGISTRY
@@ -238,21 +238,75 @@ class TestTheMigration:
         engine = _engine(pg_url)
         try:
             await migrate.upgrade(engine, "0001")
-            await _seed_0001(engine)
+            ids = await _seed_0001(engine)
             await migrate.upgrade(engine)
             async with sessions(engine)() as s, s.begin():
                 one = await get_task(s, "acme/one")
                 await update_task(s, one, kind="voice", region="eu", default_suite="smoke")
-                await archive_task(s, await get_task(s, "acme/two"))
+                two = await get_task(s, "acme/two")
+                await archive_task(s, two)
+                # Two profiles: an upgrade would not link this one again.
+                two.profile_item_id = ids["two:profile:staging"]
+                await update_task(s, await get_task(s, "acme/empty"), name="Main")
             with pytest.raises(RuntimeError) as caught:
                 async with engine.begin() as conn:
                     await conn.run_sync(_downgrade, "0001")
             message = str(caught.value)
             assert "nothing was downgraded" in message
             assert "acme/one: the default task's kind voice, region eu, a default suite" in message
-            assert "acme/two: the default task's archived" in message
-            assert "acme/empty" not in message
+            assert "acme/two: the default task's archived, its profile link" in message
+            assert "acme/empty: the default task's name 'Main'" in message
             assert await migrate.current(engine) == "0003"
+
+            # One step down never is: 0003's downgrade loses nothing. 0002's refuses the rest.
+            async with engine.begin() as conn:
+                await conn.run_sync(_downgrade, "-1")
+            assert await migrate.current(engine) == "0002"
+            with pytest.raises(RuntimeError, match="acme/empty: the default task's name"):
+                async with engine.begin() as conn:
+                    await conn.run_sync(_downgrade, "-1")
+            assert await migrate.current(engine) == "0002"
+
+            # Put back as the upgrade made them, and the downgrade goes through.
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE tasks SET name = 'default', kind = 'chat', region = NULL, "
+                        "archived_at = NULL, default_suite_item_id = NULL, profile_item_id = NULL "
+                        "WHERE project_id <> :one"
+                    ),
+                    {"one": ids["one"]},
+                )
+                await conn.execute(
+                    text(
+                        "UPDATE tasks SET kind = 'chat', region = NULL, "
+                        "default_suite_item_id = NULL WHERE project_id = :one"
+                    ),
+                    {"one": ids["one"]},
+                )
+                await conn.run_sync(_downgrade, "0001")
+            assert await migrate.current(engine) == "0001"
+        finally:
+            await engine.dispose()
+
+    async def test_0003_fails_fast_on_a_busy_database(
+        self, pg_url: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A read holding the catalogue must not have the upgrade queue every later read.
+        engine = _engine(pg_url)
+        try:
+            await migrate.upgrade(engine, "0002")
+            monkeypatch.setattr(migrate, "LOCK_TIMEOUT", "200ms")
+            async with engine.connect() as reader, reader.begin():
+                await reader.execute(text("SELECT count(*) FROM catalogue_items"))
+                with pytest.raises(ConfigError, match="could not lock .* within 200ms"):
+                    await migrate.upgrade(engine)
+            assert await migrate.current(engine) == "0002"
+            await migrate.upgrade(engine)
+            assert await migrate.current(engine) == "0003"
+            # The timeout was the migration's own, and is not left behind for what comes next.
+            async with engine.begin() as conn:
+                assert await conn.scalar(text("SHOW lock_timeout")) == "0"
         finally:
             await engine.dispose()
 
@@ -437,6 +491,90 @@ class TestTheTable:
             left = await s.scalar(select(func.count()).select_from(CatalogueItem))
         assert left == 7  # acme/other's catalogue only
 
+    async def test_the_store_names_the_link_rule_the_database_enforces(
+        self, engine: AsyncEngine, tmp_path: Path
+    ) -> None:
+        cat = folder(tmp_path)
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, PROJECT)
+            await push(s, await _voice(s), read(cat))
+        rule = "fk_tasks_profile_item_id_catalogue_items"
+        with pytest.raises(ConfigError, match=f"may link only its own .*{rule}"):
+            async with sessions(engine)() as s, s.begin():
+                chat, voice = await get_task(s, PROJECT), await get_task(s, PROJECT, "voice")
+                theirs = await s.scalar(
+                    select(CatalogueItem.id).where(
+                        CatalogueItem.task_id == voice.id, CatalogueItem.kind == "profile"
+                    )
+                )
+                # As if a caller had picked another task's item: the store's write meets it.
+                with s.no_autoflush:
+                    chat.profile_item_id = theirs
+                    await update_task(s, chat, name="chat")
+
+    async def test_a_schema_made_by_create_all_has_the_kind_trigger_too(
+        self, pg_url: str, tmp_path: Path
+    ) -> None:
+        # In a schema of its own, so the trigger must name its tables by schema: with the
+        # caller's search_path elsewhere, it still checks the right catalogue_items.
+        engine = _engine(pg_url)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE SCHEMA other"))
+                await conn.execute(text("SET LOCAL search_path TO other"))
+                await conn.run_sync(Base.metadata.create_all)
+                prosrc = await conn.scalar(
+                    text("SELECT proconfig FROM pg_proc WHERE proname = :n"), {"n": LINK_KINDS}
+                )
+            assert prosrc == ["search_path=pg_catalog, pg_temp"]
+            org, project, task, suite = (uuid.uuid4() for _ in range(4))
+            async with engine.begin() as conn:
+                await conn.execute(text("SET LOCAL search_path TO public"))
+                await conn.execute(
+                    text("INSERT INTO other.organizations (id, slug, name) VALUES (:o, 'a', 'a')"),
+                    {"o": org},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO other.projects (id, organization_id, slug, name) "
+                        "VALUES (:p, :o, 'p', 'p')"
+                    ),
+                    {"p": project, "o": org},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO other.tasks (id, project_id, slug, name, kind, modality) "
+                        "VALUES (:t, :p, 'default', 'default', 'chat', 'text')"
+                    ),
+                    {"t": task, "p": project},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO other.catalogue_items (id, project_id, task_id, kind, name) "
+                        "VALUES (:i, :p, :t, 'suite', 'smoke')"
+                    ),
+                    {"i": suite, "p": project, "t": task},
+                )
+            with pytest.raises(IntegrityError, match="ck_tasks_profile_item_kind"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("UPDATE other.tasks SET profile_item_id = :i WHERE id = :t"),
+                        {"i": suite, "t": task},
+                    )
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("UPDATE other.tasks SET default_suite_item_id = :i WHERE id = :t"),
+                    {"i": suite, "t": task},
+                )
+                await conn.execute(text("SET LOCAL search_path TO other"))
+                await conn.run_sync(Base.metadata.drop_all)
+                left = await conn.scalar(
+                    text("SELECT count(*) FROM pg_proc WHERE proname = :n"), {"n": LINK_KINDS}
+                )
+            assert left == 0
+        finally:
+            await engine.dispose()
+
     async def test_a_new_project_has_its_default_task(self, engine: AsyncEngine) -> None:
         async with sessions(engine)() as s, s.begin():
             await ensure_project(s, PROJECT)
@@ -501,16 +639,17 @@ class TestNamingATask:
             with pytest.raises(ConfigError, match="region is 'eu', not None"):
                 await ensure_task(s, PROJECT, "x", region="")
 
-    async def test_ensuring_an_archived_task_says_so_and_leaves_it_archived(
+    async def test_ensuring_an_archived_task_finds_it_and_leaves_it_archived(
         self, engine: AsyncEngine
     ) -> None:
         async with sessions(engine)() as s, s.begin():
             await archive_task(s, await _voice(s))
-            with pytest.raises(ConfigError) as caught:
-                await ensure_task(s, PROJECT, "voice")
+            found, created = await ensure_task(s, PROJECT, "voice", kind="voice")
+            assert created is False and found.archived_at is not None
+            # Only a difference is an error, archived or not.
+            with pytest.raises(ConfigError, match="kind is 'voice', not 'chat'"):
+                await ensure_task(s, PROJECT, "voice", kind="chat")
             assert (await get_task(s, PROJECT, "voice")).archived_at is not None
-        assert "is archived" in str(caught.value)
-        assert f"opseval task unarchive voice --project {PROJECT}" in str(caught.value)
 
     async def test_two_inits_at_once_both_succeed(self, engine: AsyncEngine) -> None:
         # The second waits on the first's insert, then finds what it made: no unique-key error.
@@ -632,10 +771,13 @@ class TestArchiving:
                 await push(s, voice, read(cat))
             with pytest.raises(ConfigError, match="'voice' is archived"):
                 await set_label(s, voice, "suite", "smoke", 1, "staging")
-            with pytest.raises(ConfigError, match="'voice' is archived") as caught:
-                await update_task(s, voice, region="eu")
-            assert f"opseval task unarchive voice --project {PROJECT}" in str(caught.value)
-            assert voice.region is None
+            # Its description can still change; its catalogue cannot.
+            await update_task(s, voice, region="eu", name="Voice", default_suite="smoke")
+            assert (voice.region, voice.name, voice.archived_at is not None) == (
+                "eu",
+                "Voice",
+                True,
+            )
             # Reads still work: nothing is deleted, and a pull can bring the catalogue out.
             assert len(await list_items(s, voice)) == 7
             assert await history(s, voice, "suite", "smoke")
@@ -823,6 +965,12 @@ class TestCommandLine:
         )
         refused = runner.invoke(app, ["catalogue", "push", str(cat), *task])
         assert refused.exit_code == 3 and "is archived" in refused.output
+        found = runner.invoke(app, ["db", "init", "--project", PROJECT, "--task", DEFAULT_TASK])
+        assert found.exit_code == 0, found.output
+        assert (
+            f"exists (archived; `opseval task unarchive {DEFAULT_TASK} --project {PROJECT}` "
+            "to push to it)" in found.output
+        )
         assert runner.invoke(app, ["task", "list", "--project", PROJECT]).output.strip() == ""
         shown = runner.invoke(app, ["task", "list", "--project", PROJECT, "--all"])
         assert "archived" in shown.output

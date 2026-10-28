@@ -8,9 +8,11 @@ trigger (``opseval_task_link_kinds``) that checks the profile is a ``profile`` a
 ``suite``. A link the new rule forbids (another task's item, or the wrong kind) is invalid, so
 it is cleared before the keys are added, and the count is printed.
 
-The downgrade removes exactly that and restores ``0002``'s plain ``ON DELETE SET NULL`` keys.
-When the downgrade goes on below ``0002``, it first refuses anything ``0002``'s own downgrade
-would silently drop (see ``_guard_below_tasks``).
+The upgrade waits at most ``migrate.LOCK_TIMEOUT`` for each lock: on a busy database it fails
+fast, naming why, instead of queueing behind a push while every read queues behind it.
+
+The downgrade removes exactly that and restores ``0002``'s plain ``ON DELETE SET NULL`` keys;
+it loses nothing, so it is never refused.
 
 Revision ID: 0003
 Revises: 0002
@@ -19,42 +21,23 @@ Revises: 0002
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
-from typing import Any
 
 import sqlalchemy as sa
-from alembic import context, op
+from alembic import op
+from sqlalchemy.exc import DBAPIError
+
+from opseval.db import migrate
+from opseval.db.schema import LINK_COLUMNS, drop_link_kinds, install_link_kinds
+from opseval.errors import ConfigError
 
 revision = "0003"
 down_revision = "0002"
 branch_labels = None
 depends_on = None
 
-LINKS = {"profile_item_id": "profile", "default_suite_item_id": "suite"}
-"""A task's links to its own items, and the kind each must have."""
-LINK_KINDS = "opseval_task_link_kinds"
-LINK_KINDS_FUNCTION = """
-CREATE FUNCTION opseval_task_link_kinds() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM catalogue_items WHERE id = NEW.profile_item_id AND kind <> 'profile')
-  THEN
-    RAISE EXCEPTION '%: tasks.profile_item_id must name an item of kind profile',
-      'ck_tasks_profile_item_kind'
-      USING ERRCODE = 'check_violation', CONSTRAINT = 'ck_tasks_profile_item_kind';
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM catalogue_items WHERE id = NEW.default_suite_item_id AND kind <> 'suite'
-  ) THEN
-    RAISE EXCEPTION '%: tasks.default_suite_item_id must name an item of kind suite',
-      'ck_tasks_default_suite_item_kind'
-      USING ERRCODE = 'check_violation', CONSTRAINT = 'ck_tasks_default_suite_item_kind';
-  END IF;
-  RETURN NEW;
-END
-$$
-"""
-"""The kind half of the links: a foreign key cannot say it, and a trigger is cheap here (a
-task's links change once per push). An item's kind never changes, so tasks are enough."""
+LOCK_NOT_AVAILABLE = "55P03"
+SET_LOCK_TIMEOUT = sa.text("SELECT set_config('lock_timeout', :t, true)")
+"""``SET LOCAL lock_timeout``, with the value as a parameter."""
 
 
 def _fk(column: str) -> str:
@@ -63,7 +46,7 @@ def _fk(column: str) -> str:
 
 def _clear_invalid(column: str, kind: str) -> int:
     """Null every link the new key or the trigger would refuse; how many there were.
-    ``column`` is one of ``LINKS``, never input, so the f-string is not an injection."""
+    ``column`` is one of ``LINK_COLUMNS``, never input, so the f-string is not an injection."""
     result = op.get_bind().execute(
         sa.text(
             f"UPDATE tasks AS t SET {column} = NULL WHERE t.{column} IS NOT NULL "  # noqa: S608  # nosec B608
@@ -75,9 +58,9 @@ def _clear_invalid(column: str, kind: str) -> int:
     return int(result.rowcount or 0)
 
 
-def upgrade() -> None:
+def _upgrade() -> None:
     # The links 0002 allowed but the new rule forbids are invalid: cleared, and counted.
-    for column, kind in LINKS.items():
+    for column, kind in LINK_COLUMNS.items():
         cleared = _clear_invalid(column, kind)
         if cleared:
             print(
@@ -89,73 +72,36 @@ def upgrade() -> None:
     # so another task's item cannot be named; NO ACTION, because Postgres before 15 cannot
     # null one column of a composite key, and an item is only ever deleted with its task.
     op.create_unique_constraint("uq_catalogue_items_id", "catalogue_items", ["id", "task_id"])
-    for column in LINKS:
+    for column in LINK_COLUMNS:
         op.drop_constraint(_fk(column), "tasks", type_="foreignkey")
         op.create_foreign_key(
             _fk(column), "tasks", "catalogue_items", [column, "id"], ["id", "task_id"]
         )
-    op.execute(LINK_KINDS_FUNCTION)
-    op.execute(
-        f"CREATE TRIGGER {LINK_KINDS} BEFORE INSERT OR UPDATE OF "
-        f"{', '.join(LINKS)} ON tasks FOR EACH ROW EXECUTE FUNCTION {LINK_KINDS}()"
-    )
+    install_link_kinds(op.get_bind())
 
 
-LOST = """
-SELECT o.slug || '/' || p.slug, t.slug, t.kind, t.modality, t.region,
-       t.archived_at IS NOT NULL, t.default_suite_item_id IS NOT NULL
-FROM tasks AS t
-JOIN projects AS p ON p.id = t.project_id
-JOIN organizations AS o ON o.id = p.organization_id
-WHERE t.slug <> 'default' OR t.kind <> 'chat' OR t.modality <> 'text'
-   OR t.region IS NOT NULL OR t.archived_at IS NOT NULL OR t.default_suite_item_id IS NOT NULL
-ORDER BY 1, 2
-"""
-
-
-def _lost(row: Sequence[Any]) -> str:
-    project, slug, kind, modality, region, archived, suite = row
-    if slug != "default":
-        return f"{project}: task {slug!r} and its catalogue"
-    settings = [f"kind {kind}"] if kind != "chat" else []
-    settings += [f"modality {modality}"] if modality != "text" else []
-    settings += [f"region {region}"] if region is not None else []
-    settings += ["archived"] if archived else []
-    settings += ["a default suite"] if suite else []
-    return f"{project}: the default task's {', '.join(settings)}"
-
-
-def _stays_at_or_above_0002() -> bool:
-    """Whether this downgrade stops at ``0002`` or later. A base, ``0001``, relative or
-    unknown destination counts as going below: the guard then runs, which can only refuse."""
-    destination = context.get_revision_argument()
-    if not isinstance(destination, str) or destination.startswith(("-", "+")):
-        return False
+def upgrade() -> None:
+    bind = op.get_bind()
+    # SET LOCAL lasts to the end of the migration transaction, so the old value is put back
+    # for whatever revision runs after this one.
+    before = bind.scalar(sa.text("SELECT current_setting('lock_timeout')"))
+    bind.execute(SET_LOCK_TIMEOUT, {"t": migrate.LOCK_TIMEOUT})
     try:
-        below = context.script.revision_map.iterate_revisions(destination, "base")
-        return any(r.revision == "0002" for r in below)
-    except Exception:  # noqa: BLE001 - an unresolvable destination is treated as "below"
-        return False
-
-
-def _guard_below_tasks() -> None:
-    # 0002's downgrade (unchanged since it was released) refuses only a non-default task; it
-    # would drop a default task's kind, modality, region, archive or default suite. The old
-    # schema has no place for them, so a downgrade past 0002 is refused here, never lossy.
-    lost = [_lost(row) for row in op.get_bind().execute(sa.text(LOST))]
-    if lost:
-        listed = "\n".join(f"  - {line}" for line in lost)
-        raise RuntimeError(
-            f"the schema before tasks cannot hold these, so nothing was downgraded:\n{listed}"
-        )
+        _upgrade()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != LOCK_NOT_AVAILABLE:
+            raise
+        raise ConfigError(
+            "migration 0003 could not lock the tasks and catalogue tables within "
+            f"{migrate.LOCK_TIMEOUT}: something else (a push, a pull) holds them. Nothing was "
+            "changed; run `opseval db upgrade` again when the database is quieter"
+        ) from exc
+    bind.execute(SET_LOCK_TIMEOUT, {"t": before})
 
 
 def downgrade() -> None:
-    if not _stays_at_or_above_0002():
-        _guard_below_tasks()
-    op.execute(f"DROP TRIGGER {LINK_KINDS} ON tasks")
-    op.execute(f"DROP FUNCTION {LINK_KINDS}()")
-    for column in LINKS:
+    drop_link_kinds(op.get_bind())
+    for column in LINK_COLUMNS:
         op.drop_constraint(_fk(column), "tasks", type_="foreignkey")
         op.create_foreign_key(
             _fk(column), "tasks", "catalogue_items", [column], ["id"], ondelete="SET NULL"

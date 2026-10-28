@@ -174,25 +174,35 @@ def db_init(
     """Create an organisation and project if they do not exist (headless initialisation),
     with its `default` task; `--task` creates another. Nothing that exists is changed."""
     _modules()
-    from opseval.db.catalogue_store import ensure_project, ensure_task
+    from opseval.db.catalogue_store import ensure_project, ensure_task, parse_project
 
     if task is None and (kind or modality or region):
         raise _fail(ConfigError("--kind, --modality and --region describe a task: add --task"))
 
-    async def work(session: AsyncSession) -> tuple[str, bool] | None:
+    async def work(session: AsyncSession) -> tuple[str, str] | None:
         await ensure_project(session, project, name=name)
         if task is None:
             return None
         made, created = await ensure_task(
             session, project, task, kind=kind, modality=modality, region=region
         )
-        return f"{made.slug} ({made.kind}, {made.modality})", created
+        if created:
+            state = "created"
+        elif made.archived_at is None:
+            state = "already exists"
+        else:
+            ref = "/".join(parse_project(project))
+            state = (
+                f"exists (archived; `opseval task unarchive {made.slug} --project {ref}` "
+                "to push to it)"
+            )
+        return f"{made.slug} ({made.kind}, {made.modality})", state
 
     made = _run(work)
     typer.echo(f"Project {project} is ready.")
     if made is not None:
-        what, created = made
-        typer.echo(f"Task {what} {'created' if created else 'already exists'}.")
+        what, state = made
+        typer.echo(f"Task {what} {state}.")
 
 
 @task_app.command("list")

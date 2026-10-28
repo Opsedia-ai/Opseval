@@ -106,33 +106,42 @@ The database layer and its CLI are built; the console and runs are not.
 
 - **Schema and migrations.** `db.schema.Task` and revision `0002` (`0002_tasks.py`) as decided,
   then revision `0003` (`0003_task_link_keys.py`) for the link keys below. `0002` was released
-  with plain links to any item and is never edited after release (a database already at it
-  would never see the change), so the stricter keys are a revision of their own. Details the
-  decision left open:
+  with plain links to any item, so the stricter keys are a revision of their own. The rule
+  for a released revision: **never edit its upgrade** (a database already past it would never
+  run the change, and two databases at the same revision would differ). Its downgrade may be
+  edited: it runs from the installed package, and changes nothing about what the upgrade
+  produced. Details the decision left open:
   - `catalogue_items (task_id, project_id)` is a composite foreign key to `tasks (id,
     project_id)`, so an item can never sit in one project's row and another project's task.
   - `profile_item_id` and `default_suite_item_id` are composite foreign keys, `(item, task)`
     to `catalogue_items (id, task_id)`, so a task can only link its own items; a trigger
     (`opseval_task_link_kinds`) checks the profile is a `profile` and the suite a `suite`.
     They are `NO ACTION`, not `SET NULL`: Postgres before 15 cannot null one column of a
-    composite key, and nothing deletes an item except with its task. A task cascades from its
+    composite key, and nothing deletes an item except with its task. Code that ever deletes
+    a single item must clear a link to it first. The trigger is declared with the models too
+    (`schema.install_link_kinds`, on the `tasks` table's `after_create`), so a schema made by
+    `metadata.create_all` enforces the same rule; `0003` calls the same function. Its function
+    runs with `search_path = pg_catalog, pg_temp` and names `catalogue_items` by the schema it
+    was created in (`current_schema()` at that moment), so a caller's `search_path` cannot
+    point it at another table. A task cascades from its
     project, as items do; `runs.task_id` (ADR-0051) will be `RESTRICT`, which keeps a task
     with runs from being deleted.
   - `0003` first sets to `NULL` every existing link the new rule forbids (another task's
     item, or the wrong kind), printing how many per column: such a link was never valid, and
     there is no right item to guess. Then it adds `catalogue_items (id, task_id)` unique,
-    swaps the plain keys for the composite ones (same names) and installs the trigger. Its
-    downgrade to `0002` removes exactly that and restores `0002`'s plain `ON DELETE SET NULL`
-    keys; it loses nothing, so it is never refused.
-  - `0002`'s downgrade is unchanged as released: it refuses only while a non-default task
-    exists. The fuller guard (a `default` task's settings too) lives in `0003`'s downgrade
-    and runs when the destination is below `0002` (`0001`, `base`, or a relative or unknown
-    one, which can only make it refuse), so a downgrade from head to `0001` is refused,
-    whole, before anything is dropped. A database that never reached `0003` keeps `0002`'s
-    original check.
-  - The downgrade to `0001` works while every task is a `default` one as the upgrade made it
-    (chat, text, no region, not archived, no default suite), and is refused otherwise, with a
-    list of what it would lose.
+    swaps the plain keys for the composite ones (same names) and installs the trigger. It
+    sets `lock_timeout` to `migrate.LOCK_TIMEOUT` (10 s) for its own statements (`SET LOCAL`
+    in the one migration transaction `migrate.upgrade` opens, put back afterwards): on a busy
+    database it fails with a `ConfigError` saying so and changes nothing, instead of waiting
+    behind a push while every read waits behind it. Its downgrade to `0002` removes exactly
+    that and restores `0002`'s plain `ON DELETE SET NULL` keys; it loses nothing, so it is
+    never refused.
+  - The guard against a lossy downgrade lives in `0002`'s downgrade (edited after release, as
+    the rule above allows). The downgrade to `0001` works while every task is a `default` one
+    as the upgrade made it (named `default`, chat, text, no region, not archived, no default
+    suite, and a profile link only to the project's one profile, which an upgrade would link
+    again), and is refused otherwise, listing what it would lose, before anything is dropped.
+    From head to `0001` runs in one transaction, so a refusal leaves the database at head.
 - **A new project gets its `default` task** (`ensure_project`), so a project made after the
   migration looks like one made before it. Organisation, project and task are inserted
   `ON CONFLICT DO NOTHING` and then read, so two `db init` at once both succeed.
@@ -142,8 +151,9 @@ The database layer and its CLI are built; the console and runs are not.
   command, and nothing is created.
 - **A push links the folder's profile** as the task's `profile_item_id`. If the profile's name
   changes, the link follows it to the new item.
-- **The lock is the task row**: `FOR NO KEY UPDATE` for a push, a label move or a task update,
-  `FOR SHARE` for a pull. An archived task refuses an update too (only `unarchive` changes it).
+- **The lock is the task row**: `FOR NO KEY UPDATE` for a push, a label move, a task update or
+  an archive, `FOR SHARE` for a pull. An archived task can still be updated (its name, kind,
+  modality, region, default suite: its description, not its catalogue).
   Two tasks of one project never wait for each other.
 - **Archiving.** An archived task refuses pushes and label moves. A write reads `archived_at`
   under its own lock, so an archive that commits first is always seen. Pull, list and history
@@ -151,8 +161,9 @@ The database layer and its CLI are built; the console and runs are not.
 - **CLI.**
   - `--task SLUG` (default `default`) on `catalogue push|pull|list|history|label`.
   - `db init --project org/p --task t [--kind --modality --region]` creates a task. On an
-    existing task it reports "already exists", and refuses when the options asked for differ
-    from the task, rather than ignore them.
+    existing task it reports "already exists" (for an archived one, "exists (archived; `opseval
+    task unarchive … --project …` to push to it)", still exit 0), and refuses when the options
+    asked for differ from the task, rather than ignore them.
   - `opseval task list [--all]`, `task update SLUG [--kind --modality --region --name
     --default-suite]`, and `task archive|unarchive SLUG` let an operator change the defaults
     the migration set.
@@ -166,7 +177,12 @@ The database layer and its CLI are built; the console and runs are not.
     refusal);
   - `0003` on a database at `0002` holding invalid links (another task's profile, a scenario
     as default suite): those cleared and counted, valid ones kept, the keys and trigger in
-    place, and the downgrade back to `0002`'s exact keys;
+    place, the downgrade back to `0002`'s exact keys, and an upgrade that fails fast while a
+    reader holds the tables;
+  - the downgrade: one step from `0003` never refused, below `0002` refused listing a
+    renamed `default` task, its settings and a profile link an upgrade would not remake, and
+    allowed once nothing would be lost;
+  - a schema made by `create_all` in another schema enforcing the kind trigger;
   - the check constraints and the composite key;
   - same-named items in two tasks;
   - `--task` on every command, and an unknown task (exit 3, nothing created);
