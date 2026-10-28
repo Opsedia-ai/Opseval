@@ -313,6 +313,7 @@ async def rescore_run(
         gate=new_gate,
         exit_code=exit_code(tests, load_errors=len(original.load_errors), gate=new_gate),
         usage=meter.snapshot(),
+        usage_events=[e for _, e in meter.events],
         config_digest=config_digest(settings),
         load_errors=original.load_errors,
         rescore=info,

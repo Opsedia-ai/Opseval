@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from datetime import date
 from array import array
 from pathlib import Path
 from typing import Any
@@ -41,10 +42,11 @@ from opseval.errors import (
     TtsRateLimited,
     TtsRequestError,
 )
-from opseval.llm import SPEECH_PRICES, UsageMeter
+from opseval.llm import UsageMeter
 from opseval.models.preflight import CheckStatus
 from opseval.models.profile import SutProfile
 from opseval.models.results import ModelUsage
+from opseval.models.usage import ModelPrice, PriceTable
 from opseval.plugins import STT_GROUP, TELEPHONY_GROUP, TTS_GROUP, reset_for_tests
 from opseval.preflight import (
     CANARY_PHRASES,
@@ -482,7 +484,9 @@ class TestUsage:
         by_role = {u.role: u for u in meter.snapshot()}
         assert by_role["tts"].characters == 5
         assert by_role["tts"].audio_out_seconds == pytest.approx(0.5)
-        assert by_role["tts"].audio_in_seconds is None and by_role["tts"].cost_usd is None
+        assert by_role["tts"].audio_in_seconds is None
+        # tts-1 is in the built-in price table: 5 characters at $15 per 1M.
+        assert by_role["tts"].cost_usd == pytest.approx(5 * 15 / 1_000_000)
         assert by_role["stt"].audio_in_seconds == pytest.approx(0.5)
         assert by_role["stt"].characters is None
         judge = by_role["judge"]
@@ -492,10 +496,24 @@ class TestUsage:
             None,
         )
 
-    def test_a_price_per_character_or_per_second(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(SPEECH_PRICES, "tts-1", (None, 0.00001))
-        monkeypatch.setitem(SPEECH_PRICES, "whisper-1", (0.0001, None))
-        meter = UsageMeter()
+    def test_a_price_per_character_or_per_second(self) -> None:
+        table = PriceTable(
+            prices=(
+                ModelPrice(
+                    match="tts-1",
+                    unit="characters",
+                    effective_from=date(2020, 1, 1),
+                    characters=10.0,
+                ),
+                ModelPrice(
+                    match="whisper-1",
+                    unit="seconds",
+                    effective_from=date(2020, 1, 1),
+                    audio_in=0.006,
+                ),
+            )
+        )
+        meter = UsageMeter(prices=table)
         meter.record_speech("tts", "tts-1", characters=1000, audio_out_seconds=2.0)
         meter.record_speech("stt", "whisper-1", audio_in_seconds=60.0)
         meter.record_speech("stt", "unpriced", audio_in_seconds=60.0)
@@ -1054,13 +1072,15 @@ class TestArabicFolding:
 
 
 class TestSpeechUsageRows:
-    def test_a_speech_row_has_no_tokens_an_llm_row_has_zero(self) -> None:
+    def test_a_speech_row_has_no_tokens_an_llm_row_counts_what_was_reported(self) -> None:
         meter = UsageMeter()
         meter.record_speech("tts", "tts-1", characters=3, audio_out_seconds=0.5)
-        meter.record("judge", "gpt", None, 0)
+        meter.record("judge", "gpt", {"prompt_tokens": 0, "completion_tokens": 0}, 0)
+        meter.record("simulator", "gpt", None, 0)  # failed: nothing to count, never 0
         rows = {u.role: u for u in meter.snapshot()}
         assert (rows["tts"].input_tokens, rows["tts"].output_tokens) == (None, None)
         assert (rows["judge"].input_tokens, rows["judge"].output_tokens) == (0, 0)
+        assert (rows["simulator"].input_tokens, rows["simulator"].failed_calls) == (None, 1)
 
     def test_an_old_row_without_the_fields_still_reads_with_zero_tokens(self) -> None:
         usage = ModelUsage.model_validate({"role": "judge", "model": "m", "calls": 1})

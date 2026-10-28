@@ -606,6 +606,199 @@
       "title": "TransportEvent",
       "type": "object"
     },
+    "UsageEvent": {
+      "additionalProperties": false,
+      "description": "One call the harness paid for. Lives in the attempt's record in files mode (ADR-0066).\n\nToken counts follow the OpenAI usage object: ``cached_input_tokens`` is the part of\n``input_tokens`` served from the provider's cache (``prompt_tokens_details.cached_tokens``)\nand ``reasoning_tokens`` the part of ``output_tokens`` spent reasoning\n(``completion_tokens_details.reasoning_tokens``).",
+      "properties": {
+        "answered": {
+          "default": true,
+          "title": "Answered",
+          "type": "boolean"
+        },
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        },
+        "audio_in_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio In Seconds"
+        },
+        "audio_out_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio Out Seconds"
+        },
+        "cached_input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cached Input Tokens"
+        },
+        "characters": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Characters"
+        },
+        "cost_source": {
+          "default": "unknown",
+          "enum": [
+            "provider",
+            "price_table",
+            "unknown"
+          ],
+          "title": "Cost Source",
+          "type": "string"
+        },
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Tokens"
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latency Ms"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        },
+        "price_from": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price From"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "rate_limited": {
+          "default": 0,
+          "title": "Rate Limited",
+          "type": "integer"
+        },
+        "reasoning_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Tokens"
+        },
+        "retries": {
+          "default": 0,
+          "title": "Retries",
+          "type": "integer"
+        },
+        "role": {
+          "enum": [
+            "simulator",
+            "judge",
+            "attacker",
+            "generator",
+            "tts",
+            "stt",
+            "telephony"
+          ],
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "role",
+        "model"
+      ],
+      "title": "UsageEvent",
+      "type": "object"
+    },
     "VoiceEventRecord": {
       "additionalProperties": false,
       "properties": {
@@ -887,6 +1080,21 @@
       },
       "title": "Transport Events",
       "type": "array"
+    },
+    "usage_events": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/UsageEvent"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Usage Events"
     },
     "user_turns": {
       "default": 0,

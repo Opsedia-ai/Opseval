@@ -35,7 +35,9 @@ from opseval.models.gate import Preset, ResolvedGatePolicy
 from opseval.models.gate import resolve as resolve_gate
 from opseval.models.preflight import PreflightReport
 from opseval.models.profile import SutProfile
+from opseval.models.record import RunRecord
 from opseval.models.results import (
+    AttemptVerdict,
     SkipKind,
     StopCause,
     StoppedEarly,
@@ -804,6 +806,36 @@ async def _launch(
             if lease is not None:
                 lease.release()
 
+    async def one_attempt(
+        scenario: Scenario, i: int, driver: Driver, lease: Lease | None
+    ) -> tuple[RunRecord, AttemptVerdict]:
+        """Drive, enrich, save and score one attempt. Every call it pays for (the simulator,
+        speech, the judges) is in the meter's attempt block, and goes into its record."""
+        record = await driver.run()
+        if lease is not None and not lease.check():
+            # Another run holds this tenant's lease now: the attempt may have shared
+            # the account, so it is the harness's problem, never a verdict.
+            record = record.model_copy(
+                update={
+                    "infra_errors": (
+                        *record.infra_errors,
+                        f"tenant lease lost: {lease.tenant.id} may have been shared",
+                    ),
+                    "notes": (*record.notes, TENANT_LEASE_LOST),
+                }
+            )
+        if trace_source is not None:
+            record = await enrich(record, trace_source, profile)
+        path = store.save_record(record)
+        tracker.attempt(scenario.id)
+        scores = await engine.score(record, scenario, profile)
+        verdict = attempt_verdict(record, scores, str(path))
+        # Saved again with the calls the attempt paid for, judges included (ADR-0066). The
+        # record was on disk before scoring, so a crash while judging still leaves it.
+        record = record.model_copy(update={"usage_events": meter.events_for(scenario.id, i)})
+        store.save_record(record)
+        return record, verdict
+
     async def attempts_of(
         scenario: Scenario, tenant: Tenant | None, lease: Lease | None
     ) -> TestVerdict:
@@ -837,26 +869,9 @@ async def _launch(
                 allow_commit=options.allow_commit,
                 simulator_timeout_seconds=settings.simulator_timeout_seconds,
             )
-            record = await driver.run()
-            if lease is not None and not lease.check():
-                # Another run holds this tenant's lease now: the attempt may have shared
-                # the account, so it is the harness's problem, never a verdict.
-                record = record.model_copy(
-                    update={
-                        "infra_errors": (
-                            *record.infra_errors,
-                            f"tenant lease lost: {lease.tenant.id} may have been shared",
-                        ),
-                        "notes": (*record.notes, TENANT_LEASE_LOST),
-                    }
-                )
+            with meter.attempt(scenario.id, i):
+                record, verdict = await one_attempt(scenario, i, driver, lease)
             rate_limited = rate_limited or RATE_LIMITED_NOTE in record.notes
-            if trace_source is not None:
-                record = await enrich(record, trace_source, profile)
-            path = store.save_record(record)
-            tracker.attempt(scenario.id)
-            scores = await engine.score(record, scenario, profile)
-            verdict = attempt_verdict(record, scores, str(path))
             attempts.append(verdict)
             state = (
                 "not judged" if verdict.passed is None else ("pass" if verdict.passed else "FAIL")
@@ -938,6 +953,7 @@ async def _launch(
         gate=gate,
         exit_code=exit_code(verdicts, load_errors=len(catalogue.problems), gate=gate),
         usage=meter.snapshot(),
+        usage_events=meter.outside_attempts(),
         config_digest=config_digest(settings),
         load_errors=[str(p) for p in catalogue.problems],
         preflight=health if options.preflight else None,

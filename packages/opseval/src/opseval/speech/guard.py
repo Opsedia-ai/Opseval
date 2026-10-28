@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 
 from opseval.errors import (
     HarnessError,
@@ -107,6 +108,7 @@ class GuardedTextToSpeech:
 
     async def synthesize(self, text: str, *, voice: str | None, language: str) -> Audio:
         resolved = resolve_voice(dict(self.config.voice_map), voice, language)
+        began = time.monotonic()
         try:
             async with asyncio.timeout(self.config.timeout_seconds):
                 audio = await self.provider.synthesize(text, voice=resolved, language=language)
@@ -119,17 +121,17 @@ class GuardedTextToSpeech:
                 limited=TtsRateLimited,
                 rejected=TtsRequestError,
             )
-            self._failed(error)
+            self._failed(error, began)
             if error is exc:
                 raise
             raise error from exc
         if not isinstance(audio, Audio):
-            self._failed(None)
+            self._failed(None, began)
             raise TtsError(
                 f"TTS provider {self.config.provider!r} returned {type(audio).__name__}, not Audio"
             )
         if not audio.pcm16:
-            self._failed(None)
+            self._failed(None, began)
             raise TtsError(f"TTS provider {self.config.provider!r} returned no audio")
         # Only a call that produced audio counts its characters and seconds.
         self._meter.record_speech(
@@ -137,12 +139,19 @@ class GuardedTextToSpeech:
             self.config.model_label,
             characters=len(text),
             audio_out_seconds=audio.seconds,
+            provider=self.config.provider,
+            latency_ms=_since(began),
         )
         return audio
 
-    def _failed(self, error: HarnessError | None) -> None:
+    def _failed(self, error: HarnessError | None, began: float) -> None:
         self._meter.record_speech(
-            "tts", self.config.model_label, rate_limited=_plugin_429(error, self.trusted)
+            "tts",
+            self.config.model_label,
+            rate_limited=_plugin_429(error, self.trusted),
+            answered=False,
+            provider=self.config.provider,
+            latency_ms=_since(began),
         )
 
     async def aclose(self) -> None:
@@ -179,6 +188,7 @@ class GuardedSpeechToText:
         self, audio: Audio, *, language: str, hint: str | None = None
     ) -> Transcript:
         what = self.config.label or "stt"
+        began = time.monotonic()
         try:
             async with asyncio.timeout(self.config.timeout_seconds):
                 transcript = await self.provider.transcribe(audio, language=language, hint=hint)
@@ -191,12 +201,12 @@ class GuardedSpeechToText:
                 limited=SttRateLimited,
                 rejected=SttRequestError,
             )
-            self._failed(error)
+            self._failed(error, began)
             if error is exc:
                 raise
             raise error from exc
         if not isinstance(transcript, Transcript) or not isinstance(transcript.text, str):
-            self._failed(None)
+            self._failed(None, began)
             raise SttError(
                 f"{what} provider {self.config.provider!r} returned "
                 f"{type(transcript).__name__}, not a Transcript"
@@ -209,18 +219,29 @@ class GuardedSpeechToText:
             or not math.isfinite(confidence)
             or not 0 <= confidence <= 1
         ):
-            self._failed(None)
+            self._failed(None, began)
             raise SttError(
                 f"{what} provider {self.config.provider!r} reported a confidence that is not a "
                 "number from 0 to 1"
             )
         # Only a call that was heard counts its audio seconds.
-        self._meter.record_speech("stt", self.config.model_label, audio_in_seconds=audio.seconds)
+        self._meter.record_speech(
+            "stt",
+            self.config.model_label,
+            audio_in_seconds=audio.seconds,
+            provider=self.config.provider,
+            latency_ms=_since(began),
+        )
         return transcript
 
-    def _failed(self, error: HarnessError | None) -> None:
+    def _failed(self, error: HarnessError | None, began: float) -> None:
         self._meter.record_speech(
-            "stt", self.config.model_label, rate_limited=_plugin_429(error, self.trusted)
+            "stt",
+            self.config.model_label,
+            rate_limited=_plugin_429(error, self.trusted),
+            answered=False,
+            provider=self.config.provider,
+            latency_ms=_since(began),
         )
 
     async def aclose(self) -> None:
@@ -228,6 +249,11 @@ class GuardedSpeechToText:
             await self.provider.aclose()
         except Exception:  # noqa: BLE001 - closing must never change a result
             return
+
+
+
+def _since(began: float) -> float:
+    return round((time.monotonic() - began) * 1000, 1)
 
 
 __all__ = ["GuardedSpeechToText", "GuardedTextToSpeech", "resolve_voice"]
