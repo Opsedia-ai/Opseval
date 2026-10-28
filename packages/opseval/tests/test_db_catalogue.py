@@ -16,7 +16,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from typer.testing import CliRunner
 
 from opseval.catalogue import load_catalogue, load_profile
@@ -26,7 +26,7 @@ from opseval.db import migrate
 from opseval.db.catalogue_store import (
     LATEST,
     ensure_project,
-    get_project,
+    get_task,
     history,
     list_items,
     materialize,
@@ -37,7 +37,7 @@ from opseval.db.catalogue_store import (
     set_label,
 )
 from opseval.db.engine import checked_url, make_engine, sessions
-from opseval.db.schema import Base, CatalogueItem, CatalogueVersion
+from opseval.db.schema import Base, CatalogueItem, CatalogueVersion, Task
 from opseval.demo import catalogue_dir
 from opseval.demo.refund_agent import run_agent
 from opseval.errors import AllowedHostError, ConfigError
@@ -71,6 +71,12 @@ def _without_persona(path: Path) -> str:
         skipping = False
         out.append(line)
     return "".join(out)
+
+
+async def default_task(s: AsyncSession, ref: str = PROJECT) -> Task:
+    """The project's ``default`` task, creating the project (and so the task) if needed."""
+    await ensure_project(s, ref)
+    return await get_task(s, ref)
 
 
 @pytest.fixture
@@ -312,7 +318,7 @@ class TestReadingAFolder:
 
 class TestSchema:
     async def test_upgrade_reaches_head(self, engine: AsyncEngine) -> None:
-        assert await migrate.current(engine) == migrate.head() == "0001"
+        assert await migrate.current(engine) == migrate.head() == "0002"
 
     async def test_the_migrations_create_exactly_the_models(self, engine: AsyncEngine) -> None:
         def diff(conn):  # type: ignore[no-untyped-def]
@@ -326,7 +332,7 @@ class TestSchema:
 
     async def test_upgrading_twice_changes_nothing(self, engine: AsyncEngine) -> None:
         await migrate.upgrade(engine)
-        assert await migrate.current(engine) == "0001"
+        assert await migrate.current(engine) == "0002"
 
     async def test_two_upgrades_at_once_both_succeed(self, pg_url: str) -> None:
         import asyncio
@@ -345,7 +351,7 @@ class TestTheCatalogue:
     async def test_push_versions_labels_and_pull(self, engine: AsyncEngine, tmp_path: Path) -> None:
         cat = folder(tmp_path)
         async with sessions(engine)() as s, s.begin():
-            project = await ensure_project(s, PROJECT)
+            project = await default_task(s)
             first = await push(s, project, read(cat), label="staging", message="first")
         assert len(first.added) == 7 and not first.unchanged
 
@@ -355,13 +361,13 @@ class TestTheCatalogue:
         path.write_text(path.read_text("utf-8").replace("name:", "name: (v2)", 1), "utf-8")
         (cat / "scenarios" / "rf-003-egyptian-arabic.yaml").unlink()
         async with sessions(engine)() as s, s.begin():
-            project = await get_project(s, PROJECT)
+            project = await get_task(s, PROJECT)
             second = await push(s, project, read(cat), label="staging", message="edit")
         assert second.added == [("scenario", "rf-001", 2)]
         assert ("scenario", "rf-003") in second.unlabelled
 
         async with sessions(engine)() as s, s.begin():
-            project = await get_project(s, PROJECT)
+            project = await get_task(s, PROJECT)
             for kind, name in (
                 ("profile", "refund-agent"),
                 ("suite", "smoke"),
@@ -381,7 +387,7 @@ class TestTheCatalogue:
 
         out = tmp_path / "pulled"
         async with sessions(engine)() as s, s.begin():
-            await materialize(s, await get_project(s, PROJECT), "production", out)
+            await materialize(s, await get_task(s, PROJECT), "production", out)
         written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*.yaml"))
         assert written == [
             "profile.yaml",
@@ -403,7 +409,7 @@ class TestTheCatalogue:
     async def test_latest_is_the_newest_version(self, engine: AsyncEngine, tmp_path: Path) -> None:
         cat = folder(tmp_path)
         async with sessions(engine)() as s, s.begin():
-            project = await ensure_project(s, PROJECT)
+            project = await default_task(s)
             await push(s, project, read(cat))
             chosen = await resolve(s, project, LATEST)
             assert len(chosen) == 7
@@ -414,7 +420,7 @@ class TestTheCatalogue:
     ) -> None:
         cat = folder(tmp_path)
         async with sessions(engine)() as s, s.begin():
-            project = await ensure_project(s, PROJECT)
+            project = await default_task(s)
             await push(s, project, read(cat))
         # Delete one scenario and rename another (same file, new id): neither the deleted one
         # nor the old name may come back under latest, and the pull must not collide.
@@ -422,7 +428,7 @@ class TestTheCatalogue:
         path = cat / "scenarios" / "rf-001-happy-path.yaml"
         path.write_text(path.read_text("utf-8").replace("id: rf-001", "id: rf-001b", 1), "utf-8")
         async with sessions(engine)() as s, s.begin():
-            project = await get_project(s, PROJECT)
+            project = await get_task(s, PROJECT)
             await push(s, project, read(cat))
             names = {item.name for item, _v in await resolve(s, project, LATEST)}
             await materialize(s, project, LATEST, tmp_path / "latest")
@@ -435,7 +441,7 @@ class TestTheCatalogue:
 
         cat = folder(tmp_path)
         async with sessions(engine)() as s, s.begin():
-            project = await ensure_project(s, PROJECT)
+            project = await default_task(s)
             await push(s, project, read(cat), label="production")
         path = cat / "scenarios" / "rf-001-happy-path.yaml"
         path.write_text(path.read_text("utf-8").replace("name:", "name: (v2)", 1), "utf-8")
@@ -443,11 +449,11 @@ class TestTheCatalogue:
 
         async with sessions(engine)() as pusher:
             await pusher.begin()
-            await push(pusher, await get_project(pusher, PROJECT), edited, label="production")
+            await push(pusher, await get_task(pusher, PROJECT), edited, label="production")
 
             async def pull() -> list[int]:
                 async with sessions(engine)() as s, s.begin():
-                    chosen = await resolve(s, await get_project(s, PROJECT), "production")
+                    chosen = await resolve(s, await get_task(s, PROJECT), "production")
                     return [v.version for i, v in chosen if i.name == "rf-001"]
 
             reader = asyncio.create_task(pull())
@@ -458,7 +464,7 @@ class TestTheCatalogue:
 
     async def test_labels_are_checked(self, engine: AsyncEngine, tmp_path: Path) -> None:
         async with sessions(engine)() as s, s.begin():
-            project = await ensure_project(s, PROJECT)
+            project = await default_task(s)
             await push(s, project, read(folder(tmp_path)))
             with pytest.raises(ConfigError, match="kept by Opseval"):
                 await set_label(s, project, "suite", "smoke", 1, LATEST)
@@ -476,7 +482,7 @@ class TestTheCatalogue:
         out.mkdir()
         (out / "stale.yaml").write_text("id: stale\n", encoding="utf-8")
         async with sessions(engine)() as s, s.begin():
-            project = await ensure_project(s, PROJECT)
+            project = await default_task(s)
             await push(s, project, read(folder(tmp_path)), label="production")
             with pytest.raises(ConfigError, match="not an empty folder"):
                 await materialize(s, project, "production", out)
@@ -488,7 +494,7 @@ class TestTheCatalogue:
     ) -> None:
         # Rows written by something other than push (a restore, a bug) are checked again.
         async with sessions(engine)() as s, s.begin():
-            project = await ensure_project(s, PROJECT)
+            project = await default_task(s)
             await push(s, project, read(folder(tmp_path)), label="production")
             await s.execute(
                 text("UPDATE catalogue_versions SET path = '../escape.yaml' WHERE version = 1")
@@ -499,9 +505,9 @@ class TestTheCatalogue:
 
     async def test_projects_are_separate(self, engine: AsyncEngine, tmp_path: Path) -> None:
         async with sessions(engine)() as s, s.begin():
-            a = await ensure_project(s, "acme/a")
-            b = await ensure_project(s, "acme/b")
-            assert (await ensure_project(s, "acme/a")).id == a.id
+            a_project = await ensure_project(s, "acme/a")
+            assert (await ensure_project(s, "acme/a")).id == a_project.id
+            a, b = await default_task(s, "acme/a"), await default_task(s, "acme/b")
             await push(s, a, read(folder(tmp_path)), label="production")
             assert await list_items(s, b) == []
             assert len(await list_items(s, a)) == 7
@@ -524,7 +530,7 @@ class TestTheCatalogue:
 
         async def one(files):  # type: ignore[no-untyped-def]
             async with sessions(engine)() as s, s.begin():
-                await push(s, await get_project(s, PROJECT), files)
+                await push(s, await get_task(s, PROJECT), files)
 
         await asyncio.gather(*(one(f) for f in versions))
         async with sessions(engine)() as s:
@@ -634,7 +640,7 @@ async def test_a_pulled_label_runs_like_any_folder(
     engine: AsyncEngine, tmp_path: Path, settings: Settings
 ) -> None:
     async with sessions(engine)() as s, s.begin():
-        project = await ensure_project(s, PROJECT)
+        project = await default_task(s)
         await push(s, project, read(folder(tmp_path)), label="production")
         out = tmp_path / "production"
         await materialize(s, project, "production", out)
@@ -661,6 +667,11 @@ for args in (
     ["catalogue", "list", "--project", "p"],
     ["catalogue", "history", "suite", "smoke", "--project", "p"],
     ["catalogue", "label", "suite", "smoke", "1", "x", "--project", "p"],
+    ["catalogue", "list", "--project", "p", "--task", "voice"],
+    ["db", "init", "--project", "p", "--task", "voice", "--kind", "voice"],
+    ["task", "list", "--project", "p"], ["task", "archive", "t", "--project", "p"],
+    ["task", "unarchive", "t", "--project", "p"],
+    ["task", "update", "t", "--project", "p", "--kind", "voice"],
 ):
     res = runner.invoke(app, args)
     assert res.exit_code == 3, (args, res.output)

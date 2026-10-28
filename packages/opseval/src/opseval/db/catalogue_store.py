@@ -9,6 +9,9 @@
   label always names one consistent catalogue. Every push does the same with ``latest``, which
   only Opseval sets: it is always the catalogue as last pushed, so a scenario deleted from the
   folder never comes back with it.
+- **Tasks** (ADR-0049). A project holds tasks, and each task its own catalogue: one folder is
+  one task, so every function that reads or writes items takes a :class:`Task`, never a
+  project. Forgetting the filter would leak one task's scenarios into another's run.
 - **Pull** a label back out as a folder, which ``opseval run`` and ``opseval validate`` take
   exactly as they take any other: the loader, its checks and its fail-closed rules are the same
   code, so the database adds storage and history, never a second way to read a scenario.
@@ -22,7 +25,7 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -34,11 +37,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from opseval.catalogue import KnownScorers, load_catalogue, load_profile, suite_files
 from opseval.db.schema import (
+    MODALITIES,
+    TASK_KINDS,
     CatalogueItem,
     CatalogueLabel,
     CatalogueVersion,
     Organization,
     Project,
+    Task,
 )
 from opseval.errors import ConfigError
 from opseval.models.scenario import Suite
@@ -50,6 +56,10 @@ DEFAULT_LABEL = "production"
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,35}$")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 DEFAULT_ORG = "default"
+DEFAULT_TASK = "default"
+"""The task every project has (the migration made one per project), and the one each command
+uses without ``--task``, so everything written for ADR-0047 keeps working."""
+DEFAULT_KIND, DEFAULT_MODALITY = "chat", "text"
 MAX_FILE_BYTES = 256 * 1024
 """A scenario is a page of YAML; anything near this is a mistake or an attack."""
 
@@ -86,6 +96,20 @@ class ItemSummary:
     latest: int
     path: str
     labels: dict[str, int]
+
+
+@dataclass(frozen=True)
+class TaskSummary:
+    slug: str
+    name: str
+    kind: str
+    modality: str
+    region: str | None
+    archived_at: datetime | None
+    profile: str | None
+    """The linked profile item's name; ``None`` before the first push."""
+    default_suite: str | None
+    items: int
 
 
 @dataclass(frozen=True)
@@ -244,7 +268,8 @@ def parse_project(ref: str) -> tuple[str, str]:
 
 
 async def ensure_project(session: AsyncSession, ref: str, *, name: str | None = None) -> Project:
-    """Create the organisation and project if they do not exist (headless initialisation)."""
+    """Create the organisation and project if they do not exist (headless initialisation).
+    A new project comes with its ``default`` task, as the migration gave every old one."""
     org_slug, project_slug = parse_project(ref)
     org = await session.scalar(select(Organization).where(Organization.slug == org_slug))
     if org is None:
@@ -257,6 +282,16 @@ async def ensure_project(session: AsyncSession, ref: str, *, name: str | None = 
     if project is None:
         project = Project(organization_id=org.id, slug=project_slug, name=name or project_slug)
         session.add(project)
+        await session.flush()
+        session.add(
+            Task(
+                project_id=project.id,
+                slug=DEFAULT_TASK,
+                name=DEFAULT_TASK,
+                kind=DEFAULT_KIND,
+                modality=DEFAULT_MODALITY,
+            )
+        )
         await session.flush()
     return project
 
@@ -276,19 +311,199 @@ async def get_project(session: AsyncSession, ref: str) -> Project:
     return project
 
 
+# --- tasks ------------------------------------------------------------------------------
+
+
+def check_task_slug(slug: str) -> str:
+    if not SLUG_RE.match(slug):
+        raise ConfigError(f"task {slug!r}: use lowercase letters, digits and '-' (at most 64)")
+    return slug
+
+
+def check_kind(kind: str) -> str:
+    if kind not in TASK_KINDS:
+        raise ConfigError(f"task kind {kind!r}: use one of {', '.join(TASK_KINDS)}")
+    return kind
+
+
+def check_modality(modality: str) -> str:
+    if modality not in MODALITIES:
+        raise ConfigError(f"task modality {modality!r}: use one of {', '.join(MODALITIES)}")
+    return modality
+
+
+def _ref(project_ref: str) -> str:
+    """``org/project`` as typed in a command, with the default organisation spelt out."""
+    return "/".join(parse_project(project_ref))
+
+
+async def ensure_task(
+    session: AsyncSession,
+    project_ref: str,
+    slug: str,
+    *,
+    kind: str | None = None,
+    modality: str | None = None,
+    name: str | None = None,
+    region: str | None = None,
+) -> tuple[Task, bool]:
+    """Create task ``slug`` in an existing project, unless it is there; ``(task, created)``.
+
+    Asking for a kind or modality the existing task does not have is an error, not a silent
+    no-op: the caller would believe the task is what they asked for."""
+    check_task_slug(slug)
+    for value, check in ((kind, check_kind), (modality, check_modality)):
+        if value is not None:
+            check(value)
+    project = await get_project(session, project_ref)
+    task = await session.scalar(
+        select(Task).where(Task.project_id == project.id, Task.slug == slug)
+    )
+    if task is None:
+        task = Task(
+            project_id=project.id,
+            slug=slug,
+            name=name or slug,
+            kind=kind or DEFAULT_KIND,
+            modality=modality or DEFAULT_MODALITY,
+            region=region,
+        )
+        session.add(task)
+        await session.flush()
+        return task, True
+    differs = [
+        f"{field} is {have!r}, not {want!r}"
+        for field, have, want in (
+            ("kind", task.kind, kind),
+            ("modality", task.modality, modality),
+            ("region", task.region, region),
+        )
+        if want is not None and want != have
+    ]
+    if differs:
+        raise ConfigError(
+            f"task {slug!r} already exists in {_ref(project_ref)} and its "
+            f"{'; '.join(differs)}; change it with "
+            f"`opseval task update {slug} --project {_ref(project_ref)}`"
+        )
+    return task, False
+
+
+async def get_task(session: AsyncSession, project_ref: str, slug: str = DEFAULT_TASK) -> Task:
+    """A task by project and slug. One that does not exist is an error naming both, never an
+    implicit create: a typo in ``--task`` must not start an empty catalogue."""
+    check_task_slug(slug)
+    project = await get_project(session, project_ref)
+    task = await session.scalar(
+        select(Task).where(Task.project_id == project.id, Task.slug == slug)
+    )
+    if task is None:
+        ref = _ref(project_ref)
+        raise ConfigError(
+            f"no task {slug!r} in project {ref}; create it with "
+            f"`opseval db init --project {ref} --task {slug}`"
+        )
+    return task
+
+
+async def list_tasks(
+    session: AsyncSession, project_ref: str, *, archived: bool = False
+) -> list[TaskSummary]:
+    """A project's tasks by slug; archived ones only when asked for."""
+    project = await get_project(session, project_ref)
+    query = select(Task).where(Task.project_id == project.id).order_by(Task.slug)
+    if not archived:
+        query = query.where(Task.archived_at.is_(None))
+    tasks = list(await session.scalars(query))
+    linked = {t.profile_item_id for t in tasks} | {t.default_suite_item_id for t in tasks}
+    names = {
+        i.id: i.name
+        for i in await session.scalars(
+            select(CatalogueItem).where(CatalogueItem.id.in_([i for i in linked if i]))
+        )
+    }
+    counts = {
+        task_id: int(n)
+        for task_id, n in await session.execute(
+            select(CatalogueItem.task_id, func.count())
+            .where(CatalogueItem.project_id == project.id)
+            .group_by(CatalogueItem.task_id)
+        )
+    }
+    return [
+        TaskSummary(
+            slug=t.slug,
+            name=t.name,
+            kind=t.kind,
+            modality=t.modality,
+            region=t.region,
+            archived_at=t.archived_at,
+            profile=names.get(t.profile_item_id) if t.profile_item_id else None,
+            default_suite=names.get(t.default_suite_item_id) if t.default_suite_item_id else None,
+            items=counts.get(t.id, 0),
+        )
+        for t in tasks
+    ]
+
+
+async def update_task(
+    session: AsyncSession,
+    task: Task,
+    *,
+    kind: str | None = None,
+    modality: str | None = None,
+    name: str | None = None,
+    region: str | None = None,
+    default_suite: str | None = None,
+) -> Task:
+    """Change what an operator may change: kind, modality, name, region, the default suite
+    (a suite of this task, by name)."""
+    await session.execute(select(Task.id).where(Task.id == task.id).with_for_update())
+    if kind is not None:
+        task.kind = check_kind(kind)
+    if modality is not None:
+        task.modality = check_modality(modality)
+    if name is not None:
+        task.name = name
+    if region is not None:
+        task.region = region or None
+    if default_suite is not None:
+        task.default_suite_item_id = (await _item(session, task, "suite", default_suite)).id
+    await session.flush()
+    return task
+
+
+async def archive_task(session: AsyncSession, task: Task, *, archived: bool = True) -> Task:
+    """Hide a task, or bring it back. Nothing is deleted: its versions, labels and (later)
+    runs stay, and it can still be listed and pulled. An archived task takes no push and no
+    label move, so nothing changes under a task nobody is looking at."""
+    await session.execute(select(Task.id).where(Task.id == task.id).with_for_update())
+    task.archived_at = datetime.now(UTC) if archived else None
+    await session.flush()
+    return task
+
+
 # --- writing ----------------------------------------------------------------------------
 
 
-async def _lock(session: AsyncSession, project: Project, *, write: bool) -> None:
-    """Serialise catalogue changes per project, and let reads see one whole push.
+async def _lock(session: AsyncSession, task: Task, *, write: bool) -> None:
+    """Serialise catalogue changes per task, and let reads see one whole push.
 
-    A push (or a label move) holds the project row ``FOR UPDATE`` until it commits; a pull
-    holds it ``FOR SHARE``. So a pull waits for a push in progress, then no push can start
-    until the pull has read everything: it never mixes two pushes into a catalogue nobody
-    pushed, which a series of reads under READ COMMITTED otherwise could.
+    A push (or a label move) holds the task row ``FOR UPDATE`` until it commits; a pull holds
+    it ``FOR SHARE``. So a pull waits for a push in progress, then no push can start until the
+    pull has read everything: it never mixes two pushes into a catalogue nobody pushed, which
+    a series of reads under READ COMMITTED otherwise could. Two tasks of one project never
+    wait for each other.
+
+    A write reads ``archived_at`` under the lock, so an archive that commits first is seen.
     """
-    clause = select(Project.id).where(Project.id == project.id)
-    await session.execute(clause.with_for_update(read=not write))
+    clause = select(Task.archived_at).where(Task.id == task.id)
+    archived_at = await session.scalar(clause.with_for_update(read=not write))
+    if write and archived_at is not None:
+        raise ConfigError(
+            f"task {task.slug!r} is archived; nothing can be pushed or labelled in it "
+            f"(`opseval task unarchive {task.slug}` brings it back)"
+        )
 
 
 async def _latest_versions(
@@ -351,21 +566,22 @@ async def _move_label(
 
 async def push(
     session: AsyncSession,
-    project: Project,
+    task: Task,
     files: list[CatalogueFile],
     *,
     label: str | None = None,
     message: str | None = None,
     actor: str | None = None,
 ) -> PushReport:
-    """Store a checked folder as new versions, in the caller's transaction."""
+    """Store a checked folder as new versions of ``task``'s catalogue, in the caller's
+    transaction, and link the folder's profile as the task's profile."""
     if label is not None:
         check_label(label)
-    await _lock(session, project, write=True)
+    await _lock(session, task, write=True)
     items = {
         (i.kind, i.name): i
         for i in await session.scalars(
-            select(CatalogueItem).where(CatalogueItem.project_id == project.id)
+            select(CatalogueItem).where(CatalogueItem.task_id == task.id)
         )
     }
     latest = await _latest_versions(session, (i.id for i in items.values()))
@@ -374,7 +590,9 @@ async def push(
     for f in files:
         item = items.get((f.kind, f.name))
         if item is None:
-            item = CatalogueItem(project_id=project.id, kind=f.kind, name=f.name)
+            item = CatalogueItem(
+                project_id=task.project_id, task_id=task.id, kind=f.kind, name=f.name
+            )
             session.add(item)
             await session.flush()
             items[(f.kind, f.name)] = item
@@ -397,6 +615,9 @@ async def push(
         await session.flush()
         report.added.append((f.kind, f.name, version.version))
         current[item.id] = version.id
+    profiles = [items[(f.kind, f.name)].id for f in files if f.kind == "profile"]
+    if profiles:  # read_folder always yields exactly one
+        task.profile_item_id = profiles[0]
     others = [i for i in items.values() if i.id not in current]
     await _move_label(session, LATEST, current, others)
     if label is not None:
@@ -405,12 +626,12 @@ async def push(
 
 
 async def set_label(
-    session: AsyncSession, project: Project, kind: str, name: str, version: int, label: str
+    session: AsyncSession, task: Task, kind: str, name: str, version: int, label: str
 ) -> None:
     """Point ``label`` at one version of one item (promote ``staging`` to ``production``)."""
     check_label(label)
-    await _lock(session, project, write=True)
-    item = await _item(session, project, kind, name)
+    await _lock(session, task, write=True)
+    item = await _item(session, task, kind, name)
     target = await session.scalar(
         select(CatalogueVersion).where(
             CatalogueVersion.item_id == item.id, CatalogueVersion.version == version
@@ -424,24 +645,24 @@ async def set_label(
 # --- reading ----------------------------------------------------------------------------
 
 
-async def _item(session: AsyncSession, project: Project, kind: str, name: str) -> CatalogueItem:
+async def _item(session: AsyncSession, task: Task, kind: str, name: str) -> CatalogueItem:
     item = await session.scalar(
         select(CatalogueItem).where(
-            CatalogueItem.project_id == project.id,
+            CatalogueItem.task_id == task.id,
             CatalogueItem.kind == kind,
             CatalogueItem.name == name,
         )
     )
     if item is None:
-        raise ConfigError(f"no {kind} {name!r} in this project")
+        raise ConfigError(f"no {kind} {name!r} in task {task.slug!r}")
     return item
 
 
-async def list_items(session: AsyncSession, project: Project) -> list[ItemSummary]:
+async def list_items(session: AsyncSession, task: Task) -> list[ItemSummary]:
     items = list(
         await session.scalars(
             select(CatalogueItem)
-            .where(CatalogueItem.project_id == project.id)
+            .where(CatalogueItem.task_id == task.id)
             .order_by(CatalogueItem.kind, CatalogueItem.name)
         )
     )
@@ -451,7 +672,7 @@ async def list_items(session: AsyncSession, project: Project) -> list[ItemSummar
         select(CatalogueLabel.item_id, CatalogueLabel.label, CatalogueVersion.version)
         .join(CatalogueVersion, CatalogueVersion.id == CatalogueLabel.version_id)
         .join(CatalogueItem, CatalogueItem.id == CatalogueLabel.item_id)
-        .where(CatalogueItem.project_id == project.id)
+        .where(CatalogueItem.task_id == task.id)
         .order_by(CatalogueLabel.label)
     )
     for item_id, label, version in rows:
@@ -463,10 +684,8 @@ async def list_items(session: AsyncSession, project: Project) -> list[ItemSummar
     ]
 
 
-async def history(
-    session: AsyncSession, project: Project, kind: str, name: str
-) -> list[VersionInfo]:
-    item = await _item(session, project, kind, name)
+async def history(session: AsyncSession, task: Task, kind: str, name: str) -> list[VersionInfo]:
+    item = await _item(session, task, kind, name)
     labels: dict[uuid.UUID, list[str]] = {}
     for label, version_id in await session.execute(
         select(CatalogueLabel.label, CatalogueLabel.version_id).where(
@@ -491,18 +710,18 @@ def _ordered(labels: dict[uuid.UUID, list[str]], version: CatalogueVersion) -> l
 
 
 async def resolve(
-    session: AsyncSession, project: Project, label: str
+    session: AsyncSession, task: Task, label: str
 ) -> list[tuple[CatalogueItem, CatalogueVersion]]:
     """Every item's version under ``label``, read as one push left it. Items without the label
     are left out, as Langfuse serves no prompt for a label it does not carry."""
     if label != LATEST:
         check_label(label)
-    await _lock(session, project, write=False)
+    await _lock(session, task, write=False)
     rows = await session.execute(
         select(CatalogueItem, CatalogueVersion)
         .join(CatalogueLabel, CatalogueLabel.item_id == CatalogueItem.id)
         .join(CatalogueVersion, CatalogueVersion.id == CatalogueLabel.version_id)
-        .where(CatalogueItem.project_id == project.id, CatalogueLabel.label == label)
+        .where(CatalogueItem.task_id == task.id, CatalogueLabel.label == label)
         .order_by(CatalogueItem.kind, CatalogueItem.name)
     )
     return [(item, version) for item, version in rows]
@@ -522,13 +741,13 @@ def _safe_target(dest: Path, path: str) -> Path:
 
 
 async def materialize(
-    session: AsyncSession, project: Project, label: str, dest: Path
+    session: AsyncSession, task: Task, label: str, dest: Path
 ) -> list[tuple[CatalogueItem, CatalogueVersion]]:
     """Write the catalogue under ``label`` to ``dest``, a folder that must be empty or new:
     a file left over from something else would run as if it were part of the label."""
-    chosen = await resolve(session, project, label)
+    chosen = await resolve(session, task, label)
     if not chosen:
-        raise ConfigError(f"nothing in this project carries the label {label!r}")
+        raise ConfigError(f"nothing in task {task.slug!r} carries the label {label!r}")
     dest = dest.resolve()
     if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
         raise ConfigError(f"{dest}: not an empty folder; pull into a new or empty one")

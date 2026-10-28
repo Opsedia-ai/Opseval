@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-28** (`main` with the guided scenario form, the roadmap ADRs 0049–0066, the voice foundations and speech providers (ADR-0053 V0a, ADR-0054 V0b) and unknown languages refused at load (ADR-0059 step 1), `main` protected softly (ADR-0065); GitHub drop-in workflows, ADR-0058 E1).
+**As of 2026-10-28** (tasks inside a project in the database and CLI, ADR-0049; `main` with the guided scenario form, the roadmap ADRs 0049–0066, the voice foundations and speech providers (ADR-0053 V0a, ADR-0054 V0b) and unknown languages refused at load (ADR-0059 step 1), `main` protected softly (ADR-0065); GitHub drop-in workflows, ADR-0058 E1).
 
 ## Completion
 
@@ -43,7 +43,7 @@ PRD gains it.
 
 | Item | Plan | State |
 |---|---|---|
-| Tasks inside a project (chat, agentic, voice, batch) | [ADR-0049](adr/0049-tasks-in-a-project.md) | Missing: organisations and projects exist (ADR-0047), tasks do not |
+| Tasks inside a project (chat, agentic, voice, batch) | [ADR-0049](adr/0049-tasks-in-a-project.md) | Partial: the database layer and CLI. A `tasks` table (kind/modality check constraints, profile and default-suite links, region, `archived_at`); migration `0002` gives every project a `default` task, moves its items in, links its profile when there is exactly one, and moves the unique key to `(task_id, kind, name)`; `--task` on `catalogue push/pull/list/history/label` (default `default`); an unknown task is exit 3, never created; `db init --task`, `opseval task list/update/archive/unarchive`; pushes and pulls lock the task row; an archived task refuses writes (`tests/test_db_tasks.py`). Not built: task-scoped API routes and the console (ADR-0047 step 1), `runs.task_id` (ADR-0051) |
 | Accounts, roles, API keys, OIDC, a network-facing server | [ADR-0050](adr/0050-accounts-and-access.md) | Missing: one shared token, loopback only (ADR-0031) |
 | Runs, scores and audio in the database and a blob store | [ADR-0051](adr/0051-runs-and-blobs-in-the-database.md) | Missing: runs are folders (`FileStore`) |
 | Analytics interface; ClickHouse optional | [ADR-0052](adr/0052-analytics-store.md) | Missing: the console's views scan `result.json` files |

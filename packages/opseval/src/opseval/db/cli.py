@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``opseval db …`` and ``opseval catalogue …``: server mode on Postgres (ADR-0047).
+"""``opseval db …``, ``opseval task …`` and ``opseval catalogue …``: server mode on Postgres
+(ADR-0047), with tasks inside a project (ADR-0049).
 
 Nothing here imports SQLAlchemy at module level: the base install, without the ``server``
 extra, keeps a working CLI, and these commands say what to install instead of failing to
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-    from opseval.db.catalogue_store import ItemSummary, PushReport, VersionInfo
+    from opseval.db.catalogue_store import ItemSummary, PushReport, TaskSummary, VersionInfo
 
 EXIT_HARNESS = 3  # opseval.verdicts.EXIT_HARNESS, without importing the run path
 T = TypeVar("T")
@@ -38,8 +39,27 @@ catalogue_app = typer.Typer(
     no_args_is_help=True,
 )
 
+task_app = typer.Typer(
+    help="Tasks inside a project (ADR-0049): one agent endpoint and modality each.",
+    no_args_is_help=True,
+)
+
 ProjectOpt = Annotated[
     str, typer.Option("--project", help="org/project (or just project, in 'default').")
+]
+TaskOpt = Annotated[str, typer.Option("--task", help="The task inside the project (ADR-0049).")]
+TaskArg = Annotated[str, typer.Argument(help="The task's slug.")]
+KindOpt = Annotated[
+    Optional[str],  # noqa: UP045
+    typer.Option("--kind", help="chat | agentic | voice | batch"),
+]
+ModalityOpt = Annotated[
+    Optional[str],  # noqa: UP045
+    typer.Option("--modality", help="text | audio_file | audio_stream | telephony | webrtc"),
+]
+RegionOpt = Annotated[
+    Optional[str],  # noqa: UP045
+    typer.Option("--region", help="Where the task's data may live."),
 ]
 KindArg = Annotated[str, typer.Argument(help="scenario | suite | profile")]
 
@@ -143,16 +163,114 @@ def db_init(
         Optional[str],  # noqa: UP045 - typer needs Optional here
         typer.Option(help="A display name for the project."),
     ] = None,
+    task: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option("--task", help="Also create this task in the project (ADR-0049)."),
+    ] = None,
+    kind: KindOpt = None,
+    modality: ModalityOpt = None,
+    region: RegionOpt = None,
 ) -> None:
-    """Create an organisation and project if they do not exist (headless initialisation)."""
+    """Create an organisation and project if they do not exist (headless initialisation),
+    with its `default` task; `--task` creates another. Nothing that exists is changed."""
     _modules()
-    from opseval.db.catalogue_store import ensure_project
+    from opseval.db.catalogue_store import ensure_project, ensure_task
+
+    if task is None and (kind or modality or region):
+        raise _fail(ConfigError("--kind, --modality and --region describe a task: add --task"))
+
+    async def work(session: AsyncSession) -> tuple[str, bool] | None:
+        await ensure_project(session, project, name=name)
+        if task is None:
+            return None
+        made, created = await ensure_task(
+            session, project, task, kind=kind, modality=modality, region=region
+        )
+        return f"{made.slug} ({made.kind}, {made.modality})", created
+
+    made = _run(work)
+    typer.echo(f"Project {project} is ready.")
+    if made is not None:
+        what, created = made
+        typer.echo(f"Task {what} {'created' if created else 'already exists'}.")
+
+
+@task_app.command("list")
+def task_list(
+    project: ProjectOpt,
+    archived: Annotated[bool, typer.Option("--all", help="Include archived tasks.")] = False,
+) -> None:
+    """A project's tasks: kind, modality, profile and how many items each holds."""
+    _modules()
+    from opseval.db.catalogue_store import list_tasks
+
+    async def work(session: AsyncSession) -> list[TaskSummary]:
+        return await list_tasks(session, project, archived=archived)
+
+    for t in _run(work):
+        extra = [f"profile {t.profile or 'none yet'}", f"{t.items} item(s)"]
+        extra += [f"default suite {t.default_suite}"] if t.default_suite else []
+        extra += [f"region {t.region}"] if t.region else []
+        extra += [f"archived {t.archived_at:%Y-%m-%d}"] if t.archived_at else []
+        typer.echo(f"  {t.slug:<24} {t.kind:<8} {t.modality:<13} {', '.join(extra)}")
+
+
+@task_app.command("update")
+def task_update(
+    task: TaskArg,
+    project: ProjectOpt,
+    kind: KindOpt = None,
+    modality: ModalityOpt = None,
+    region: RegionOpt = None,
+    name: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option("--name", help="A display name for the task."),
+    ] = None,
+    default_suite: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option("--default-suite", help="The suite (by name) a run uses when it names none."),
+    ] = None,
+) -> None:
+    """Change a task's kind, modality, region, name or default suite."""
+    _modules()
+    from opseval.db.catalogue_store import get_task, update_task
+
+    async def work(session: AsyncSession) -> str:
+        made = await update_task(
+            session,
+            await get_task(session, project, task),
+            kind=kind,
+            modality=modality,
+            name=name,
+            region=region,
+            default_suite=default_suite,
+        )
+        return f"{made.slug} ({made.kind}, {made.modality})"
+
+    typer.echo(f"Task {_run(work)} updated.")
+
+
+def _archive(task: str, project: str, *, archived: bool) -> None:
+    _modules()
+    from opseval.db.catalogue_store import archive_task, get_task
 
     async def work(session: AsyncSession) -> None:
-        await ensure_project(session, project, name=name)
+        await archive_task(session, await get_task(session, project, task), archived=archived)
 
     _run(work)
-    typer.echo(f"Project {project} is ready.")
+    typer.echo(f"Task {task} {'archived' if archived else 'restored'}.")
+
+
+@task_app.command("archive")
+def task_archive(task: TaskArg, project: ProjectOpt) -> None:
+    """Hide a task. Nothing is deleted; it takes no push or label move until unarchived."""
+    _archive(task, project, archived=True)
+
+
+@task_app.command("unarchive")
+def task_unarchive(task: TaskArg, project: ProjectOpt) -> None:
+    """Bring an archived task back."""
+    _archive(task, project, archived=False)
 
 
 @catalogue_app.command("push")
@@ -167,11 +285,12 @@ def catalogue_push(
         Optional[str],  # noqa: UP045
         typer.Option("--message", "-m", help="Why; kept with each new version."),
     ] = None,
+    task: TaskOpt = "default",
 ) -> None:
     """Check a folder exactly like `opseval validate`, then store what changed as new versions.
     One problem anywhere and nothing is stored."""
     _modules()
-    from opseval.db.catalogue_store import get_project, push, read_folder
+    from opseval.db.catalogue_store import get_task, push, read_folder
     from opseval.plugins import load_scorers
     from opseval.scoring import INVARIANTS, REGISTRY
 
@@ -182,7 +301,7 @@ def catalogue_push(
         raise _fail(exc) from exc
 
     async def work(session: AsyncSession) -> PushReport:
-        target = await get_project(session, project)
+        target = await get_task(session, project, task)
         return await push(session, target, files, label=label, message=message)
 
     report = _run(work)
@@ -203,13 +322,14 @@ def catalogue_pull(
     folder: Annotated[Path, typer.Argument(help="A new or empty folder to write into.")],
     project: ProjectOpt,
     label: Annotated[str, typer.Option(help="Which label to pull, or latest.")] = "production",
+    task: TaskOpt = "default",
 ) -> None:
     """Write the catalogue under a label to a folder, ready for `opseval run`."""
     _modules()
-    from opseval.db.catalogue_store import get_project, materialize
+    from opseval.db.catalogue_store import get_task, materialize
 
     async def work(session: AsyncSession) -> int:
-        target = await get_project(session, project)
+        target = await get_task(session, project, task)
         return len(await materialize(session, target, label, folder))
 
     count = _run(work)
@@ -217,13 +337,13 @@ def catalogue_pull(
 
 
 @catalogue_app.command("list")
-def catalogue_list(project: ProjectOpt) -> None:
-    """Every item, its newest version and where each label points."""
+def catalogue_list(project: ProjectOpt, task: TaskOpt = "default") -> None:
+    """Every item of a task, its newest version and where each label points."""
     _modules()
-    from opseval.db.catalogue_store import get_project, list_items
+    from opseval.db.catalogue_store import get_task, list_items
 
     async def work(session: AsyncSession) -> list[ItemSummary]:
-        return await list_items(session, await get_project(session, project))
+        return await list_items(session, await get_task(session, project, task))
 
     items = _run(work)
     if not items:
@@ -234,13 +354,15 @@ def catalogue_list(project: ProjectOpt) -> None:
 
 
 @catalogue_app.command("history")
-def catalogue_history(kind: KindArg, name: str, project: ProjectOpt) -> None:
+def catalogue_history(
+    kind: KindArg, name: str, project: ProjectOpt, task: TaskOpt = "default"
+) -> None:
     """Every version of one item, newest first, with its labels."""
     _modules()
-    from opseval.db.catalogue_store import get_project, history
+    from opseval.db.catalogue_store import get_task, history
 
     async def work(session: AsyncSession) -> list[VersionInfo]:
-        return await history(session, await get_project(session, project), kind, name)
+        return await history(session, await get_task(session, project, task), kind, name)
 
     for v in _run(work):
         labels = f"  [{', '.join(v.labels)}]" if v.labels else ""
@@ -250,14 +372,20 @@ def catalogue_history(kind: KindArg, name: str, project: ProjectOpt) -> None:
 
 @catalogue_app.command("label")
 def catalogue_label(
-    kind: KindArg, name: str, version: int, label: str, project: ProjectOpt
+    kind: KindArg,
+    name: str,
+    version: int,
+    label: str,
+    project: ProjectOpt,
+    task: TaskOpt = "default",
 ) -> None:
     """Point a label at one version of one item (promote staging to production)."""
     _modules()
-    from opseval.db.catalogue_store import get_project, set_label
+    from opseval.db.catalogue_store import get_task, set_label
 
     async def work(session: AsyncSession) -> None:
-        await set_label(session, await get_project(session, project), kind, name, version, label)
+        target = await get_task(session, project, task)
+        await set_label(session, target, kind, name, version, label)
 
     _run(work)
     typer.echo(f"{kind} {name}: {label} → v{version}")
