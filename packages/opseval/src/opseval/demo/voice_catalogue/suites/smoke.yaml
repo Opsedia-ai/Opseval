@@ -1,0 +1,3 @@
+name: voice-smoke
+description: Scripted voice scenarios that need no speech model or key. Used by `opseval demo --voice`.
+include: ["scenarios/*.yaml"]

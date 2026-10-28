@@ -9,10 +9,11 @@ ends in exactly one :class:`TerminalState`; harness problems end in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
@@ -22,6 +23,7 @@ from opseval.errors import (
     SimulatorError,
     TransportError,
     TransportTimeout,
+    TurnNeverEnded,
 )
 from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
 from opseval.models.record import (
@@ -156,6 +158,7 @@ class Driver:
         self._last_sent_at: float | None = None
         self._used = False
         self._redacted: set[str] = set()
+        self._session: Session | None = None
 
     # --- recording ------------------------------------------------------------------
     def _record(
@@ -172,6 +175,18 @@ class Driver:
         latency = None
         if direction == "received" and self._last_sent_at is not None:
             latency = round((time.monotonic() - self._last_sent_at) * 1000, 1)
+        # A voice session knows what was spoken: the audio, its transcript, and the latency
+        # on the attempt's own clock, which time spent in STT must not inflate (ADR-0053).
+        media = self._session.frame_media(direction, payload) if self._session else None
+        if media is not None:
+            audio = media.audio or audio
+            transcript = media.transcript or transcript
+            at = media.at or at
+            text = media.text if media.text is not None else text
+            if direction == "received":
+                # The session's own measure, or not measured at all (a barge-in): the
+                # driver's clock would count the session's STT time as the agent's.
+                latency = None if media.latency_ms is None else round(media.latency_ms, 1)
         phase = None
         if direction == "received" and self.p.phase_field and isinstance(payload, dict):
             raw = payload.get(self.p.phase_field)
@@ -278,6 +293,8 @@ class Driver:
                 self._deadline = deadline
                 try:
                     session = await self.transport.connect()
+                    self._session = session
+                    session.use_harness_clock(self._off_clock)
                     await self._converse(session)
                 finally:
                     if session is not None:
@@ -335,6 +352,7 @@ class Driver:
             redaction=RedactionInfo(applied=True, found=tuple(sorted(self._redacted))),
             created_artifacts=artifacts,
             artifacts_checked=artifacts_checked,
+            voice=session.voice_timeline() if session else None,
         )
 
     def _note_rate_limit(self, exc: Exception) -> None:
@@ -342,31 +360,45 @@ class Driver:
         if isinstance(exc, RateLimited):
             self._notes.append(RATE_LIMITED_NOTE)
 
-    async def _simulate(self, call: Awaitable[T]) -> T:
-        """Run one simulator call off the agent's clock (the core rule).
-
-        The attempt deadline measures the agent. Time spent waiting on the simulator (an LLM
-        that is slow, rate-limited or retrying) is the harness's, so the deadline is paused
-        for the call and moved back by however long it took. The call has its own limit
-        instead, and overrunning it is a :class:`SimulatorError`: a harness failure, never
-        the agent's ``TIMEOUT``.
-        """
+    @contextlib.asynccontextmanager
+    async def _paused(self) -> AsyncIterator[None]:
+        """Pause the attempt deadline for a harness call and move it back by however long
+        the call took: the deadline measures the agent, and time spent waiting on the
+        harness (the simulator, the voice bridge's TTS and STT) is not the agent's."""
         loop = asyncio.get_running_loop()
         when = self._deadline.when() if self._deadline is not None else None
         remaining = None if when is None else when - loop.time()
         if self._deadline is not None:
             self._deadline.reschedule(None)
         try:
-            async with asyncio.timeout(self.simulator_timeout):
-                return await call
-        except TimeoutError as exc:
-            raise SimulatorError(
-                f"the simulator did not answer within {self.simulator_timeout:g}s "
-                "(OPSEVAL_SIMULATOR_TIMEOUT_SECONDS)"
-            ) from exc
+            yield
         finally:
             if self._deadline is not None and remaining is not None:
                 self._deadline.reschedule(loop.time() + remaining)
+
+    async def _simulate(self, call: Awaitable[T]) -> T:
+        """Run one simulator call off the agent's clock (the core rule).
+
+        The call has its own limit instead, and overrunning it is a :class:`SimulatorError`:
+        a harness failure, never the agent's ``TIMEOUT``.
+        """
+        async with self._paused():
+            try:
+                async with asyncio.timeout(self.simulator_timeout):
+                    return await call
+            except TimeoutError as exc:
+                raise SimulatorError(
+                    f"the simulator did not answer within {self.simulator_timeout:g}s "
+                    "(OPSEVAL_SIMULATOR_TIMEOUT_SECONDS)"
+                ) from exc
+
+    async def _off_clock(self, call: Awaitable[T]) -> T:
+        """Run one harness call (the voice bridge's TTS or STT) off the agent's clock, as
+        :meth:`_simulate` does. The call has its own limit (``OPSEVAL_TTS_TIMEOUT_SECONDS``,
+        ``OPSEVAL_STT_TIMEOUT_SECONDS``, in the speech guard), so it is never the agent's
+        timeout (ADR-0053)."""
+        async with self._paused():
+            return await call
 
     def _created_artifacts(self) -> tuple[CreatedArtifact, ...]:
         """Ids of what the agent created, from the (already redacted) frames it sent.
@@ -500,6 +532,8 @@ class Driver:
                 payload = await session.receive(
                     max(0.0, deadline - loop.time()) if waiting else quiet
                 )
+            except TurnNeverEnded as exc:
+                raise _Stop(TerminalState.TIMEOUT, str(exc)) from None
             except TransportTimeout:
                 if waiting:
                     raise _Stop(TerminalState.TIMEOUT, f"no reply within {turn:.0f}s") from None
@@ -509,7 +543,11 @@ class Driver:
             text = text if isinstance(text, str) else None
             # Transport chatter (e.g. a late resume confirmation) is never the agent's reply.
             if waiting and kind is not FrameKind.HANDSHAKE:
-                waiting = not (session.replies_in_send or self.p.answers(kind, text, payload))
+                waiting = not (
+                    session.replies_in_send
+                    or self.p.answers(kind, text, payload)
+                    or session.ends_turn(payload)
+                )
             self._record("received", payload, kind, text)
             if kind is FrameKind.ERROR:
                 raise _Stop(TerminalState.ERROR_FRAME, "the agent sent an error frame")

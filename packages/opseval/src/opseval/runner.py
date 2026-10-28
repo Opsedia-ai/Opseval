@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import socket
 import time
@@ -75,6 +76,9 @@ from opseval.transport import (
     Transport,
     WebSocketTransport,
 )
+from opseval.transport.audio import AudioTransport
+from opseval.transport.audio_http import AudioHttpTransport
+from opseval.transport.audio_ws import AudioWsTransport
 from opseval.verdicts import (
     TENANT_LEASE_LOST,
     attempt_verdict,
@@ -85,6 +89,8 @@ from opseval.verdicts import (
     release_gate,
     skipped,
 )
+from opseval.voice import AudioRecorder, SpeechKit, VoiceTransport, check_audio_privacy
+from opseval.voice.recording import Mode as AudioMode
 
 TransportFactory = Callable[[SutProfile], Transport]
 
@@ -124,6 +130,9 @@ class RunOptions:
     only_ids: list[str] | None = None
     """Run only these scenario ids (any of them, unlike ``filters``, which must all hold).
     An id that is not in the catalogue is a configuration error, never silently dropped."""
+    synthetic_voices: bool = False
+    """The voices are the demo's own synthetic ones (``opseval demo --voice``): exempt from
+    the rule that recorded audio must be encrypted (ADR-0053). Never set for a real agent."""
 
 
 class _TransportCtor(Protocol):
@@ -143,12 +152,71 @@ TRANSPORTS: dict[str, tuple[_TransportCtor, tuple[str, ...]]] = {
 """Transport class and the schemes that count as secure for it: one table, so a tenant's own
 target is checked exactly like the default one."""
 
+
+class _AudioCtor(Protocol):
+    def __call__(
+        self, target: str, profile: SutProfile, /, *, token: str | TokenSource | None = None
+    ) -> AudioTransport: ...
+
+
+VOICE_TRANSPORTS: dict[str, tuple[_AudioCtor, tuple[str, ...]]] = {
+    "audio-ws": (AudioWsTransport, ("wss",)),
+    "audio-http": (AudioHttpTransport, ("https",)),
+}
+"""Speaking agents, reached through the voice bridge (ADR-0053)."""
+
+
+def secure_schemes(transport: str) -> tuple[str, ...]:
+    """The schemes that count as secure for a transport, text or voice."""
+    if transport in VOICE_TRANSPORTS:
+        return VOICE_TRANSPORTS[transport][1]
+    return TRANSPORTS.get(transport, (None, ("https",)))[1]
+
+
+def speech_kit(settings: Settings, profile: SutProfile, meter: UsageMeter) -> SpeechKit:
+    """The guarded TTS, STT and optional second STT a voice run needs, or
+    :class:`ConfigError` (exit 3) before anything is sent: a voice run without a TTS or an STT
+    could not speak or listen, and every URL is allowlisted when it is built (ADR-0054)."""
+    from opseval.speech.providers import (
+        check_speech_settings,
+        second_speech_to_text,
+        speech_to_text,
+        text_to_speech,
+    )
+
+    if profile.audio is None:
+        raise ConfigError(
+            f"profile {profile.name!r} has no audio: block, which a voice transport needs "
+            "(codec, rate, end_of_turn_silence_ms; ADR-0053)"
+        )
+    check_speech_settings(settings)
+    tts = text_to_speech(settings, meter)
+    stt = speech_to_text(settings, meter)
+    if tts is None or stt is None:
+        missing = [n for n, p in (("OPSEVAL_TTS_*", tts), ("OPSEVAL_STT_*", stt)) if p is None]
+        raise ConfigError(
+            f"a voice run speaks and listens: configure {' and '.join(missing)} "
+            "(URL and model, or a provider plugin)"
+        )
+    return SpeechKit(
+        tts=tts,
+        stt=stt,
+        second=second_speech_to_text(settings, meter),
+        min_confidence=settings.stt_min_confidence,
+        canary_max_wer=settings.stt_canary_max_wer,
+    )
+
+
 TenantTransportFactory = Callable[[SutProfile, "Tenant | None"], Transport]
 """Builds the transport for one attempt. With a pool, the tenant supplies its own target and
 credentials (ADR-0041)."""
 
 
-def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTransportFactory:
+def build_transport_factory(
+    options: RunOptions, settings: Settings, *, kit: SpeechKit | None = None
+) -> TenantTransportFactory:
+    """``kit`` is the speech a voice transport (``audio-ws``, ``audio-http``) needs; each
+    attempt then gets a :class:`VoiceTransport` to give its own recorder and language."""
     if options.transport_factory is not None:
         injected = options.transport_factory
         return lambda profile, _tenant: injected(profile)
@@ -193,11 +261,25 @@ def build_transport_factory(options: RunOptions, settings: Settings) -> TenantTr
             claims=profile.token.claims,
         )
 
+    if options.transport in VOICE_TRANSPORTS:
+        audio_cls, voice_secure = VOICE_TRANSPORTS[options.transport]
+        if kit is None:
+            raise ConfigError(f"the {options.transport} transport needs TTS and STT settings")
+        check_url_allowed(default_target, settings.allowlist(), secure_schemes=voice_secure)
+        voice_kit = kit
+
+        def build_voice(profile: SutProfile, tenant: Tenant | None) -> Transport:
+            where = tenant.target if tenant and tenant.target else default_target
+            audio = audio_cls(where, profile, token=credentials(profile, tenant, where))
+            return VoiceTransport(audio, profile, voice_kit)
+
+        return build_voice
     try:
         cls, secure = TRANSPORTS[options.transport]
     except KeyError:
+        known = sorted([*TRANSPORTS, *VOICE_TRANSPORTS])
         raise ConfigError(
-            f"unknown transport {options.transport!r}; use {', '.join(sorted(TRANSPORTS))}"
+            f"unknown transport {options.transport!r}; use {', '.join(known)}"
         ) from None
     check_url_allowed(default_target, settings.allowlist(), secure_schemes=secure)
 
@@ -258,7 +340,7 @@ def _check_pool(
             "identity to apply, so every lane would share one"
         )
     minted = profile.token is not None
-    secure = TRANSPORTS.get(options.transport, (None, ("https",)))[1]
+    secure = secure_schemes(options.transport)
     for tenant in pool.tenants:
         own = token_for(tenant, settings)
         if minted and not own:
@@ -350,6 +432,14 @@ def _unmet(
     if all_trace and (reason := health.reason("traces")) is not None:
         return f"every scorer needs traces, and {reason}", "dependency"
     return None
+
+
+def _voice_language(scenarios: list[Scenario], profile: SutProfile) -> str:
+    """The language the preflight canary is spoken in: the profile's, else the first
+    scenario's persona's."""
+    if profile.audio is not None and profile.audio.language:
+        return profile.audio.language
+    return scenarios[0].persona.language if scenarios else "en"
 
 
 STOP_KINDS: tuple[SkipKind, ...] = ("fail_fast", "stopped", "cancelled")
@@ -466,6 +556,24 @@ async def launch(
     log: Callable[[str], None] = lambda _msg: None,
 ) -> SuiteResult:
     """Load, run, score and persist a suite. Raises ConfigError for exit code 3."""
+    kits: list[SpeechKit] = []
+    try:
+        return await _launch(catalogue_target, options, settings, log=log, kits=kits)
+    finally:
+        # The speech providers' HTTP clients, closed however the run ended.
+        for kit in kits:
+            with contextlib.suppress(Exception):  # closing must never change the outcome
+                await kit.aclose()
+
+
+async def _launch(
+    catalogue_target: str | Path,
+    options: RunOptions,
+    settings: Settings | None,
+    *,
+    log: Callable[[str], None],
+    kits: list[SpeechKit],
+) -> SuiteResult:
     settings = settings or Settings()
     # Before the catalogue is validated, so a suite may name a plugin's scorer and a
     # broken plugin is reported rather than becoming an UNKNOWN_SCORER later.
@@ -505,9 +613,18 @@ async def launch(
     # Built before the run: a destination that is not allowlisted is a configuration
     # error, and finding that out after a suite has something to publish is too late.
     sinks = build_sinks(settings)
-    make_transport = build_transport_factory(options, settings)
-    trace_source = build_trace_source(options, settings, profile)
     meter = UsageMeter()
+    voice = options.transport in VOICE_TRANSPORTS and options.transport_factory is None
+    kit: SpeechKit | None = None
+    audio_mode: AudioMode = "hashes"
+    if voice:
+        # Before anything is sent: audio that would be stored unencrypted, or a run that
+        # could not speak or listen, is refused here (exit 3, ADR-0053).
+        audio_mode = check_audio_privacy(settings, synthetic=options.synthetic_voices)
+        kit = speech_kit(settings, profile, meter)
+        kits.append(kit)
+    make_transport = build_transport_factory(options, settings, kit=kit)
+    trace_source = build_trace_source(options, settings, profile)
     roles = llm_roles_needed(catalogue.scenarios)
     sim_client = client_for_role(settings, "simulator", meter) if "simulator" in roles else None
     judge_client = client_for_role(settings, "judge", meter) if "judge" in roles else None
@@ -541,6 +658,8 @@ async def launch(
             # With every tenant on its own deployment, no attempt goes to --target.
             probe_target_host=options.transport_factory is None
             and (pool is None or default_where in _tenant_targets(pool, options.target)),
+            voice_scenarios=len(catalogue.scenarios) if voice else 0,
+            voice_language=_voice_language(catalogue.scenarios, profile),
         )
         sut = health.get("sut")
         if sut is not None and sut.blocking:
@@ -552,6 +671,16 @@ async def launch(
                 f"{sut.detail}. Nothing was run. Check the target and the network, or "
                 "pass --no-preflight to try anyway."
             )
+        for name in ("tts", "stt"):
+            speech = health.get(name)
+            if voice and speech is not None and speech.blocking:
+                # Every scenario of a voice run speaks and listens, so a speech outage
+                # silences all of them. A skip is only a gate warning; refusing says plainly
+                # that nothing could be measured (as for an unreachable agent, ADR-0030).
+                raise ConfigError(
+                    f"the {name.upper()} provider is not usable: {speech.detail}. Nothing was "
+                    "run: a voice run cannot be measured without speaking and listening"
+                )
         for check in health.blocking():
             log(f"preflight: {check.name} unavailable — {check.detail}")
         # Tenants with their own deployment are probed too: the attempts go there, not to
@@ -693,10 +822,14 @@ async def launch(
                 if scenario.conversation.scripted_turns or sim_client is None
                 else LLMSimulator(scenario, seed, sim_client)
             )
+            transport = make_transport(profile, tenant)
+            if isinstance(transport, VoiceTransport):
+                recorder = AudioRecorder(store.run_dir(run_id), scenario.id, i, audio_mode)
+                transport = transport.for_attempt(recorder, scenario.persona.language)
             driver = Driver(
                 scenario=scenario,
                 profile=profile,
-                transport=make_transport(profile, tenant),
+                transport=transport,
                 simulator=sim,
                 run_id=run_id,
                 attempt_index=i,

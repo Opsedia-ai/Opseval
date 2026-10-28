@@ -73,6 +73,20 @@ jobs:
           set +e
           uv run opseval demo --repeats 1 --bug crash
           test $? -eq 3
+      - name: Voice demo passes over audio-ws and audio-http (exit 0, ADR-0053)
+        run: |
+          uv run opseval demo --voice --repeats 1
+          uv run opseval demo --voice --repeats 1 --voice-transport audio-http
+      - name: Voice demo catches a silent and a garbled agent (exit 1)
+        run: |
+          set +e
+          uv run opseval demo --voice --repeats 1 --bug silent; test $? -eq 1 || exit 1
+          uv run opseval demo --voice --repeats 1 --bug garbled; test $? -eq 1 || exit 1
+      - name: Voice demo refuses to run on a broken STT, never blaming the agent (exit 3)
+        run: |
+          set +e
+          uv run opseval demo --voice --repeats 1 --stt-down; test $? -eq 3 || exit 1
+          uv run opseval demo --voice --repeats 1 --stt-deaf; test $? -eq 3 || exit 1
 
   # DCO (ADR-0065): every commit in the pull request, and only those, has a Signed-off-by line
   # matching its author. The range is the two parents of the pull request's merge ref
@@ -142,6 +156,14 @@ jobs:
           docker run --rm opseval:ci demo --repeats 1 --bug skip-approval; test $? -eq 1 || exit 1
           docker run --rm opseval:ci demo --repeats 1 --bug forget-method; test $? -eq 1 || exit 1
           docker run --rm opseval:ci demo --repeats 1 --bug crash; test $? -eq 3 || exit 1
+      - name: Voice demo exit codes inside the image are 0 / 1 / 1 / 3 / 3
+        run: |
+          set +e
+          docker run --rm opseval:ci demo --voice --repeats 1; test $? -eq 0 || exit 1
+          docker run --rm opseval:ci demo --voice --repeats 1 --bug silent; test $? -eq 1 || exit 1
+          docker run --rm opseval:ci demo --voice --repeats 1 --bug garbled; test $? -eq 1 || exit 1
+          docker run --rm opseval:ci demo --voice --repeats 1 --stt-down; test $? -eq 3 || exit 1
+          docker run --rm opseval:ci demo --voice --repeats 1 --stt-deaf; test $? -eq 3 || exit 1
       - name: It does not run as root
         run: test "$(docker run --rm --entrypoint id opseval:ci -u)" != "0"
 

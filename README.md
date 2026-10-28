@@ -518,6 +518,26 @@ Leaving `sut_model` unset means *unknown*, not *independent*: the check stays in
 claims independence it has not verified. See
 [ADR-0016](docs/adr/0016-judge-independence-and-quality-judges.md).
 
+## Voice agents (preview)
+
+Opseval can test an agent that speaks, over `--transport audio-ws` (a WebSocket audio stream)
+or `--transport audio-http` (one audio file per turn). The customer's words go through TTS, the
+agent's answer through STT, and every scorer and judge runs on the transcript. When the agent
+spoke and the STT heard nothing usable, Opseval checks its own hearing on the customer's
+previous turn before blaming anyone: if it can hear that, `voice.intelligible` fails the agent;
+if not, the text checks are *not measured* (`ASR_NO_TRANSCRIPT`).
+
+```bash
+uv run opseval demo --voice                  # speaking refund agent, fake loopback speech → exit 0
+uv run opseval demo --voice --bug garbled    # speech nobody can understand → exit 1
+uv run opseval demo --voice --stt-down       # Opseval cannot listen → exit 3
+```
+
+This is a preview: turn-based only (no barge-in yet), no phone or WebRTC, and no audio encryption
+yet, so a run against a real agent needs `OPSEVAL_RECORD_AUDIO=hashes` (no audio is kept). See
+the [voice guide](docs/guide/voice.md) and
+[ADR-0053](docs/adr/0053-voice-sessions-and-records.md).
+
 ## The web console
 
 ```bash

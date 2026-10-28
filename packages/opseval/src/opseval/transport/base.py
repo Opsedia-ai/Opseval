@@ -11,11 +11,38 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar
+from collections.abc import Awaitable
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, ClassVar, Protocol, TypeVar
 
 import httpx
 
-from opseval.models.record import TransportEvent
+from opseval.models.record import AudioRef, TranscriptInfo, TransportEvent, VoiceTimeline
+
+T = TypeVar("T")
+
+
+class HarnessClock(Protocol):
+    """Runs one harness call (TTS, STT) off the agent's attempt deadline (ADR-0042)."""
+
+    async def __call__(self, call: Awaitable[T], /) -> T: ...
+
+
+@dataclass(frozen=True)
+class FrameMedia:
+    """What a voice session knows about a frame beyond its payload: the spoken audio, its
+    transcript, when it reached the other side, and the latency measured on the attempt's
+    own monotonic clock (ADR-0053), which STT time must not inflate. ``text`` is what was
+    actually spoken for a sent frame (a bare approval is said "Yes, please go ahead."), which
+    replaces the frame's text in the record so a judge reads what the agent heard."""
+
+    audio: AudioRef | None = None
+    text: str | None = None
+    transcript: TranscriptInfo | None = None
+    at: datetime | None = None
+    latency_ms: float | None = None
+
 
 SYNTHETIC_KIND = "_opseval_kind"
 """Key used for frames synthesised by a transport (e.g. an HTTP 500 from the agent)."""
@@ -59,6 +86,27 @@ class Session(ABC):
     """True where ``send`` returns only once the agent has answered (request/response
     transports). The driver then stamps a sent frame when sending began, not after the reply:
     otherwise everything the agent did in reply would be placed before it (ADR-0042)."""
+
+    def ends_turn(self, payload: Any) -> bool:
+        """Whether a received frame ends the wait for the agent's answer although the
+        profile would not call it one (``SutProfile.answers``). The voice bridge says so for
+        a spoken turn, even with an empty transcript (whether those were words is
+        ``voice.intelligible``'s question, never a turn timeout's), and for a hang-up. A
+        notification or a data frame that does not answer never ends the wait here: an agent
+        that sends ``response.created`` and never speaks is the agent's ``TIMEOUT``."""
+        return False
+
+    def use_harness_clock(self, clock: HarnessClock) -> None:  # noqa: B027 - optional hook
+        """The driver hands over how to run a harness call off the agent's clock. Only a
+        session that makes such calls itself (the voice bridge) needs it."""
+
+    def frame_media(self, direction: str, payload: Any) -> FrameMedia | None:
+        """The audio behind a frame just sent or received, or ``None`` (text sessions)."""
+        return None
+
+    def voice_timeline(self) -> VoiceTimeline | None:
+        """The attempt's spoken timeline, for ``RunRecord.voice``; ``None`` for text."""
+        return None
 
     def transport_events(self) -> tuple[TransportEvent, ...]:
         """Drops, resumes and token refreshes seen by this session (recorded as evidence)."""

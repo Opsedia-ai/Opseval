@@ -32,6 +32,253 @@
       "title": "ArtifactSpec",
       "type": "object"
     },
+    "AudioConfig": {
+      "additionalProperties": false,
+      "description": "A speaking agent (ADR-0053): what goes over the wire and when a turn ends.",
+      "properties": {
+        "chunk_ms": {
+          "default": 20,
+          "maximum": 1000,
+          "minimum": 5,
+          "title": "Chunk Ms",
+          "type": "integer"
+        },
+        "codec": {
+          "default": "pcm16",
+          "enum": [
+            "pcm16",
+            "mulaw",
+            "alaw"
+          ],
+          "title": "Codec",
+          "type": "string"
+        },
+        "end_of_turn_silence_ms": {
+          "default": 800,
+          "maximum": 30000,
+          "minimum": 50,
+          "title": "End Of Turn Silence Ms",
+          "type": "integer"
+        },
+        "envelope": {
+          "$ref": "#/$defs/AudioEnvelope"
+        },
+        "http": {
+          "$ref": "#/$defs/AudioHttp"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "max_turn_seconds": {
+          "default": 60.0,
+          "exclusiveMinimum": 0,
+          "maximum": 600,
+          "title": "Max Turn Seconds",
+          "type": "number"
+        },
+        "rate": {
+          "default": 16000,
+          "title": "Rate",
+          "type": "integer"
+        },
+        "silence_dbfs": {
+          "default": -50.0,
+          "maximum": 0,
+          "title": "Silence Dbfs",
+          "type": "number"
+        }
+      },
+      "title": "AudioConfig",
+      "type": "object"
+    },
+    "AudioEnvelope": {
+      "additionalProperties": false,
+      "description": "How an ``audio-ws`` agent frames its stream (ADR-0053). Every event is a JSON object\nwhose ``type_field`` names it; audio may also arrive as binary WebSocket frames.",
+      "properties": {
+        "audio_event": {
+          "default": "audio",
+          "title": "Audio Event",
+          "type": "string"
+        },
+        "audio_field": {
+          "default": "audio",
+          "title": "Audio Field",
+          "type": "string"
+        },
+        "binary": {
+          "default": false,
+          "title": "Binary",
+          "type": "boolean"
+        },
+        "caller_turn_end_event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "end_of_turn",
+          "title": "Caller Turn End Event"
+        },
+        "dtmf_digits_field": {
+          "default": "digits",
+          "title": "Dtmf Digits Field",
+          "type": "string"
+        },
+        "dtmf_event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "dtmf",
+          "title": "Dtmf Event"
+        },
+        "hangup_event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "hangup",
+          "title": "Hangup Event"
+        },
+        "mark_event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "mark",
+          "title": "Mark Event"
+        },
+        "mark_name_field": {
+          "default": "name",
+          "title": "Mark Name Field",
+          "type": "string"
+        },
+        "speech_end_event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "speech_end",
+          "title": "Speech End Event"
+        },
+        "speech_start_event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "speech_start",
+          "title": "Speech Start Event"
+        },
+        "start_frame": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Frame"
+        },
+        "transcript_event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "transcript",
+          "title": "Transcript Event"
+        },
+        "transcript_text_field": {
+          "default": "text",
+          "title": "Transcript Text Field",
+          "type": "string"
+        },
+        "transfer_event": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "transfer",
+          "title": "Transfer Event"
+        },
+        "transfer_to_field": {
+          "default": "to",
+          "title": "Transfer To Field",
+          "type": "string"
+        },
+        "type_field": {
+          "default": "type",
+          "title": "Type Field",
+          "type": "string"
+        }
+      },
+      "title": "AudioEnvelope",
+      "type": "object"
+    },
+    "AudioHttp": {
+      "additionalProperties": false,
+      "description": "How an ``audio-http`` agent takes and returns a turn (ADR-0053).",
+      "properties": {
+        "request_format": {
+          "default": "wav",
+          "enum": [
+            "wav",
+            "raw"
+          ],
+          "title": "Request Format",
+          "type": "string"
+        },
+        "session_header": {
+          "default": "X-Opseval-Session",
+          "title": "Session Header",
+          "type": "string"
+        }
+      },
+      "title": "AudioHttp",
+      "type": "object"
+    },
     "CheckpointSpec": {
       "additionalProperties": false,
       "properties": {
@@ -320,6 +567,17 @@
       },
       "title": "Artifacts",
       "type": "array"
+    },
+    "audio": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AudioConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "auth_frame": {
       "anyOf": [

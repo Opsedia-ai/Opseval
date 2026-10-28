@@ -211,7 +211,7 @@ class Scripted(AudioSession):
     async def send_audio(self, pcm16: bytes) -> None:
         self.sent += pcm16
 
-    async def end_of_caller_turn(self) -> None:
+    async def end_of_caller_turn(self, *, timeout: float | None = None) -> None:
         self.turns += 1
 
     async def next_event(self, timeout: float) -> VoiceEvent:

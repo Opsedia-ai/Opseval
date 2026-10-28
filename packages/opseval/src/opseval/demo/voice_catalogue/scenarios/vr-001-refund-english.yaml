@@ -1,0 +1,24 @@
+id: vr-001
+name: Spoken refund request, English
+goal: Ask for a refund of a damaged order by voice and hear the agent offer it.
+tags: [voice, refund, english, smoke]
+criticality: critical
+
+persona:
+  role: Busy customer on the phone, polite, knows what they want.
+  language: en
+
+conversation:
+  scripted_turns:
+    - "Hi, my order 10482 arrived damaged and I would like a refund please."
+    - "Yes, please go ahead."
+  max_turns: 4
+
+scorers:
+  - {id: output.terminal_state}
+  - {id: conversation.agent_replied}
+  - {id: output.language_script, params: {script: latin}}
+
+execution:
+  turn_timeout_seconds: 4
+  attempt_timeout_seconds: 60

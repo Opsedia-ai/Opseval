@@ -51,12 +51,12 @@ def relayout(run: Path, layout: str | None, *, started: datetime | None = None) 
 
 def test_a_new_run_records_its_layout(run: Path) -> None:
     assert json.loads((run / "manifest.json").read_text("utf-8"))["layout"] == LAYOUT
-    assert LAYOUT == "opseval-runs/4", (
-        "4: usage rows may carry speech counts and null tokens (ADR-0054)"
+    assert LAYOUT == "opseval-runs/5", (
+        "5: profile snapshots may carry audio: and replies the voice bridge's evidence (ADR-0053)"
     )
 
 
-@pytest.mark.parametrize("older", ["opseval-runs/2", "opseval-runs/3"])
+@pytest.mark.parametrize("older", ["opseval-runs/2", "opseval-runs/3", "opseval-runs/4"])
 def test_an_older_layout_run_is_still_read(run: Path, older: str) -> None:
     relayout(run, older)
     store = FileStore(run.parent)

@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from opseval.audio import AudioFormat, warm
 from opseval.errors import UnsupportedCapability
@@ -93,6 +93,25 @@ class Hangup:
 
 
 @dataclass(frozen=True)
+class AgentFrame:
+    """A data message the agent sent beside its speech (a checkpoint, a result, an error):
+    handed to the driver as a frame, classified by the profile like any other."""
+
+    at_ms: float
+    payload: Any
+
+
+@dataclass(frozen=True)
+class UndecodableAudio:
+    """Audio from the agent that is not what its format says (ADR-0053): the agent's fault.
+    The bytes are kept as they came, for the record."""
+
+    at_ms: float
+    data: bytes = field(repr=False)
+    reason: str
+
+
+@dataclass(frozen=True)
 class Mark:
     """A named point the agent's protocol reports (for example, playback finished)."""
 
@@ -109,6 +128,8 @@ VoiceEvent = (
     | Transfer
     | Hangup
     | Mark
+    | AgentFrame
+    | UndecodableAudio
 )
 
 
@@ -152,9 +173,11 @@ class AudioSession(ABC):
         )
 
     @abstractmethod
-    async def end_of_caller_turn(self) -> None:
+    async def end_of_caller_turn(self, *, timeout: float | None = None) -> None:
         """The caller has finished speaking: flush, and for request/response transports, send.
-        The agent's turn clock starts here (ADR-0042: harness time is not the agent's)."""
+        The agent's turn clock starts here (ADR-0042: harness time is not the agent's).
+        ``timeout`` is how long the agent may take to answer, where the transport needs it to
+        bound a request (``audio-http``)."""
 
     @abstractmethod
     async def next_event(self, timeout: float) -> VoiceEvent:
@@ -165,8 +188,25 @@ class AudioSession(ABC):
     async def close(self) -> None: ...
 
 
+class AudioTransport(ABC):
+    """Factory for voice sessions, one per attempt (the voice counterpart of ``Transport``)."""
+
+    name: str = "audio"
+
+    @abstractmethod
+    async def open(self) -> AudioSession:
+        """A new, not yet started, session."""
+
+    @property
+    @abstractmethod
+    def target(self) -> str: ...
+
+
 __all__ = [
     "AgentAudio",
+    "AgentFrame",
+    "AudioTransport",
+    "UndecodableAudio",
     "AgentSpeechEnd",
     "AgentSpeechStart",
     "AgentTranscript",

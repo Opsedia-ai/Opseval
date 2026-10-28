@@ -23,6 +23,12 @@ leaf and import nothing else in opseval, so the tuple is repeated and a test kee
 equal."""
 
 
+VOICE_KEY = "_opseval_voice"
+"""Where the voice bridge puts a spoken reply's evidence in the reply's payload (ADR-0053):
+its level and length, every transcript tried, the decision taken on an empty one and the STT
+canary behind it. In the payload, so ``rescore`` reads exactly what the run decided on."""
+
+
 class TerminalState(StrEnum):
     OUTCOME_COMMITTED = "outcome_committed"
     STOPPED_AT_CHECKPOINT = "stopped_at_checkpoint"

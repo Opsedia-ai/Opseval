@@ -137,6 +137,15 @@ class Settings(BaseSettings):
     """API key for the second STT, if it needs one."""
     stt_second_model: str | None = None
     """Model of the second STT."""
+    record_audio: Literal["files", "hashes"] = "files"
+    """What a voice run keeps of each spoken turn (ADR-0053). ``files``: one WAV per speaker
+    per turn under the run folder's ``audio/``, which needs ``OPSEVAL_AUDIO_ENCRYPTION_KEY``
+    (a voice can be biometric data), so without the key a voice run is refused (exit 3).
+    ``hashes``: no bytes at all, only each turn's SHA-256, length, codec, rate and duration."""
+    audio_encryption_key: SecretStr | None = None
+    """The key that encrypts recorded audio at rest (ADR-0053), separate from the key that
+    encrypts agent credentials. Encryption arrives in the next voice step: until then a run
+    with this set is refused (exit 3); use ``OPSEVAL_RECORD_AUDIO=hashes``."""
 
     # Trace source: OTLP-JSON spans on disk (ADR-0028)
     otlp_spans_path: str | None = None
@@ -286,6 +295,7 @@ SECRET_FIELDS = (
     "tts_key",
     "stt_key",
     "stt_second_key",
+    "audio_encryption_key",
     "langfuse_secret_key",
     "serve_token",
     "webhook_url",

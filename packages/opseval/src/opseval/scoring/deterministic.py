@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import (
     SCRIPT_EXHAUSTED,
+    VOICE_KEY,
     FrameRecord,
     InterruptRecord,
     RunRecord,
@@ -60,9 +61,18 @@ class LanguageScriptParams(NoParams):
     """Share of agent messages that must be in the script; the threshold when unset."""
 
 
+def _spoken_unheard(frame: FrameRecord) -> bool:
+    """A spoken agent turn Opseval could not hear (its own STT proven broken, ADR-0053):
+    the agent did answer there, so calling it silence would blame it for Opseval's ears."""
+    payload = frame.payload
+    evidence = payload.get(VOICE_KEY) if isinstance(payload, dict) else None
+    return isinstance(evidence, dict) and evidence.get("heard") == "asr_failed"
+
+
 @register
 class NoErrors(Scorer):
     id = "conversation.no_errors"
+    reads_text = False
     Params = NoParams
     axis = Axis.FLOW
     description = "Fails if the agent sent any error frame."
@@ -106,7 +116,9 @@ class AgentReplied(Scorer):
                 turns.append(frame.seq)
                 answered.append(False)
             elif frame.direction == "received" and turns and not answered[-1]:
-                answered[-1] = ctx.profile.answers(frame.kind, frame.text, frame.payload)
+                answered[-1] = ctx.profile.answers(
+                    frame.kind, frame.text, frame.payload
+                ) or _spoken_unheard(frame)
         if not turns:
             return self.result(spec, 1.0, vacuous=True, note="no customer turn was sent")
         silent = [n for n, ok in enumerate(answered, start=1) if not ok]
@@ -118,6 +130,7 @@ class AgentReplied(Scorer):
 @register
 class ConnectionStable(Scorer):
     id = "conversation.connection_stable"
+    reads_text = False
     Params = ConnectionStableParams
     axis = Axis.FLOW
     description = (
@@ -141,6 +154,7 @@ class ConnectionStable(Scorer):
 @register
 class TurnBudget(Scorer):
     id = "conversation.turn_budget"
+    reads_text = False
     Params = TurnBudgetParams
     axis = Axis.FLOW
     description = "Customer turns used versus a budget (params.budget, default max_turns)."
@@ -160,6 +174,7 @@ class TurnBudget(Scorer):
 @register
 class PhaseOrder(Scorer):
     id = "flow.phase_order"
+    reads_text = False
     Params = PhaseOrderParams
     axis = Axis.FLOW
     description = "Phases first appear in profile order without skipping (params.allow_gaps)."
@@ -189,6 +204,7 @@ class PhaseOrder(Scorer):
 @register
 class RejectionRouting(Scorer):
     id = "flow.rejection_routing"
+    reads_text = False
     Params = NoParams
     axis = Axis.FLOW
     description = "After each rejection, the agent returns to the expected target phase."
@@ -221,6 +237,7 @@ class RejectionRouting(Scorer):
 @register
 class TerminalStateScorer(Scorer):
     id = "output.terminal_state"
+    reads_text = False
     Params = NoParams
     version = "2"  # 2: the default stop_at with no commit gate expects goal_reached (ADR-0043)
     axis = Axis.OUTPUT
@@ -271,6 +288,7 @@ _dig = dig  # objects by key, lists by index (opseval.paths)
 @register
 class PayloadEquals(Scorer):
     id = "output.payload_equals"
+    reads_text = False
     Params = PayloadEqualsParams
     axis = Axis.OUTPUT
     # 2: a checkpoint the profile does not declare is BAD_PARAMS, not a failure.
@@ -344,6 +362,7 @@ def _unknown_checkpoint(checkpoint: str, ctx: ScoringContext) -> str | None:
 @register
 class RequiredFields(Scorer):
     id = "output.required_fields"
+    reads_text = False
     Params = RequiredFieldsParams
     axis = Axis.OUTPUT
     version = "2"  # 2: a numeric path step indexes a list (opseval.paths.dig)
@@ -430,6 +449,7 @@ class ProbesPassed(Scorer):
     """FR-RUN-07: the agent answered the raw protocol probes as the profile declares."""
 
     id = "protocol.probes_passed"
+    reads_text = False
     Params = NoParams
     axis = Axis.OUTPUT
     description = "Every protocol probe the profile declares got the answer it expects."
@@ -505,6 +525,7 @@ class RepliesRead(Scorer):
     """
 
     id = UNREAD_REPLIES
+    reads_text = False
     Params = NoParams
     axis = Axis.HARNESS
     description = (

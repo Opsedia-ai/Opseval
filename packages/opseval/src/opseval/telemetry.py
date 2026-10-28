@@ -41,7 +41,9 @@ from opseval.models.telemetry import TelemetryEvent, TelemetryPayload, bucket
 
 POST_TIMEOUT = 2.0
 
-BUILTIN_TRANSPORTS = frozenset({"websocket", "http-json", "sse", "openai-chat", "python"})
+BUILTIN_TRANSPORTS = frozenset(
+    {"websocket", "http-json", "sse", "openai-chat", "python", "audio-ws", "audio-http"}
+)
 BUILTIN_TRACE_SOURCES = frozenset({"langfuse"})
 CUSTOM = "custom"
 """Stands in for any name that is not ours: a third-party transport or scorer id could

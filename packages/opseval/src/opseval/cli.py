@@ -25,7 +25,7 @@ from opseval.models.gate import Preset
 from opseval.models.results import SuiteResult
 from opseval.models.stop import StopPolicy
 from opseval.reporting import console_summary
-from opseval.runner import RunOptions, launch
+from opseval.runner import VOICE_TRANSPORTS, RunOptions, launch
 from opseval.scaffold import PLACEHOLDER_URL, TEMPLATES, Answers, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY, describe_params
 from opseval.storage import FileStore, load_result_at
@@ -267,7 +267,7 @@ def run(
         str, typer.Option("--target", "-t", help="Agent URL (ws://, wss://, http(s)://).")
     ],
     transport: Annotated[
-        str, typer.Option(help="websocket | http-json | sse | openai-chat")
+        str, typer.Option(help="websocket | http-json | sse | openai-chat | audio-ws | audio-http")
     ] = "websocket",
     repeats: Annotated[Optional[int], typer.Option(min=1, max=20, help="Override repeats.")] = None,  # noqa: UP045
     allow_commit: Annotated[
@@ -649,7 +649,7 @@ def preflight(
     profile: Annotated[str, typer.Option("--profile", "-p", help="SUT profile file.")],
     target: Annotated[str, typer.Option("--target", "-t", help="Agent URL.")],
     transport: Annotated[
-        str, typer.Option(help="websocket | http-json | sse | openai-chat")
+        str, typer.Option(help="websocket | http-json | sse | openai-chat | audio-ws | audio-http")
     ] = "websocket",
     traces: Annotated[bool, typer.Option(help="Include the trace source check.")] = True,
     verify_llm: Annotated[
@@ -681,6 +681,9 @@ def preflight(
                 transport=transport,
                 traces_enabled=traces and sut_profile.traces is not None,
                 verify_llm=verify_llm,
+                # A voice transport speaks and listens: check the TTS and STT too (ADR-0054).
+                voice_scenarios=len(found.scenarios) if transport in VOICE_TRANSPORTS else 0,
+                voice_language=(found.scenarios[0].persona.language if found.scenarios else "en"),
             )
         )
     except ConfigError as exc:
@@ -774,7 +777,8 @@ def demo(
     bug: Annotated[
         Optional[str],  # noqa: UP045
         typer.Option(
-            help="Inject a defect into the sample agent: skip-approval | forget-method | crash"
+            help="Inject a defect into the sample agent: skip-approval | forget-method | crash; "
+            "with --voice: silent | garbled"
         ),
     ] = None,
     repeats: Annotated[int, typer.Option(min=1, max=20)] = 3,
@@ -782,11 +786,38 @@ def demo(
     open_report: Annotated[
         bool, typer.Option("--open", help="Open report.html when done.")
     ] = False,
+    voice: Annotated[
+        bool,
+        typer.Option(
+            "--voice",
+            help="Run the speaking demo agent through the voice bridge, with fake loopback "
+            "TTS and STT (synthetic voices, no speech model or key).",
+        ),
+    ] = False,
+    voice_transport: Annotated[
+        str, typer.Option(help="With --voice: audio-ws | audio-http.")
+    ] = "audio-ws",
+    stt_down: Annotated[
+        bool, typer.Option("--stt-down", help="With --voice: the fake STT answers 503.")
+    ] = False,
+    stt_deaf: Annotated[
+        bool,
+        typer.Option(
+            "--stt-deaf", help="With --voice: the fake STT hears nothing, not even the canary."
+        ),
+    ] = False,
 ) -> None:
     """Start the sample refund agent and run the smoke suite against it (no LLM keys needed)."""
     from opseval.demo import catalogue_dir
     from opseval.demo.refund_agent import BUGS, run_agent
 
+    if voice:
+        raise typer.Exit(
+            _voice_demo(bug, repeats, junit, open_report, voice_transport, stt_down, stt_deaf)
+        )
+    if stt_down or stt_deaf:
+        typer.secho("--stt-down and --stt-deaf need --voice", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS)
     if bug is not None and bug not in BUGS:
         typer.secho(f"unknown bug {bug!r}; choose from {', '.join(BUGS)}", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS)
@@ -808,6 +839,77 @@ def demo(
         return _finish(result, settings, open_report, junit)
 
     raise typer.Exit(asyncio.run(_go()))
+
+
+def _voice_demo(
+    bug: str | None,
+    repeats: int,
+    junit: Path | None,
+    open_report: bool,
+    transport: str,
+    stt_down: bool,
+    stt_deaf: bool,
+) -> int:
+    """``opseval demo --voice`` (ADR-0053): the speaking agent and fake speech on loopback."""
+    from opseval.demo import voice_catalogue_dir
+    from opseval.demo.voice_agent import VOICE_BUGS, run_voice_demo
+
+    if bug is not None and bug not in VOICE_BUGS:
+        typer.secho(
+            f"unknown voice bug {bug!r}; choose from {', '.join(VOICE_BUGS)}", fg="red", err=True
+        )
+        return EXIT_HARNESS
+    if transport not in ("audio-ws", "audio-http"):
+        typer.secho("--voice-transport is audio-ws or audio-http", fg="red", err=True)
+        return EXIT_HARNESS
+    if stt_down and stt_deaf:
+        typer.secho("choose one of --stt-down and --stt-deaf", fg="red", err=True)
+        return EXIT_HARNESS
+    cat = voice_catalogue_dir()
+    speech = "down" if stt_down else "deaf" if stt_deaf else "ok"
+
+    async def _go() -> int:
+        async with run_voice_demo(
+            bug,  # type: ignore[arg-type]
+            speech=speech,  # type: ignore[arg-type]
+            transport=transport,  # type: ignore[arg-type]
+        ) as (url, speech_url):
+            settings = Settings()
+            settings.allowed_hosts = ",".join(filter(None, [settings.allowed_hosts, "127.0.0.1"]))
+            # The demo's own synthetic speech: the fake TTS and STT on loopback, every other
+            # speech setting cleared so a real provider in the environment is never used.
+            settings.tts_provider = settings.stt_provider = "openai"
+            settings.tts_url = settings.stt_url = speech_url
+            settings.tts_model, settings.stt_model = "demo-tts", "demo-stt"
+            settings.tts_key = settings.stt_key = None
+            settings.tts_voice_map = {"default": "demo"}
+            settings.tts_format = "wav"
+            settings.stt_second_provider = settings.stt_second_url = None
+            settings.stt_second_model = None
+            settings.stt_canary_wav = settings.stt_canary_text = None
+            settings.stt_canary_language = None
+            settings.tts_timeout_seconds = settings.stt_timeout_seconds = 5.0
+            settings.record_audio = "files"
+            settings.audio_encryption_key = None
+            what = f"bug: {bug or 'none'}; STT: {speech}"
+            typer.echo(f"Speaking refund agent at {url} over {transport} ({what})\n")
+            options = RunOptions(
+                target=url,
+                transport=transport,
+                profile=cat / "profile.yaml",
+                repeats=repeats,
+                synthetic_voices=True,
+            )
+            try:
+                result = await launch(
+                    cat / "suites" / "smoke.yaml", options, settings, log=typer.echo
+                )
+            except ConfigError as exc:
+                typer.secho(f"configuration error: {exc}", fg="red", err=True)
+                return EXIT_HARNESS
+        return _finish(result, settings, open_report, junit)
+
+    return asyncio.run(_go())
 
 
 @app.command()
