@@ -104,8 +104,11 @@ version history.
 
 The database layer and its CLI are built; the console and runs are not.
 
-- **Schema and migration.** `db.schema.Task` and revision `0002` (`0002_tasks.py`) as decided.
-  Two details the decision left open:
+- **Schema and migrations.** `db.schema.Task` and revision `0002` (`0002_tasks.py`) as decided,
+  then revision `0003` (`0003_task_link_keys.py`) for the link keys below. `0002` was released
+  with plain links to any item and is never edited after release (a database already at it
+  would never see the change), so the stricter keys are a revision of their own. Details the
+  decision left open:
   - `catalogue_items (task_id, project_id)` is a composite foreign key to `tasks (id,
     project_id)`, so an item can never sit in one project's row and another project's task.
   - `profile_item_id` and `default_suite_item_id` are composite foreign keys, `(item, task)`
@@ -115,6 +118,18 @@ The database layer and its CLI are built; the console and runs are not.
     composite key, and nothing deletes an item except with its task. A task cascades from its
     project, as items do; `runs.task_id` (ADR-0051) will be `RESTRICT`, which keeps a task
     with runs from being deleted.
+  - `0003` first sets to `NULL` every existing link the new rule forbids (another task's
+    item, or the wrong kind), printing how many per column: such a link was never valid, and
+    there is no right item to guess. Then it adds `catalogue_items (id, task_id)` unique,
+    swaps the plain keys for the composite ones (same names) and installs the trigger. Its
+    downgrade to `0002` removes exactly that and restores `0002`'s plain `ON DELETE SET NULL`
+    keys; it loses nothing, so it is never refused.
+  - `0002`'s downgrade is unchanged as released: it refuses only while a non-default task
+    exists. The fuller guard (a `default` task's settings too) lives in `0003`'s downgrade
+    and runs when the destination is below `0002` (`0001`, `base`, or a relative or unknown
+    one, which can only make it refuse), so a downgrade from head to `0001` is refused,
+    whole, before anything is dropped. A database that never reached `0003` keeps `0002`'s
+    original check.
   - The downgrade to `0001` works while every task is a `default` one as the upgrade made it
     (chat, text, no region, not archived, no default suite), and is refused otherwise, with a
     list of what it would lose.
@@ -149,6 +164,9 @@ The database layer and its CLI are built; the console and runs are not.
   - the migration from `0001` with data (default tasks, moved items, the profile linked only
     when there is exactly one, the swapped key, a second upgrade, the downgrade and its
     refusal);
+  - `0003` on a database at `0002` holding invalid links (another task's profile, a scenario
+    as default suite): those cleared and counted, valid ones kept, the keys and trigger in
+    place, and the downgrade back to `0002`'s exact keys;
   - the check constraints and the composite key;
   - same-named items in two tasks;
   - `--task` on every command, and an unknown task (exit 3, nothing created);

@@ -19,7 +19,7 @@ from alembic import command
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 from typer.testing import CliRunner
 
 from opseval.cli import app
@@ -147,6 +147,16 @@ async def _constraints(engine: AsyncEngine, table: str) -> set[str]:
         return {str(r[0]) for r in rows}
 
 
+async def _fk_defs(conn: AsyncConnection) -> dict[str, str]:
+    rows = await conn.execute(
+        text(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = CAST('tasks' AS regclass) AND contype = 'f'"
+        )
+    )
+    return {str(r[0]): str(r[1]) for r in rows}
+
+
 def _downgrade(conn: Connection, revision: str) -> None:
     command.downgrade(migrate.config(conn), revision)
 
@@ -159,7 +169,7 @@ class TestTheMigration:
             ids = await _seed_0001(engine)
             assert "uq_catalogue_items_project_id" in await _constraints(engine, "catalogue_items")
             await migrate.upgrade(engine)
-            assert await migrate.current(engine) == "0002"
+            assert await migrate.current(engine) == "0003"
 
             async with sessions(engine)() as s:
                 tasks = {t.project_id: t for t in await s.scalars(select(Task))}
@@ -219,7 +229,7 @@ class TestTheMigration:
             with pytest.raises(RuntimeError, match="acme/one: task 'voice' and its catalogue"):
                 async with engine.begin() as conn:
                     await conn.run_sync(_downgrade, "0001")
-            assert await migrate.current(engine) == "0002"
+            assert await migrate.current(engine) == "0003"
         finally:
             await engine.dispose()
 
@@ -242,7 +252,111 @@ class TestTheMigration:
             assert "acme/one: the default task's kind voice, region eu, a default suite" in message
             assert "acme/two: the default task's archived" in message
             assert "acme/empty" not in message
+            assert await migrate.current(engine) == "0003"
+        finally:
+            await engine.dispose()
+
+    async def test_0003_keys_the_links_of_a_database_already_at_0002(
+        self, pg_url: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # 0002 was released with plain links to any item; 0003 must bring such a database to
+        # the new rule, clearing (and counting) only the links that rule forbids.
+        engine = _engine(pg_url)
+        try:
+            await migrate.upgrade(engine, "0001")
+            ids = await _seed_0001(engine)
+            await migrate.upgrade(engine, "0002")
+            voice, voice_suite = uuid.uuid4(), uuid.uuid4()
+            async with engine.begin() as conn:
+                task = {
+                    str(r[0]): r[1]
+                    for r in await conn.execute(text("SELECT project_id, id FROM tasks"))
+                }
+                one, two = task[str(ids["one"])], task[str(ids["two"])]
+                await conn.execute(
+                    text(
+                        "INSERT INTO tasks (id, project_id, slug, name, kind, modality) "
+                        "VALUES (:id, :project, 'voice', 'voice', 'voice', 'audio_stream')"
+                    ),
+                    {"id": voice, "project": ids["one"]},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO catalogue_items (id, project_id, task_id, kind, name) "
+                        "VALUES (:id, :project, :task, 'suite', 'smoke')"
+                    ),
+                    {"id": voice_suite, "project": ids["one"], "task": voice},
+                )
+                links = [
+                    # valid: one's default task, its own profile (kept from 0002) and suite
+                    (one, "default_suite_item_id", ids["one:suite:smoke"]),
+                    # invalid: the voice task names its sibling's profile; its own suite is valid
+                    (voice, "profile_item_id", ids["one:profile:refund-agent"]),
+                    (voice, "default_suite_item_id", voice_suite),
+                    # valid profile; invalid suite: a scenario of the right task
+                    (two, "profile_item_id", ids["two:profile:staging"]),
+                    (two, "default_suite_item_id", ids["two:scenario:rf-001"]),
+                ]
+                for row, column, item in links:
+                    await conn.execute(
+                        text(f"UPDATE tasks SET {column} = :item WHERE id = :id"),
+                        {"item": item, "id": row},
+                    )
+
+            capsys.readouterr()
+            await migrate.upgrade(engine)
+            assert await migrate.current(engine) == "0003"
+            printed = capsys.readouterr().err
+            assert "cleared 1 tasks.profile_item_id link(s)" in printed
+            assert "cleared 1 tasks.default_suite_item_id link(s)" in printed
+
+            async with engine.connect() as conn:
+                rows = await conn.execute(
+                    text("SELECT id, profile_item_id, default_suite_item_id FROM tasks")
+                )
+                after = {r[0]: (r[1], r[2]) for r in rows}
+                defs = await _fk_defs(conn)
+                triggers = await conn.scalar(
+                    text("SELECT count(*) FROM pg_trigger WHERE tgname = 'opseval_task_link_kinds'")
+                )
+            assert after[one] == (ids["one:profile:refund-agent"], ids["one:suite:smoke"])
+            assert after[voice] == (None, voice_suite)
+            assert after[two] == (ids["two:profile:staging"], None)
+            assert "uq_catalogue_items_id" in await _constraints(engine, "catalogue_items")
+            for column in ("profile_item_id", "default_suite_item_id"):
+                assert defs[f"fk_tasks_{column}_catalogue_items"] == (
+                    f"FOREIGN KEY ({column}, id) REFERENCES catalogue_items(id, task_id)"
+                )
+            assert triggers == 1
+            # The new rule holds on the migrated database.
+            with pytest.raises(IntegrityError, match="fk_tasks_profile_item_id_catalogue_items"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("UPDATE tasks SET profile_item_id = :item WHERE id = :id"),
+                        {"item": ids["one:profile:refund-agent"], "id": voice},
+                    )
+
+            # Down to 0002 loses nothing (the voice task stays) and restores its schema exactly.
+            async with engine.begin() as conn:
+                await conn.run_sync(_downgrade, "0002")
             assert await migrate.current(engine) == "0002"
+            async with engine.connect() as conn:
+                defs = await _fk_defs(conn)
+                triggers = await conn.scalar(
+                    text("SELECT count(*) FROM pg_trigger WHERE tgname = 'opseval_task_link_kinds'")
+                )
+                functions = await conn.scalar(
+                    text("SELECT count(*) FROM pg_proc WHERE proname = 'opseval_task_link_kinds'")
+                )
+                tasks = await conn.scalar(text("SELECT count(*) FROM tasks"))
+            assert (triggers, functions, tasks) == (0, 0, 4)
+            assert "uq_catalogue_items_id" not in await _constraints(engine, "catalogue_items")
+            for column in ("profile_item_id", "default_suite_item_id"):
+                assert defs[f"fk_tasks_{column}_catalogue_items"] == (
+                    f"FOREIGN KEY ({column}) REFERENCES catalogue_items(id) ON DELETE SET NULL"
+                )
+            await migrate.upgrade(engine)
+            assert await migrate.current(engine) == "0003"
         finally:
             await engine.dispose()
 
