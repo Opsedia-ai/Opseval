@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# An example bitbucket-pipelines.yml: evaluate the agent on every pull request and on main,
+# and deploy only when the evaluation passed. The pipe exits with Opseval's code, so the step
+# fails on 1 (the agent failed), 2 (not judged) and 3 (harness or configuration error), and
+# the deploy step after it does not run.
+#
+# Secrets: secured repository or deployment variables (OPSEVAL_JUDGE_API_KEY here), handed to
+# the pipe as variables. Bitbucket masks them in the log.
+#
+# Test reports: the pipe writes test-results/opseval/junit.xml, which Bitbucket picks up.
+definitions:
+  steps:
+    - step: &opseval
+        name: Opseval
+        script:
+          # Until the pipe is published: build it (see templates/bitbucket/pipe/Dockerfile),
+          # push it to a registry the runner can pull from, and name it as docker://<image>.
+          - pipe: docker://registry.example.com/tools/opseval-pipe:0.2.0
+            variables:
+              SUITE: evals/suites/smoke.yaml
+              PROFILE: evals/profile.yaml
+              TARGET: wss://agent.staging.example.com/ws
+              ALLOWED_HOSTS: agent.staging.example.com,api.openai.com
+              JUDGE_BASE_URL: https://api.openai.com/v1
+              JUDGE_MODEL: gpt-4.1-mini
+              JUDGE_API_KEY: $OPSEVAL_JUDGE_API_KEY
+              OPSEVAL_ENV: OPSEVAL_SIMULATOR_TIMEOUT_SECONDS=120
+        artifacts:
+          - opseval-reports/**
+
+pipelines:
+  pull-requests:
+    "**":
+      - step: *opseval
+  branches:
+    main:
+      - step: *opseval
+      - step:
+          name: Deploy
+          deployment: production
+          script:
+            - ./scripts/publish.sh

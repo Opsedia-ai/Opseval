@@ -271,6 +271,8 @@ The report, JUnit file and `result.json` are uploaded as an artifact, and the st
 
 Drop-in workflows for a pull request, a `v*` tag, a published release and a successful deployment are in [`examples/github/`](examples/github/), and `.github/workflows/opseval-eval.yml` is a reusable workflow (`on: workflow_call`) whose job a release can `needs:`. Only exit 0 passes; 2 (not judged) and 3 (harness error) block like 1 and are never turned green ([CI guide](docs/guide/ci.md), [ADR-0058](docs/adr/0058-ci-cd-anywhere.md)).
 
+For GitLab, Jenkins, Azure DevOps, CircleCI and Bitbucket, [`templates/`](templates/) has a CI/CD component, a shared-library step, a steps template, an orb and a pipe. Each wraps the CLI image, publishes the JUnit file, takes keys only from that system's secret store and fails on 1, 2 and 3. Any other CI gets a documented `docker run` line in bash and PowerShell ([CI guide](docs/guide/ci.md#other-ci-systems)).
+
 **pytest**: `pip install pytest-opseval`, then `pytest --opseval-profile opseval/profile.yaml --opseval-target wss://… opseval/suites/smoke.yaml`. Each scenario becomes a test: *failed* is FAILED, *not judged* is ERROR (never a pass), and skipped scenarios are skipped ([ADR-0015](docs/adr/0015-ci-integrations.md)).
 
 ### Trace-backed tool checks (Langfuse)
