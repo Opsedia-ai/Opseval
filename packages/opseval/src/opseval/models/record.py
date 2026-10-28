@@ -5,9 +5,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from opseval.models.profile import FrameKind
 
@@ -15,6 +15,12 @@ SCRIPT_EXHAUSTED = "script_exhausted"
 """Noted when a scripted customer ran out of turns (ADR-0043). The attempt ends
 ``goal_reached``, but that shows only that the conversation ran to its end, not that the goal
 was met; scorers read the note, which lives here so they need not import the driver."""
+
+
+AUDIO_RATES: tuple[int, ...] = (8_000, 16_000, 22_050, 24_000, 44_100, 48_000)
+"""The sample rates a voice record may claim. Mirrors ``opseval.audio.RATES``: models are a
+leaf and import nothing else in opseval, so the tuple is repeated and a test keeps the two
+equal."""
 
 
 class TerminalState(StrEnum):
@@ -38,13 +44,18 @@ class Frozen(BaseModel):
 
 class AudioRef(Frozen):
     """One turn's audio, kept beside the record (ADR-0053). Caller and agent audio are
-    separate files, so either can be withheld or deleted on its own."""
+    separate files, so either can be withheld or deleted on its own.
+
+    Three states, told apart by ``path`` and ``pruned``: a file (``path`` set), hashes only
+    (no path, not pruned: ``OPSEVAL_RECORD_AUDIO=hashes``, or audio that could not be
+    decoded), and pruned (no path, ``pruned``: the file existed and retention removed it).
+    """
 
     path: str | None
     """Relative to the run folder, under ``audio/``. None when only the hash is kept
     (``OPSEVAL_RECORD_AUDIO=hashes``) or the file has been pruned (``pruned``)."""
     speaker: Literal["caller", "agent"]
-    start_ms: float
+    start_ms: float = Field(ge=0)
     """On the attempt's monotonic clock (``transport.audio.AttemptClock``)."""
     end_ms: float
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -54,6 +65,12 @@ class AudioRef(Frozen):
     pruned: bool = False
     """Retention removed the file (ADR-0053): the audio was there, so this is never read as
     missing evidence; text scorers still rescore from the transcript."""
+    encryption: Literal["none", "aes-256-gcm"] = "none"
+    """How the file is (or was, before pruning) encrypted at rest. ADR-0053 V0a records the
+    field; V0c writes encrypted files with ``OPSEVAL_AUDIO_ENCRYPTION_KEY``."""
+    key_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{16,64}$")
+    """A fingerprint of the key the file was encrypted with, never the key: it says which key
+    opens the file after a rotation. Set exactly when ``encryption`` is not ``none``."""
 
     @field_validator("path")
     @classmethod
@@ -67,6 +84,30 @@ class AudioRef(Frozen):
         if "\\" in value or ":" in value:
             raise ValueError("an audio path uses '/' and no drive or scheme")
         return value
+
+    @field_validator("rate")
+    @classmethod
+    def _known_rate(cls, value: int) -> int:
+        if value not in AUDIO_RATES:
+            raise ValueError(f"unsupported audio rate {value}; one of {AUDIO_RATES}")
+        return value
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if self.end_ms < self.start_ms:
+            raise ValueError("an audio turn cannot end before it starts (end_ms < start_ms)")
+        if self.pruned and self.path is not None:
+            raise ValueError("pruned audio has no file: path must be None")
+        if (self.encryption == "none") != (self.key_id is None):
+            raise ValueError("key_id is set exactly when the audio is encrypted")
+        if self.encryption != "none" and self.hashes_only:
+            raise ValueError("hashes-only audio has no file, so nothing is encrypted")
+        return self
+
+    @property
+    def hashes_only(self) -> bool:
+        """Only the hash and metadata were ever kept: no file, and none was pruned."""
+        return self.path is None and not self.pruned
 
 
 class WordTiming(Frozen):
@@ -103,6 +144,13 @@ class VoiceTimeline(Frozen):
     codec: Literal["pcm16", "mulaw", "alaw"]
     rate: int
     events: tuple[VoiceEventRecord, ...] = ()
+
+    @field_validator("rate")
+    @classmethod
+    def _known_rate(cls, value: int) -> int:
+        if value not in AUDIO_RATES:
+            raise ValueError(f"unsupported audio rate {value}; one of {AUDIO_RATES}")
+        return value
 
 
 class FrameRecord(Frozen):

@@ -31,6 +31,8 @@ from __future__ import annotations
 import re
 from typing import Any, Final
 
+from opseval.models.record import FrameRecord, TranscriptInfo, WordTiming
+
 MARKER: Final = "[redacted:{kind}]"
 MARKER_RE: Final = re.compile(r"\[redacted:[a-z0-9_]+\]")
 
@@ -160,6 +162,147 @@ def redact_value(value: Any) -> tuple[Any, list[str]]:
             found += kinds
         return out_l, found
     return value, found
+
+
+def _spans(text: str) -> list[tuple[int, int, str]]:
+    """Where each detector matches in ``text``: the same patterns as :func:`redact_text`,
+    reporting offsets instead of rewriting."""
+    found: list[tuple[int, int, str]] = []
+    for kind, pattern in PATTERNS:
+        for match in pattern.finditer(text):
+            if kind == "labelled_secret" and match.lastindex:
+                if _looks_like_a_secret(match.group(1)):
+                    found.append((match.start(1), match.end(1), kind))
+            else:
+                found.append((match.start(), match.end(), kind))
+    return found
+
+
+def _mark(
+    starts: list[int],
+    words: list[str],
+    span: tuple[int, int],
+    kind: str,
+    hits: dict[int, str],
+    offset: int = 0,
+) -> None:
+    for j, start in enumerate(starts):
+        if start < span[1] and start + len(words[j + offset]) > span[0]:
+            hits.setdefault(j + offset, kind)
+
+
+def _offsets(words: list[str], sep: str) -> list[int]:
+    starts, pos = [], 0
+    for word in words:
+        starts.append(pos)
+        pos += len(word) + len(sep)
+    return starts
+
+
+_RUN: Final = 12
+"""How many consecutive words a credential spoken piece by piece may span."""
+
+
+def _word_hits(words: list[str]) -> dict[int, str]:
+    """Which words overlap a credential: in the words joined by spaces, and in every run of
+    up to ``_RUN`` words joined with nothing (``sk-`` ``abc123…`` is one token, said in two
+    pieces), each run matched from its first word so the word before it cannot hide it."""
+    hits: dict[int, str] = {}
+    for start, end, kind in _spans(" ".join(words)):
+        _mark(_offsets(words, " "), words, (start, end), kind, hits)
+    for i in range(len(words)):
+        run = words[i : i + _RUN]
+        joined = "".join(run)
+        for kind, pattern in PATTERNS:
+            match = pattern.match(joined)
+            if match is None:
+                continue
+            group = 1 if kind == "labelled_secret" and match.lastindex else 0
+            if group and not _looks_like_a_secret(match.group(1)):
+                continue
+            _mark(_offsets(run, ""), words, match.span(group), kind, hits, offset=i)
+    return hits
+
+
+def redact_words(
+    words: tuple[WordTiming, ...], text: str | None = None
+) -> tuple[tuple[WordTiming, ...], list[str]]:
+    """Word timings with credentials replaced (ADR-0053).
+
+    Speech-to-text splits what was said into words, and a token spoken aloud can land in one
+    word or in several. So the detectors run on each word, on the words joined by spaces,
+    on runs of words joined with nothing, and on the turn's own ``text`` (its words are
+    matched to what was found there). A word inside a credential becomes
+    ``[redacted:<kind>]``; a word that only contains one is rewritten as :func:`redact_text`
+    would. Timings are kept: when a credential was spoken stays evidence, what it was does
+    not.
+
+    Errs towards removing: a word said straight after a credential with nothing between them
+    that a token could not contain (``…xyz thanks``) can be taken as its last piece. Losing
+    that word costs less than leaving the end of a credential in clear.
+    """
+    raw = [w.word for w in words]
+    hits = _word_hits(raw)
+    secrets = [(text[a:b], kind) for a, b, kind in _spans(text)] if text else []
+    if secrets:
+
+        def _inside(i: int, min_len: int) -> str | None:
+            core = raw[i].strip(".,;:!?\"'()")
+            if len(core) < min_len:
+                return None
+            return next((kind for secret, kind in secrets if core in secret), None)
+
+        # A piece that is token-shaped on its own, then its neighbours inside the same
+        # secret: a lone lowercase word ("test" in a sentence that also says sk_test_…) is
+        # not deleted unless it sits next to a piece of the credential.
+        for i, word in enumerate(raw):
+            kind = _inside(i, 4)
+            if kind and i not in hits and _looks_like_a_secret(word):
+                hits[i] = kind
+        grew = True
+        while grew:
+            grew = False
+            for i in range(len(raw)):
+                if i in hits or not ((i - 1) in hits or (i + 1) in hits):
+                    continue
+                kind = _inside(i, 2)
+                if kind:
+                    hits[i], grew = kind, True
+    kinds: list[str] = []
+    out: list[WordTiming] = []
+    for i, timing in enumerate(words):
+        if i in hits:
+            kinds.append(hits[i])
+            out.append(timing.model_copy(update={"word": _marker(hits[i])}))
+            continue
+        clean, found = redact_text(timing.word)
+        kinds += found
+        out.append(timing.model_copy(update={"word": clean}) if found else timing)
+    return tuple(out), kinds
+
+
+def redact_transcript(
+    info: TranscriptInfo, text: str | None = None
+) -> tuple[TranscriptInfo, list[str]]:
+    """A transcript's word timings with credentials replaced; ``text`` is the turn's text
+    before redaction, so a credential found there is found in the words too."""
+    words, kinds = redact_words(info.words, text)
+    return (info.model_copy(update={"words": words}) if kinds else info), kinds
+
+
+def redact_frame(frame: FrameRecord) -> tuple[FrameRecord, list[str]]:
+    """Every free-text field of a frame with credential values replaced: the payload's
+    strings, ``text``, and a voice turn's word timings. The driver passes each frame through
+    this before it is kept, so a field added to a frame later has one place to be covered."""
+    payload, kinds = redact_value(frame.payload)
+    update: dict[str, Any] = {"payload": payload}
+    if frame.text is not None:
+        update["text"], found = redact_text(frame.text)
+        kinds += found
+    if frame.transcript is not None:
+        update["transcript"], found = redact_transcript(frame.transcript, frame.text)
+        kinds += found
+    return frame.model_copy(update=update), kinds
 
 
 def strip_markers(value: str) -> str:
