@@ -209,6 +209,69 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
   so it is left for go-public rather than added disabled), and the action repository's README.
   No `actionlint` run: the tests parse and check the files offline.
 
+**E3, 2026-10-28.** Built in `templates/`, with these details:
+
+- **One script.** Every template runs `templates/shared/opseval-ci.sh`: it validates the
+  settings, builds the `opseval run` line, runs it, copies the JUnit file, writes
+  `summary.md` and exits with the code.
+  - GitLab, CircleCI and Azure DevOps inline a copy, the Jenkins library ships one as a resource,
+    and the Bitbucket pipe uses one as its entrypoint. `scripts/ci_templates.py` rewrites the
+    copies, and a test keeps them identical.
+  - The text has no heredoc and no `<<` (CircleCI reads it as a parameter) and no `$(name)` with
+    no space (Azure DevOps expands it as a macro), so the same bytes survive every system.
+  - Inputs reach it only through the environment, never pasted into the script.
+- **Two modes.** `MODE=local` runs `opseval` from PATH: GitLab and CircleCI run the job in the
+  image, and the pipe is built from it. `MODE=docker` runs `docker run` for Jenkins, Azure DevOps
+  and the documented line.
+  - With Docker, the container gets only the validated settings (an env file outside the
+    workspace) and the three keys by name (`-e NAME`, never a value on the command line).
+  - It runs as the job's own uid:gid so it can write the reports into the mounted workspace,
+    and as the image's user 10001 when the job runs as root. It never runs as root.
+- **The E1 rules, once.** Inputs mirror the action's and the reusable workflow's settings
+  inputs, in each system's spelling. `opseval-env` refuses a secret setting (the list is tested
+  equal to `config.SECRET_FIELDS`), a setting with its own input, a duplicate or another shape,
+  and a simulator or judge key with no base URL and model is exit 3. Before anything runs,
+  `OPSEVAL_DOTENV` is `false` unless `read-dotenv` is true.
+- **Exit codes.** 0 to 3 pass through unchanged. Exit 2 with no `result.json` is Click refusing
+  its arguments (a typo in `extra-args`), reported as 3, a configuration error, not as "not
+  judged". Any other code (Docker could not start the image, 125) is 3.
+  - A stale `junit.xml` or `summary.md` from an earlier build in a reused workspace is deleted
+    first.
+  - Jenkins publishes `junit` with `skipMarkingBuildUnstable: true`, and 1, 2 and 3 are each
+    `FAILURE` with their own message, never `UNSTABLE`.
+  - Azure DevOps sets `failTaskOnFailedTests: false`. Its three publishing steps run on
+    `succeededOrFailed()` and cannot turn the failed step green.
+  - A test refuses `allow_failure`, `continueOnError`, `continue-on-error`, `catchError`,
+    `unstable(`, `|| true` and `set +e` in any template.
+- **Secrets** come from each system's own store, under Opseval's names: GitLab masked CI/CD
+  variables, Jenkins Secret text credentials bound by `withCredentials`, Azure secret variables
+  mapped to `env:`, CircleCI contexts named by `env_var_name` parameters, Bitbucket secured
+  variables passed to the pipe.
+  - On Azure an undefined secret reaches the step as its own macro text; the template treats
+    that as no key.
+- **Per system.**
+  - The Jenkins step is `opseval(...)` (`vars/opseval.groovy`), not `opsevalRun`: a library's
+    step is named after its file.
+  - The CircleCI orb has the `run` job and an `evaluate` command, since `run` is a built-in step.
+  - The Bitbucket pipe writes JUnit to `test-results/opseval/junit.xml`, where Bitbucket looks,
+    and keeps the run folder in `opseval-reports/` so the run's own `junit.xml` is not counted
+    twice.
+  - A GitLab catalog component must be `templates/<name>.yml` in its own project, so until it is
+    published the file is included with `include: project:` and the same inputs.
+- **The image.** It is not published before Gate 0, so every `image` input defaults to
+  `ghcr.io/opsedia-ai/opseval:<version>`. With Docker that placeholder is exit 3, saying how to
+  build the image (`docker build -t opseval .`).
+- **Not built.** The verification matrix job. `ci.yml`'s jobs must equal the required checks
+  (ADR-0065), `gitlab-ci-local` and the `circleci` CLI are not installed, and Jenkins, Azure
+  DevOps and Bitbucket cannot run in GitHub Actions. So the templates are checked by pytest
+  only (`tests/test_ci_templates.py`):
+  - every file parses, and the shell scripts pass `bash -n`;
+  - the shared script runs under `bash -e` with a fake `opseval` and a fake `docker`, for exit
+    codes 0 to 3, the E1 settings rules and secrets by name;
+  - the Bitbucket, Azure and CircleCI preludes run the same way.
+
+  Publishing the image, the GitLab component, the orb and the pipe waits for go-public.
+
 ## Not decided here
 
 - Where the image is published at go-public (GHCR or Docker Hub), and listing the GitLab component,
