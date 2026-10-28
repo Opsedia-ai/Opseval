@@ -5,14 +5,16 @@ An error stops a file from loading. A warning does not, and never changes ``ok``
 code: it says what the scenario will *not* tell you, so nobody reads a green run as proof of
 something it never checked. Two kinds:
 
-- about the file itself (one repeat, a lowered pass threshold, a planted injection that no
-  scorer grades, trace-backed checks with no trace source, the commit opt-in, quarantine);
+- about the file itself (one repeat, a lowered pass threshold, a planted injection or a
+  declared expectation that no scorer grades, trace-backed checks with no trace source, the
+  commit opt-in, quarantine);
 - about this machine (judge checks with no judge configured, an LLM persona with no simulator).
   These are checked only when the caller says what is configured.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from opseval.catalogue import LoadProblem
@@ -73,6 +75,7 @@ def scenario_warnings(
             "conversation.injections",
             "payloads are planted but nothing grades them: add security.no_injection_takeover",
         )
+    _ungraded(scenario, needs, warn)
     traced = sorted(sid for sid, req in needs.items() if req == "trace")
     if traced and profile.traces is None:
         warn(
@@ -95,6 +98,40 @@ def scenario_warnings(
                 "(set OPSEVAL_SIMULATOR_BASE_URL and OPSEVAL_SIMULATOR_MODEL)",
             )
     return out
+
+
+def _ungraded(
+    scenario: Scenario, needs: dict[str, str | None], warn: Callable[[str, str], None]
+) -> None:
+    """An expectation the scenario declares and none of its checks reads (ADR-0048): written
+    down, it looks checked, so an agent that breaks it would pass unnoticed. ``scorers:
+    default`` covers each of these; an explicit list may not."""
+    exp = scenario.expectations
+    tools = exp.expected_tools
+    graders: list[tuple[str, bool, set[str]]] = [
+        ("expectations.expected_tools.must_call", bool(tools.must_call), {"tools.expected_called"}),
+        (
+            "expectations.expected_tools.must_not_call",
+            bool(tools.must_not_call),
+            {"tools.forbidden_not_called"},
+        ),
+        (
+            "expectations.expected_tools.forbidden_before",
+            bool(tools.forbidden_before),
+            {"tools.forbidden_not_called", "tools.approval_gated"},
+        ),
+        ("expectations.expected_tools.ordering", bool(tools.ordering), {"tools.ordering"}),
+        ("expectations.kind", exp.kind == "refusal", {"judge.goal_achievement"}),
+        ("expectations.policy", bool(exp.policy), {"security.policy_adherence"}),
+    ]
+    for field, declared, by in graders:
+        if declared and not by & needs.keys():
+            warn(field, f"declared but nothing grades it: add {' or '.join(sorted(by))}")
+    if exp.expected_outcome and "llm" not in needs.values():
+        warn(
+            "expectations.expected_outcome",
+            "only the judges read it, and this scenario runs none: add judge.goal_achievement",
+        )
 
 
 __all__ = ["Configured", "scenario_warnings"]

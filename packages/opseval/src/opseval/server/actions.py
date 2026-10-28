@@ -35,13 +35,15 @@ from opseval.models.scenario import Scenario, Suite
 from opseval.models.stop import StopPolicy
 from opseval.runner import RunOptions, launch, new_run_id
 from opseval.scoring import INVARIANTS, REGISTRY
+from opseval.server import forms
 from opseval.server import schemas as s
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 from opseval.storage import FileStore
 from opseval.verdicts import EXIT_HARNESS
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.ya?ml$")
+# Only .yaml: the loader reads `*.yaml`, so a new .yml file would be saved and never run.
+SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.yaml$")
 
 log = logging.getLogger("opseval.server")
 
@@ -428,8 +430,8 @@ def _problem(path: str, fld: str, message: str) -> s.Problem:
 def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
     """All-or-nothing: validate every file first, write only if all are valid and new."""
     root, profile = ctx.need_writable()
-    if not SAFE_NAME.match(body.family):
-        raise ApiError(422, "BAD_FAMILY", "family may use letters, digits, '.', '_' and '-' only")
+    if (wrong := _family_problem(body.family)) is not None:
+        raise ApiError(422, "BAD_FAMILY", f"family: {wrong}")
     # The same root the rest of the server reads, so a flat catalogue (scenarios at the
     # top) is checked for clashes and its scenarios do not vanish behind a new folder.
     scenarios = scenario_root(root)
@@ -569,6 +571,12 @@ def _suites_selecting(root: Path, sid: str) -> list[str]:
 
 
 def check_scenario(ctx: ServerContext, body: s.ScenarioTextIn) -> s.ScenarioCheckOut:
+    return _check_scenario(ctx, body)[0]
+
+
+def _check_scenario(
+    ctx: ServerContext, body: s.ScenarioTextIn
+) -> tuple[s.ScenarioCheckOut, Scenario | None]:
     """The loader's verdict on one scenario's text (catalogue.check_scenario_text), plus
     what only the catalogue can say: an id used by another file, a rename that would
     empty a suite, and, for a new file, whether its folder and name can be written."""
@@ -580,9 +588,10 @@ def check_scenario(ctx: ServerContext, body: s.ScenarioTextIn) -> s.ScenarioChec
     out = [_problem(p.path, p.field, p.message) for p in problems]
     editing = _scenario_file(ctx, body.file)[1] if body.file else None
     if body.file is None and body.file_name is not None:
-        family = body.family or "uncategorised"
-        if not SAFE_NAME.match(family):
-            out.append(_problem(where, "family", "letters, digits, '.', '_' and '-' only"))
+        # Not given is the default folder; given empty is a mistake, as import says it is.
+        family = body.family if body.family is not None else "uncategorised"
+        if (wrong := _family_problem(family)) is not None:
+            out.append(_problem(where, "family", wrong))
         elif not SAFE_FILE.match(body.file_name):
             out.append(_problem(where, "file", "a .yaml file name: letters, digits, '.', '_', '-'"))
         elif (scenario_root(root) / family / body.file_name).exists():
@@ -612,12 +621,67 @@ def check_scenario(ctx: ServerContext, body: s.ScenarioTextIn) -> s.ScenarioChec
             _problem(w.path, w.field, w.message)
             for w in scenario_warnings(sc, where, profile, here)
         ]
-    return s.ScenarioCheckOut(
+    verdict = s.ScenarioCheckOut(
         ok=sc is not None and not out,
         id=sc.id if sc else None,
         title=sc.name if sc else None,
         problems=out,
         warnings=warnings,
+    )
+    return verdict, sc
+
+
+def _family_problem(family: str) -> str | None:
+    """Why a new scenario cannot go in this folder, if it cannot."""
+    if not SAFE_NAME.match(family):
+        return "letters, digits, '.', '_' and '-' only"
+    if family.lower() == "suites":  # case-insensitive filesystems make Suites the same folder
+        return "'suites' is where suites live: the loader never reads a scenario saved there"
+    return None
+
+
+def scenario_form(ctx: ServerContext) -> s.FormOut:
+    """What the guided form offers for this catalogue's profile (ADR-0048)."""
+    _root, profile = ctx.need_catalogue()
+    return forms.form(profile, read_only=ctx.read_only)
+
+
+def draft(ctx: ServerContext, body: s.ScenarioDraftIn) -> s.DraftOut:
+    """The YAML a filled-in form becomes, and the loader's verdict on it (ADR-0048).
+
+    Nothing is written: the console saves the YAML through ``import_scenarios``, the same
+    all-or-nothing, never-overwrite path as every other new scenario.
+    """
+    _root, profile = ctx.need_catalogue()
+    text, changed = forms.render(body, profile)
+    name = forms.file_name(body)
+    where = f"{body.family}/{name}"
+    if len(text) > s.SCENARIO_TEXT_MAX:
+        # Said as a problem, like any other: the editor's limit, never a bare 500.
+        too_big = _problem(
+            where, "(file)", f"{len(text):,} characters; at most {s.SCENARIO_TEXT_MAX:,}"
+        )
+        check = s.ScenarioCheckOut(ok=False, id=None, title=None, problems=[too_big], warnings=[])
+    else:
+        body_in = s.ScenarioTextIn(text=text, family=body.family, file_name=name)
+        check, _ = _check_scenario(ctx, body_in)
+    if changed:
+        unfaithful = [
+            _problem(
+                where,
+                path,
+                "this text would not load back as typed (a character YAML reads as a "
+                "line break, such as U+0085): remove it",
+            )
+            for path in changed
+        ]
+        check = check.model_copy(update={"ok": False, "problems": [*check.problems, *unfaithful]})
+    return s.DraftOut(
+        yaml=text,
+        family=body.family,
+        file_name=name,
+        check=check,
+        default_checks=forms.pack(body, profile),
     )
 
 

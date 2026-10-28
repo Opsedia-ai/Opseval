@@ -48,5 +48,6 @@
 | [0045](0045-jira-sink.md) | An issue for each failed critical scenario in Jira (Cloud and Data Center): the marker is a label | Proposed |
 | [0046](0046-credential-provider-plugins.md) | Credential provider plugins: named to be used, fail closed, every failure a harness error | Proposed |
 | [0047](0047-server-mode-on-postgres.md) | Server mode on Postgres, the Langfuse model: a versioned catalogue first, then runs, accounts and workers | Proposed |
+| [0048](0048-guided-scenario-form.md) | The guided scenario form: the server offers the choices and writes the YAML, the loader judges it, the import saves it | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

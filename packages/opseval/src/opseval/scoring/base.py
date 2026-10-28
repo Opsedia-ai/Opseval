@@ -47,7 +47,7 @@ class ScoringContext:
 class NoParams(BaseModel):
     """A scorer that takes no params: any key given is an authoring mistake."""
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid", strict=True, use_attribute_docstrings=True)
 
 
 class Scorer(ABC):
@@ -176,7 +176,23 @@ def default_pack(scenario: Scenario, profile: SutProfile) -> list[str]:
         pack.append("tools.expected_called")
     if tools.ordering:
         pack.append("tools.ordering")
-    return pack
+    return pack + judged_expectations(scenario)
+
+
+def judged_expectations(scenario: Scenario) -> list[str]:
+    """The judges a declared expectation needs to be graded at all (ADR-0048).
+
+    A refusal scenario under ``scorers: default`` was never graded as one, so an agent that
+    did what it must refuse passed; policy rules were written down and never read. With no
+    judge configured these are *not measured* and named as such, never a silent pass. They
+    do not depend on the profile, so callers without one (preflight's roles) count them too.
+    """
+    out = []
+    if scenario.expectations.kind == "refusal":
+        out.append("judge.goal_achievement")
+    if scenario.expectations.policy:
+        out.append("security.policy_adherence")
+    return out
 
 
 ALWAYS_ON = [UNREAD_REPLIES]
@@ -193,7 +209,11 @@ def effective_specs(scenario: Scenario, profile: SutProfile | None = None) -> li
     (:func:`default_pack`); every caller that has a profile passes it, so the runner, the
     engine, preflight and advice agree on one set."""
     if scenario.scorers == "default":
-        ids = DEFAULT_PACK if profile is None else default_pack(scenario, profile)
+        ids = (
+            [*DEFAULT_PACK, *judged_expectations(scenario)]
+            if profile is None
+            else default_pack(scenario, profile)
+        )
         specs = [ScorerSpec(id=i) for i in ids]
     else:
         specs = list(scenario.scorers)

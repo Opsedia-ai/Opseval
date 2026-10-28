@@ -8,6 +8,7 @@ import RunDetail from "./pages/RunDetail";
 import Runs from "./pages/Runs";
 import Scenarios from "./pages/Scenarios";
 import ScenarioEditor from "./pages/ScenarioEditor";
+import ScenarioForm from "./pages/ScenarioForm";
 import Settings from "./pages/Settings";
 import Simulator from "./pages/Simulator";
 import Suites from "./pages/Suites";
@@ -26,7 +27,8 @@ export default function App() {
         <Route path="usage" element={<Usage />} />
         <Route path="simulator" element={<Simulator />} />
         <Route path="scenarios" element={<Scenarios />} />
-        <Route path="scenarios/new" element={<ScenarioEditor />} />
+        <Route path="scenarios/new" element={<ScenarioForm />} />
+        <Route path="scenarios/new/yaml" element={<ScenarioEditor />} />
         <Route path="scenarios/edit" element={<ScenarioEditor />} />
         <Route path="import" element={<BulkImport />} />
         <Route path="suites" element={<Suites />} />

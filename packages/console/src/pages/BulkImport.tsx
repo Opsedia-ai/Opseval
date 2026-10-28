@@ -36,9 +36,9 @@ export default function BulkImport() {
         <Explainer><b>Drop as many scenario files as you like.</b> Every one is validated before anything is written. The import is all-or-nothing, and a file that would replace an existing scenario is refused, never silently overwritten.</Explainer>
         <div onClick={() => input.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); setFiles([...e.dataTransfer.files]); }}
           className="flex cursor-pointer flex-col items-center gap-2 rounded-[28px] border-2 border-dashed border-line bg-soft px-6 py-14 text-center">
-          <Upload className="text-deep-coral" /><b className="text-ink">Choose .yaml or .yml files</b>
-          <span className="text-sm">They are read in the browser and posted as text. Nothing is written until you press import.</span>
-          <input ref={input} type="file" multiple accept=".yaml,.yml" hidden onChange={(e) => setFiles([...(e.target.files ?? [])])} />
+          <Upload className="text-deep-coral" /><b className="text-ink">Choose .yaml files</b>
+          <span className="text-sm">They are read in the browser and posted as text. Nothing is written until you press import. Rename a <Mono>.yml</Mono> file first: the loader reads only <Mono>.yaml</Mono>, so it would never run.</span>
+          <input ref={input} type="file" multiple accept=".yaml" hidden onChange={(e) => setFiles([...(e.target.files ?? [])])} />
         </div>
         {files.length > 0 && <Card title="Selected"><ul className="font-mono text-sm">{files.map((f) => <li key={f.name}>{f.name}</li>)}</ul></Card>}
         {fatal && <Callout>{fatal}</Callout>}

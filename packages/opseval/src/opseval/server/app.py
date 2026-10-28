@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -237,6 +238,28 @@ def create_app(
             },
         )
 
+    @app.exception_handler(RequestValidationError)
+    def _bad_request(_: Request, exc: RequestValidationError) -> JSONResponse:
+        # A body the API's own models refuse, said as problems at their fields like the
+        # loader's, so the console can point at the field. The value sent is never echoed.
+        problems = [
+            {
+                "path": "request",
+                "field": ".".join(str(part) for part in err.get("loc", ())[1:]),
+                "message": str(err.get("msg", "invalid")),
+            }
+            for err in exc.errors()
+        ]
+        first = problems[0] if problems else {"field": "", "message": "invalid request"}
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": "INVALID_REQUEST",
+                "message": f"{first['field']}: {first['message']}".lstrip(": "),
+                "detail": problems,
+            },
+        )
+
     @app.exception_handler(StarletteHTTPException)
     def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
         # Every API error carries a machine code the console can act on, including the
@@ -338,6 +361,14 @@ def create_app(
     @app.get(f"{API}/config")
     def config() -> list[s.SettingRow]:
         return views.settings_rows(settings)
+
+    @app.get(f"{API}/scenarios/form")
+    def scenario_form() -> s.FormOut:
+        return actions.scenario_form(ctx)
+
+    @app.post(f"{API}/scenarios/draft")
+    def draft_scenario(body: s.ScenarioDraftIn) -> s.DraftOut:
+        return actions.draft(ctx, body)
 
     @app.get(f"{API}/scenarios/source")
     def scenario_file(file: str) -> s.ScenarioSourceOut:
