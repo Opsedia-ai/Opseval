@@ -14,6 +14,8 @@ Revises: 0001
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
+from typing import Any
 
 import sqlalchemy as sa
 from alembic import op
@@ -135,14 +137,49 @@ def upgrade() -> None:
     )
 
 
+LOST = """
+SELECT o.slug || '/' || p.slug, t.slug, t.name, t.kind, t.modality, t.region,
+       t.archived_at IS NOT NULL, t.default_suite_item_id IS NOT NULL,
+       t.profile_item_id IS NOT NULL AND t.profile_item_id IS DISTINCT FROM (
+         SELECT (array_agg(i.id))[1] FROM catalogue_items AS i
+         WHERE i.project_id = t.project_id AND i.kind = 'profile' HAVING count(*) = 1
+       )
+FROM tasks AS t
+JOIN projects AS p ON p.id = t.project_id
+JOIN organizations AS o ON o.id = p.organization_id
+ORDER BY 1, 2
+"""
+"""Every task, with what of it the schema before tasks cannot hold. The profile link counts
+only when an upgrade would not make it again (the project's one profile)."""
+
+
+def _lost(row: Sequence[Any]) -> str | None:
+    project, slug, name, kind, modality, region, archived, suite, profile = row
+    if slug != "default":
+        return f"{project}: task {slug!r} and its catalogue"
+    settings = [f"name {name!r}"] if name != "default" else []
+    settings += [f"kind {kind}"] if kind != "chat" else []
+    settings += [f"modality {modality}"] if modality != "text" else []
+    settings += [f"region {region}"] if region is not None else []
+    settings += ["archived"] if archived else []
+    settings += ["a default suite"] if suite else []
+    settings += ["its profile link"] if profile else []
+    return f"{project}: the default task's {', '.join(settings)}" if settings else None
+
+
 def downgrade() -> None:
-    # Reversible only while every project has nothing but its `default` task: otherwise two
-    # tasks' items could share a name the old key forbids, and the downgrade would lose them.
-    bind = op.get_bind()
-    others = bind.scalar(sa.text("SELECT count(*) FROM tasks WHERE slug <> 'default'"))
-    if others:
+    # Reversible only while every task is a `default` one as the upgrade made it: a second
+    # task's items could share a name the old key forbids, and the old schema has no place for
+    # a task's name, kind, modality, region, archive, default suite or a profile link the
+    # upgrade would not make again. Refused, listing them, before anything is dropped.
+    # (This guard was added after 0002 was released. Editing a released downgrade is safe: it
+    # runs from the installed package and never changes what 0002's upgrade produced. A
+    # released upgrade is never edited.)
+    lost = [line for row in op.get_bind().execute(sa.text(LOST)) if (line := _lost(row))]
+    if lost:
+        listed = "\n".join(f"  - {line}" for line in lost)
         raise RuntimeError(
-            f"{others} task(s) besides 'default' exist; the old schema cannot hold them"
+            f"the schema before tasks cannot hold these, so nothing was downgraded:\n{listed}"
         )
     op.drop_constraint("fk_catalogue_items_task_id_tasks", "catalogue_items", type_="foreignkey")
     op.drop_constraint("uq_catalogue_items_task_id", "catalogue_items", type_="unique")

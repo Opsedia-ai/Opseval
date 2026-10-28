@@ -19,7 +19,7 @@ from alembic import command
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 from typer.testing import CliRunner
 
 from opseval.cli import app
@@ -42,7 +42,7 @@ from opseval.db.catalogue_store import (
     update_task,
 )
 from opseval.db.engine import make_engine, sessions
-from opseval.db.schema import CatalogueItem, Task
+from opseval.db.schema import LINK_KINDS, Base, CatalogueItem, Task
 from opseval.demo import catalogue_dir
 from opseval.errors import ConfigError
 from opseval.scoring import INVARIANTS, REGISTRY
@@ -147,6 +147,16 @@ async def _constraints(engine: AsyncEngine, table: str) -> set[str]:
         return {str(r[0]) for r in rows}
 
 
+async def _fk_defs(conn: AsyncConnection) -> dict[str, str]:
+    rows = await conn.execute(
+        text(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = CAST('tasks' AS regclass) AND contype = 'f'"
+        )
+    )
+    return {str(r[0]): str(r[1]) for r in rows}
+
+
 def _downgrade(conn: Connection, revision: str) -> None:
     command.downgrade(migrate.config(conn), revision)
 
@@ -159,7 +169,7 @@ class TestTheMigration:
             ids = await _seed_0001(engine)
             assert "uq_catalogue_items_project_id" in await _constraints(engine, "catalogue_items")
             await migrate.upgrade(engine)
-            assert await migrate.current(engine) == "0002"
+            assert await migrate.current(engine) == "0003"
 
             async with sessions(engine)() as s:
                 tasks = {t.project_id: t for t in await s.scalars(select(Task))}
@@ -216,10 +226,191 @@ class TestTheMigration:
             await migrate.upgrade(engine)
             async with sessions(engine)() as s, s.begin():
                 await ensure_task(s, "acme/one", "voice", kind="voice")
-            with pytest.raises(RuntimeError, match="besides 'default'"):
+            with pytest.raises(RuntimeError, match="acme/one: task 'voice' and its catalogue"):
                 async with engine.begin() as conn:
                     await conn.run_sync(_downgrade, "0001")
+            assert await migrate.current(engine) == "0003"
+        finally:
+            await engine.dispose()
+
+    async def test_it_refuses_to_drop_a_default_tasks_settings(self, pg_url: str) -> None:
+        # The old schema has no place for them: refused and listed, never silently dropped.
+        engine = _engine(pg_url)
+        try:
+            await migrate.upgrade(engine, "0001")
+            ids = await _seed_0001(engine)
+            await migrate.upgrade(engine)
+            async with sessions(engine)() as s, s.begin():
+                one = await get_task(s, "acme/one")
+                await update_task(s, one, kind="voice", region="eu", default_suite="smoke")
+                two = await get_task(s, "acme/two")
+                await archive_task(s, two)
+                # Two profiles: an upgrade would not link this one again.
+                two.profile_item_id = ids["two:profile:staging"]
+                await update_task(s, await get_task(s, "acme/empty"), name="Main")
+            with pytest.raises(RuntimeError) as caught:
+                async with engine.begin() as conn:
+                    await conn.run_sync(_downgrade, "0001")
+            message = str(caught.value)
+            assert "nothing was downgraded" in message
+            assert "acme/one: the default task's kind voice, region eu, a default suite" in message
+            assert "acme/two: the default task's archived, its profile link" in message
+            assert "acme/empty: the default task's name 'Main'" in message
+            assert await migrate.current(engine) == "0003"
+
+            # One step down never is: 0003's downgrade loses nothing. 0002's refuses the rest.
+            async with engine.begin() as conn:
+                await conn.run_sync(_downgrade, "-1")
             assert await migrate.current(engine) == "0002"
+            with pytest.raises(RuntimeError, match="acme/empty: the default task's name"):
+                async with engine.begin() as conn:
+                    await conn.run_sync(_downgrade, "-1")
+            assert await migrate.current(engine) == "0002"
+
+            # Put back as the upgrade made them, and the downgrade goes through.
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE tasks SET name = 'default', kind = 'chat', region = NULL, "
+                        "archived_at = NULL, default_suite_item_id = NULL, profile_item_id = NULL "
+                        "WHERE project_id <> :one"
+                    ),
+                    {"one": ids["one"]},
+                )
+                await conn.execute(
+                    text(
+                        "UPDATE tasks SET kind = 'chat', region = NULL, "
+                        "default_suite_item_id = NULL WHERE project_id = :one"
+                    ),
+                    {"one": ids["one"]},
+                )
+                await conn.run_sync(_downgrade, "0001")
+            assert await migrate.current(engine) == "0001"
+        finally:
+            await engine.dispose()
+
+    async def test_0003_fails_fast_on_a_busy_database(
+        self, pg_url: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A read holding the catalogue must not have the upgrade queue every later read.
+        engine = _engine(pg_url)
+        try:
+            await migrate.upgrade(engine, "0002")
+            monkeypatch.setattr(migrate, "LOCK_TIMEOUT", "200ms")
+            async with engine.connect() as reader, reader.begin():
+                await reader.execute(text("SELECT count(*) FROM catalogue_items"))
+                with pytest.raises(ConfigError, match="could not lock .* within 200ms"):
+                    await migrate.upgrade(engine)
+            assert await migrate.current(engine) == "0002"
+            await migrate.upgrade(engine)
+            assert await migrate.current(engine) == "0003"
+            # The timeout was the migration's own, and is not left behind for what comes next.
+            async with engine.begin() as conn:
+                assert await conn.scalar(text("SHOW lock_timeout")) == "0"
+        finally:
+            await engine.dispose()
+
+    async def test_0003_keys_the_links_of_a_database_already_at_0002(
+        self, pg_url: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # 0002 was released with plain links to any item; 0003 must bring such a database to
+        # the new rule, clearing (and counting) only the links that rule forbids.
+        engine = _engine(pg_url)
+        try:
+            await migrate.upgrade(engine, "0001")
+            ids = await _seed_0001(engine)
+            await migrate.upgrade(engine, "0002")
+            voice, voice_suite = uuid.uuid4(), uuid.uuid4()
+            async with engine.begin() as conn:
+                task = {
+                    str(r[0]): r[1]
+                    for r in await conn.execute(text("SELECT project_id, id FROM tasks"))
+                }
+                one, two = task[str(ids["one"])], task[str(ids["two"])]
+                await conn.execute(
+                    text(
+                        "INSERT INTO tasks (id, project_id, slug, name, kind, modality) "
+                        "VALUES (:id, :project, 'voice', 'voice', 'voice', 'audio_stream')"
+                    ),
+                    {"id": voice, "project": ids["one"]},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO catalogue_items (id, project_id, task_id, kind, name) "
+                        "VALUES (:id, :project, :task, 'suite', 'smoke')"
+                    ),
+                    {"id": voice_suite, "project": ids["one"], "task": voice},
+                )
+                links = [
+                    # valid: one's default task, its own profile (kept from 0002) and suite
+                    (one, "default_suite_item_id", ids["one:suite:smoke"]),
+                    # invalid: the voice task names its sibling's profile; its own suite is valid
+                    (voice, "profile_item_id", ids["one:profile:refund-agent"]),
+                    (voice, "default_suite_item_id", voice_suite),
+                    # valid profile; invalid suite: a scenario of the right task
+                    (two, "profile_item_id", ids["two:profile:staging"]),
+                    (two, "default_suite_item_id", ids["two:scenario:rf-001"]),
+                ]
+                for row, column, item in links:
+                    await conn.execute(
+                        text(f"UPDATE tasks SET {column} = :item WHERE id = :id"),
+                        {"item": item, "id": row},
+                    )
+
+            capsys.readouterr()
+            await migrate.upgrade(engine)
+            assert await migrate.current(engine) == "0003"
+            printed = capsys.readouterr().err
+            assert "cleared 1 tasks.profile_item_id link(s)" in printed
+            assert "cleared 1 tasks.default_suite_item_id link(s)" in printed
+
+            async with engine.connect() as conn:
+                rows = await conn.execute(
+                    text("SELECT id, profile_item_id, default_suite_item_id FROM tasks")
+                )
+                after = {r[0]: (r[1], r[2]) for r in rows}
+                defs = await _fk_defs(conn)
+                triggers = await conn.scalar(
+                    text("SELECT count(*) FROM pg_trigger WHERE tgname = 'opseval_task_link_kinds'")
+                )
+            assert after[one] == (ids["one:profile:refund-agent"], ids["one:suite:smoke"])
+            assert after[voice] == (None, voice_suite)
+            assert after[two] == (ids["two:profile:staging"], None)
+            assert "uq_catalogue_items_id" in await _constraints(engine, "catalogue_items")
+            for column in ("profile_item_id", "default_suite_item_id"):
+                assert defs[f"fk_tasks_{column}_catalogue_items"] == (
+                    f"FOREIGN KEY ({column}, id) REFERENCES catalogue_items(id, task_id)"
+                )
+            assert triggers == 1
+            # The new rule holds on the migrated database.
+            with pytest.raises(IntegrityError, match="fk_tasks_profile_item_id_catalogue_items"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("UPDATE tasks SET profile_item_id = :item WHERE id = :id"),
+                        {"item": ids["one:profile:refund-agent"], "id": voice},
+                    )
+
+            # Down to 0002 loses nothing (the voice task stays) and restores its schema exactly.
+            async with engine.begin() as conn:
+                await conn.run_sync(_downgrade, "0002")
+            assert await migrate.current(engine) == "0002"
+            async with engine.connect() as conn:
+                defs = await _fk_defs(conn)
+                triggers = await conn.scalar(
+                    text("SELECT count(*) FROM pg_trigger WHERE tgname = 'opseval_task_link_kinds'")
+                )
+                functions = await conn.scalar(
+                    text("SELECT count(*) FROM pg_proc WHERE proname = 'opseval_task_link_kinds'")
+                )
+                tasks = await conn.scalar(text("SELECT count(*) FROM tasks"))
+            assert (triggers, functions, tasks) == (0, 0, 4)
+            assert "uq_catalogue_items_id" not in await _constraints(engine, "catalogue_items")
+            for column in ("profile_item_id", "default_suite_item_id"):
+                assert defs[f"fk_tasks_{column}_catalogue_items"] == (
+                    f"FOREIGN KEY ({column}) REFERENCES catalogue_items(id) ON DELETE SET NULL"
+                )
+            await migrate.upgrade(engine)
+            assert await migrate.current(engine) == "0003"
         finally:
             await engine.dispose()
 
@@ -245,6 +436,144 @@ class TestTheTable:
         with pytest.raises(IntegrityError, match="fk_catalogue_items_task_id_tasks"):
             async with sessions(engine)() as s, s.begin():
                 s.add(CatalogueItem(project_id=other.id, task_id=task.id, kind="suite", name="x"))
+
+    async def test_a_task_links_only_its_own_items_of_the_right_kind(
+        self, engine: AsyncEngine, tmp_path: Path
+    ) -> None:
+        cat = folder(tmp_path)
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, PROJECT)
+            await ensure_project(s, "acme/other")
+            chat, voice = await get_task(s, PROJECT), await _voice(s)
+            elsewhere = await get_task(s, "acme/other")
+            for task in (chat, voice, elsewhere):
+                await push(s, task, read(cat))
+            items = {
+                (i.task_id, i.kind): i.id
+                for i in await s.scalars(select(CatalogueItem))
+                if i.kind != "scenario"
+            }
+            chat_id, voice_id = chat.id, voice.id
+        # Each of the right kind, so only the key can refuse it.
+        for what, owner in (("another task's", voice_id), ("another project's", elsewhere.id)):
+            for column, kind in (
+                ("profile_item_id", "profile"),
+                ("default_suite_item_id", "suite"),
+            ):
+                item = items[(owner, kind)]
+                with pytest.raises(IntegrityError, match=f"fk_tasks_{column}_catalogue_items"):
+                    async with sessions(engine)() as s, s.begin():
+                        await s.execute(
+                            text(f"UPDATE tasks SET {column} = :item WHERE id = :task"),
+                            {"item": item, "task": chat_id},
+                        )
+                    pytest.fail(f"{column} took {what} item")
+        wrong_kind = {
+            "profile_item_id": (items[(chat_id, "suite")], "ck_tasks_profile_item_kind"),
+            "default_suite_item_id": (
+                items[(chat_id, "profile")],
+                "ck_tasks_default_suite_item_kind",
+            ),
+        }
+        for column, (item, name) in wrong_kind.items():
+            with pytest.raises(IntegrityError, match=name):
+                async with sessions(engine)() as s, s.begin():
+                    await s.execute(
+                        text(f"UPDATE tasks SET {column} = :item WHERE id = :task"),
+                        {"item": item, "task": chat_id},
+                    )
+        # The store's own links pass, and a task (or a project) with links can still go.
+        async with sessions(engine)() as s, s.begin():
+            await update_task(s, await get_task(s, PROJECT), default_suite="smoke")
+        async with sessions(engine)() as s, s.begin():
+            await s.execute(text("DELETE FROM tasks WHERE id = :t"), {"t": voice_id})
+            await s.execute(text("DELETE FROM projects WHERE slug = 'support-bot'"))
+            left = await s.scalar(select(func.count()).select_from(CatalogueItem))
+        assert left == 7  # acme/other's catalogue only
+
+    async def test_the_store_names_the_link_rule_the_database_enforces(
+        self, engine: AsyncEngine, tmp_path: Path
+    ) -> None:
+        cat = folder(tmp_path)
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, PROJECT)
+            await push(s, await _voice(s), read(cat))
+        rule = "fk_tasks_profile_item_id_catalogue_items"
+        with pytest.raises(ConfigError, match=f"may link only its own .*{rule}"):
+            async with sessions(engine)() as s, s.begin():
+                chat, voice = await get_task(s, PROJECT), await get_task(s, PROJECT, "voice")
+                theirs = await s.scalar(
+                    select(CatalogueItem.id).where(
+                        CatalogueItem.task_id == voice.id, CatalogueItem.kind == "profile"
+                    )
+                )
+                # As if a caller had picked another task's item: the store's write meets it.
+                with s.no_autoflush:
+                    chat.profile_item_id = theirs
+                    await update_task(s, chat, name="chat")
+
+    async def test_a_schema_made_by_create_all_has_the_kind_trigger_too(
+        self, pg_url: str, tmp_path: Path
+    ) -> None:
+        # In a schema of its own, so the trigger must name its tables by schema: with the
+        # caller's search_path elsewhere, it still checks the right catalogue_items.
+        engine = _engine(pg_url)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE SCHEMA other"))
+                await conn.execute(text("SET LOCAL search_path TO other"))
+                await conn.run_sync(Base.metadata.create_all)
+                prosrc = await conn.scalar(
+                    text("SELECT proconfig FROM pg_proc WHERE proname = :n"), {"n": LINK_KINDS}
+                )
+            assert prosrc == ["search_path=pg_catalog, pg_temp"]
+            org, project, task, suite = (uuid.uuid4() for _ in range(4))
+            async with engine.begin() as conn:
+                await conn.execute(text("SET LOCAL search_path TO public"))
+                await conn.execute(
+                    text("INSERT INTO other.organizations (id, slug, name) VALUES (:o, 'a', 'a')"),
+                    {"o": org},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO other.projects (id, organization_id, slug, name) "
+                        "VALUES (:p, :o, 'p', 'p')"
+                    ),
+                    {"p": project, "o": org},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO other.tasks (id, project_id, slug, name, kind, modality) "
+                        "VALUES (:t, :p, 'default', 'default', 'chat', 'text')"
+                    ),
+                    {"t": task, "p": project},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO other.catalogue_items (id, project_id, task_id, kind, name) "
+                        "VALUES (:i, :p, :t, 'suite', 'smoke')"
+                    ),
+                    {"i": suite, "p": project, "t": task},
+                )
+            with pytest.raises(IntegrityError, match="ck_tasks_profile_item_kind"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("UPDATE other.tasks SET profile_item_id = :i WHERE id = :t"),
+                        {"i": suite, "t": task},
+                    )
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("UPDATE other.tasks SET default_suite_item_id = :i WHERE id = :t"),
+                    {"i": suite, "t": task},
+                )
+                await conn.execute(text("SET LOCAL search_path TO other"))
+                await conn.run_sync(Base.metadata.drop_all)
+                left = await conn.scalar(
+                    text("SELECT count(*) FROM pg_proc WHERE proname = :n"), {"n": LINK_KINDS}
+                )
+            assert left == 0
+        finally:
+            await engine.dispose()
 
     async def test_a_new_project_has_its_default_task(self, engine: AsyncEngine) -> None:
         async with sessions(engine)() as s, s.begin():
@@ -298,6 +627,60 @@ class TestNamingATask:
                 await ensure_task(s, PROJECT, "Voice")
             with pytest.raises(ConfigError, match="no project"):
                 await ensure_task(s, "acme/nope", "voice")
+
+    async def test_an_empty_region_is_no_region(self, engine: AsyncEngine) -> None:
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, PROJECT)
+            made, created = await ensure_task(s, PROJECT, "x", region="")
+            assert created and made.region is None
+            # Asking again for no region is what the task has, so nothing differs.
+            assert (await ensure_task(s, PROJECT, "x", region=""))[1] is False
+            await update_task(s, made, region="eu")
+            with pytest.raises(ConfigError, match="region is 'eu', not None"):
+                await ensure_task(s, PROJECT, "x", region="")
+
+    async def test_ensuring_an_archived_task_finds_it_and_leaves_it_archived(
+        self, engine: AsyncEngine
+    ) -> None:
+        async with sessions(engine)() as s, s.begin():
+            await archive_task(s, await _voice(s))
+            found, created = await ensure_task(s, PROJECT, "voice", kind="voice")
+            assert created is False and found.archived_at is not None
+            # Only a difference is an error, archived or not.
+            with pytest.raises(ConfigError, match="kind is 'voice', not 'chat'"):
+                await ensure_task(s, PROJECT, "voice", kind="chat")
+            assert (await get_task(s, PROJECT, "voice")).archived_at is not None
+
+    async def test_two_inits_at_once_both_succeed(self, engine: AsyncEngine) -> None:
+        # The second waits on the first's insert, then finds what it made: no unique-key error.
+        async def init(s: AsyncSession) -> bool:
+            await ensure_project(s, "acme/new")
+            _task, created = await ensure_task(s, "acme/new", "voice", kind="voice")
+            return created
+
+        async with sessions(engine)() as first:
+            await first.begin()
+            assert await init(first)
+            async with sessions(engine)() as second:
+                await second.begin()
+                waiting = asyncio.create_task(init(second))
+                await asyncio.sleep(0.3)
+                assert not waiting.done()  # it waits on the first's rows
+                await first.commit()
+                assert await waiting is False
+                await second.commit()
+        both = await asyncio.gather(*(self._init_in_own_session(engine, n) for n in range(4)))
+        assert sorted(both) == [False, False, False, True]
+        async with sessions(engine)() as s, s.begin():
+            slugs = [t.slug for t in await list_tasks(s, "acme/new")]
+            racing = [t.slug for t in await list_tasks(s, "acme/race")]
+        assert slugs == [DEFAULT_TASK, "voice"] and racing == [DEFAULT_TASK, "x"]
+
+    @staticmethod
+    async def _init_in_own_session(engine: AsyncEngine, n: int) -> bool:
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, "acme/race")
+            return (await ensure_task(s, "acme/race", "x"))[1]
 
     async def test_update_changes_what_an_operator_may_change(
         self, engine: AsyncEngine, tmp_path: Path
@@ -388,6 +771,13 @@ class TestArchiving:
                 await push(s, voice, read(cat))
             with pytest.raises(ConfigError, match="'voice' is archived"):
                 await set_label(s, voice, "suite", "smoke", 1, "staging")
+            # Its description can still change; its catalogue cannot.
+            await update_task(s, voice, region="eu", name="Voice", default_suite="smoke")
+            assert (voice.region, voice.name, voice.archived_at is not None) == (
+                "eu",
+                "Voice",
+                True,
+            )
             # Reads still work: nothing is deleted, and a pull can bring the catalogue out.
             assert len(await list_items(s, voice)) == 7
             assert await history(s, voice, "suite", "smoke")
@@ -575,6 +965,12 @@ class TestCommandLine:
         )
         refused = runner.invoke(app, ["catalogue", "push", str(cat), *task])
         assert refused.exit_code == 3 and "is archived" in refused.output
+        found = runner.invoke(app, ["db", "init", "--project", PROJECT, "--task", DEFAULT_TASK])
+        assert found.exit_code == 0, found.output
+        assert (
+            f"exists (archived; `opseval task unarchive {DEFAULT_TASK} --project {PROJECT}` "
+            "to push to it)" in found.output
+        )
         assert runner.invoke(app, ["task", "list", "--project", PROJECT]).output.strip() == ""
         shown = runner.invoke(app, ["task", "list", "--project", PROJECT, "--all"])
         assert "archived" in shown.output

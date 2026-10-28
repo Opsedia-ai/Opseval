@@ -37,6 +37,10 @@ def head() -> str:
     return revision
 
 
+LOCK_TIMEOUT = "10s"
+"""How long a migration that alters busy tables (``0003``) waits for each lock before it fails,
+rather than queueing every read behind it."""
+
 UPGRADE_LOCK = 0x0B5E7A1  # any constant; one per application sharing the database
 
 
