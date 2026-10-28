@@ -240,10 +240,46 @@
     "ModelUsage": {
       "additionalProperties": false,
       "properties": {
+        "audio_in_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio In Seconds"
+        },
+        "audio_out_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio Out Seconds"
+        },
         "calls": {
           "default": 0,
           "title": "Calls",
           "type": "integer"
+        },
+        "characters": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Characters"
         },
         "cost_usd": {
           "anyOf": [
@@ -258,18 +294,32 @@
           "title": "Cost Usd"
         },
         "input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": 0,
-          "title": "Input Tokens",
-          "type": "integer"
+          "title": "Input Tokens"
         },
         "model": {
           "title": "Model",
           "type": "string"
         },
         "output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": 0,
-          "title": "Output Tokens",
-          "type": "integer"
+          "title": "Output Tokens"
         },
         "rate_limited_calls": {
           "default": 0,

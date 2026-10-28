@@ -162,9 +162,10 @@ forbidden, no matching call, no rule to apply. The passes are honest and they ar
 {% endfor %}
 
 {% if result.usage %}
-<h2>LLM usage</h2>
-<table><tr><th>Role</th><th>Model</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th><th>Cost (USD)</th></tr>
-{% for u in result.usage %}<tr><td>{{ u.role }}</td><td>{{ u.model }}</td><td>{{ u.calls }}</td><td>{{ u.input_tokens }}</td><td>{{ u.output_tokens }}</td><td>{{ 'no rate' if u.cost_usd is none else '%.4f' % u.cost_usd }}</td></tr>{% endfor %}
+<h2>Model usage</h2>
+{% macro measured(v, fmt='%s') %}{% if v is none %}<span class="muted" title="not measured">—</span>{% else %}{{ fmt % v }}{% endif %}{% endmacro %}
+<table><tr><th>Role</th><th>Model</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th><th>Audio in (s)</th><th>Audio out (s)</th><th>Characters</th><th>Cost (USD)</th></tr>
+{% for u in result.usage %}<tr><td>{{ u.role }}</td><td>{{ u.model }}</td><td>{{ u.calls }}</td><td>{{ measured(u.input_tokens) }}</td><td>{{ measured(u.output_tokens) }}</td><td>{{ measured(u.audio_in_seconds, '%.1f') }}</td><td>{{ measured(u.audio_out_seconds, '%.1f') }}</td><td>{{ measured(u.characters) }}</td><td>{{ 'no rate' if u.cost_usd is none else '%.4f' % u.cost_usd }}</td></tr>{% endfor %}
 </table>
 {% endif %}
 

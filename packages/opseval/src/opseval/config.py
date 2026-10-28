@@ -68,6 +68,72 @@ class Settings(BaseSettings):
     ``error`` refuses the run at launch (exit 3), ``warn`` scores but marks the results
     degraded, ``off`` skips the check."""
 
+    # Speech providers for voice (ADR-0054). Both receive conversation content: the
+    # customer's script goes to TTS, the agent's voice to STT. Every URL is allowlisted.
+    tts_provider: str = "openai"
+    """The text-to-speech provider: ``openai`` (the built-in OpenAI-compatible
+    ``/v1/audio/speech`` client) or the name of an ``opseval.tts`` plugin. Only the named one
+    is imported; a name nothing provides is refused (exit 3), never replaced by another."""
+    tts_url: str | None = None
+    """Base URL of the TTS provider (``{url}/v1/audio/speech`` for the built-in). Required for
+    every provider, plugin included; its host must be allowlisted, and use TLS unless it is
+    loopback."""
+    tts_key: SecretStr | None = None
+    """API key for the TTS provider, if it needs one."""
+    tts_model: str | None = None
+    """TTS model, such as ``tts-1`` or ``gpt-4o-mini-tts``."""
+    tts_voice_map: dict[str, str] = {}
+    """JSON object from a persona's voice name, or a language tag, to the provider's voice:
+    ``{"calm_female": "nova", "ar": "onyx", "default": "alloy"}``. A voice is looked up by
+    persona voice, then language, then ``default``; an unmapped persona voice is sent as is."""
+    tts_format: Literal["wav", "pcm"] = "wav"
+    """Audio format asked of the built-in TTS: ``wav`` (the rate is in the file) or ``pcm``
+    (raw PCM16 at ``OPSEVAL_TTS_PCM_RATE``)."""
+    tts_pcm_rate: int = Field(default=24_000, gt=0)
+    """The sample rate of raw ``pcm`` TTS audio (OpenAI sends 24 kHz)."""
+    tts_timeout_seconds: float = Field(default=30.0, gt=0)
+    """The most one TTS call may take, retries included. Off the agent's clock; overrunning it
+    is a harness error (``TtsError``), never the agent's timeout."""
+    stt_provider: str = "openai"
+    """The speech-to-text provider: ``openai`` (the built-in OpenAI-compatible
+    ``/v1/audio/transcriptions`` client) or the name of an ``opseval.stt`` plugin."""
+    stt_url: str | None = None
+    """Base URL of the STT provider (``{url}/v1/audio/transcriptions`` for the built-in).
+    Required for every provider, plugin included. Allowlisted, TLS off loopback."""
+    stt_key: SecretStr | None = None
+    """API key for the STT provider, if it needs one."""
+    stt_model: str | None = None
+    """STT model, such as ``whisper-1``."""
+    stt_timeout_seconds: float = Field(default=60.0, gt=0)
+    """The most one STT call may take, retries included. Off the agent's clock; overrunning it
+    is a harness error (``SttError``), never the agent's timeout (ADR-0053)."""
+    stt_min_confidence: float = Field(default=0.5, ge=0, le=1)
+    """A transcript below this confidence marks the attempt's judge scores degraded
+    (ADR-0053). A provider that reports no confidence is not measured, never 1.0."""
+    stt_canary_max_wer: float = Field(default=0.25, ge=0)
+    """The STT health canary is healthy when its word error rate is at most this (ADR-0053).
+    Calibrated per language pack later (ADR-0059)."""
+    stt_canary_wav: str | None = None
+    """A WAV of known speech for the STT canary when no TTS is configured to make one. Its
+    words go in ``OPSEVAL_STT_CANARY_TEXT`` and its language in
+    ``OPSEVAL_STT_CANARY_LANGUAGE``; one without the others is refused (exit 3). Without a
+    TTS or this WAV, the canary is not run."""
+    stt_canary_text: str | None = None
+    """What ``OPSEVAL_STT_CANARY_WAV`` says, word for word."""
+    stt_canary_language: str | None = None
+    """The language ``OPSEVAL_STT_CANARY_WAV`` is spoken in, as a BCP-47 tag (``en``,
+    ``ar-EG``). The STT is asked to hear the canary in this language, not the scenario's."""
+    stt_second_provider: str | None = None
+    """An optional second STT check (ADR-0053): ``openai`` or an ``opseval.stt`` plugin. It
+    must differ from the first in provider or model, or the run is refused (exit 3): the same
+    STT twice proves nothing. Setting a second URL or model alone implies ``openai``."""
+    stt_second_url: str | None = None
+    """Base URL of the second STT. Allowlisted and preflighted like the first."""
+    stt_second_key: SecretStr | None = None
+    """API key for the second STT, if it needs one."""
+    stt_second_model: str | None = None
+    """Model of the second STT."""
+
     # Trace source: OTLP-JSON spans on disk (ADR-0028)
     otlp_spans_path: str | None = None
     """OTLP-JSON spans (a file or folder) for `traces.source: otlp-file` (ADR-0028)."""
@@ -205,6 +271,9 @@ SECRET_FIELDS = (
     "token_signing_key",
     "simulator_api_key",
     "judge_api_key",
+    "tts_key",
+    "stt_key",
+    "stt_second_key",
     "langfuse_secret_key",
     "serve_token",
     "webhook_url",
