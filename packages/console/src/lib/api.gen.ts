@@ -146,9 +146,12 @@ export interface UsageOut {
   role: string;
   model: string;
   calls: number;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
   costUsd: number | null;
+  audioInSeconds: number | null;
+  audioOutSeconds: number | null;
+  characters: number | null;
 }
 
 export interface SinkOut {
@@ -248,6 +251,10 @@ export interface RunUsage {
   simulatorTokens: number | null;
   judgeTokens: number | null;
   costUsd: number | null;
+  costComplete: boolean;
+  audioInSeconds: number | null;
+  audioOutSeconds: number | null;
+  characters: number | null;
 }
 
 export interface TrendPoint {

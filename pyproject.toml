@@ -115,6 +115,12 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "Speech providers are harness dependencies: no transports, driver, simulator or runner (ADR-0054)"
+type = "forbidden"
+source_modules = ["opseval.speech"]
+forbidden_modules = ["opseval.transport", "opseval.driver", "opseval.simulator", "opseval.runner"]
+
+[[tool.importlinter.contracts]]
 name = "Calibration is offline and read-only: no transports, driver, simulator or runner"
 type = "forbidden"
 source_modules = ["opseval.calibrate"]

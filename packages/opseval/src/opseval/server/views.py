@@ -25,7 +25,7 @@ from opseval.models.gate import (
     to_yaml_block,
 )
 from opseval.models.profile import SutProfile
-from opseval.models.results import SuiteResult, TestVerdict, VerdictStatus
+from opseval.models.results import ModelUsage, SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
@@ -274,6 +274,9 @@ def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
                 input_tokens=u.input_tokens,
                 output_tokens=u.output_tokens,
                 cost_usd=u.cost_usd,
+                audio_in_seconds=u.audio_in_seconds,
+                audio_out_seconds=u.audio_out_seconds,
+                characters=u.characters,
             )
             for u in r.usage
         ],
@@ -291,30 +294,49 @@ def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
     )
 
 
+def _total(values: list[float | None]) -> float | None:
+    """The sum of what was measured; ``None`` when nothing was (never 0)."""
+    known = [v for v in values if v is not None]
+    return sum(known) if known else None
+
+
+def _count(values: list[int | None]) -> int | None:
+    known = [v for v in values if v is not None]
+    return sum(known) if known else None
+
+
 def usage(store: FileStore) -> list[s.RunUsage]:
+    """Per run: tokens per LLM role, speech audio and characters, and the cost. The cost is
+    what the priced models cost, with ``cost_complete`` saying whether every model was priced:
+    one unpriced model makes the total a floor, never hides the part that is known."""
     rows: list[s.RunUsage] = []
     for r in load_results(store):
-        if not r.usage:
-            rows.append(
-                s.RunUsage(run=r.run_id, simulator_tokens=None, judge_tokens=None, cost_usd=None)
-            )
-            continue
 
         def tokens(role: str, r: SuiteResult = r) -> int | None:
             hits = [u for u in r.usage if u.role == role]
-            return sum(u.input_tokens + u.output_tokens for u in hits) if hits else None
+            return _count([_tokens(u) for u in hits]) if hits else None
 
         costs = [u.cost_usd for u in r.usage]
-        total = None if any(c is None for c in costs) else round(sum(c for c in costs if c), 4)
+        known = _total(costs)
         rows.append(
             s.RunUsage(
                 run=r.run_id,
                 simulator_tokens=tokens("simulator"),
                 judge_tokens=tokens("judge"),
-                cost_usd=total,
+                cost_usd=round(known, 4) if known is not None else None,
+                cost_complete=bool(costs) and all(c is not None for c in costs),
+                audio_in_seconds=_total([u.audio_in_seconds for u in r.usage]),
+                audio_out_seconds=_total([u.audio_out_seconds for u in r.usage]),
+                characters=_count([u.characters for u in r.usage]),
             )
         )
     return rows
+
+
+def _tokens(u: ModelUsage) -> int | None:
+    if u.input_tokens is None and u.output_tokens is None:
+        return None
+    return (u.input_tokens or 0) + (u.output_tokens or 0)
 
 
 def trend(store: FileStore) -> list[s.TrendPoint]:
