@@ -145,7 +145,9 @@ Built, in local (files) mode:
   and judge ballots stay apart) belongs to that attempt. The runner saves the record before
   scoring with `usage_events: null`, and again after scoring with every call the attempt paid
   for, judges included, so a crash while judging leaves "not measured", not a short list. Calls
-  outside any attempt go to `SuiteResult.usage_events`; `rescore` puts its judge calls there.
+  outside any attempt go to `SuiteResult.usage_events`. `rescore` wraps each attempt it
+  re-grades in `meter.attempt` too, and writes those calls to its result's
+  `attempt_usage` (records are never rewritten).
   Layout `opseval-runs/6`; layouts 1–5 are read and are "written before per-call usage".
 - **Counts.** `llm.token_counts` reads `prompt_tokens`, `completion_tokens`,
   `prompt_tokens_details.cached_tokens` and `completion_tokens_details.reasoning_tokens`; a
@@ -163,22 +165,39 @@ Built, in local (files) mode:
   `effective_from`. The newest row in force on the call's day prices it; an unreported cache
   or reasoning split is billed at the base rate (no discount was reported); a priced count
   not reported is `null`. It ships a few OpenAI rows (gpt-4o, gpt-4o-mini, whisper-1, tts-1,
-  tts-1-hd) with their sources, for the maintainers to check and extend. The analytics
-  recompute each event's cost from its counts with the row in force when it was made, so a
-  row added later with a later date never changes an old run.
+  tts-1-hd) with their sources, for the maintainers to check and extend. **The cost stored
+  with each call when it was made is authoritative**: nothing reprices it, so a row added
+  later, even one backdated to before the run, never changes an old run, and the run's own
+  usage rows, the Usage page and the dashboards read the same figures. A call stored with
+  `cost_source: unknown` stays not measured.
 - **`opseval.analytics`.** `AnalyticsStore` (protocol), `UsageFilter` and `FileAnalytics`,
   which answers `cost` and `tokens`: spend by role and by model per day, week or run; cost per
   run, per scenario, per attempt and per passed test; tokens stacked as input not cached,
   cached input, output not reasoning and reasoning; per model; tokens per attempt; reasoning
   share. Every value is `{value, measured, of, complete}`; `of: 0` is "no calls", `measured: 0`
-  with `of > 0` is "not measured", `complete: false` with a value is a floor. Runs written
+  with `of > 0` is "not measured", `complete: false` with a value is a floor. Ratios (cost per
+  attempt, per passed test, tokens per attempt) have the same shape: the denominator counts
+  only measured units (`measured` of `of`: a passed test or attempt with no per-call usage
+  never dilutes it), and `complete: false` says the numerator was a floor (drawn "≥"). A
+  scenario's `passed_runs` counts only runs whose attempts of it were measured. Token
+  aggregates count only roles with tokens (`models.usage.has_tokens`: TTS, STT and telephony
+  calls are left out of every token total and its `of`, so a voice attempt is not partial).
+  A run whose records cannot be read is left out **entirely** (no calls, passed tests or
+  bucket) and named in `scope.unreadable_runs`. The latest re-score of a run is counted with
+  that run, its calls grouped by role as `judge (rescore)` and counted in
+  `scope.rescore_calls`; per-attempt and per-scenario figures stay the attempts as they ran.
+  `FileAnalytics` reads the finished results once per request (options and answer share
+  them) and caches each run by `result.json`'s and its latest re-score's mtime. Runs written
   before per-call usage contribute their per-model totals as written and are named in
   `scope.legacy_runs`. Filters: suite, role, model, since/until, bucket. Organisation,
   project, task and label need server mode and are **refused** (400
   `FILTER_NEEDS_SERVER_MODE`), never ignored.
 - **API and console.** `GET /api/v1/analytics/cost` and `/analytics/tokens`; console pages
   `/cost` and `/tokens`, drawn as in-house SVG (no chart library): a `null` is a gap ("no
-  data"), a partial value hatched and said with "≥" and its coverage, with a table view.
+  data"), a partial value hatched and said with "≥" and its coverage, with a table view; a
+  bucket where any series was not measured is a floor as a whole (every segment hatched,
+  "partial: … not measured" in its tooltip and table row). The Usage page's simulator and
+  judge token totals carry `*_tokens_complete` and are drawn "≥ n" when partial.
   The report's usage table shows reasoning and cached tokens and how many calls reported each.
 
 Deferred, as the phasing says or because nothing to build it on exists yet:
