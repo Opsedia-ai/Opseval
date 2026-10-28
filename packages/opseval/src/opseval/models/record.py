@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from opseval.models.profile import FrameKind
 
@@ -36,6 +36,75 @@ class Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class AudioRef(Frozen):
+    """One turn's audio, kept beside the record (ADR-0053). Caller and agent audio are
+    separate files, so either can be withheld or deleted on its own."""
+
+    path: str | None
+    """Relative to the run folder, under ``audio/``. None when only the hash is kept
+    (``OPSEVAL_RECORD_AUDIO=hashes``) or the file has been pruned (``pruned``)."""
+    speaker: Literal["caller", "agent"]
+    start_ms: float
+    """On the attempt's monotonic clock (``transport.audio.AttemptClock``)."""
+    end_ms: float
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    codec: Literal["pcm16", "mulaw", "alaw"]
+    rate: int
+    bytes: int = Field(ge=0)
+    pruned: bool = False
+    """Retention removed the file (ADR-0053): the audio was there, so this is never read as
+    missing evidence; text scorers still rescore from the transcript."""
+
+    @field_validator("path")
+    @classmethod
+    def _inside_audio(cls, value: str | None) -> str | None:
+        # A record is evidence other tools open: a path must never leave the run folder.
+        if value is None:
+            return value
+        parts = value.split("/")
+        if not value.startswith("audio/") or any(p in ("", ".", "..") for p in parts):
+            raise ValueError("an audio path is relative to the run folder, under audio/")
+        if "\\" in value or ":" in value:
+            raise ValueError("an audio path uses '/' and no drive or scheme")
+        return value
+
+
+class WordTiming(Frozen):
+    word: str
+    start_ms: float
+    end_ms: float
+    confidence: float | None = None
+
+
+class TranscriptInfo(Frozen):
+    """Where a turn's ``text`` came from when it was spoken (ADR-0053). ``text`` stays the
+    field every scorer reads; this is the evidence behind it."""
+
+    source: Literal["opseval", "agent"]
+    """``opseval``: Opseval's own speech-to-text heard the audio. ``agent``: the agent's
+    protocol reported its own transcript."""
+    provider: str | None = None
+    model: str | None = None
+    confidence: float | None = None
+    """None when the provider gives none: not measured, never 1.0."""
+    words: tuple[WordTiming, ...] = ()
+
+
+class VoiceEventRecord(Frozen):
+    at_ms: float
+    kind: Literal["speech_start", "speech_end", "barge_in", "dtmf", "transfer", "hangup", "mark"]
+    speaker: Literal["caller", "agent"] | None = None
+    detail: str | None = None
+
+
+class VoiceTimeline(Frozen):
+    """A voice attempt's timeline on its monotonic clock (ADR-0053, ADR-0055)."""
+
+    codec: Literal["pcm16", "mulaw", "alaw"]
+    rate: int
+    events: tuple[VoiceEventRecord, ...] = ()
+
+
 class FrameRecord(Frozen):
     seq: int
     at: datetime
@@ -45,6 +114,9 @@ class FrameRecord(Frozen):
     latency_ms: float | None = None
     phase: str | None = None
     text: str | None = None
+    audio: AudioRef | None = None
+    """The spoken turn behind this frame, for voice attempts (ADR-0053)."""
+    transcript: TranscriptInfo | None = None
 
 
 class InterruptRecord(Frozen):
@@ -154,6 +226,8 @@ class RunRecord(Frozen):
     artifacts_checked: bool = False
     """Whether they were looked for. Empty and unchecked is "not looked for", never "nothing
     created"; empty and checked is "nothing created"."""
+    voice: VoiceTimeline | None = None
+    """The attempt's spoken timeline; None for a text attempt (ADR-0053)."""
 
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]

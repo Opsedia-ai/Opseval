@@ -1,5 +1,78 @@
 {
   "$defs": {
+    "AudioRef": {
+      "additionalProperties": false,
+      "description": "One turn's audio, kept beside the record (ADR-0053). Caller and agent audio are\nseparate files, so either can be withheld or deleted on its own.",
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "codec": {
+          "enum": [
+            "pcm16",
+            "mulaw",
+            "alaw"
+          ],
+          "title": "Codec",
+          "type": "string"
+        },
+        "end_ms": {
+          "title": "End Ms",
+          "type": "number"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Path"
+        },
+        "pruned": {
+          "default": false,
+          "title": "Pruned",
+          "type": "boolean"
+        },
+        "rate": {
+          "title": "Rate",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "speaker": {
+          "enum": [
+            "caller",
+            "agent"
+          ],
+          "title": "Speaker",
+          "type": "string"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "number"
+        }
+      },
+      "required": [
+        "path",
+        "speaker",
+        "start_ms",
+        "end_ms",
+        "sha256",
+        "codec",
+        "rate",
+        "bytes"
+      ],
+      "title": "AudioRef",
+      "type": "object"
+    },
     "CreatedArtifact": {
       "additionalProperties": false,
       "description": "Something the agent created during the attempt (FR-REC-01): its kind, its id as the\nagent reported it, and the frame that reported it.",
@@ -58,6 +131,17 @@
           "title": "At",
           "type": "string"
         },
+        "audio": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "direction": {
           "enum": [
             "sent",
@@ -111,6 +195,17 @@
           ],
           "default": null,
           "title": "Text"
+        },
+        "transcript": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -362,6 +457,69 @@
       "title": "ToolCall",
       "type": "object"
     },
+    "TranscriptInfo": {
+      "additionalProperties": false,
+      "description": "Where a turn's ``text`` came from when it was spoken (ADR-0053). ``text`` stays the\nfield every scorer reads; this is the evidence behind it.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "source": {
+          "enum": [
+            "opseval",
+            "agent"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "words": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WordTiming"
+          },
+          "title": "Words",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "TranscriptInfo",
+      "type": "object"
+    },
     "TransportEvent": {
       "additionalProperties": false,
       "description": "Connection-level events: drops, resumes and token refreshes (never token values).",
@@ -423,6 +581,131 @@
         "kind"
       ],
       "title": "TransportEvent",
+      "type": "object"
+    },
+    "VoiceEventRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "at_ms": {
+          "title": "At Ms",
+          "type": "number"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "kind": {
+          "enum": [
+            "speech_start",
+            "speech_end",
+            "barge_in",
+            "dtmf",
+            "transfer",
+            "hangup",
+            "mark"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "speaker": {
+          "anyOf": [
+            {
+              "enum": [
+                "caller",
+                "agent"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Speaker"
+        }
+      },
+      "required": [
+        "at_ms",
+        "kind"
+      ],
+      "title": "VoiceEventRecord",
+      "type": "object"
+    },
+    "VoiceTimeline": {
+      "additionalProperties": false,
+      "description": "A voice attempt's timeline on its monotonic clock (ADR-0053, ADR-0055).",
+      "properties": {
+        "codec": {
+          "enum": [
+            "pcm16",
+            "mulaw",
+            "alaw"
+          ],
+          "title": "Codec",
+          "type": "string"
+        },
+        "events": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VoiceEventRecord"
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "rate": {
+          "title": "Rate",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "codec",
+        "rate"
+      ],
+      "title": "VoiceTimeline",
+      "type": "object"
+    },
+    "WordTiming": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "end_ms": {
+          "title": "End Ms",
+          "type": "number"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "number"
+        },
+        "word": {
+          "title": "Word",
+          "type": "string"
+        }
+      },
+      "required": [
+        "word",
+        "start_ms",
+        "end_ms"
+      ],
+      "title": "WordTiming",
       "type": "object"
     }
   },
@@ -586,6 +869,17 @@
       "default": 0,
       "title": "User Turns",
       "type": "integer"
+    },
+    "voice": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VoiceTimeline"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [
