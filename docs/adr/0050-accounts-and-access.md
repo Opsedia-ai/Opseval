@@ -33,10 +33,10 @@ roles, API keys and OIDC login are core.
 - `project_memberships`: may set a role for one project that is **lower** than the user's org
   role. Raising it above the org role is `ee/`.
 - `api_keys`: per project. A public id `pk-oe-…` and a secret `sk-oe-…` shown once and stored
-  only as a hash. Scopes (read, run, write catalogue, move labels), an optional list of tasks
-  it may touch, `expires_at`, `revoked_at`, `last_used_at`.
+  only as a hash. Scopes (below), an optional list of tasks it may touch, `system` (a key
+  Opseval's own automation uses), `expires_at`, `revoked_at`, `last_used_at`.
 - `catalogue_labels.protected`: a protected label (by default `production`) moves only for
-  `admin` and `owner`.
+  `admin` and `owner`, or for a key holding `label:protected`.
 - `audit_events`: who (user or key), what, on which org/project/task, when, from where.
   Written in core for every write and every sign-in. The viewer and export are `ee/`.
 
@@ -52,6 +52,23 @@ roles, API keys and OIDC login are core.
 Every route checks the role it needs on the org, project and task it touches. A key scoped to
 task A gets 404 for task B, not 403, so it cannot learn what exists.
 
+### API key scopes
+
+| Scope | Allows |
+|---|---|
+| `runs:read` | read runs, results and the catalogue |
+| `runs:start` | start and cancel runs, report a CI run |
+| `catalogue:write` | push catalogue versions |
+| `catalogue:label` | move **unprotected** labels only; a protected label is refused (403) |
+| `label:protected` | move protected labels, such as `production` |
+
+- **`label:protected` is off by default** and is never implied by another scope.
+- **Only an org admin or owner can grant it,** and the grant is an audit event.
+- **A system key can never hold it.** Keys used by schedules, workers, proposals and regression
+  rules ([ADR-0064](0064-continuous-evaluation.md)) are system keys, and the grant is refused.
+  Automation never moves `production`.
+- A key never has more than the role of the person who created it, checked at each use.
+
 ### Signing in
 
 - **Passwords:** argon2id (argon2-cffi), with parameters stored in the hash so they can be
@@ -59,22 +76,36 @@ task A gets 404 for task B, not 403, so it cannot learn what exists.
 - **Sessions:** a `__Host-` cookie, `Secure`, `HttpOnly`, `SameSite=Lax`, no `Domain`. A new
   session id is issued at login, and the old one is revoked. Logout deletes the row.
 - **CSRF:** a write needs both a same-origin `Origin` and a token header derived from the
-  session's CSRF secret. Requests authenticated by an API key carry no cookie and are exempt.
+  session's CSRF secret. A request authenticated by an API key is exempt.
+- **A key never falls back to a cookie.** A request with an `Authorization` header is
+  authenticated by that header alone. An invalid, expired or revoked key is 401, even when the
+  same request carries a valid session cookie.
 - **OIDC:** authorisation code with PKCE, `state` and `nonce`, from an issuer on an allowlist
   (`OPSEVAL_*` settings, the issuer host also on `OPSEVAL_ALLOWED_HOSTS`, TLS). An unknown
   issuer is refused before any redirect.
 - **First users:** sign-up is off. `opseval admin create-user --org o --role owner` creates
   users headlessly. Invitations come from an admin in the console.
 
-### Serving beyond loopback
+### Two modes, chosen by configuration
 
-- `opseval serve` keeps ADR-0031's loopback token mode unchanged when no database is
-  configured, or when it binds to loopback.
-- A non-loopback bind is refused (exit 3) unless `--public-url https://…` is given **and**
-  either a TLS certificate and key or `--trusted-proxy` naming the proxy addresses whose
-  forwarded headers are believed.
-- With a public URL, the `Host` check compares against that URL's host, HSTS is sent, and the
-  bearer-token shortcut is off: only sessions and API keys authenticate.
+The mode is decided by what is configured, never by the bind address:
+
+- **Accounts mode** is on when `OPSEVAL_DATABASE_URL` (ADR-0047) or a public URL (`--public-url`) is
+  configured. It has users, sessions, roles, CSRF and API keys, also on loopback. The shared
+  bearer token is off: only sessions and API keys authenticate.
+- **Shared-token mode** (ADR-0031) is only for file mode, with no database and no public URL. It
+  stays as it is: loopback only, one bearer token.
+
+Serving beyond loopback:
+
+- A non-loopback bind is refused (exit 3) in shared-token mode, and in accounts mode unless
+  `--public-url https://…` is given **and** either a TLS certificate and key or
+  `--trusted-proxy` naming the proxy addresses whose forwarded headers are believed.
+- With a public URL, the `Host` check compares against that URL's host, and HSTS is sent.
+- **Behind a trusted proxy,** `Forwarded` and `X-Forwarded-*` headers are read only from the
+  listed addresses and ignored from anyone else. The forwarded host must equal the public URL's
+  host and the forwarded proto must be `https`, or the request is 403 `HOST_NOT_ALLOWED`. The
+  client address for rate limits and audit events is the one the trusted proxy reports.
 - Secrets used here (session signing material, OIDC client secret) are `SecretStr` in
   `config.Settings` and appear in `SECRET_FIELDS`.
 
@@ -94,7 +125,10 @@ project role above the org role, and the audit viewer and export.
   makes plain HTTP on a public interface impossible rather than discouraged.
 - New dependencies (argon2-cffi, an OIDC/JOSE library) must pass `make audit`.
 - Tests cover login, cookie flags, CSRF, role scoping (a viewer cannot write; a key for task A
-  cannot read task B), protected labels, and refusing a non-TLS public bind.
+  cannot read task B), protected labels (`catalogue:label` cannot move `production`; a system
+  key cannot be granted `label:protected`), a bad key with a good cookie (401), forwarded
+  headers from an untrusted address, the mode chosen by configuration (a database URL on
+  loopback is accounts mode), and refusing a non-TLS public bind.
 
 ## Not decided here
 

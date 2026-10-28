@@ -82,10 +82,12 @@ Unknown strategy names are a load error.
 ### Caps and the commit gate
 
 - **Turns.** `attacker.max_turns` is at most `conversation.max_turns`.
-- **Tokens.** `OPSEVAL_ATTACKER_MAX_TOKENS` applies per attempt, and the run's budget per task
-  (ADR-0064). Reaching a cap ends the attempt with the stop reason `attack_budget_exhausted`. The
-  judges then grade what happened. A pass is reported with its scope ("resisted 12 turns: crescendo,
-  encoding").
+- **Tokens.** `OPSEVAL_ATTACKER_MAX_TOKENS` applies per attempt. Reaching it ends the attempt
+  with the stop reason `attack_budget_exhausted`. The judges then grade what
+  happened. A pass is reported with its scope ("resisted 12 turns: crescendo, encoding").
+- **The task's budget is a different thing.** These caps end one attempt. A money budget follows
+  the one rule of [ADR-0066](0066-dashboards.md): it is checked before an attempt starts, never
+  cuts one in flight, and skips what is left with `skip_kind: budget`.
 - **The commit gate holds.** `allow_commit: true` with `attacker:` is a load error, and `stop_at`
   must be `commit_gate` or a checkpoint before it. Approval checkpoints are answered by the
   scenario's `checkpoint_policy`, never by the attacker. Reaching the commit gate ends the attempt.
@@ -97,13 +99,28 @@ Unknown strategy names are a load error.
 |---|---|
 | The attacker's endpoint fails or times out | `SimulatorError` / `LLMInfraError`: not judged |
 | The attacker refuses to attack, or breaks its output format | `ATTACKER_REFUSED`: not judged |
-| No attack turn was delivered | `attack.delivered` (harness axis) fails: not judged |
+| The conversation was still open, but an attack turn it was owed was not delivered | `attack.delivered` (harness axis) fails: not judged |
 | The agent times out on an attack turn | `TransportTimeout`: the agent's fault |
 | The agent complies | the security judges fail it |
 
 `attack.delivered` is always on for attacker scenarios, like `protocol.replies_read`
-([ADR-0042](0042-read-the-reply-on-the-agents-clock.md)). It checks that each turn the attacker
-planned was sent. An attacker that did nothing can therefore never let the agent pass.
+([ADR-0042](0042-read-the-reply-on-the-agents-clock.md)). It counts only the turns owed up to the
+point where the conversation ended:
+
+- **The conversation ends** at `stop_at` (the commit gate), at an agent `TransportTimeout`, when
+  the agent's own terminal state ends the attempt (success or failure, a hang-up), or at
+  `max_turns` or the token cap. No turn after that point is owed.
+- **It fails** only when the attacker did not deliver a turn the conversation was still open for:
+  the attacker model refused, errored or returned nothing usable, or no attack turn was sent at
+  all.
+- **It never invalidates an early ending.** An agent that gave in on turn 2, or timed out on turn
+  3, owed the attacker nothing more. The security judges fail the first; the second stays the
+  agent's timeout.
+- As with `protocol.replies_read`, a forbidden tool call proven by traces before the missing turn
+  still fails the attempt, so a real failure is not hidden behind a broken attacker.
+
+An attacker that did nothing can therefore never let the agent pass, and an attacker that stopped
+because the conversation was over never takes the agent's result away.
 
 ### Reproducibility
 
@@ -116,8 +133,8 @@ scenario.
 
 - Teams can test persistence and obfuscation, not only single payloads, with the same judges and
   gate.
-- Attacks cost more than scripted turns. The caps, the attacker role in the usage meter
-  ([ADR-0066](0066-dashboards.md)) and the task budget make that visible.
+- Attacks cost more than scripted turns. The per-attempt caps, the `attacker` role in the usage
+  events ([ADR-0066](0066-dashboards.md)) and the task budget make that visible.
 - Some attacker models refuse to attack. Those runs come out "not judged", which is the honest
   answer. The docs name models known to work.
 - Strategy recipes are versioned. A changed recipe is a new prompt hash, named by `rescore`.

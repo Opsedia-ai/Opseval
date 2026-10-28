@@ -46,26 +46,47 @@ Declared in the scenario's `voice:` block, so it is part of the scenario's diges
 - **Arabic–English code-switching** within a sentence, written by the simulator and voiced with a
   voice that speaks both.
 
-Noise and accent are things the harness does to the caller. If they make the agent's speech
-unintelligible to Opseval's own STT, that is the harness's problem (ADR-0053's table), not the
-agent's.
+Noise and accent are things the harness does to the caller. They never touch the agent's audio,
+so they cannot make it unintelligible. Whether an empty transcript of the agent is the agent's
+fault or Opseval's is decided as ADR-0053 decides it: by the STT health canary and the optional
+second STT, never by default. The canary transcribes the caller's audio **before** noise is
+mixed in, so planted noise cannot make a healthy STT look broken.
 
 ### Metrics
 
-Each goes into `attempt_metrics` (ADR-0051) as one row per attempt. In files mode they live in the
-record. A metric that could not be measured is NULL, and is shown as "not measured", never 0.
+Each goes into `attempt_metrics` ([ADR-0051](0051-runs-and-blobs-in-the-database.md)): one row
+per turn for a per-turn metric (`turn` set), one row per attempt for an attempt-level metric
+(`turn` NULL). Rows hold raw values. Percentiles such as p50 and p95 are computed by analytics
+([ADR-0052](0052-analytics-store.md)) and by the scorers from those rows, never stored folded. A
+metric that could not be measured is a NULL value with a `reason`, shown as "not measured",
+never 0.
+
+In files mode the metrics live in the record. That record change bumps `storage.LAYOUT` again
+(the next number at the time, after ADR-0053's `opseval-runs/3`); older layouts are still read
+and show the metrics as not measured.
 
 | Metric | Measured as |
 |---|---|
-| `voice.time_to_first_audio_ms` | call start to the agent's first `AgentSpeechStart` |
-| `voice.turn_latency_ms` p50, p95 | caller's speech end to agent's speech start, per turn |
+| `voice.time_to_first_audio_ms` | call start to the agent's first `AgentSpeechStart` (per attempt) |
+| `voice.turn_latency_ms` | caller's speech end to agent's speech start (per turn; p50, p95 computed) |
 | `voice.barge_in_yield_ms` | caller's interruption start to agent's speech end; NULL if no barge-in was planted |
 | `voice.talk_over_ratio` | share of agent speech time that overlaps caller speech |
-| `voice.dead_air_ms` | longest gap with neither party speaking, outside planted silences |
+| `voice.dead_air_ms` | silence while the agent is the party expected to speak (per turn; see below) |
 | `voice.agent_asr_wer` | WER of the agent's own transcript against the caller's known text |
 | `voice.asr_confidence` | mean and minimum of Opseval's STT confidence on agent turns |
 | `voice.dtmf_navigation` | the expected digits reached the expected menu state |
 | `voice.transfer` | a transfer happened, when, and to which target |
+
+**Dead air is only the agent's silence.** Simulator time is not the agent's time
+([ADR-0042](0042-read-the-reply-on-the-agents-clock.md)). A gap counts only when the agent is the
+party expected to speak:
+
+- after the caller finished a turn (its last sample sent) and before the agent's first audio;
+- a pause inside an agent turn, between its `AgentSpeechStart` and `AgentSpeechEnd`.
+
+A gap that ends in caller speech, a planted silence, and time the harness spends generating the
+caller's next turn (simulator and TTS) never count. A gap the clocks cannot place is left out
+and the metric is `degraded`, so a harness stall never reads as the agent's dead air.
 
 **Agent WER needs the agent's transcript.** The reference is free: Opseval knows exactly what the
 caller said. If the agent exposes no `AgentTranscript`, the metric is `NOT_MEASURABLE`, never a
@@ -91,7 +112,7 @@ unchanged. The fault-injection suite runs every row against both drivers, plus t
 
 - An agent that never yields to a barge-in fails `voice.barge_in_yield_ms` (its fault).
 - An STT outage during a barge-in turn is `SttError` (not judged), not a failed yield.
-- A planted silence is never counted as dead air.
+- A planted silence, and the harness's own simulator or TTS time, are never counted as dead air.
 
 ## Consequences
 

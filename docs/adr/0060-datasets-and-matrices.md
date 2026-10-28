@@ -24,7 +24,7 @@ authoring errors to run time and put expression evaluation on text read from dat
 
 ```yaml
 id: refund-by-order-type
-dataset: data/orders.csv          # or .jsonl
+dataset: datasets/orders.csv      # or .jsonl
 goal: Get a refund for order {{order_id}} ({{order_type}}).
 conversation:
   opening_message: Hi, I want my money back for {{order_id}}.
@@ -32,10 +32,21 @@ conversation:
 
 - **Formats.** CSV with a header row, or JSONL with one object per line. Values are scalars (string,
   number, boolean). A nested value is a load error.
-- **Where the file may be.** The path is relative to the scenario file and must stay inside the
-  catalogue folder. Links pointing outside it are refused, as `catalogue push` refuses them
-  ([ADR-0047](0047-server-mode-on-postgres.md)). The push gains `datasets/**/*.{csv,jsonl}` and the
-  same size cap.
+- **Where the file may be.** One place: under `datasets/` at the catalogue root, beside
+  `profile.yaml`, `suites/` and `scenarios/`. The path is relative to the catalogue root, not to
+  the scenario file, so a scenario moved between folders keeps working. Any other path, `..`, or
+  a link pointing outside the folder is a load error.
+- **What the catalogue store needs** ([ADR-0047](0047-server-mode-on-postgres.md),
+  `db/catalogue_store.py`):
+  - `catalogue push` stores `datasets/**/*.csv` and `datasets/**/*.jsonl`: `_files` lists them
+    beside the YAML files, with the same refusal of links that leave the folder;
+  - `catalogue_items.kind` gains `dataset` (the check constraint in `db/schema.py`), named by its
+    path, and versioned and labelled like the other kinds;
+  - pull's `_safe_target` allows those two extensions, only under `datasets/` (today it allows
+    `.yaml` only, under `suites/` and `scenarios/` or as `profile.yaml`);
+  - a size cap per dataset file, `OPSEVAL_MAX_DATASET_BYTES` (default 5 MB), checked at load and
+    at push, in place of the 256 KB `MAX_FILE_BYTES` that YAML files keep; over it is an error
+    naming the file, never a truncation.
 - **Column names** match `[A-Za-z_][A-Za-z0-9_]*`. A duplicate column is a load error.
 - **Placeholders are logic-free.** `{{name}}` (spaces inside allowed) is replaced by the value.
   There are no filters, conditionals, loops, defaults or expressions. `\{{` writes a literal `{{`.

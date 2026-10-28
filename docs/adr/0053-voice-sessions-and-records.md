@@ -76,14 +76,45 @@ The bridge is turn-based, so it cannot measure barge-in or talk-over. That is AD
 | No agent speech within the turn timeout | `TransportTimeout` | The agent did not answer. Its fault. |
 | The agent speaks past `audio.max_turn_seconds` | `TransportTimeout` | The turn never ended. Its fault. |
 | TTS or STT unreachable, 5xx, or over its own timeout | `TtsError` / `SttError` (`HarnessError`) | Opseval could not speak or listen. Not judged. |
-| Empty transcript for agent audio that has energy | `infra_error` `ASR_NO_TRANSCRIPT` on every text-reading scorer | The agent said something we could not hear. Not measured, and named. |
+| Agent audio with energy, empty or garbage transcript, STT canary healthy | `voice.intelligible` fails (output axis) | STT is proven to work; the agent's audio is what failed. Its fault, with proof. |
+| The same, and a second STT provider transcribes it | the second transcript is used, scores `degraded` | The agent was heard; the first STT missed it. Named. |
+| The same, and the STT canary fails | `infra_error` `ASR_NO_TRANSCRIPT` on every text-reading scorer | Opseval's own listening is broken. Not measured, and named. |
 | Transcript confidence under `OPSEVAL_STT_MIN_CONFIDENCE` | judge scores `degraded`, named in every output (ADR-0017) | The evidence is weak; the score is not hidden. |
-| Agent audio cannot be decoded | synthetic `error` frame; bytes kept under `audio/` | The agent sent broken audio. Its fault, with proof. |
+| Agent audio cannot be decoded | synthetic `error` frame; bytes kept, encrypted, under `audio/` (hashes only: hash, length, codec, duration) | The agent sent broken audio. Its fault, with proof. |
 | Agent audio with no energy (silence) | no speech; the turn times out | Silence is not an empty transcript. |
 
 `protocol.replies_read` counts a turn with audio as read, so an untranscribed turn is reported
-once, as `ASR_NO_TRANSCRIPT`, and not again as an unread reply. Deterministic checks that need no
-text (tools, flow, terminal state) still score that attempt.
+once (as a failed `voice.intelligible` or as `ASR_NO_TRANSCRIPT`), and not again as an unread
+reply. Deterministic checks that need no text (tools, flow, terminal state) still score that
+attempt.
+
+### Empty transcripts: decided by evidence, not by default
+
+An empty transcript for agent audio with energy could be the agent's fault (garbled, clipped or
+wrong-codec speech) or Opseval's (a broken STT). Defaulting to either side breaks the one rule, so
+Opseval measures which it is:
+
+- **An STT health canary.** Opseval knows exactly what the caller said, so its own caller audio is
+  a known-good clip. Preflight transcribes one phrase (ADR-0054). Within an attempt, whenever an
+  agent turn comes back empty or garbage, the caller turn just before it is transcribed too, on
+  the same provider and model and through the same codec path (μ-law 8 kHz on a phone line). The
+  canary is healthy when its WER is at most `OPSEVAL_STT_CANARY_MAX_WER`.
+- **A second STT check** (optional, recommended): a different provider or model
+  (`OPSEVAL_STT_SECOND_*`, ADR-0054), under the same allowlist and region rules. It transcribes
+  the same agent audio.
+- **The decision**, in order:
+  1. the second STT returns a usable transcript: it is used, and the attempt's text scores are
+     `degraded`, naming both providers;
+  2. otherwise, the canary is healthy: the agent's audio is the problem, and `voice.intelligible`
+     fails, with the energy, duration and every transcript as evidence;
+  3. otherwise (the canary's WER is over the bound, or the canary call itself failed): every
+     text-reading scorer is `infra_error` `ASR_NO_TRANSCRIPT`, and the canary result is named.
+- "Garbage" means no word in the scenario language's script (the test `output.language_script`
+  uses). A low-confidence transcript with words is the confidence row of the table, not this one.
+- `voice.intelligible` is always on for voice attempts and sits on the `output` axis. Every
+  canary call and its WER go into the record, so `rescore` sees the same evidence.
+- A canary that is unhealthy while transcripts are not empty marks the attempt's judge scores
+  `degraded`, named in every output (ADR-0017).
 
 ### Privacy and residency
 
@@ -92,9 +123,15 @@ PDPL, the UAE PDPL and China's PIPL.
 
 - **Per-speaker channels.** Caller and agent audio are separate files, so either can be deleted
   or withheld alone.
-- **Encrypted at rest** with `OPSEVAL_ENCRYPTION_KEY` (a `SecretStr` in `SECRET_FIELDS`). Without
-  a key, a run that records audio is refused at launch (exit 3), unless it keeps hashes only
+- **Always encrypted at rest when stored,** agent audio without exception, with
+  `OPSEVAL_AUDIO_ENCRYPTION_KEY` (a `SecretStr` in `SECRET_FIELDS`). It is a separate key from
+  `OPSEVAL_ENCRYPTION_KEY`, which encrypts agent credentials (ADR-0047 step 5). The same rule
+  holds for the blob store ([ADR-0051](0051-runs-and-blobs-in-the-database.md)). Without the key,
+  a run that records audio is refused at launch (exit 3), unless it keeps hashes only
   (`OPSEVAL_RECORD_AUDIO=hashes`). The demo's synthetic voices are exempt.
+- **Hashes only means no bytes.** In that mode each turn keeps its SHA-256, length, codec, rate
+  and duration. Audio that could not be decoded keeps the same: a hash and the metadata, never
+  the bytes.
 - **Separate retention.** `OPSEVAL_AUDIO_RETENTION_DAYS` (default 30) prunes `audio/` before the
   record (`retention.py`, ADR-0037). A pruned blob reads as "audio pruned", never as missing
   evidence; text scorers still rescore from the transcript.
@@ -108,14 +145,16 @@ PDPL, the UAE PDPL and China's PIPL.
 
 - Every text scorer and judge works on voice from the first voice PR.
 - Verification: `opseval demo --voice` runs a speaking demo agent over `audio-ws` and `audio-http`
-  and exits 0; `--bug silent` exits 1; `--stt-down` exits 3. CI uses loopback fake TTS and STT
-  servers; real providers run nightly. Fault-injection tests cover every row of the table.
+  and exits 0; `--bug silent` and `--bug garbled` (speech no STT can read, canary healthy) exit 1;
+  `--stt-down` and `--stt-deaf` (STT answers, but empty for the canary too) exit 3. CI uses
+  loopback fake TTS and STT servers; real providers run nightly. Fault-injection tests cover
+  every row of the table.
 - A voice extra (`opseval[voice]`) holds the encryption library, which must pass the `make audit`
   licence allowlist. The core install gains no dependency.
 - A layout bump means a new reader for layout 3, with the old ones kept.
 
 ## Not decided here
 
-- The default energy threshold and end-of-turn silence per language. They are calibrated per
-  language pack (ADR-0059).
+- The default energy threshold, end-of-turn silence and `OPSEVAL_STT_CANARY_MAX_WER` per
+  language. They are calibrated per language pack (ADR-0059).
 - Consent records per recording (`audio_assets.consent_basis`, ADR-0051).

@@ -54,6 +54,12 @@ Twilio's callbacks are served by `opseval voice-gateway --public-url https://…
   closed.
 - **Serves nothing else.** No catalogue, no run data, no console. It holds audio only for the
   attempts in flight and hands it to the runner.
+- **Talks to the runner over a closed channel.** The gateway↔runner link is loopback (a Unix
+  socket or `127.0.0.1`) or, between hosts, mutually authenticated TLS with certificates both
+  sides pin. Every message carries the attempt's token, and the runner accepts it only for the
+  attempt that token was minted for. A message with an unknown or expired token is dropped and
+  logged (token prefix and call SID only, no audio, no body). It never reaches an attempt, so a
+  stray stream cannot become another attempt's agent audio.
 
 ### Test numbers only
 
@@ -69,12 +75,23 @@ On top of the ADR-0053 table:
 
 | What happened | Result |
 |---|---|
-| Twilio API refuses the call, or 5xx | `TransportError` (harness): not judged |
-| The call is placed but the agent's number never answers | `TransportTimeout`: the agent's fault |
-| Busy, or the number does not exist | `TransportError`, naming the status: a configuration problem |
+| Twilio's API errors (5xx, timeout, auth refused, rate limit) | `TransportError` (harness): not judged |
+| Our side is misconfigured (the from-number is not ours, the TwiML or stream URL is refused, an invalid `to` format) | `ConfigError` (exit 3) at launch or preflight, else `TransportError`: not judged |
+| The call is placed and the agent's number is busy | `TransportTimeout`, naming `busy`: the agent's fault |
+| The agent's number rejects the call | `TransportTimeout`, naming `rejected`: the agent's fault |
+| The call is placed and nobody answers | `TransportTimeout`, naming `no-answer`: the agent's fault |
 | The media stream drops mid-call | `TransportClosed`: not judged |
 | The agent hangs up before the goal | a recorded `Hangup(by=agent)`, scored as behaviour |
 | The agent transfers the call | a recorded `Transfer`, scored against the scenario's expectation |
+
+Capacity is part of what is tested: a contact-centre number that is busy, rejects calls or rings
+out would do the same to a customer. So once Twilio reports that it placed the call, a busy,
+rejected or unanswered call is the agent's, named by its Twilio status. What comes before that
+(Twilio's own API, Opseval's account, numbers and URLs) is the harness's. The split follows
+Twilio's call status and error codes, never message text: carrier and provider errors (the
+`failed` status with a Twilio error code for the provider or the account) are harness errors.
+A `to` number Twilio says does not exist is on our own allowlist, so it is a configuration
+problem, not the agent's: `TransportError`, not judged.
 
 ### Cost
 

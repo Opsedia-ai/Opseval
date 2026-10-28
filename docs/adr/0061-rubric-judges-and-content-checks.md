@@ -61,10 +61,14 @@ scorers:
   - **A failed `must` criterion fails the score whatever the weights,** so a serious failure is
     never averaged away.
   - **If any criterion is unmeasured** (an invalid ballot, too few valid votes), the score is
-    `infra_error`, naming the criterion. It is never computed from the rest, which would grade a
-    smaller rubric than the one written.
-  - **One exception keeps a real failure visible:** a measured `must` criterion that failed still
-    fails the score, even if another criterion is unmeasured.
+    never computed from the rest, which would grade a smaller rubric than the one written. It is
+    decided by the cut-short rule of `verdicts.fold_cut_short`
+    ([ADR-0035](0035-run-control.md)), applied to criteria instead of attempts:
+    - **failed** if it would fail even had every unmeasured criterion passed (a measured `must`
+      that failed is one such case), with the unmeasured criteria named in `details`;
+    - **passed** only if it would pass even had every unmeasured criterion failed (so an
+      unmeasured `must` never passes), and is marked `degraded`, naming them;
+    - otherwise **`infra_error`** (not measured), naming the unmeasured criteria.
 - **Axis.** The rubric declares `axis: output | flow | security` (default `output`). It can never be
   `harness`, which would let a team's own rubric invalidate attempts instead of failing them.
 

@@ -30,7 +30,7 @@ alerts and scenarios proposed from what went wrong. The risk is automation that 
 | L2 | [0061](0061-rubric-judges-and-content-checks.md) | `judge.rubric` criteria, `content.*` checks | criteria fenced and in the rubric digest; judge independence; `must` criteria cannot be averaged away |
 | L3 | [0062](0062-generated-scenarios.md) | `opseval generate` from docs or transcripts | drafts only; every draft through the loader; provenance; a cost cap |
 | L4 | [0063](0063-adaptive-attacker.md) | an `attacker:` with strategies and caps | graded by the security judges; attacker family differs from the judge's; stops at the commit gate |
-| L5 | this ADR | a `schedule:`, regression rules, proposals from failures and traces | only a human admin moves `production`; a monthly budget; alerts, never rollback |
+| L5 | this ADR | a `schedule:`, regression rules, proposals from failures and traces | only a human admin or owner moves `production`; a monthly budget; alerts, never rollback |
 
 - **Every level is opt-in per task.** A task that uses none of them behaves as today.
 - **L0 to L2 are opt-in by writing them.** They are scenario files, versioned and reviewed like any
@@ -95,25 +95,28 @@ monitoring stop in silence.
 - **Everything is a draft,** with provenance, credential redaction and the personal-data
   acknowledgement, set once per task by an admin. Proposals spend from the task's budget.
 
-### Only a human admin moves `production`
+### Only a human admin or owner moves `production`
 
-- `production` is a protected label (ADR-0050). Moving it needs one of:
-  - a signed-in user with the admin or owner role;
-  - an API key that an admin explicitly granted the protected-label scope.
-- **Automation never holds that scope:** the scheduler, workers, the proposer and the regression
-  rules.
+- `production` is a protected label ([ADR-0050](0050-accounts-and-access.md)). Only a human
+  admin or owner moves it: signed in, or with a key that an admin or owner granted
+  `label:protected` for a release step they run themselves.
+- **No key used by schedules or proposals holds `label:protected`,** nor does any key of the
+  scheduler, the workers or the regression rules. Those keys are system keys, and ADR-0050
+  refuses the grant to a system key.
 - A proposed scenario reaches `production` only after a person accepts it and an admin labels the
   catalogue version that contains it.
 
 ### A monthly budget per task
 
-- **What it covers:** every LLM and speech role the task's automation uses: simulator, judge,
-  attacker, generator, TTS and STT. Costs come from the usage events and price table of
+- **What it covers:** every role the task's automation uses: `simulator`, `judge`, `attacker`,
+  `generator`, `tts`, `stt` and `telephony`. Costs come from the usage events and price table of
   [ADR-0066](0066-dashboards.md).
 - **At 80%,** an alert.
-- **At 100%,** scheduled runs and proposals stop as `budget_exhausted`, raised as a monitoring gap.
-  A run is never cut to fit the budget and then reported as complete. Runs a person starts get a
-  warning instead.
+- **At 100%,** the budget rule of ADR-0066 applies to scheduled runs: no new attempt starts, the
+  remaining scenarios are skipped with `skip_kind: budget`, and an attempt in flight is never cut.
+  A scheduled run that could not start at all is recorded as `skipped: budget_exhausted`. Both are
+  raised as a monitoring gap. Proposals stop. Runs a person starts are not bound by the task's
+  automation budget; they get a warning instead.
 - **A model with no price** cannot be budgeted. A schedule using one is refused when it is saved,
   unless the task sets a token cap in its place. An unknown cost is never counted as $0.
 

@@ -43,11 +43,17 @@ All rows carry `project_id` and `task_id` ([ADR-0049](0049-tasks-in-a-project.md
   weight, degraded, vacuous, reason code. A check constraint repeats the model's rule:
   `(score IS NULL) = (status = 'infra_error')`.
 - `verdicts`: one per `TestVerdict`: status, `skip_kind`, flaky, `cut_short_of`, criticality.
-- `attempt_metrics`: a long table `(attempt_id, name, value, unit, degraded)`. A metric that
-  was not measured has a row with `value` NULL and a reason, or no row; it is never written as
-  0. Voice latencies and similar numbers land here.
-- `blobs`: `(id, kind, content_type, size, sha256, store, key, region, encryption,
-  retain_until, legal_hold, deleted_at)`. A blob under legal hold is never pruned.
+- `attempt_metrics`: a long table `(attempt_id, turn, name, value, unit, degraded, reason)`.
+  - **Grain:** one row per turn for a per-turn metric (a turn latency), with `turn` set; one row
+    per attempt for an attempt-level metric (time to first audio), with `turn` NULL.
+  - **Raw values only.** Percentiles (p50, p95, p99) are computed by analytics
+    ([ADR-0052](0052-analytics-store.md)) from the per-turn rows, never stored pre-folded.
+  - **Not measured** is a row with `value` NULL and a `reason` (a check constraint:
+    `value IS NOT NULL OR reason IS NOT NULL`), or no row. It is never written as 0.
+  - Voice latencies and similar numbers land here.
+- `blobs`: `(id, run_id, state, kind, content_type, size, sha256, store, key, region,
+  encryption, retain_until, legal_hold, created_at, deleted_at)`. `state` is `pending` or
+  `committed`. A blob under legal hold is never pruned.
 - `audio_assets`: per stored audio file: blob, attempt, speaker channel (`customer` or
   `agent`), codec, sample rate, duration, redaction applied, consent basis.
 
@@ -64,21 +70,38 @@ A `BlobStore` protocol: `put(kind, bytes, *, region, retain_until) -> ref`, `get
   signing (SigV4) is written in-house over httpx, as the LLM client is: no boto, no vendor SDK
   ([ADR-0003](0003-python-core-openai-compatible-http.md)). The endpoint is allowlisted
   (`check_url_allowed`) and must use TLS off loopback; the keys are `SecretStr`.
-- Server-side encryption is requested and recorded on the `blobs` row. Audio may also be
-  encrypted client-side with `OPSEVAL_ENCRYPTION_KEY` (ADR-0047 step 5).
+- Server-side encryption is requested and recorded on the `blobs` row.
+- **Audio is always encrypted client-side when stored,** agent audio without exception, with
+  `OPSEVAL_AUDIO_ENCRYPTION_KEY` ([ADR-0053](0053-voice-sessions-and-records.md)). That key is
+  separate from `OPSEVAL_ENCRYPTION_KEY`, which encrypts agent credentials (ADR-0047 step 5), so
+  either can be rotated or revoked alone. In hashes-only mode no audio bytes are stored at all.
 - A blob store error is a `HarnessError`. A run whose record could not be stored ends as
   `harness_error` (exit 3), never as a pass or a fail.
 
 ### `DbRunStore`
 
-`DbRunStore` implements `storage.RunStore`, method for method, on the tables and a
-`BlobStore`. Nothing above the store changes: the runner, `rescore` and `calibrate` take a
-store. Rules:
+`DbRunStore` implements `storage.RunStore` on the tables and a `BlobStore`. The contract is
+not ready for a second store yet, and the `storage.RunStore` docstring overstates it:
+
+- Its write methods return a `Path` (`write_manifest`, `save_record`, `save_result`,
+  `save_report`, `save_junit`, `save_rescore` and others). A database store has no path.
+- `server/views.py` is typed against `FileStore`, not `RunStore`, and reads files around the
+  store: `store.root.glob("*/result.json")` in `load_results`, and
+  `store.run_dir(run_id) / "result.json"` in `run_detail` and `compare`.
+
+**The first PR of this ADR is that refactor, with no change in behaviour:** the write methods
+return nothing (or a ref), the reads views need (list runs, is a run finished) become `RunStore`
+methods, and views take a `RunStore`. Only after it does `DbRunStore` arrive, and from then on the
+runner, `rescore`, `calibrate` and the console take a store without caring which. Rules:
 
 - `check_layout` still refuses a layout it does not know (`UnknownLayout`).
-- `save_result` writes the run, verdict and score rows in one transaction, after the blobs.
-  A crash between the two leaves blobs without rows, which retention cleans up; never rows
-  that point at missing blobs.
+- **A blob is written behind a pending row.** Before `put`, a `blobs` row with
+  `state = 'pending'` and the run id is committed. The row that refers to the blob (an attempt,
+  or the run in `save_result`) is written in the same transaction that marks the blob
+  `committed`.
+- `save_result` writes the run, verdict and score rows and commits the run's pending blobs in
+  one transaction. A crash before it leaves pending rows, which retention finds; never rows that
+  point at missing blobs.
 - `load_result` rebuilds the `SuiteResult` from the stored `result.json` blob, not from rows,
   so a reader sees exactly what the run wrote. The rows exist for queries.
 
@@ -96,6 +119,10 @@ result is reported and skipped, never half-imported. Runs still in progress are 
 - Retention ([ADR-0037](0037-retention.md)) gains a database path: delete blobs whose
   `retain_until` has passed and that have no legal hold, then mark the rows. Audio can
   expire earlier than its record.
+- Retention also deletes **orphans**: a `pending` blob older than a grace period
+  (`OPSEVAL_BLOB_PENDING_GRACE_HOURS`, default 24) whose run is no longer running. It deletes
+  the object first, then the row, so a crash mid-cleanup is retried, never lost track of. It
+  never lists the store to guess: an object with no row is not Opseval's to delete.
 - Golden tests run fixture runs through both stores and compare every `load_*` answer.
 - The schema check constraint makes a stored `infra_error` with a score, or a failure without
   one, impossible, so a bug in a writer cannot quietly turn a harness error into a 0.

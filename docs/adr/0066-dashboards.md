@@ -29,11 +29,12 @@ What exists today:
 
 ### One usage event per call
 
-Every LLM, TTS or STT call writes one `usage_events` row (server mode) or one entry in the
-attempt's record (files mode):
+Every LLM, TTS, STT or telephony call writes one `usage_events` row (server mode) or one entry in
+the attempt's record (files mode):
 
 - attempt, run, task, project;
-- role: `simulator`, `judge`, `attacker`, `generator`, `tts` or `stt`;
+- role: `simulator`, `judge`, `attacker`, `generator`, `tts`, `stt` or `telephony` (the one list
+  of roles, used by the meter, the price table and budgets);
 - provider and model, as sent;
 - `input_tokens`, `output_tokens`, `reasoning_tokens`, `cached_input_tokens`,
   `audio_in_seconds`, `audio_out_seconds`;
@@ -47,8 +48,28 @@ Counts come from the provider's own fields (`completion_tokens_details.reasoning
 is unknown, with the number of calls that reported it beside the total.
 
 In files mode the events live inside the record, so `rescore` and old runs keep working. The
-record change bumps `storage.LAYOUT`; older layouts are still read and show the new fields as
-not measured.
+record change bumps `storage.LAYOUT` again (the next number at the time, after ADR-0053's
+`opseval-runs/3`); older layouts are still read and show the new fields as not measured.
+
+### Budgets: one rule
+
+Every money budget (a task's monthly budget, [ADR-0064](0064-continuous-evaluation.md); a run's
+cost cap) acts the same way, from the usage events above:
+
+- **Checked before each scenario and each attempt starts,** never during one.
+- **When it is exhausted,** no new attempt starts. The remaining scenarios are
+  `skipped_precondition` with `skip_kind: budget`, named in every output. Like the stop policies
+  of [ADR-0035](0035-run-control.md), that is a gate warning, not a failure: nothing the agent did
+  is judged by it. A suite that judged nothing still blocks the gate (ADR-0030).
+- **An attempt in flight is never cut.** It finishes and is judged on what happened, so a run can
+  overshoot by up to one attempt per lane, and the overshoot is shown.
+- **A scenario left with some repeats run** is folded by `verdicts.fold_cut_short`, as a cancel
+  is: it fails if it would fail even had every remaining attempt passed, and is otherwise skipped
+  with `skip_kind: budget`.
+- **A cost with no price** cannot be counted against a budget, and is never counted as $0.
+
+Per-attempt caps, such as the attacker's turns and tokens
+([ADR-0063](0063-adaptive-attacker.md)), are separate: they end one attempt, not the run.
 
 ### Model prices, versioned
 
@@ -101,13 +122,15 @@ date range.
 - Golden tests on fixture runs require equal totals from files and from Postgres.
 - A missing reasoning count stays NULL through the meter, the record, the API and the chart.
 - A test changes a price and checks that earlier runs keep their cost.
+- `TestVerdict.skip_kind` gains `budget`, and `verdicts.fold_cut_short` takes the skip kind it
+  records (today it is always `cancelled`). Fault-injection tests prove a budget never cuts an
+  attempt and never turns a certain failure into a skip.
 - Vitest checks that no chart draws a NULL as 0.
 - Fixing the `or 0` in `UsageMeter` changes what old totals mean; old records keep their
   totals, labelled as written before per-call usage.
 
 ## Not decided here
 
-- Budgets that stop a run when exceeded (run control, [ADR-0035](0035-run-control.md), may
-  gain one).
+- Where a run's cost cap is declared (a suite `stop:` field next to ADR-0035's, or a `run` flag).
 - Exporting dashboards or sharing them outside the console.
 - Currencies other than USD.

@@ -63,6 +63,11 @@ All in `config.Settings` with docstrings (they feed `docs/reference/settings.md`
 - `OPSEVAL_STT_URL`, `OPSEVAL_STT_KEY` (`SecretStr`), `OPSEVAL_STT_MODEL`,
   `OPSEVAL_STT_TIMEOUT_SECONDS`, `OPSEVAL_STT_MIN_CONFIDENCE`.
 - `OPSEVAL_TTS_TIMEOUT_SECONDS`. Each call has its own limit, like the simulator's.
+- `OPSEVAL_STT_CANARY_MAX_WER`: the bound for the STT health canary of ADR-0053.
+- `OPSEVAL_STT_SECOND_PROVIDER`, `OPSEVAL_STT_SECOND_URL`, `OPSEVAL_STT_SECOND_KEY` (`SecretStr`),
+  `OPSEVAL_STT_SECOND_MODEL`: the optional second STT check of ADR-0053. It must differ from the
+  first in provider or model, or it is refused at launch (exit 3): the same STT twice proves
+  nothing. It is allowlisted, region-checked and preflighted like the first.
 
 ### Errors
 
@@ -80,9 +85,10 @@ to an allowlisted host. An unreachable provider skips the voice scenarios it sil
 
 ### Usage and cost
 
-`llm.UsageMeter` gains `audio_seconds_in`, `audio_seconds_out` and characters synthesised per role
-(`tts`, `stt`) and model. A price is per second or per character. An unknown price stays `None`
-("no price"), never $0, as it is for tokens today.
+`llm.UsageMeter` gains `audio_in_seconds`, `audio_out_seconds` and characters synthesised per role
+(`tts`, `stt`) and model, the field names of the usage events of [ADR-0066](0066-dashboards.md).
+A price is per second or per character. An unknown price stays `None` ("no price"), never $0, as
+it is for tokens today.
 
 ### Regions
 
