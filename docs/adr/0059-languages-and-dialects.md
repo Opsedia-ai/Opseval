@@ -3,6 +3,24 @@
 - **Status:** Proposed
 - **Date:** 2026-10-28
 - **Deciders:** Opseval maintainers (owner request 2026-10-28)
+- **Implementation:** Step 1 implemented (2026-10-28): *Unknown is a load error* and *BCP-47
+  codes, old names kept* (`opseval.langpacks`). The new packs, `voice_map`, `stt_language`,
+  `script`, `output.language_script` v2 and the judge's dialect label are not built yet. Two
+  details this ADR left open: the existing Gulf pack covers Saudi Arabia and the UAE, so it is
+  tagged `ar-x-gulf` (private use, as `ar-x-codeswitch`) and `ar-SA`, `ar-AE`, `ar-KW`, `ar-QA`,
+  `ar-BH`, `ar-OM` are declared fallbacks *to the Gulf pack* (the nearer pack, not the base
+  language) until each has its own; and the dialects that silently became MSA before (Levantine,
+  Maghrebi, `ar-LB`, `ar-MA`, …) and regional English (`en-US`, `en-GB`, …) are declared
+  fallbacks, so they still load, now with a warning. Only an LLM persona uses a pack, so only an
+  LLM persona is refused: scripted turns are sent as written and load with a warning when their
+  language has no pack. Judges grade against the language resolved once
+  (`langpacks.effective_language`): for an LLM persona the pack the simulator was told to write
+  (a fallback included, so `ar` + `levantine` is graded as MSA rather than blaming the agent or
+  invalidating the attempt for the harness's own stand-in), for scripted turns the declared
+  language. Every spelling of one pack gives the same judge label and rubric digest; the
+  canonical spellings give exactly the old ones. `judge.language_consistency` and
+  `judge.persona_consistency` went to version 3. A regional pack (`fr-CA`) is reachable without
+  a base pack.
 
 ## Context
 

@@ -19,7 +19,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 |---|---|---|---|---|
 | `judge.content_quality` | llm | 2 | none | LLM judge: was the agent's writing clear, grounded and appropriate? (quoted) |
 | `judge.goal_achievement` | llm | 3 | none | LLM judge: did the conversation achieve the customer's goal? (quoted, weighted) |
-| `judge.language_consistency` | llm | 2 | none | LLM judge: did the agent answer in the customer's language and dialect? (quoted) |
+| `judge.language_consistency` | llm | 3 | none | LLM judge: did the agent answer in the customer's language and dialect? (quoted) |
 | `output.language_script` | frames | 1 | `script, min_fraction` | Share of agent messages written mainly in the expected script (arabic\|latin). |
 | `output.payload_equals` | frames | 3 | `checkpoint*, path*, equals*` | A checkpoint payload field has the expected value (params: checkpoint, path, equals; checks the approved occurrence, else the last one). |
 | `output.required_fields` | frames | 2 | `checkpoint*, fields*` | A checkpoint payload carries every listed field, present and not empty (params: checkpoint, fields; checks the approved occurrence, else the last one). |
@@ -61,7 +61,7 @@ Name a scorer in a scenario's `scorers:` list, for example
 
 | Scorer | Needs | Version | Params | What it checks |
 |---|---|---|---|---|
-| `judge.persona_consistency` | llm | 2 | none | LLM judge on the HARNESS axis: did the simulated customer stay in character? A failure invalidates the attempt instead of failing the agent. |
+| `judge.persona_consistency` | llm | 3 | none | LLM judge on the HARNESS axis: did the simulated customer stay in character? A failure invalidates the attempt instead of failing the agent. |
 | `protocol.replies_read` | frames | 1 | none | Always on. Invalidates the attempt when the agent sent frames but the profile read nothing from them (no text, checkpoint, result or error): a wrong mapping is not judged. |
 
 ## Invariant bundles
