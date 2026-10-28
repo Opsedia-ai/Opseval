@@ -14,6 +14,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from opseval.errors import ConfigError
+from opseval.langpacks import UnknownLanguage, lookup
 from opseval.models.gate import GatePolicy
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import RESERVED_STOP_AT, PolicyAction, Scenario, Suite
@@ -138,6 +139,14 @@ def check_references(
                 f"conversation.checkpoint_policy.{name}.action: 'script' needs an LLM persona; "
                 "scripted conversations must use approve, reject or sequence"
             )
+    if conv.llm_persona:
+        try:
+            # Never a silent fallback: an LLM persona with no pack would write something
+            # else, and the persona judge would then blame the agent or the run (ADR-0059).
+            # Scripted turns are sent verbatim and need no pack (advice warns instead).
+            lookup(scenario.persona.language, scenario.persona.dialect)
+        except UnknownLanguage as exc:
+            errors.append(f"persona.{exc.field}: {exc}")
     tz = scenario.persona.timezone
     if tz and profile.timezones and tz not in profile.timezones:
         errors.append(

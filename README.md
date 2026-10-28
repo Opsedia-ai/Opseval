@@ -321,6 +321,13 @@ execution:
   repeats: 3
 ```
 
+`language` takes a BCP-47 tag (`en`, `ar`, `ar-EG`, `ar-x-gulf`) or, as above, a language plus a
+`dialect` name. For an LLM persona, a language Opseval has no pack for is a load error, never
+simulated as English, and a dialect without a pack of its own loads only where a nearer pack
+declares it, with a warning from `opseval validate`; the judges then grade against the pack the
+customer actually writes. Scripted turns are sent as written, so they need no pack (a warning
+says so) (ADR-0059).
+
 ### Judges and security tests
 
 | Judge | Axis | What it checks |
