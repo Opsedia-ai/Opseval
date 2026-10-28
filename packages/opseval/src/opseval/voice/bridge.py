@@ -195,6 +195,9 @@ class _Turn:
     audio_ms: float = 0.0
     """How much agent audio this turn holds, at the session's rate (``max_turn_seconds``)."""
     barge_in: bool = False
+    barge_event: int | None = None
+    """Where this turn's ``barge_in`` event is in the timeline: tagged with the turn's file
+    number when the turn is kept, so playback ties the overlap to this turn exactly."""
 
     def reset_audio(self) -> None:
         self.chunks.clear()
@@ -475,6 +478,7 @@ class VoiceBridge(Session):
         caller_end = self._caller_end_ms
         if caller_end is not None and at_ms < caller_end:
             turn.barge_in = True
+            turn.barge_event = len(self._events)
             self._event(at_ms, "barge_in", "agent", "agent speech began before the caller finished")
 
     def _hand_over(self, frames: list[dict[str, Any]]) -> dict[str, Any]:
@@ -524,9 +528,17 @@ class VoiceBridge(Session):
         start = turn.first_ms if turn.first_ms is not None else self.audio.clock.now_ms()
         end = self.audio.clock.now_ms()
         self._event(end, "speech_end", "agent")
+        number = self._next_file()
         ref = self.recorder.keep(
-            turn=self._next_file(), speaker="agent", pcm16=pcm, rate=self.rate, start_ms=start
+            turn=number, speaker="agent", pcm16=pcm, rate=self.rate, start_ms=start
         )
+        if turn.barge_event is not None:
+            # "(turn N)": the file number playback matches (voice.playback.barged). The
+            # event's own time is when the speech began, which sparse (VAD-gated) chunks
+            # can put after the turn's last recorded sample.
+            event = self._events[turn.barge_event]
+            tagged = f"{event.detail} (turn {number})" if event.detail else f"(turn {number})"
+            self._events[turn.barge_event] = event.model_copy(update={"detail": tagged})
         text, info, evidence = await self._hear(pcm)
         if turn.own_transcript is not None:
             evidence["agent_transcript"] = turn.own_transcript

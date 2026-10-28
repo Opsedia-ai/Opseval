@@ -8,6 +8,8 @@ never judges anything, so it never exits 1 or 2.
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 
@@ -96,6 +98,47 @@ def list_audio(
         typer.echo(f"No recorded audio in {run_dir}" + (f" for {test}" if test else "") + ".")
 
 
+def _check_out(out: Path, *, force: bool) -> None:
+    """Refuse ``--out`` before any audio is decrypted: a link (dangling included) always,
+    an existing file unless ``--force``, anything but a regular file even then."""
+    try:
+        st = out.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise _fail(f"cannot check {out}: {exc}") from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise _fail(f"{out} is a symbolic link; decrypted audio is never written through one")
+    if not force:
+        raise _fail(f"{out} exists; pass --force to overwrite it")
+    if not stat.S_ISREG(st.st_mode):
+        raise _fail(f"{out} is not a regular file")
+
+
+def _write_private(out: Path, data: bytes | bytearray, *, force: bool) -> None:
+    """Write decrypted audio readable by its owner only (0600), never through a link: the
+    file is created with ``O_EXCL`` (``O_TRUNC`` with ``--force``) and ``O_NOFOLLOW``, so a
+    link put in place after the check is refused rather than followed."""
+    _check_out(out, force=force)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    flags |= os.O_TRUNC if force else os.O_EXCL
+    try:
+        fd = os.open(out, flags, 0o600)
+    except FileExistsError as exc:
+        raise _fail(f"{out} exists; pass --force to overwrite it") from exc
+    except OSError as exc:  # ELOOP: a link appeared at --out
+        raise _fail(f"cannot write {out}: {exc.strerror or exc}") from exc
+    try:
+        if force and hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)  # an existing file keeps its mode through O_TRUNC
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+    finally:
+        os.close(fd)
+
+
 @audio_app.command("export")
 def export(
     run_dir: Annotated[Path, typer.Argument(help="The run folder (reports/<run id>).")],
@@ -117,19 +160,21 @@ def export(
             "--raw", help="With --turn: an undecodable turn's bytes as the agent sent them."
         ),
     ] = False,
-    force: Annotated[bool, typer.Option("--force", help="Overwrite --out.")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite --out (a regular file, never a link).")
+    ] = False,
 ) -> None:
     """Decrypt and write a turn, or the whole call, as a WAV you can play.
 
     Without --turn the whole call is written on the attempt's own clock: every turn starts
     at its real time, with silence between. Stereo by default (left: the caller, right: the
     agent); --mono mixes both, summed and clipped where they overlap; --speaker keeps one
-    side (mono). The decrypted audio goes only to --out.
+    side (mono). The decrypted audio goes only to --out, created readable by you alone
+    (0600) and never written through a symbolic link.
     """
     if speaker not in (None, "caller", "agent"):
         raise _fail("--speaker is caller or agent")
-    if out.exists() and not force:
-        raise _fail(f"{out} exists; pass --force to overwrite it")
+    _check_out(out, force=force)
     (record,) = _records(run_dir, test, attempt)
     key = _key()
     try:
@@ -137,7 +182,7 @@ def export(
             found = find(run_dir, record, turn)
             if speaker is not None and found.ref.speaker != speaker:
                 raise _fail(f"turn {turn} is the {found.ref.speaker}'s, not the {speaker}'s")
-            data = read_bytes(run_dir, record, found, key, raw=raw)
+            data: bytes | bytearray = read_bytes(run_dir, record, found, key, raw=raw)
             what = f"turn {turn} ({found.ref.speaker}, {_seconds(found.duration_ms)})"
         else:
             side: Literal["caller", "agent"] | None = speaker  # type: ignore[assignment]
@@ -156,8 +201,7 @@ def export(
     except ConfigError as exc:  # AudioUnavailable included
         code = getattr(exc, "code", "AUDIO")
         raise _fail(f"{code}: {exc}") from exc
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(data)
+    _write_private(out, data, force=force)
     typer.echo(f"Wrote {what} of {record.test_id} attempt {record.attempt_index} to {out}.")
 
 

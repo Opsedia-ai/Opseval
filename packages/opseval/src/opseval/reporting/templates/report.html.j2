@@ -117,6 +117,7 @@ forbidden, no matching call, no rule to apply. The passes are honest and they ar
   {% if e.kind == 'message' %}<div class="bubble {{ e.who }}"><div class="who">{{ e.who }}{% if e.phase %} · {{ e.phase }}{% endif %}{% if e.latency_ms %} · {{ '%.0f' % e.latency_ms }} ms{% endif %}</div>{% if e.text %}<div dir="auto">{{ e.text }}</div>{% else %}<div class="muted"><i>spoken; nothing was heard in it (no transcript)</i></div>{% endif %}</div>
   {% elif e.kind == 'checkpoint' %}<div class="decision">⏸ checkpoint raised: <code>{{ e.detail or '' }}</code></div>
   {% elif e.kind == 'decision' %}<div class="decision">▶ customer decision: <code>{{ e.detail or '' }}</code></div>
+  {% elif e.kind == 'undecodable_audio' %}<div class="decision failed">undecodable audio from the agent: <code>{{ e.detail or '' }}</code>{% set heard = audio.get((t.test_id, a.attempt_index)) %}{% if heard and heard.raw.get(e.seq) %} — its bytes as sent: <code>{{ heard.raw[e.seq] }}</code>{% endif %}</div>
   {% else %}<div class="decision{{ ' failed' if e.kind == 'error' else '' }}">{{ {'error': 'error from the agent', 'result': 'result', 'notification': 'notification', 'unknown': 'unclassified frame'}[e.kind] }}: <code>{{ e.detail or '' }}</code></div>{% endif %}
 {% endfor %}
 {% if rec.infra_errors %}<pre>{{ rec.infra_errors | join('\n') }}</pre>{% endif %}

@@ -350,7 +350,8 @@ listened back to.
   than it plays (`audio-http`, the demo) would otherwise sound like a conversation that never
   happened. A recorded barge-in stays an overlap. Any turn missing for a reason other than
   undecodable agent audio refuses the whole call (fail closed); undecodable turns are silence,
-  named. A call over 4 hours by the record's times is refused rather than allocated.
+  named. A call over 4 hours by the record's times, or over 256 MB, is refused rather than
+  allocated (see the review below).
 - **CLI** (`voice/cli.py`): `opseval audio list|export|keygen`. `export` writes a turn
   (`--turn SEQ`, `--raw` for undecodable bytes), the whole call (stereo; `--mono`;
   `--speaker caller|agent` keeps one side, timed as in the call), refuses to overwrite without
@@ -360,8 +361,8 @@ listened back to.
   and token): `GET …/attempts/{test}/{n}/audio` (the descriptor), `…/audio/call?mono=` and
   `…/audio/{seq}` (`audio/wav`, `Cache-Control: no-store`, `Content-Disposition: inline`).
   Codes: `AUDIO_NOT_FOUND`/`AUDIO_HASHES_ONLY`/`AUDIO_MISSING` 404, `AUDIO_PRUNED` 410,
-  `AUDIO_KEY_MISSING`/`AUDIO_KEY_MISMATCH`/`AUDIO_UNDECODABLE`/`AUDIO_KEY_INVALID` 409,
-  `AUDIO_TAMPERED` 422. A malformed server key does not stop `opseval serve`; it is said on
+  `AUDIO_KEY_MISSING`/`AUDIO_KEY_MISMATCH`/`AUDIO_UNDECODABLE`/`AUDIO_KEY_INVALID`/
+  `AUDIO_EXTRA_MISSING` 409, `AUDIO_TOO_LARGE` 413, `AUDIO_TAMPERED` 422. A malformed server key does not stop `opseval serve`; it is said on
   every audio request. The attempt detail carries `audio` (turns, `callState`, `callNote`,
   `skipped`) and each spoken message entry its `audio` descriptor. A spoken turn with no
   transcript is now a message entry with `text: null` (in the report too: "spoken; nothing was
@@ -374,6 +375,43 @@ listened back to.
   the console or `opseval audio export <run folder> --test … --attempt … --out ….wav`".
 - **Retention**: `OPSEVAL_AUDIO_RETENTION_DAYS` (30) in `opseval prune` (ADR-0037 amendment):
   the files go, the record stays, and `audio/PRUNED.json` says when.
+
+Review of #87 (2026-10-28):
+
+- **Undecodable agent audio** is its own transcript entry (`undecodable_audio`, the agent's,
+  a failure), never a message: only a `message` frame with audio and no text is "spoken;
+  nothing was heard". The entry carries the turn's `audio` descriptor; its bytes, when kept,
+  download as they came (`…/audio/{seq}?raw=true`, `application/octet-stream`, attachment;
+  the report names `opseval audio export … --turn N --raw --out ….raw`).
+- **Limits before decrypting**: a turn's file larger than the record says it was written
+  (its WAV, plus header and tag when sealed) is `AUDIO_TAMPERED` without being read. A whole
+  call is sized from the record alone (the turns' bytes, then the scheduled end × rate ×
+  channels × 2) and refused over `MAX_CALL_BYTES` (256 MB) or 4 hours as `AUDIO_TOO_LARGE`
+  (413; the descriptor's `callState: too_large`; its turns still play one by one), and checked
+  again from the decoded audio before the one buffer is allocated. The WAV is built in place:
+  header, then each turn written into the interleaved samples, each decoded turn let go once
+  placed.
+- **No key, three ways**: unset `key_missing` (`AUDIO_KEY_MISSING`), malformed `key_invalid`
+  (`AUDIO_KEY_INVALID`), set without the voice extra `extra_missing` (`AUDIO_EXTRA_MISSING`),
+  all 409, in the descriptor and on the play routes alike. Plain (demo) files play in all three.
+- **Barge-in**: the bridge tags the `barge_in` event's `detail` with the file number of the
+  turn it opened (`… (turn 3)`, written when the turn is kept; no new field, no layout bump),
+  and playback keeps that turn's overlap. An untagged event (an older record, or a turn cut
+  short) belongs to the last agent turn that started at or before it with no caller turn
+  starting in between: containment in `[start, end]` missed barge-ins whose sparse (VAD-gated)
+  chunks end before the speech-start stamp.
+- **Export**: `--out` is created `0600` with `O_CREAT|O_EXCL|O_NOFOLLOW` (`--force`: `O_TRUNC`,
+  still `O_NOFOLLOW`, mode reset to `0600`); a symbolic link at `--out`, dangling included, is
+  refused, with or without `--force`.
+- **Prune race and one marker parser**: a file gone between listing and reading re-checks the
+  marker (`AUDIO_PRUNED`, 410). `retention.read_pruned_marker` is the one parser the player,
+  the CLI and the report share; an unreadable marker reads as "audio pruned (marker
+  unreadable)" in all of them.
+- **Keys**: unpadded base64 (`secrets.token_urlsafe(32)`) is accepted; still exactly 32 bytes.
+- The attempt route reads the record once and hands it to the audio descriptor, which lists
+  the turns once (`server/lookup.py` holds the id check every route shares); the console's
+  audio fetch shares `call()`'s token and error path (`callBlob`), the whole call already loaded
+  is what "Download WAV" saves, and a download's blob URL is revoked after 60 s or on unmount.
 
 Still open: the region check, the full-duplex driver (barge-in), phone and WebRTC, the voice
 timeline in the report and console, key rotation tooling (re-sealing old runs under a new

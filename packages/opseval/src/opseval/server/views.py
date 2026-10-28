@@ -25,6 +25,7 @@ from opseval.models.gate import (
     to_yaml_block,
 )
 from opseval.models.profile import SutProfile
+from opseval.models.record import RunRecord
 from opseval.models.results import ModelUsage, SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
@@ -670,13 +671,15 @@ def _redacted(text: str | None) -> str | None:
 
 
 def attempt_record(
-    store: FileStore, run_id: str, test_id: str, index: int
+    store: FileStore, run_id: str, test_id: str, index: int, *, record: RunRecord | None = None
 ) -> s.AttemptRecordOut | None:
-    """One attempt's conversation; ``None`` if that attempt has no record (yet)."""
-    try:
-        record = store.load_record(run_id, test_id, index)
-    except (OSError, ValueError) as exc:
-        raise RecordUnreadable(f"{test_id} attempt {index}: {type(exc).__name__}") from exc
+    """One attempt's conversation; ``None`` if that attempt has no record (yet). ``record``
+    is the attempt's record when the caller has read it already: it is not read again."""
+    if record is None:
+        try:
+            record = store.load_record(run_id, test_id, index)
+        except (OSError, ValueError) as exc:
+            raise RecordUnreadable(f"{test_id} attempt {index}: {type(exc).__name__}") from exc
     if record is None:
         return None
     persona = record.persona or {}

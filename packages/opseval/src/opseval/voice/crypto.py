@@ -39,11 +39,13 @@ VERSION = 1
 KEY_ID_BYTES = 8
 NONCE_BYTES = 12
 HEADER_BYTES = len(MAGIC) + 1 + KEY_ID_BYTES + NONCE_BYTES
+TAG_BYTES = 16
 SUFFIX = ".enc"
 INSTALL = "pip install 'opseval[voice]'"
 KEY_HELP = (
-    "32 random bytes as 64 hex characters or as base64 (make one with "
-    "`opseval audio keygen` or `openssl rand -base64 32`)"
+    "32 random bytes, written as 64 hex characters, or as base64 (standard or URL-safe, "
+    "with or without its `=` padding): make one with `opseval audio keygen`, "
+    "`openssl rand -base64 32` or `python -c 'import secrets; print(secrets.token_urlsafe(32))'`"
 )
 
 AudioCode = Literal[
@@ -55,6 +57,9 @@ AudioCode = Literal[
     "AUDIO_MISSING",
     "AUDIO_UNDECODABLE",
     "AUDIO_NOT_FOUND",
+    "AUDIO_TOO_LARGE",
+    "AUDIO_KEY_INVALID",
+    "AUDIO_EXTRA_MISSING",
 ]
 
 
@@ -74,10 +79,11 @@ _HEX = re.compile(r"^[0-9a-fA-F]{64}$")
 def parse_key(raw: str) -> bytes:
     """``OPSEVAL_AUDIO_ENCRYPTION_KEY`` as 32 bytes, or :class:`ConfigError`.
 
-    Two spellings: 64 hex characters, or base64 (standard or URL-safe) of exactly 32 bytes.
-    The two never overlap (64 base64 characters are 48 bytes). A key of fewer distinct
-    bytes than a random key could plausibly have (a repeated character, a counter) is
-    refused as a placeholder, not a key.
+    Two spellings: 64 hex characters, or base64 of exactly 32 bytes, standard (``+/``) or
+    URL-safe (``-_``), padded or not (``secrets.token_urlsafe(32)`` writes it unpadded). The
+    two never overlap (64 base64 characters are 48 bytes). A key of fewer distinct bytes
+    than a random key could plausibly have (a repeated character, a counter) is refused as
+    a placeholder, not a key.
     """
     text = raw.strip()
     key: bytes | None = None
@@ -85,13 +91,18 @@ def parse_key(raw: str) -> bytes:
         key = bytes.fromhex(text)
     else:
         standard = text.replace("-", "+").replace("_", "/")  # URL-safe, read as standard
+        if "=" not in standard:
+            standard += "=" * (-len(standard) % 4)  # unpadded: add what base64 left off
         try:
             key = base64.b64decode(standard.encode("ascii"), validate=True)
         except (binascii.Error, ValueError, UnicodeEncodeError):
             key = None
     if key is None or len(key) != 32:
-        size = "" if key is None else f" (it decodes to {len(key)} bytes)"
-        raise ConfigError(f"OPSEVAL_AUDIO_ENCRYPTION_KEY must be {KEY_HELP}{size}")
+        if key is None:
+            found = " (it is neither 64 hex characters nor valid base64)"
+        else:
+            found = f" (it decodes to {len(key)} bytes, not 32)"
+        raise ConfigError(f"OPSEVAL_AUDIO_ENCRYPTION_KEY must be {KEY_HELP}{found}")
     if len(set(key)) < 12:
         raise ConfigError(
             "OPSEVAL_AUDIO_ENCRYPTION_KEY looks like a placeholder, not a random key (too few "
@@ -110,11 +121,16 @@ def new_key() -> str:
     return base64.b64encode(os.urandom(32)).decode("ascii")
 
 
+class ExtraMissing(ConfigError):
+    """The ``opseval[voice]`` extra (``cryptography``) is not installed: a key is set, but
+    nothing here can use it. Told apart from a malformed key, so each is said as itself."""
+
+
 def _aesgcm() -> Any:
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError as exc:  # the optional extra
-        raise ConfigError(
+        raise ExtraMissing(
             f"encrypting or opening recorded audio needs the voice extra: `{INSTALL}` (ADR-0053)"
         ) from exc
     return AESGCM
@@ -190,7 +206,7 @@ class AudioKey:
 
 def file_key_id(blob: bytes) -> str:
     """The key id in a sealed file's header (no key needed), or :class:`AudioUnavailable`."""
-    if len(blob) < HEADER_BYTES + 16 or not blob.startswith(MAGIC):
+    if len(blob) < HEADER_BYTES + TAG_BYTES or not blob.startswith(MAGIC):
         raise AudioUnavailable("AUDIO_TAMPERED", "not an Opseval encrypted audio file")
     if blob[len(MAGIC)] != VERSION:
         raise AudioUnavailable(
@@ -215,6 +231,7 @@ __all__ = [
     "AudioCode",
     "AudioKey",
     "AudioUnavailable",
+    "ExtraMissing",
     "FilePlace",
     "file_key_id",
     "key_id",

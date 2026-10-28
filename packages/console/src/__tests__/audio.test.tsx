@@ -3,7 +3,7 @@
 // says in words why a turn cannot be played, never drawing a broken player.
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CallAudio, TurnAudio } from "../components/AudioPlayer";
+import { CallAudio, DOWNLOAD_URL_TTL_MS, TurnAudio } from "../components/AudioPlayer";
 import { Entry } from "../components/Transcript";
 import type { AttemptAudio, AudioTurn, TranscriptEntry } from "../lib/types";
 
@@ -52,8 +52,10 @@ describe("a spoken turn's player", () => {
       ["hashes_only", "only hashes kept"],
       ["key_missing", "no key to decrypt"],
       ["key_mismatch", "encrypted with another key"],
-      ["undecodable", "undecodable audio"],
       ["missing", "audio file missing"],
+      ["key_invalid", "the audio key is not valid"],
+      ["extra_missing", "the voice extra is not installed"],
+      ["too_large", "too large to play as one call"],
     ] as const) {
       const { container, unmount } = render(<TurnAudio where={where} audio={turn(state, `why: ${state}`)} />);
       expect(container.querySelector("audio")).toBeNull();
@@ -81,18 +83,42 @@ describe("the whole call", () => {
     turns: [turn("available")], callState, callNote, skipped: [],
   });
 
-  it("plays and downloads the call; each blob URL is revoked", async () => {
+  it("downloads the call already playing without fetching it again", async () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     const { container, unmount } = render(<CallAudio where={where} audio={call("available")} />);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "▶ Play whole call" })));
     await waitFor(() => expect(container.querySelector("audio")).not.toBeNull());
     expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe("/api/v1/runs/run-1/attempts/v-001/0/audio/call");
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Download WAV" })));
-    await waitFor(() => expect(click).toHaveBeenCalled());
-    await waitFor(() => expect(revoked).toContain("blob:test/1")); // the download's URL
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // the loaded blob, not a second decrypt
+    expect(created).toEqual(["blob:test/0"]);
+    expect(revoked).toEqual([]); // still the player's
     unmount();
-    expect(revoked).toContain("blob:test/0"); // the player's URL
+    expect(revoked).toEqual(["blob:test/0"]);
     click.mockRestore();
+  });
+
+  it("a download-only URL is revoked after a delay, not at once, or on unmount", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+      const first = render(<CallAudio where={where} audio={call("available")} />);
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Download WAV" })));
+      await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+      expect(revoked).toEqual([]); // revoking at once can cancel the download
+      await act(async () => { vi.advanceTimersByTime(DOWNLOAD_URL_TTL_MS); });
+      expect(revoked).toEqual(["blob:test/0"]);
+      first.unmount();
+      const second = render(<CallAudio where={where} audio={call("available")} />);
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Download WAV" })));
+      await waitFor(() => expect(click).toHaveBeenCalledTimes(2));
+      second.unmount();
+      expect(revoked).toEqual(["blob:test/0", "blob:test/1"]); // gone with the page
+      click.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("an unplayable call is said in words, with no buttons", () => {
@@ -100,6 +126,38 @@ describe("the whole call", () => {
     expect(container.querySelector("button")).toBeNull();
     expect(container.textContent).toContain("audio pruned on 2026-10-01");
     expect(container.querySelector("[data-call-state]")?.getAttribute("data-call-state")).toBe("pruned");
+  });
+});
+
+describe("undecodable agent audio", () => {
+  it("is never a player; its bytes can be downloaded as sent", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const { container } = render(<TurnAudio where={where} audio={turn("undecodable", "not mu-law")} />);
+    expect(container.querySelector("audio")).toBeNull();
+    expect(container.textContent).toContain("undecodable audio");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "download the bytes of turn 3" })));
+    await waitFor(() => expect(click).toHaveBeenCalled());
+    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe("/api/v1/runs/run-1/attempts/v-001/0/audio/3?raw=true");
+    click.mockRestore();
+  });
+
+  it("is the agent's failure in the transcript, not a spoken turn", () => {
+    const e: TranscriptEntry = { seq: 4, kind: "undecodable_audio", who: "agent", text: null, phase: null, latencyMs: null, detail: "not mu-law", audio: turn("undecodable") };
+    const { container } = render(<Entry e={e} where={where} />);
+    const box = container.querySelector("[data-kind=undecodable_audio]");
+    expect(box?.getAttribute("data-tone")).toBe("fail");
+    expect(box?.textContent).toContain("undecodable audio from the agent: not mu-law");
+    expect(container.querySelector("[data-state=unheard]")).toBeNull();
+  });
+});
+
+describe("audio errors share the API's error path", () => {
+  it("falls back to the detail string when there is no message", async () => {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ detail: "no run 'x'" }), { status: 404 }));
+    const { container } = render(<TurnAudio where={where} audio={turn("available")} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "play turn 3" })));
+    await waitFor(() => expect(container.textContent).toContain("HTTP_404"));
+    expect(container.textContent).toContain("no run 'x'");
   });
 });
 

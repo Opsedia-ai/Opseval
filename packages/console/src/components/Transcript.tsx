@@ -22,6 +22,15 @@ export function Entry({ e, where }: { e: TranscriptEntry; where?: Where }) {
       </div>
     );
   }
+  if (e.kind === "undecodable_audio") {
+    // The agent's audio could not be decoded: its failure, said as one, never a spoken turn.
+    return (
+      <div data-kind={e.kind} data-tone="fail" className="rounded-xl border border-dashed border-deep-coral px-3 py-1.5 text-sm text-deep-coral">
+        undecodable audio from the agent{e.detail && <>: <Mono>{e.detail}</Mono></>}
+        {e.audio && where && <div className="mt-1"><TurnAudio where={where} audio={e.audio} /></div>}
+      </div>
+    );
+  }
   const label = { checkpoint: "⏸ checkpoint raised", decision: "▶ customer decision", result: "result", error: "error from the agent", notification: "notification", unknown: "unclassified frame" }[e.kind];
   return (
     <div data-kind={e.kind} data-tone={e.kind === "error" ? "fail" : "mute"} className={cx("rounded-xl border border-dashed px-3 py-1.5 text-sm", e.kind === "error" ? "border-deep-coral text-deep-coral" : "border-line text-muted-ink")}>

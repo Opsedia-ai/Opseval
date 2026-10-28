@@ -123,9 +123,10 @@ refused at launch (exit 3), unless it keeps hashes only:
   folder's `audio/` (`audio/<test>/attempt<N>/<turn>-<speaker>.wav.enc`), each sealed on its own
   with AES-256-GCM under `OPSEVAL_AUDIO_ENCRYPTION_KEY`. This needs the voice extra:
   `pip install 'opseval[voice]'` (it adds `cryptography`; without it the run is refused, naming
-  the command). The key is 32 random bytes, as 64 hex characters or base64:
-  `opseval audio keygen` makes one. A short key, or a placeholder such as a repeated character,
-  is refused.
+  the command). The key is 32 random bytes, as 64 hex characters or base64 (standard or
+  URL-safe, with or without `=` padding): `opseval audio keygen`, `openssl rand -base64 32` or
+  `secrets.token_urlsafe(32)` make one. A short key, or a placeholder such as a repeated
+  character, is refused.
 - Every file has a fresh random nonce, and its run, test, attempt, turn and speaker are bound
   into it: a file edited, or moved to another turn, attempt or run, does not open. The record
   holds each turn's SHA-256, which is checked again after decryption.
@@ -148,7 +149,11 @@ heard in (often the one that failed), and the attempt has **Play whole call** an
 WAV**. The server decrypts in memory for each request, behind the console's token, and answers
 `Cache-Control: no-store`; nothing decrypted is written to disk. A turn that cannot be played
 says why instead: *audio pruned*, *only hashes kept*, *no key to decrypt* (the server has none),
-*encrypted with another key*.
+*the audio key is not valid*, *the voice extra is not installed*, *encrypted with another key*.
+Audio the agent sent that could not be decoded is shown as the agent's error (*undecodable
+audio from the agent*), not as a spoken turn, with a button to download its bytes as they came.
+A whole call too large to build in one piece (over 256 MB as a WAV, or 4 hours) is *too large to
+play as one call*: its turns still play one by one.
 
 **From the command line:**
 
@@ -169,8 +174,11 @@ opseval audio export reports/<run id> --test vr-001 --attempt 0 --speaker agent 
   it plays (`audio-http`, or the demo) would otherwise sound like two people talking at once.
 - `--turn N` takes the seq that `opseval audio list` and the console show. An undecodable agent
   turn is silent in the whole call (and named); `--turn N --raw` writes its bytes as they came.
+- `--out` is created readable by you alone (mode 0600). An existing file is refused unless you
+  pass `--force`; a symbolic link at `--out` is always refused.
 - Errors exit 3 and say why: `AUDIO_KEY_MISMATCH` names both key ids, a pruned run says
-  "audio pruned on <date>", a hashes-only run says "only hashes were kept".
+  "audio pruned on <date>" (or "audio pruned (marker unreadable)"), a hashes-only run says
+  "only hashes were kept", a call too large to build says `AUDIO_TOO_LARGE`.
 
 The HTML report embeds no audio. For each voice attempt it says how many turns were recorded and
 gives the exact `opseval audio export` command.

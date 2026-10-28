@@ -7,6 +7,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
+import stat
 import subprocess
 import sys
 import wave
@@ -39,6 +41,9 @@ from opseval.voice import AudioRecorder, check_audio_privacy, crypto
 from opseval.voice.crypto import AudioKey, AudioUnavailable, FilePlace, key_id, parse_key
 from opseval.voice.playback import (
     PRUNED_MARKER,
+    barged,
+    find,
+    read_bytes,
     schedule,
     turn_wav,
     turns,
@@ -74,7 +79,9 @@ def make_run(
     test_id: str = "v-001",
     days_old: float = 0,
     barge_at: float | None = None,
+    barge_detail: str | None = None,
     ended: bool = True,
+    undecodable: tuple[float, bytes] | None = None,
 ) -> tuple[Path, RunRecord]:
     """A finished voice run folder with one attempt, recorded by the real recorder."""
     store = FileStore(root)
@@ -100,10 +107,27 @@ def make_run(
                 audio=ref,
             )
         )
+    if undecodable is not None:  # agent audio that could not be decoded, as the bridge keeps it
+        at, data = undecodable
+        ref = recorder.keep_raw(
+            turn=len(frames) + 1, data=data, codec="mulaw", rate=RATE, start_ms=at
+        )
+        frames.append(
+            FrameRecord(
+                seq=len(frames),
+                at=started,
+                direction="received",
+                kind=FrameKind.ERROR,
+                payload={"code": "undecodable_audio", "detail": "not mu-law"},
+                audio=ref,
+            )
+        )
     events = (
         ()
         if barge_at is None
-        else (VoiceEventRecord(at_ms=barge_at, kind="barge_in", speaker="agent"),)
+        else (
+            VoiceEventRecord(at_ms=barge_at, kind="barge_in", speaker="agent", detail=barge_detail),
+        )
     )
     record = RunRecord(
         run_id=run_id,
@@ -144,6 +168,24 @@ class TestKey:
         url = base64.urlsafe_b64encode(KEY_BYTES).decode()
         assert parse_key(KEY) == parse_key(KEY_BYTES.hex()) == parse_key(url) == KEY_BYTES
         assert parse_key(f"  {KEY}\n") == KEY_BYTES
+
+    def test_unpadded_url_safe_base64_is_accepted(self) -> None:
+        import secrets
+
+        made = secrets.token_urlsafe(32)  # 43 characters, no padding
+        assert "=" not in made and len(parse_key(made)) == 32
+        unpadded = base64.urlsafe_b64encode(KEY_BYTES).decode().rstrip("=")
+        assert parse_key(unpadded) == KEY_BYTES
+        assert parse_key(KEY.rstrip("=")) == KEY_BYTES
+
+    def test_the_error_names_the_accepted_forms_and_what_was_found(self) -> None:
+        with pytest.raises(ConfigError) as short:
+            parse_key(base64.urlsafe_b64encode(bytes(range(16))).decode().rstrip("="))
+        assert "decodes to 16 bytes, not 32" in str(short.value)
+        for form in ("64 hex characters", "URL-safe", "padding", "token_urlsafe(32)"):
+            assert form in str(short.value)
+        with pytest.raises(ConfigError, match="neither 64 hex characters nor valid base64"):
+            parse_key("not a key!")
 
     @pytest.mark.parametrize(
         "bad",
@@ -644,3 +686,402 @@ def test_a_failed_demo_call_is_sealed_and_can_be_listened_to(
     n, rate, samples = channels(out.read_bytes())
     assert (n, rate) == (2, RATE) and any(samples[1::2]), "the agent's side has sound"
     assert "opseval audio export" in (run_dir / "report.html").read_text()
+
+
+# --- review of #87 ----------------------------------------------------------------------------
+
+
+class TestUndecodableAudio:
+    """Undecodable agent audio is the agent's error, never a turn someone spoke."""
+
+    def test_it_is_its_own_entry_not_a_message(self, tmp_path: Path) -> None:
+        from opseval.transcript import transcript
+
+        _, record = make_run(tmp_path, CALL, undecodable=(900, b"\xff" * 80))
+        entries = transcript(record)
+        assert [(e.seq, e.kind) for e in entries] == [
+            (0, "message"),
+            (1, "message"),
+            (2, "undecodable_audio"),
+        ]
+        bad = entries[2]
+        assert bad.who == "agent" and bad.text is None and bad.detail == "not mu-law"
+
+    def test_only_a_spoken_message_with_no_text_is_unheard(self) -> None:
+        from opseval.transcript import transcript
+
+        ref = AudioRecorder(None, "v", 0).keep(
+            turn=1, speaker="agent", pcm16=tone(5, 40), rate=RATE, start_ms=0
+        )
+        now = datetime.now(UTC)
+        rec = RunRecord(
+            run_id="r",
+            test_id="v",
+            attempt_index=0,
+            seed=1,
+            target="ws://127.0.0.1:1",
+            started_at=now,
+            ended_at=now,
+            terminal_state=TerminalState.GOAL_REACHED,
+            frames=(
+                FrameRecord(
+                    seq=0,
+                    at=now,
+                    direction="received",
+                    kind=FrameKind.MESSAGE,
+                    payload={},
+                    audio=ref,
+                ),
+                FrameRecord(
+                    seq=1, at=now, direction="received", kind=FrameKind.ERROR, payload={}, audio=ref
+                ),
+            ),
+        )
+        kinds = [(e.seq, e.kind, e.text) for e in transcript(rec)]
+        assert kinds == [(0, "message", None), (1, "undecodable_audio", None)]
+
+    def test_the_console_offers_its_bytes_and_the_report_names_the_command(
+        self, tmp_path: Path
+    ) -> None:
+
+        run_dir, record = make_run(tmp_path, CALL, undecodable=(900, b"\xff" * 80))
+        api = client(tmp_path)
+        detail = api.get(BASE).json()
+        bad = [e for e in detail["entries"] if e["kind"] == "undecodable_audio"]
+        assert len(bad) == 1 and bad[0]["who"] == "agent"
+        assert bad[0]["audio"]["state"] == "undecodable" and bad[0]["audio"]["seq"] == 2
+        assert not [e for e in detail["entries"] if e["kind"] == "message" and e["seq"] == 2]
+        assert detail["audio"]["skipped"] == [2]
+        raw = api.get(BASE + "/audio/2?raw=true")
+        assert raw.status_code == 200 and raw.content == b"\xff" * 80
+        assert raw.headers["content-type"] == "application/octet-stream"
+        assert raw.headers["content-disposition"].startswith("attachment;")
+        assert api.get(BASE + "/audio/2").json()["code"] == "AUDIO_UNDECODABLE"
+        note = audio_note(record, run_dir)
+        assert note is not None and note.raw == {
+            2: f"opseval audio export {run_dir} --test v-001 --attempt 0 --turn 2 --raw "
+            "--out v-001-attempt0-turn2.raw"
+        }
+
+    def test_the_report_shows_it_as_the_agents_failure_with_the_command(
+        self, tmp_path: Path
+    ) -> None:
+        from opseval.models.results import (
+            AttemptVerdict,
+            Gate,
+            SuiteResult,
+            TestVerdict,
+            VerdictStatus,
+        )
+        from opseval.models.scenario import Criticality
+        from opseval.reporting import render_html
+
+        run_dir, record = make_run(tmp_path, CALL, undecodable=(900, b"\xff" * 80))
+        result = SuiteResult(
+            opseval_version="0",
+            run_id="run-1",
+            suite="s",
+            target="ws://x",
+            profile="p",
+            started_at=NOW,
+            ended_at=NOW,
+            tests=[
+                TestVerdict(
+                    test_id="v-001",
+                    name="a call",
+                    criticality=Criticality.CRITICAL,
+                    status=VerdictStatus.FAILED,
+                    pass_rate=0.0,
+                    attempts=[
+                        AttemptVerdict(
+                            attempt_index=0,
+                            passed=False,
+                            terminal_state=TerminalState.GOAL_REACHED,
+                            scores=[],
+                            record_path="a0.json",
+                        )
+                    ],
+                )
+            ],
+            gate=Gate(status="block"),
+            exit_code=1,
+        )
+        html = render_html(result, [record], run_dir=run_dir)
+        line = html[html.index("undecodable audio from the agent") :].split("</div>")[0]
+        assert "not mu-law" in line and "--turn 2 --raw" in line
+        assert html.count("spoken; nothing was heard") == 0
+
+
+class TestSizeLimits:
+    """A record's times and sizes are data: a call too large is refused before any file is
+    read or any buffer allocated."""
+
+    def test_a_start_hours_into_the_call_is_refused_before_anything_is_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.voice import playback
+
+        spoken: list[Speech] = [("caller", 0, 100, 1), ("agent", 3 * 3600 * 1000, 100, 2)]
+        run_dir, record = make_run(tmp_path, spoken)
+
+        def never(*_a: Any, **_k: Any) -> bytes:
+            raise AssertionError("a file was read for a call that is too large")
+
+        monkeypatch.setattr(playback, "read_bytes", never)
+        with pytest.raises(AudioUnavailable) as err:
+            whole_call(run_dir, record, AudioKey(KEY_BYTES))
+        assert err.value.code == "AUDIO_TOO_LARGE" and "--turn" in str(err.value)
+        with pytest.raises(AudioUnavailable) as late:  # past the call's hours, too
+            whole_call(
+                run_dir,
+                record.model_copy(
+                    update={
+                        "frames": (
+                            record.frames[0],
+                            record.frames[1].model_copy(
+                                update={
+                                    "audio": record.frames[1].audio.model_copy(  # type: ignore[union-attr]
+                                        update={"start_ms": 9e12, "end_ms": 9e12 + 100}
+                                    )
+                                }
+                            ),
+                        )
+                    }
+                ),
+                AudioKey(KEY_BYTES),
+            )
+        assert late.value.code == "AUDIO_TOO_LARGE"
+
+    def test_the_call_budget_and_the_total_of_the_turns(self, tmp_path: Path) -> None:
+        run_dir, record = make_run(tmp_path, CALL)
+        whole = whole_call(run_dir, record, AudioKey(KEY_BYTES))
+        assert len(whole.wav) == 44 + 6400 * 4
+        with pytest.raises(AudioUnavailable) as err:
+            whole_call(run_dir, record, AudioKey(KEY_BYTES), max_bytes=6400 * 4)
+        assert err.value.code == "AUDIO_TOO_LARGE"
+        refs = sum(f.audio.bytes for f in record.frames if f.audio is not None)
+        with pytest.raises(AudioUnavailable, match="bytes of audio") as err:
+            whole_call(run_dir, record, AudioKey(KEY_BYTES), max_bytes=refs - 1)
+        # Mono is half the size of stereo: it fits where stereo does not.
+        mono = whole_call(run_dir, record, AudioKey(KEY_BYTES), stereo=False, max_bytes=13_000)
+        assert len(mono.wav) == 44 + 6400 * 2
+
+    def test_a_file_larger_than_the_record_says_is_never_read(self, tmp_path: Path) -> None:
+        run_dir, record = make_run(tmp_path, CALL)
+        path = run_dir / "audio" / "v-001" / "attempt0" / "002-agent.wav.enc"
+        path.write_bytes(path.read_bytes() + b"\x00")
+        with pytest.raises(AudioUnavailable, match="larger than the record says") as err:
+            turn_wav(run_dir, record, 1, AudioKey(KEY_BYTES))
+        assert err.value.code == "AUDIO_TAMPERED"
+
+    def test_the_console_says_too_large_and_answers_413(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.voice import playback
+
+        run_dir, _ = make_run(tmp_path, CALL)
+        monkeypatch.setattr(playback, "MAX_CALL_BYTES", 1000)
+        api = client(tmp_path)
+        audio = api.get(BASE).json()["audio"]
+        assert audio["callState"] == "too_large" and "turn by turn" in audio["callNote"]
+        r = api.get(BASE + "/audio/call")
+        assert (r.status_code, r.json()["code"]) == (413, "AUDIO_TOO_LARGE")
+        assert api.get(BASE + "/audio/1").status_code == 200  # each turn still plays
+
+
+class TestServerKeyStates:
+    def test_unset_malformed_and_no_extra_are_each_said(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        make_run(tmp_path, CALL)
+        cases: list[tuple[str | None, str, str]] = [
+            (None, "key_missing", "AUDIO_KEY_MISSING"),
+            ("too-short", "key_invalid", "AUDIO_KEY_INVALID"),
+        ]
+        for key, state, code in cases:
+            api = client(tmp_path, key=key)
+            detail = api.get(BASE).json()
+            assert {e["audio"]["state"] for e in detail["entries"]} == {state}
+            assert detail["audio"]["callState"] == state
+            for path in ("/audio/0", "/audio/call"):
+                r = api.get(BASE + path)
+                assert (r.status_code, r.json()["code"]) == (409, code)
+        monkeypatch.setitem(sys.modules, "cryptography.hazmat.primitives.ciphers.aead", None)
+        api = client(tmp_path)
+        detail = api.get(BASE).json()
+        assert detail["audio"]["callState"] == "extra_missing"
+        assert "opseval[voice]" in detail["audio"]["callNote"]
+        r = api.get(BASE + "/audio/0")
+        assert (r.status_code, r.json()["code"]) == (409, "AUDIO_EXTRA_MISSING")
+
+    def test_plain_files_play_whatever_the_key(self, tmp_path: Path) -> None:
+        make_run(tmp_path, CALL, key=None)
+        api = client(tmp_path, key="too-short")
+        assert api.get(BASE).json()["audio"]["callState"] == "available"
+        assert api.get(BASE + "/audio/0").status_code == 200
+
+
+class TestBargeIn:
+    def test_a_barge_in_after_the_last_sparse_chunk_keeps_its_overlap(self, tmp_path: Path) -> None:
+        # VAD-gated chunks: 200 ms of audio, but speech "began" at 900 ms on the clock,
+        # after the turn's last recorded sample (600 + 200). Containment would miss it.
+        spoken: list[Speech] = [("caller", 0, 1000, 1), ("agent", 600, 200, 2)]
+        _, record = make_run(tmp_path, spoken, barge_at=900)
+        found = turns(tmp_path / "run-1", record)
+        assert schedule(record, found) == {0: 0, 1: 600}
+
+    def test_a_tagged_event_names_its_turn_whatever_its_time(self, tmp_path: Path) -> None:
+        spoken: list[Speech] = [
+            ("caller", 0, 1000, 1),
+            ("agent", 600, 500, 2),
+            ("caller", 1200, 1000, 3),
+            ("agent", 1500, 500, 4),
+        ]
+        _, record = make_run(
+            tmp_path,
+            spoken,
+            barge_at=99_000,
+            barge_detail="agent speech began before the caller finished (turn 4)",
+        )
+        found = turns(tmp_path / "run-1", record)
+        assert barged(record, found) == {3}
+        when = schedule(record, found)
+        assert when[1] == 1000 and when[3] == when[2] + 300  # turn 2 moved; turn 4 kept
+
+    def test_an_untagged_event_after_the_caller_spoke_again_is_not_the_earlier_turn(
+        self, tmp_path: Path
+    ) -> None:
+        spoken: list[Speech] = [
+            ("caller", 0, 500, 1),
+            ("agent", 600, 200, 2),
+            ("caller", 900, 500, 3),
+        ]
+        _, record = make_run(tmp_path, spoken, barge_at=1000)
+        assert barged(record, turns(tmp_path / "run-1", record)) == set()
+
+
+class TestPrivateExport:
+    base = ["audio", "export"]
+
+    def args(self, run_dir: Path, out: Path, *more: str) -> list[str]:
+        return [
+            *self.base,
+            str(run_dir),
+            "--test",
+            "v-001",
+            "--turn",
+            "1",
+            "--out",
+            str(out),
+            *more,
+        ]
+
+    def test_the_file_is_the_owners_alone(self, tmp_path: Path) -> None:
+        run_dir, _ = make_run(tmp_path, CALL)
+        out = tmp_path / "t.wav"
+        assert run_cli(self.args(run_dir, out)).exit_code == 0
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
+        out.write_bytes(b"old")
+        os.chmod(out, 0o644)
+        refused = run_cli(self.args(run_dir, out))
+        assert refused.exit_code == 3 and "--force" in refused.output and out.read_bytes() == b"old"
+        assert run_cli(self.args(run_dir, out, "--force")).exit_code == 0
+        assert out.read_bytes() == to_wav(tone(-2000, 300), RATE)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+    def test_a_link_is_refused_even_dangling_and_with_force(self, tmp_path: Path) -> None:
+        run_dir, _ = make_run(tmp_path, CALL)
+        target = tmp_path / "elsewhere.wav"
+        link = tmp_path / "link.wav"
+        link.symlink_to(target)  # dangling
+        for more in ((), ("--force",)):
+            out = run_cli(self.args(run_dir, link, *more))
+            assert out.exit_code == 3 and "symbolic link" in out.output
+        assert not target.exists()
+        target.write_bytes(b"keep")
+        out = run_cli(self.args(run_dir, link, "--force"))
+        assert out.exit_code == 3 and target.read_bytes() == b"keep"
+
+    def test_a_link_put_in_place_after_the_check_is_not_followed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.voice import cli as audio_cli
+
+        target = tmp_path / "elsewhere.wav"
+        link = tmp_path / "late.wav"
+        checked = audio_cli._check_out
+
+        def then_link(out: Path, *, force: bool) -> None:
+            checked(out, force=force)
+            if not link.is_symlink():
+                link.symlink_to(target)
+
+        monkeypatch.setattr(audio_cli, "_check_out", then_link)
+        with pytest.raises(Exception) as err:
+            audio_cli._write_private(link, b"secret", force=True)
+        assert getattr(err.value, "exit_code", None) == 3
+        assert not target.exists()
+
+
+class TestPruneRace:
+    def test_audio_pruned_after_it_was_listed_is_pruned_not_missing(self, tmp_path: Path) -> None:
+        run_dir, record = make_run(tmp_path, CALL)
+        listed = find(run_dir, record, 0)
+        assert listed.state == "available"
+        store = FileStore(tmp_path)
+        apply_audio(
+            store,
+            plan_audio(store, older_than_days=1, now=NOW + timedelta(days=2)),
+            older_than_days=1,
+        )
+        with pytest.raises(AudioUnavailable) as err:
+            read_bytes(run_dir, record, listed, AudioKey(KEY_BYTES))
+        assert err.value.code == "AUDIO_PRUNED" and "audio pruned on" in str(err.value)
+
+
+class TestOneParser:
+    def test_an_unreadable_marker_reads_as_pruned_in_player_and_report(
+        self, tmp_path: Path
+    ) -> None:
+        run_dir, record = make_run(tmp_path, CALL)
+        (run_dir / "audio" / PRUNED_MARKER).write_text("{not json")
+        said = "audio pruned (marker unreadable)"
+        assert {(t.state, t.note) for t in turns(run_dir, record)} == {("pruned", said)}
+        note = audio_note(record, run_dir)
+        assert note is not None and note.command is None and note.state.startswith(said)
+
+    def test_a_dated_marker_reads_the_same_in_both(self, tmp_path: Path) -> None:
+        run_dir, record = make_run(tmp_path, CALL)
+        (run_dir / "audio" / PRUNED_MARKER).write_text('{"pruned_at": "2026-10-01T00:00:00+00:00"}')
+        assert turns(run_dir, record)[0].note == "audio pruned on 2026-10-01"
+        note = audio_note(record, run_dir)
+        assert note is not None and note.state.startswith("audio pruned on 2026-10-01")
+
+
+class TestReadOnce:
+    def test_the_attempt_is_read_once_and_its_turns_listed_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.server import audio as audio_api
+        from opseval.voice import playback
+
+        make_run(tmp_path, CALL)
+        api = client(tmp_path)
+        loads: list[str] = []
+        listed: list[int] = []
+        real_load = FileStore.load_record
+        real_turns = playback.turns
+
+        def load(self: FileStore, *a: Any, **k: Any) -> Any:
+            loads.append(a[1])
+            return real_load(self, *a, **k)
+
+        def count(*a: Any, **k: Any) -> Any:
+            listed.append(1)
+            return real_turns(*a, **k)
+
+        monkeypatch.setattr(FileStore, "load_record", load)
+        monkeypatch.setattr(audio_api, "turns", count)
+        monkeypatch.setattr(playback, "turns", count)
+        assert api.get(BASE).status_code == 200
+        assert loads == ["v-001"] and len(listed) == 1

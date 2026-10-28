@@ -4,16 +4,17 @@
 from __future__ import annotations
 
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from opseval.flow import flow_maps
 from opseval.models.gate import describe, looser_than_standard
-from opseval.models.profile import SutProfile
+from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
+from opseval.retention import read_pruned_marker
 from opseval.transcript import connection, transcript
 
 _TEMPLATES = Path(__file__).parent / "templates"
@@ -42,6 +43,9 @@ class AudioNote:
     turns: int
     state: str
     command: str | None
+    """Exports the whole call; ``None`` when there are no bytes to export."""
+    raw: dict[int, str] = field(default_factory=dict)
+    """By seq: the command that exports an undecodable agent turn's bytes as they came."""
 
 
 def audio_note(record: RunRecord, run_dir: str | Path | None) -> AudioNote | None:
@@ -49,10 +53,11 @@ def audio_note(record: RunRecord, run_dir: str | Path | None) -> AudioNote | Non
     if not refs:
         return None
     folder = Path(run_dir) if run_dir is not None else Path("reports") / record.run_id
-    pruned = (folder / "audio" / "PRUNED.json").is_file() or any(r.pruned for r in refs)
+    marker = read_pruned_marker(folder)  # the player's own parser: they never disagree
     files = [r for r in refs if r.path is not None]
-    if pruned:
-        return AudioNote(len(refs), "pruned by retention; the transcript and hashes remain", None)
+    if marker is not None or any(r.pruned for r in refs):
+        said = marker.note if marker is not None else "audio pruned by retention"
+        return AudioNote(len(refs), f"{said}; the transcript and hashes remain", None)
     if not files:
         return AudioNote(len(refs), "only hashes were kept (OPSEVAL_RECORD_AUDIO=hashes)", None)
     sealed = sum(r.encryption != "none" for r in files)
@@ -60,12 +65,16 @@ def audio_note(record: RunRecord, run_dir: str | Path | None) -> AudioNote | Non
     if 0 < sealed < len(files):
         state = f"{sealed} of {len(files)} encrypted"
     test, n = record.test_id, record.attempt_index
-    out = shlex.quote(f"{test}-attempt{n}.wav")
-    command = (
-        f"opseval audio export {shlex.quote(str(folder))} --test {shlex.quote(test)} "
-        f"--attempt {n} --out {out}"
+    base = (
+        f"opseval audio export {shlex.quote(str(folder))} --test {shlex.quote(test)} --attempt {n}"
     )
-    return AudioNote(len(refs), state, command)
+    raw = {
+        f.seq: f"{base} --turn {f.seq} --raw --out "
+        + shlex.quote(f"{test}-attempt{n}-turn{f.seq}.raw")
+        for f in record.frames
+        if f.audio is not None and f.audio.path is not None and f.kind is FrameKind.ERROR
+    }
+    return AudioNote(len(refs), state, f"{base} --out {shlex.quote(f'{test}-attempt{n}.wav')}", raw)
 
 
 def render_html(

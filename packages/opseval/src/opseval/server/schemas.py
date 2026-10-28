@@ -132,10 +132,22 @@ class StoppedOut(Api):
 
 
 AudioState = Literal[
-    "available", "pruned", "hashes_only", "undecodable", "missing", "key_missing", "key_mismatch"
+    "available",
+    "pruned",
+    "hashes_only",
+    "undecodable",
+    "missing",
+    "key_missing",
+    "key_mismatch",
+    "key_invalid",
+    "extra_missing",
+    "too_large",
 ]
 """What can be done with a turn's recorded audio, decided by the server (ADR-0053, V0d):
-``available`` plays; every other state is said in words, never drawn as a broken player."""
+``available`` plays; every other state is said in words, never drawn as a broken player.
+No key is three states: unset (``key_missing``), malformed (``key_invalid``) and set without
+the voice extra (``extra_missing``). ``too_large`` is a whole call over the size a call is
+built at (its turns still play one by one)."""
 
 
 class AudioTurnOut(Api):
@@ -163,13 +175,22 @@ class TranscriptEntry(Api):
     """One thing that happened in a conversation, in order."""
 
     seq: int
-    kind: Literal["message", "checkpoint", "decision", "result", "error", "notification", "unknown"]
-    who: Literal["customer", "agent"] | None  # only for a message
+    kind: Literal[
+        "message",
+        "checkpoint",
+        "decision",
+        "result",
+        "error",
+        "notification",
+        "unknown",
+        "undecodable_audio",
+    ]
+    who: Literal["customer", "agent"] | None  # a message, or undecodable audio (the agent)
     text: str | None
     phase: str | None
     latency_ms: float | None
     detail: str | None  # the checkpoint, the decision, or an error or result in short
-    audio: AudioTurnOut | None = None  # the spoken turn behind a message (voice attempts)
+    audio: AudioTurnOut | None = None  # the spoken turn behind it (message, undecodable_audio)
 
 
 class ToolCallOut(Api):

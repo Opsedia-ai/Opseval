@@ -161,8 +161,49 @@ def apply(store: FileStore, items: list[PruneItem]) -> PruneOutcome:
 
 
 AUDIO_MARKER = "PRUNED.json"
-"""Shared with ``voice.playback.PRUNED_MARKER`` (a test keeps them equal); retention does
-not import the voice package."""
+"""``audio/PRUNED.json``: written by :func:`apply_audio` before it removes a run's audio.
+The one name every reader uses (``voice.playback`` and the report import it from here);
+retention does not import the voice package."""
+
+
+@dataclass(frozen=True)
+class PrunedMarker:
+    """What :func:`apply_audio` left in place of a run's audio."""
+
+    pruned_at: datetime | None
+    readable: bool = True
+    """``False``: the marker is there but cannot be read. The audio still counts as pruned
+    (a reader never plays around a marker, and never calls a pruned run's audio missing)."""
+
+    @property
+    def note(self) -> str:
+        """In words, the same in the player, the CLI and the report."""
+        if not self.readable:
+            return "audio pruned (marker unreadable)"
+        if self.pruned_at is not None:
+            return f"audio pruned on {self.pruned_at.date().isoformat()}"
+        return "audio pruned by retention"
+
+
+def read_pruned_marker(run_dir: Path) -> PrunedMarker | None:
+    """The run's audio prune marker, or ``None`` when there is none. The one parser the
+    player, the CLI and the report share, so they never disagree on a run."""
+    path = run_dir / "audio" / AUDIO_MARKER
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (FileNotFoundError, NotADirectoryError):
+        return PrunedMarker(None, readable=False) if os.path.lexists(path) else None
+    except (OSError, ValueError):
+        return PrunedMarker(None, readable=False)
+    if not isinstance(data, dict):
+        return PrunedMarker(None, readable=False)
+    at = data.get("pruned_at")
+    if isinstance(at, str):
+        try:
+            return PrunedMarker(datetime.fromisoformat(at))
+        except ValueError:
+            pass
+    return PrunedMarker(None)
 
 
 @dataclass(frozen=True)
@@ -275,9 +316,11 @@ __all__ = [
     "AUDIO_MARKER",
     "AudioPruneItem",
     "PruneItem",
+    "PrunedMarker",
     "PruneOutcome",
     "apply",
     "apply_audio",
     "plan",
     "plan_audio",
+    "read_pruned_marker",
 ]

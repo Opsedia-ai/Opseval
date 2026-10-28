@@ -16,7 +16,13 @@ const SAID: Record<AudioTurn["state"], string> = {
   missing: "audio file missing",
   key_missing: "no key to decrypt",
   key_mismatch: "encrypted with another key",
+  key_invalid: "the audio key is not valid",
+  extra_missing: "the voice extra is not installed",
+  too_large: "too large to play as one call",
 };
+
+/** How long a download's blob: URL is kept before it is revoked (the browser has the file by then). */
+export const DOWNLOAD_URL_TTL_MS = 60_000;
 
 /** A blob: URL for the audio, made on demand and revoked when replaced or unmounted. */
 function useBlobUrl() {
@@ -29,6 +35,28 @@ function useBlobUrl() {
   };
   useEffect(() => () => { if (current.current) URL.revokeObjectURL(current.current); }, []);
   return [url, set] as const;
+}
+
+/**
+ * Save a blob: URL as a file. A URL made only for the download is revoked after
+ * DOWNLOAD_URL_TTL_MS, or when the component goes, whichever comes first (revoking it at
+ * once can cancel the download in some browsers; never revoking it keeps decrypted audio
+ * reachable for the page's lifetime).
+ */
+function useDownloads() {
+  const pending = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => () => {
+    for (const [u, timer] of pending.current) { clearTimeout(timer); URL.revokeObjectURL(u); }
+    pending.current.clear();
+  }, []);
+  return (u: string, name: string, owned: boolean) => {
+    const a = document.createElement("a");
+    a.href = u;
+    a.download = name;
+    a.click();
+    if (!owned) return; // a URL a player still uses is revoked with the player
+    pending.current.set(u, setTimeout(() => { pending.current.delete(u); URL.revokeObjectURL(u); }, DOWNLOAD_URL_TTL_MS));
+  };
 }
 
 function Unplayable({ state, note }: { state: AudioTurn["state"]; note: string | null }) {
@@ -44,11 +72,43 @@ function Failed({ error }: { error: ApiError }) {
   return <span data-audio-state="error" className="text-xs"><Mono>{error.code}</Mono> {error.message}</span>;
 }
 
+const asApiError = (e: unknown) => (e instanceof ApiError ? e : new ApiError(0, "AUDIO", String(e)));
+
+/** The bytes of an undecodable agent turn, as the agent sent them: offered, never played. */
+function RawBytes({ where, audio }: { where: Where; audio: AudioTurn }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ApiError | null>(null);
+  const download = useDownloads();
+  const get = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const blob = await fetchAudio(where.run, where.test, where.index, audio.seq, { raw: true });
+      download(URL.createObjectURL(blob), `${where.test}-attempt${where.index}-turn${audio.seq}.raw`, true);
+    } catch (e) {
+      setError(asApiError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span data-audio-state="undecodable" className="inline-flex flex-wrap items-center gap-2 text-xs">
+      <Pill tone="mute" dashed>{SAID.undecodable}</Pill>
+      {audio.note && <span className="opacity-80">{audio.note}</span>}
+      <button type="button" onClick={get} disabled={busy} className="rounded-full border border-current px-2 py-0.5 font-semibold" aria-label={`download the bytes of turn ${audio.seq}`}>
+        {busy ? "loading…" : "Download the bytes as sent"}
+      </button>
+      {error && <Failed error={error} />}
+    </span>
+  );
+}
+
 /** The ▶ control of one spoken turn. */
 export function TurnAudio({ where, audio }: { where: Where; audio: AudioTurn }) {
   const [url, setUrl] = useBlobUrl();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  if (audio.state === "undecodable") return <RawBytes where={where} audio={audio} />;
   if (audio.state !== "available") return <Unplayable state={audio.state} note={audio.note} />;
   const play = async () => {
     setBusy(true);
@@ -56,7 +116,7 @@ export function TurnAudio({ where, audio }: { where: Where; audio: AudioTurn }) 
     try {
       setUrl(URL.createObjectURL(await fetchAudio(where.run, where.test, where.index, audio.seq)));
     } catch (e) {
-      setError(e instanceof ApiError ? e : new ApiError(0, "AUDIO", String(e)));
+      setError(asApiError(e));
     } finally {
       setBusy(false);
     }
@@ -79,25 +139,21 @@ export function CallAudio({ where, audio }: { where: Where; audio: AttemptAudio 
   const [url, setUrl] = useBlobUrl();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
-  const get = async () => URL.createObjectURL(await fetchAudio(where.run, where.test, where.index, "call"));
+  const download = useDownloads();
+  const name = `${where.test}-attempt${where.index}-call.wav`;
   const run = async (then: (u: string) => void) => {
     setBusy(true);
     setError(null);
     try {
-      then(await get());
+      then(URL.createObjectURL(await fetchAudio(where.run, where.test, where.index, "call")));
     } catch (e) {
-      setError(e instanceof ApiError ? e : new ApiError(0, "AUDIO", String(e)));
+      setError(asApiError(e));
     } finally {
       setBusy(false);
     }
   };
-  const download = (u: string) => {
-    const a = document.createElement("a");
-    a.href = u;
-    a.download = `${where.test}-attempt${where.index}-call.wav`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(u), 0);
-  };
+  // The call already loaded for the player is saved as it is: never fetched (and decrypted) twice.
+  const save = () => (url ? download(url, name, false) : run((u) => download(u, name, true)));
   return (
     <div data-call-state={audio.callState} className="rounded-2xl border border-line bg-white px-4 py-3 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -106,7 +162,7 @@ export function CallAudio({ where, audio }: { where: Where; audio: AttemptAudio 
         {audio.callState === "available" ? (
           <>
             {!url && <Button type="button" onClick={() => run(setUrl)} disabled={busy}>▶ Play whole call</Button>}
-            <Button type="button" variant="ghost" onClick={() => run(download)} disabled={busy}>Download WAV</Button>
+            <Button type="button" variant="ghost" onClick={save} disabled={busy}>Download WAV</Button>
           </>
         ) : <Unplayable state={audio.callState} note={audio.callNote} />}
       </div>
