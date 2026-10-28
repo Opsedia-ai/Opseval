@@ -18,10 +18,11 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from opseval.analytics.base import UnsupportedFilter, UsageFilter
+from opseval.analytics.base import SERVER_ONLY_FILTERS, UnsupportedFilter, UsageFilter
 from opseval.analytics.models import (
     BucketOut,
     CostAnswer,
+    FilterOptions,
     Measured,
     Ratio,
     RunCost,
@@ -225,6 +226,25 @@ class FileAnalytics:
             picked.append(self._usage(result))
         return picked
 
+    def options(self) -> FilterOptions:
+        suites: set[str] = set()
+        roles: set[str] = set()
+        models: set[str] = set()
+        for result in self.store.finished_results():
+            suites.add(result.suite)
+            run = self._usage(result)
+            rows: list[tuple[str, str]] = [(u.role, u.model) for u in result.usage]
+            for events in [*run.attempts.values(), run.outside]:
+                rows.extend((e.role, e.model) for e in events or ())
+            roles.update(r for r, _ in rows)
+            models.update(m for _, m in rows)
+        return FilterOptions(
+            suites=sorted(suites),
+            roles=sorted(roles),
+            models=sorted(models),
+            server_only=list(SERVER_ONLY_FILTERS),
+        )
+
     @staticmethod
     def _wanted(filters: UsageFilter, role: str, model: str) -> bool:
         return (filters.role is None or role == filters.role) and (
@@ -381,6 +401,7 @@ class FileAnalytics:
         total_out = total.out(6)
         return CostAnswer(
             filters=filters.echo(),
+            options=self.options(),
             scope=self._scope(runs, filters).out(),
             buckets=buckets,
             by_role=series["*role"],
@@ -491,6 +512,7 @@ class FileAnalytics:
         )
         return TokensAnswer(
             filters=filters.echo(),
+            options=self.options(),
             scope=self._scope(runs, filters).out(),
             buckets=buckets,
             by_kind=[s for k in TOKEN_SEGMENTS for s in by_kind.get(k, [])],
@@ -502,7 +524,8 @@ class FileAnalytics:
                 of=answered + legacy_answered,
             ),
             tokens_per_attempt=Ratio(
-                value=sum(per_attempt) / len(per_attempt) if per_attempt else None,
+                # No call anywhere: nothing was counted, so no mean (never 0).
+                value=sum(per_attempt) / len(per_attempt) if per_attempt and answered else None,
                 measured=len(per_attempt),
                 of=attempts_in_scope,
             ),

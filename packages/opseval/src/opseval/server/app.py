@@ -21,6 +21,7 @@ import hmac
 import re
 import secrets
 from collections.abc import Awaitable, Callable
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
@@ -31,6 +32,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from opseval import __version__
+from opseval.analytics import FileAnalytics, UnsupportedFilter, UsageFilter
+from opseval.analytics.models import Bucket
 from opseval.catalogue import load_profile
 from opseval.config import Settings
 from opseval.errors import ConfigError
@@ -225,6 +228,12 @@ def create_app(
     def _api_error(_: Request, exc: actions.ApiError) -> JSONResponse:
         return _deny(exc.status, exc.code, exc.message)
 
+    @app.exception_handler(UnsupportedFilter)
+    def _unsupported_filter(_: Request, exc: UnsupportedFilter) -> JSONResponse:
+        # Refused, never ignored: a dashboard that dropped a filter would show every run as
+        # if it were the ones asked for (ADR-0052).
+        return _deny(400, "FILTER_NEEDS_SERVER_MODE", str(exc))
+
     @app.exception_handler(views.RunInProgress)
     def _in_progress(_: Request, exc: views.RunInProgress) -> JSONResponse:
         # The progress rides along, so a page waiting on this run needs no second poll.
@@ -333,6 +342,67 @@ def create_app(
     @app.get(f"{API}/usage")
     def usage() -> list[s.RunUsage]:
         return views.usage(ctx.store)
+
+    analytics = FileAnalytics(ctx.store)
+
+    def usage_filter(
+        suite: str | None,
+        model: str | None,
+        role: str | None,
+        since: date | None,
+        until: date | None,
+        bucket: Bucket,
+        org: str | None,
+        project: str | None,
+        task: str | None,
+        label: str | None,
+    ) -> UsageFilter:
+        if since is not None and until is not None and since > until:
+            raise actions.ApiError(422, "BAD_RANGE", "since is after until")
+        return UsageFilter(
+            suite=suite or None,
+            model=model or None,
+            role=role or None,
+            since=since,
+            until=until,
+            bucket=bucket,
+            org=org or None,
+            project=project or None,
+            task=task or None,
+            label=label or None,
+        )
+
+    @app.get(f"{API}/analytics/cost")
+    def cost_dashboard(
+        suite: str | None = None,
+        model: str | None = None,
+        role: str | None = None,
+        since: date | None = None,
+        until: date | None = None,
+        bucket: Bucket = "day",
+        org: str | None = None,
+        project: str | None = None,
+        task: str | None = None,
+        label: str | None = None,
+    ) -> s.CostDashboard:
+        f = usage_filter(suite, model, role, since, until, bucket, org, project, task, label)
+        return views.cost_dashboard(analytics, f)
+
+    @app.get(f"{API}/analytics/tokens")
+    def tokens_dashboard(
+        suite: str | None = None,
+        model: str | None = None,
+        role: str | None = None,
+        since: date | None = None,
+        until: date | None = None,
+        bucket: Bucket = "day",
+        org: str | None = None,
+        project: str | None = None,
+        task: str | None = None,
+        label: str | None = None,
+    ) -> s.TokensDashboard:
+        f = usage_filter(suite, model, role, since, until, bucket, org, project, task, label)
+        return views.tokens_dashboard(analytics, f)
 
     @app.get(f"{API}/scenarios")
     def scenarios() -> s.CatalogueOut:

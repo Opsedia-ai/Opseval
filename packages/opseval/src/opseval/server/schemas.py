@@ -182,16 +182,31 @@ class AttemptRecordOut(Api):
     artifacts_checked: bool = False  # False: not looked for (never "nothing created")
 
 
+class UsageReportedOut(Api):
+    """How many answered calls reported each count (ADR-0066)."""
+
+    answered: int
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cached_input_tokens: int
+    cost: int
+
+
 class UsageOut(Api):
     role: str
     model: str
     calls: int
-    input_tokens: int | None  # None: a speech role, which has no tokens (never 0)
+    input_tokens: int | None  # None: a speech role, or a call did not report it (never 0)
     output_tokens: int | None
     cost_usd: float | None
     audio_in_seconds: float | None = None  # STT audio heard; None = not measured (ADR-0054)
     audio_out_seconds: float | None = None  # TTS audio spoken
     characters: int | None = None  # TTS characters spoken
+    reasoning_tokens: int | None = None  # part of the output; None = not reported (ADR-0066)
+    cached_input_tokens: int | None = None  # part of the input served from cache
+    failed_calls: int = 0  # calls with no usable answer: nothing to count
+    reported: UsageReportedOut | None = None  # None: written before per-call usage
 
 
 class SinkOut(Api):
@@ -296,6 +311,131 @@ class RunUsage(Api):
     audio_in_seconds: float | None = None  # STT audio heard in the run; None = not measured
     audio_out_seconds: float | None = None  # TTS audio spoken
     characters: int | None = None  # TTS characters spoken
+    per_call: bool = False  # false: written before per-call usage (totals as written)
+
+
+class MeasuredOut(Api):
+    """A sum and what it covers (ADR-0052). ``value`` null: nothing was measured, never 0.
+    ``complete`` false with a value: a floor, drawn as partial."""
+
+    value: float | None
+    measured: int
+    of: int
+    complete: bool
+
+
+class RatioOut(Api):
+    value: float | None
+    measured: int
+    of: int
+
+
+class UsageBucket(Api):
+    key: str  # an ISO date (a day, or a week's Monday) or a run id
+    label: str
+    start: str
+    runs: int
+
+
+class UsageSeries(Api):
+    """One group's values, one per bucket, in the order of the answer's ``buckets``."""
+
+    group: str
+    points: list[MeasuredOut]
+    total: MeasuredOut
+
+
+class UsageScopeOut(Api):
+    runs: int
+    calls: int
+    failed_calls: int
+    attempts: int
+    attempts_without_usage: int
+    legacy_runs: list[str]  # written before per-call usage: per-model totals as written
+    unreadable_runs: list[str]  # records that could not be read: left out, and named
+    in_flight_excluded: bool
+
+
+class UsageFiltersOut(Api):
+    suite: str | None
+    model: str | None
+    role: str | None
+    since: str | None
+    until: str | None
+    bucket: Literal["day", "week", "run"]
+
+
+class UsageFilterOptions(Api):
+    suites: list[str]
+    roles: list[str]
+    models: list[str]
+    server_only: list[str]  # filters only server mode applies: refused here, never ignored
+
+
+class RunCostOut(Api):
+    run: str
+    suite: str
+    started_at: str
+    cost_usd: MeasuredOut
+    passed_tests: int
+    cost_per_passed_test: float | None
+    per_call: bool  # false: written before per-call usage
+
+
+class ScenarioCostOut(Api):
+    scenario: str
+    attempts: int
+    attempts_measured: int
+    cost_usd: MeasuredOut
+    cost_per_attempt: float | None
+    passed_runs: int
+    cost_per_passed_test: float | None
+
+
+class CostDashboard(Api):
+    """Evaluation spend (ADR-0066): never the agent's own cost, never $0 for "no price"."""
+
+    filters: UsageFiltersOut
+    options: UsageFilterOptions
+    scope: UsageScopeOut
+    buckets: list[UsageBucket]
+    by_role: list[UsageSeries]
+    by_model: list[UsageSeries]
+    total_usd: MeasuredOut
+    cost_per_passed_test: float | None
+    passed_tests: int
+    runs: list[RunCostOut]
+    scenarios: list[ScenarioCostOut]
+    sources: dict[str, int]  # priced calls by cost source: provider, price_table, unknown
+
+
+class TokenTotalsOut(Api):
+    input: MeasuredOut  # cached included
+    cached_input: MeasuredOut
+    output: MeasuredOut  # reasoning included
+    reasoning: MeasuredOut
+    total: MeasuredOut
+
+
+class ScenarioTokensOut(Api):
+    scenario: str
+    attempts: int
+    attempts_measured: int
+    tokens: MeasuredOut
+    tokens_per_attempt: float | None
+
+
+class TokensDashboard(Api):
+    filters: UsageFiltersOut
+    options: UsageFilterOptions
+    scope: UsageScopeOut
+    buckets: list[UsageBucket]
+    by_kind: list[UsageSeries]  # stack: input (not cached), cached_input, output, reasoning
+    by_model: list[UsageSeries]
+    totals: TokenTotalsOut
+    reasoning_share: RatioOut
+    tokens_per_attempt: RatioOut
+    scenarios: list[ScenarioTokensOut]
 
 
 class TrendPoint(Api):

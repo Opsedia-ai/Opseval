@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from opseval.analytics import AnalyticsStore, UsageFilter
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.errors import ConfigError
@@ -30,7 +31,7 @@ from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import FileStore, process_gone
+from opseval.storage import PRE_USAGE_LAYOUTS, FileStore, process_gone
 from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
 
@@ -269,6 +270,12 @@ def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
                 audio_in_seconds=u.audio_in_seconds,
                 audio_out_seconds=u.audio_out_seconds,
                 characters=u.characters,
+                reasoning_tokens=u.reasoning_tokens,
+                cached_input_tokens=u.cached_input_tokens,
+                failed_calls=u.failed_calls,
+                reported=s.UsageReportedOut.model_validate(u.reported.model_dump())
+                if u.reported
+                else None,
             )
             for u in r.usage
         ],
@@ -320,15 +327,28 @@ def usage(store: FileStore) -> list[s.RunUsage]:
                 audio_in_seconds=_total([u.audio_in_seconds for u in r.usage]),
                 audio_out_seconds=_total([u.audio_out_seconds for u in r.usage]),
                 characters=_count([u.characters for u in r.usage]),
+                per_call=store.layout(r.run_id) not in PRE_USAGE_LAYOUTS,
             )
         )
     return rows
 
 
 def _tokens(u: ModelUsage) -> int | None:
-    if u.input_tokens is None and u.output_tokens is None:
+    """A row's input plus output tokens; ``None`` unless both are known (a missing count is
+    never added as 0, ADR-0066)."""
+    if u.input_tokens is None or u.output_tokens is None:
         return None
-    return (u.input_tokens or 0) + (u.output_tokens or 0)
+    return u.input_tokens + u.output_tokens
+
+
+def cost_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.CostDashboard:
+    """The Cost dashboard (ADR-0066): every number from the analytics store."""
+    return s.CostDashboard.model_validate(analytics.cost(filters).model_dump(mode="json"))
+
+
+def tokens_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.TokensDashboard:
+    """The Tokens dashboard (ADR-0066)."""
+    return s.TokensDashboard.model_validate(analytics.tokens(filters).model_dump(mode="json"))
 
 
 def trend(store: FileStore) -> list[s.TrendPoint]:

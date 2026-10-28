@@ -22,7 +22,8 @@ class Measured(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     value: float | None
-    """The sum of what was measured; ``None`` when nothing was (never 0)."""
+    """The sum of what was measured; ``None`` when nothing was (never 0). With ``of`` 0 there
+    was nothing to count (no calls); with ``of`` above 0, the calls did not report it."""
     measured: int
     of: int
     complete: bool
@@ -87,6 +88,17 @@ class UsageFilterEcho(BaseModel):
     bucket: Bucket = "day"
 
 
+class FilterOptions(BaseModel):
+    """What the filters can be set to: every suite, role and model in the finished runs."""
+
+    model_config = ConfigDict(extra="forbid")
+    suites: list[str]
+    roles: list[str]
+    models: list[str]
+    server_only: list[str]
+    """Filters only server mode can apply (organisation, project, task, label)."""
+
+
 class RunCost(BaseModel):
     model_config = ConfigDict(extra="forbid")
     run: str
@@ -118,6 +130,7 @@ class ScenarioCost(BaseModel):
 class CostAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
     filters: UsageFilterEcho
+    options: FilterOptions
     scope: UsageScope
     buckets: list[BucketOut]
     by_role: list[Series]
@@ -158,6 +171,7 @@ class ScenarioTokens(BaseModel):
 class TokensAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
     filters: UsageFilterEcho
+    options: FilterOptions
     scope: UsageScope
     buckets: list[BucketOut]
     by_kind: list[Series]
