@@ -48,5 +48,23 @@
 | [0045](0045-jira-sink.md) | An issue for each failed critical scenario in Jira (Cloud and Data Center): the marker is a label | Proposed |
 | [0046](0046-credential-provider-plugins.md) | Credential provider plugins: named to be used, fail closed, every failure a harness error | Proposed |
 | [0047](0047-server-mode-on-postgres.md) | Server mode on Postgres, the Langfuse model: a versioned catalogue first, then runs, accounts and workers | Proposed |
+| [0049](0049-tasks-in-a-project.md) | Tasks inside a project: one agent endpoint and one modality, with its own scenarios, suites, runs and labels; one folder is one task | Proposed |
+| [0050](0050-accounts-and-access.md) | Accounts and access: argon2id users, OIDC, hashed sessions, org roles, project API keys; a network-facing server only behind TLS | Proposed |
+| [0051](0051-runs-and-blobs-in-the-database.md) | Runs, scores, metrics and audio in Postgres and a blob store; `NULL` stays "not measured" | Proposed |
+| [0052](0052-analytics-store.md) | An analytics interface with file and Postgres implementations; ClickHouse optional, in core, never required | Proposed |
+| [0053](0053-voice-sessions-and-records.md) | Voice: audio sessions, audio in the record, a bridge to the text driver, and the one rule for voice faults | Proposed |
+| [0054](0054-speech-providers.md) | Speech providers: OpenAI-compatible TTS and STT built in, others as plugins; allowlisted, failing closed, harness errors | Proposed |
+| [0055](0055-full-duplex-voice-driver-and-metrics.md) | A full-duplex voice driver (barge-in, noise, code-switching) and voice metrics usable as gate thresholds | Proposed |
+| [0056](0056-telephony.md) | Phone calls through a signed, TLS-only voice gateway; test numbers only | Proposed |
+| [0057](0057-webrtc.md) | WebRTC rooms through an optional extra, shipped only if its dependencies pass the licence audit | Proposed |
+| [0058](0058-ci-cd-anywhere.md) | CI/CD anywhere: a published GitHub Action and copy-paste workflows, server reporting, templates for other CI systems | Proposed |
+| [0059](0059-languages-and-dialects.md) | Languages and dialects: BCP-47 packs, unknown languages refused at load, MENA then US/EU then Chinese | Proposed |
+| [0060](0060-datasets-and-matrices.md) | Flexibility L1: datasets, logic-free placeholders and matrices, expanded at load with a cap | Proposed |
+| [0061](0061-rubric-judges-and-content-checks.md) | Flexibility L2: teams' own rubric judges (fenced, hashed, calibrated) and content checks | Proposed |
+| [0062](0062-generated-scenarios.md) | Flexibility L3: generated scenarios, drafts only, never labelled by a machine | Proposed |
+| [0063](0063-adaptive-attacker.md) | Flexibility L4: an adaptive multi-turn attacker graded by the security judges | Proposed |
+| [0064](0064-continuous-evaluation.md) | Flexibility L5: scheduled runs, regression alerts and proposed scenarios; only a human moves `production` | Proposed |
+| [0065](0065-protecting-main.md) | Protecting `main`: a DCO check and a pre-push hook now, committed rulesets applied when the repository goes public | Proposed |
+| [0066](0066-dashboards.md) | Dashboards: usage per call (input, output, reasoning, cached tokens), versioned model prices, cost, tokens, latency, quality and voice | Proposed |
 
 New ADRs: copy [`template.md`](template.md), take the next number, and open a PR. Changes to public contracts start as an RFC in GitHub Discussions.

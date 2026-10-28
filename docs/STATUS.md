@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-22** (`main` with the catalogue versioned in Postgres, and defaults from the profile).
+**As of 2026-10-28** (`main` with the catalogue versioned in Postgres and defaults from the profile; the 2026-10-28 roadmap planned in ADRs 0049–0066).
 
 ## Completion
 
@@ -33,6 +33,26 @@ evidence column. A deliberate, recorded divergence from the requirement (an ADR)
 Gate 0, the product name, design partners, calibration labels and the telemetry collector are
 decisions, not code. They are not in the percentage, and today they gate more than code does.
 They are tracked in one place: [`ATTENTION.md`](ATTENTION.md).
+
+## Planned beyond the PRD (roadmap of 2026-10-28)
+
+The owner asked on 2026-10-28 for the work below. It is planned in ADRs 0049–0066 and **none of
+it is built yet**. These rows are not in the percentage, because the PRD (doc 04) has no rows for
+them yet (ATTENTION D13 and D15). A row moves into the table above, with an `FR-` id, when the
+PRD gains it.
+
+| Item | Plan | State |
+|---|---|---|
+| Tasks inside a project (chat, agentic, voice, batch) | [ADR-0049](adr/0049-tasks-in-a-project.md) | Missing: organisations and projects exist (ADR-0047), tasks do not |
+| Accounts, roles, API keys, OIDC, a network-facing server | [ADR-0050](adr/0050-accounts-and-access.md) | Missing: one shared token, loopback only (ADR-0031) |
+| Runs, scores and audio in the database and a blob store | [ADR-0051](adr/0051-runs-and-blobs-in-the-database.md) | Missing: runs are folders (`FileStore`) |
+| Analytics interface; ClickHouse optional | [ADR-0052](adr/0052-analytics-store.md) | Missing: the console's views scan `result.json` files |
+| Dashboards: cost, tokens (input, output, reasoning, cached), latency, quality, voice | [ADR-0066](adr/0066-dashboards.md) | Partial: usage and cost per run (input and output tokens only) on the Usage page |
+| Voice evaluation: audio sessions, speech providers, full-duplex driver and metrics, phone, WebRTC | ADRs [0053](adr/0053-voice-sessions-and-records.md)–[0057](adr/0057-webrtc.md) | Missing |
+| Languages and dialects: MENA, US and Europe, Chinese; unknown languages refused | [ADR-0059](adr/0059-languages-and-dialects.md) | Partial: en and three Arabic packs; any other language becomes English (ATTENTION I14) |
+| CI/CD anywhere: Marketplace action, example workflows, server reporting, other CI templates | [ADR-0058](adr/0058-ci-cd-anywhere.md) | Partial: the composite GitHub Action; see FR-GATE-03 and FR-GATE-05 |
+| Flexibility ladder L1–L5: datasets, rubric judges, generated scenarios, adaptive attacker, continuous evaluation | ADRs [0060](adr/0060-datasets-and-matrices.md)–[0064](adr/0064-continuous-evaluation.md) | Missing (L0, YAML and the guided form, is ADR-0048) |
+| Protecting `main` | [ADR-0065](adr/0065-protecting-main.md) | Missing: GitHub refuses rulesets on this private repository; soft protection first, rulesets at go-public |
 
 ## Requirements
 
