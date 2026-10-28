@@ -27,7 +27,8 @@ function adoptToken(): string | null {
 }
 const token = adoptToken();
 
-async function call<R>(path: string, init?: RequestInit): Promise<R> {
+/** One request with the token, or the ApiError that says why not: shared by JSON and binary answers. */
+async function request(path: string, init?: RequestInit): Promise<Response> {
   let res: Response;
   try {
     const headers: Record<string, string> = { "content-type": "application/json" };
@@ -41,7 +42,16 @@ async function call<R>(path: string, init?: RequestInit): Promise<R> {
     const detail = body.detail;
     throw new ApiError(res.status, body.code ?? `HTTP_${res.status}`, body.message ?? (typeof detail === "string" ? detail : `Request failed (${res.status})`), detail);
   }
-  return res.json() as Promise<R>;
+  return res;
+}
+
+async function call<R>(path: string, init?: RequestInit): Promise<R> {
+  return (await request(path, init)).json() as Promise<R>;
+}
+
+/** A binary answer (recorded audio) as a Blob, with the same token and error handling as `call`. */
+export async function callBlob(path: string): Promise<Blob> {
+  return (await request(path)).blob();
 }
 const post = <R,>(path: string, body: unknown) => call<R>(path, { method: "POST", body: JSON.stringify(body) });
 
@@ -105,4 +115,16 @@ async function saveNewScenario(family: string, name: string, text: string): Prom
     // Written, but not found by its id: say so rather than invite a second save.
     throw new ApiError(0, "SAVED_NOT_LISTED", `saved as ${family}/${name}, but the catalogue does not list ${id}; open it from Test cases`);
   }
+}
+
+/**
+ * A voice attempt's recorded audio as a Blob (ADR-0053): a turn by its seq, or the whole
+ * call. An <audio src> cannot carry the token, so the bytes are fetched here, with it, and
+ * played from a blob: URL that the component revokes. The server decrypts in memory and
+ * answers no-store; an unplayable turn is an ApiError with its code (AUDIO_PRUNED, …).
+ * `raw`: an undecodable agent turn's bytes, as the agent sent them.
+ */
+export function fetchAudio(run: string, test: string, index: number, which: number | "call", opts: { mono?: boolean; raw?: boolean } = {}): Promise<Blob> {
+  const query = opts.raw ? "?raw=true" : opts.mono ? "?mono=true" : "";
+  return callBlob(`/runs/${encodeURIComponent(run)}/attempts/${encodeURIComponent(test)}/${index}/audio/${which}${query}`);
 }

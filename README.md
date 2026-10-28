@@ -535,8 +535,18 @@ uv run opseval demo --voice --bug garbled    # speech nobody can understand → 
 uv run opseval demo --voice --stt-down       # Opseval cannot listen → exit 3
 ```
 
-This is a preview: turn-based only (no barge-in yet), no phone or WebRTC, and no audio encryption
-yet, so a run against a real agent needs `OPSEVAL_RECORD_AUDIO=hashes` (no audio is kept). See
+Recorded audio is encrypted at rest, and you can listen back to a failed call: install the voice
+extra and set a key, then play each turn (or the whole call) in the console, or export it:
+
+```bash
+pip install 'opseval[voice]'
+export OPSEVAL_AUDIO_ENCRYPTION_KEY="$(opseval audio keygen)"   # keep it: no key, no playback
+opseval audio export reports/<run id> --test vr-001 --attempt 0 --out call.wav   # stereo
+```
+
+Without a key a voice run against a real agent is refused, unless it keeps hashes only
+(`OPSEVAL_RECORD_AUDIO=hashes`). Audio is pruned after `OPSEVAL_AUDIO_RETENTION_DAYS` (30).
+This is a preview: turn-based only (no barge-in yet), no phone or WebRTC. See
 the [voice guide](docs/guide/voice.md) and
 [ADR-0053](docs/adr/0053-voice-sessions-and-records.md).
 

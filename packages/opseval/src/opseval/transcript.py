@@ -18,7 +18,14 @@ from opseval.models.profile import FrameKind
 from opseval.models.record import RunRecord
 
 EntryKind = Literal[
-    "message", "checkpoint", "decision", "result", "error", "notification", "unknown"
+    "message",
+    "checkpoint",
+    "decision",
+    "result",
+    "error",
+    "notification",
+    "unknown",
+    "undecodable_audio",
 ]
 
 
@@ -57,7 +64,14 @@ def transcript(record: RunRecord) -> list[Entry]:
     decided = {i.decision_seq: i for i in record.interrupts if i.decision_seq is not None}
     out: list[Entry] = []
     for f in record.frames:
-        if f.text:
+        # Audio the agent sent that could not be decoded is the agent's error (the bridge
+        # records it as one): its own entry, a failure, never a turn someone spoke. Its
+        # bytes, when kept, can be downloaded as they came.
+        undecodable = f.audio is not None and f.kind is FrameKind.ERROR
+        # A spoken turn is shown even when nothing was heard in it (an empty transcript): it
+        # is the turn someone needs to listen to, and hiding it would hide what failed.
+        spoken = f.audio is not None and f.kind is FrameKind.MESSAGE
+        if (f.text and not undecodable) or spoken:
             who: Literal["customer", "agent"] = "customer" if f.direction == "sent" else "agent"
             out.append(Entry(f.seq, "message", who, f.text, f.phase, f.latency_ms))
         if f.seq in raised:
@@ -70,7 +84,10 @@ def transcript(record: RunRecord) -> list[Entry]:
             out.append(Entry(f.seq, "decision", detail=f"{interrupt.action}{via}"))
         elif f.kind is FrameKind.RESUME:
             out.append(Entry(f.seq, "decision", detail=_field(f.payload, "action")))
-        if f.kind in _MARKED:
+        if undecodable:
+            reason = _field(f.payload, "detail") or short(f.payload)
+            out.append(Entry(f.seq, "undecodable_audio", "agent", None, f.phase, detail=reason))
+        elif f.kind in _MARKED:
             out.append(Entry(f.seq, _MARKED[f.kind], detail=short(f.payload)))
     return out
 

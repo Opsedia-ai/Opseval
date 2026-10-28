@@ -83,3 +83,7 @@ export type TokensDashboard = G.TokensDashboard;
 export type UsageBucketing = G.UsageFiltersOut["bucket"];
 /** The dashboards' filters as the page holds them; "" is "any". */
 export interface UsageQuery { suite: string; role: string; model: string; since: string; until: string; bucket: UsageBucketing }
+
+/** Recorded audio of a voice attempt (ADR-0053): what each turn can do is the server's call. */
+export type AudioTurn = G.AudioTurnOut;
+export type AttemptAudio = G.AttemptAudioOut;

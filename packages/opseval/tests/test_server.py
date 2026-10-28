@@ -1140,6 +1140,7 @@ def test_a_record_from_before_redaction_says_it_was_never_checked(tmp_path: Path
             "phase": None,
             "latencyMs": None,
             "detail": '{"why": "boom"}',
+            "audio": None,  # not a spoken turn
         }
     ]
 
@@ -1404,11 +1405,14 @@ def test_the_demo_catalogue_cannot_be_edited(tmp_path: Path) -> None:
 
 def _csp_sources_are_local(header: str) -> bool:
     """Every source in every directive is this origin or a keyword, never a host, a scheme
-    or a wildcard (review of #39: a substring check would let a bare font host back in)."""
+    or a wildcard (review of #39: a substring check would let a bare font host back in).
+    ``data:`` only for images, ``blob:`` only for media: recorded audio is fetched with the
+    token and played from a blob URL the page made itself (ADR-0053, V0d)."""
     local = {"'self'", "'none'", "'unsafe-inline'"}
+    extra = {"img-src": {"data:"}, "media-src": {"blob:"}}
     for directive in filter(None, (d.strip() for d in header.split(";"))):
         name, *sources = directive.split()
-        allowed = local | ({"data:"} if name == "img-src" else set())
+        allowed = local | extra.get(name, set())
         if not set(sources) <= allowed:
             return False
     return True
@@ -1421,6 +1425,10 @@ def test_the_csp_check_itself_catches_a_host_coming_back() -> None:
     assert not _csp_sources_are_local("default-src 'self'; font-src 'self' fonts.gstatic.com")
     assert not _csp_sources_are_local("font-src 'self' data:")
     assert not _csp_sources_are_local("script-src *")
+    assert not _csp_sources_are_local("script-src 'self' blob:"), "blob: is for media only"
+    assert not _csp_sources_are_local("media-src 'self' blob: https:")
+    csp = CONSOLE_HEADERS["Content-Security-Policy"]
+    assert "media-src 'self' blob:" in csp and "connect-src 'self'" in csp
 
 
 # --- run control (ADR-0035) ---------------------------------------------------------------------

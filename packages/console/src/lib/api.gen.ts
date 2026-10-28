@@ -93,15 +93,35 @@ export interface StoppedOut {
   detail: string;
 }
 
+/** One spoken turn's recorded audio. Played from ``…/audio/{seq}``. */
+export interface AudioTurnOut {
+  seq: number;
+  speaker: "caller" | "agent";
+  state: "available" | "pruned" | "hashes_only" | "undecodable" | "missing" | "key_missing" | "key_mismatch" | "key_invalid" | "extra_missing" | "too_large";
+  startMs: number;
+  durationMs: number;
+  encrypted: boolean;
+  note: string | null;
+}
+
+/** A voice attempt's audio: every turn, and whether the whole call can be played. */
+export interface AttemptAudioOut {
+  turns: AudioTurnOut[];
+  callState: "available" | "pruned" | "hashes_only" | "undecodable" | "missing" | "key_missing" | "key_mismatch" | "key_invalid" | "extra_missing" | "too_large";
+  callNote: string | null;
+  skipped: number[];
+}
+
 /** One thing that happened in a conversation, in order. */
 export interface TranscriptEntry {
   seq: number;
-  kind: "message" | "checkpoint" | "decision" | "result" | "error" | "notification" | "unknown";
+  kind: "message" | "checkpoint" | "decision" | "result" | "error" | "notification" | "unknown" | "undecodable_audio";
   who: "customer" | "agent" | null;
   text: string | null;
   phase: string | null;
   latencyMs: number | null;
   detail: string | null;
+  audio: AudioTurnOut | null;
 }
 
 export interface ToolCallOut {
@@ -140,6 +160,7 @@ export interface AttemptRecordOut {
   redactedKinds: string[];
   createdArtifacts: ArtifactOut[];
   artifactsChecked: boolean;
+  audio: AttemptAudioOut | null;
 }
 
 /** How many answered calls reported each count (ADR-0066). */

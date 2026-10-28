@@ -131,16 +131,66 @@ class StoppedOut(Api):
     detail: str
 
 
+AudioState = Literal[
+    "available",
+    "pruned",
+    "hashes_only",
+    "undecodable",
+    "missing",
+    "key_missing",
+    "key_mismatch",
+    "key_invalid",
+    "extra_missing",
+    "too_large",
+]
+"""What can be done with a turn's recorded audio, decided by the server (ADR-0053, V0d):
+``available`` plays; every other state is said in words, never drawn as a broken player.
+No key is three states: unset (``key_missing``), malformed (``key_invalid``) and set without
+the voice extra (``extra_missing``). ``too_large`` is a whole call over the size a call is
+built at (its turns still play one by one)."""
+
+
+class AudioTurnOut(Api):
+    """One spoken turn's recorded audio. Played from ``…/audio/{seq}``."""
+
+    seq: int
+    speaker: Literal["caller", "agent"]
+    state: AudioState
+    start_ms: float  # on the attempt's clock
+    duration_ms: float
+    encrypted: bool
+    note: str | None  # why it cannot be played (None when it can)
+
+
+class AttemptAudioOut(Api):
+    """A voice attempt's audio: every turn, and whether the whole call can be played."""
+
+    turns: list[AudioTurnOut]
+    call_state: AudioState  # the whole call (``…/audio/call``): the first turn that stops it
+    call_note: str | None
+    skipped: list[int]  # undecodable agent turns, left as silence in the whole call
+
+
 class TranscriptEntry(Api):
     """One thing that happened in a conversation, in order."""
 
     seq: int
-    kind: Literal["message", "checkpoint", "decision", "result", "error", "notification", "unknown"]
-    who: Literal["customer", "agent"] | None  # only for a message
+    kind: Literal[
+        "message",
+        "checkpoint",
+        "decision",
+        "result",
+        "error",
+        "notification",
+        "unknown",
+        "undecodable_audio",
+    ]
+    who: Literal["customer", "agent"] | None  # a message, or undecodable audio (the agent)
     text: str | None
     phase: str | None
     latency_ms: float | None
     detail: str | None  # the checkpoint, the decision, or an error or result in short
+    audio: AudioTurnOut | None = None  # the spoken turn behind it (message, undecodable_audio)
 
 
 class ToolCallOut(Api):
@@ -180,6 +230,7 @@ class AttemptRecordOut(Api):
     redacted_kinds: list[str]  # the credential kinds taken out; never the values
     created_artifacts: list[ArtifactOut] = []  # what the agent created (FR-REC-01)
     artifacts_checked: bool = False  # False: not looked for (never "nothing created")
+    audio: AttemptAudioOut | None = None  # None: a text attempt, nothing was spoken
 
 
 class UsageReportedOut(Api):

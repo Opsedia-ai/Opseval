@@ -30,6 +30,7 @@ from opseval.scaffold import PLACEHOLDER_URL, TEMPLATES, Answers, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY, describe_params
 from opseval.storage import FileStore, load_result_at
 from opseval.verdicts import EXIT_HARNESS, EXIT_NOT_JUDGED
+from opseval.voice.cli import audio_app
 
 app = typer.Typer(
     add_completion=False,
@@ -379,43 +380,72 @@ def prune(
         Optional[int],  # noqa: UP045
         typer.Option("--older-than", min=1, help="Days. Default: OPSEVAL_RETENTION_DAYS (90)."),
     ] = None,
+    audio_older_than: Annotated[
+        Optional[int],  # noqa: UP045
+        typer.Option(
+            "--audio-older-than",
+            min=1,
+            help="Days for recorded audio. Default: OPSEVAL_AUDIO_RETENTION_DAYS (30).",
+        ),
+    ] = None,
     reports_dir: Annotated[Optional[Path], typer.Option(help="The reports folder.")] = None,  # noqa: UP045
     yes: Annotated[
         bool, typer.Option("--yes", help="Delete. Without it, only show what would go.")
     ] = False,
 ) -> None:
-    """Delete finished runs older than N days (a dry run unless you pass --yes).
+    """Delete finished runs older than N days, and recorded audio older than M days (a dry
+    run unless you pass --yes).
 
-    A run that may still be going is never deleted: only one with a result, an error, or a
-    process on this host that is gone. Nothing but run folders is touched. Exit 3 if any
-    run could not be fully deleted (the others still are, and both are listed).
+    A run that may still be going is never touched: only one with a result, an error, or a
+    process on this host that is gone. Nothing but run folders is touched. Audio goes before
+    the run: the run keeps every turn's hash and transcript, and reads "audio pruned on
+    <date>". Exit 3 if anything could not be fully deleted (the rest still is, and listed).
     """
-    from opseval.retention import apply
+    from opseval.retention import apply, apply_audio, plan_audio
     from opseval.retention import plan as plan_prune
 
     settings = Settings()
     root = reports_dir or Path(settings.reports_dir)
     days = older_than or settings.retention_days
+    audio_days = audio_older_than or settings.audio_retention_days
     store = FileStore(root)
     items = plan_prune(store, older_than_days=days)
     doomed = [i for i in items if i.action == "delete"]
+    sounds = plan_audio(store, older_than_days=audio_days, skip=frozenset(i.run_id for i in doomed))
     for item in items:
         mark = "delete" if item.action == "delete" else "keep  "
         when = item.started_at.date().isoformat() if item.started_at else "unknown date"
         typer.echo(f"  {mark}  {item.run_id}  ({when}: {item.reason})")
-    if not doomed:
-        typer.echo(f"Nothing to prune in {root}: no finished run is older than {days} days.")
+    for sound in sounds:
+        when = sound.started_at.date().isoformat()
+        typer.echo(
+            f"  audio   {sound.run_id}  ({when}: {sound.files} audio file(s), older than "
+            f"{audio_days} days; the record stays)"
+        )
+    if not doomed and not sounds:
+        typer.echo(
+            f"Nothing to prune in {root}: no finished run is older than {days} days, and no "
+            f"recorded audio older than {audio_days} days."
+        )
         return
     if not yes:
-        typer.echo(f"{len(doomed)} run(s) would be deleted. Re-run with --yes to delete them.")
+        typer.echo(
+            f"{len(doomed)} run(s) and the audio of {len(sounds)} run(s) would be deleted. "
+            "Re-run with --yes to delete them."
+        )
         return
+    heard = apply_audio(store, sounds, older_than_days=audio_days)
     outcome = apply(store, items)
-    typer.echo(f"Deleted {len(outcome.deleted)} run(s) from {root}.")
-    for run_id, why in outcome.failed:
+    typer.echo(
+        f"Deleted {len(outcome.deleted)} run(s) and the audio of {len(heard.deleted)} run(s) "
+        f"from {root}."
+    )
+    failed = [*heard.failed, *outcome.failed]
+    for run_id, why in failed:
         typer.secho(f"  could not delete {run_id}: {why}", fg="red", err=True)
-    if outcome.failed:
+    if failed:
         typer.secho(
-            f"{len(outcome.failed)} run(s) could not be fully deleted; remove them by hand.",
+            f"{len(failed)} run(s) could not be fully pruned; remove them by hand.",
             fg="red",
             err=True,
         )
@@ -532,6 +562,7 @@ app.add_typer(telemetry_app, name="telemetry")
 app.add_typer(db_app, name="db")
 app.add_typer(catalogue_app, name="catalogue")
 app.add_typer(task_app, name="task")
+app.add_typer(audio_app, name="audio")
 
 
 def _sample_result() -> SuiteResult:
@@ -889,8 +920,9 @@ def _voice_demo(
             settings.stt_canary_wav = settings.stt_canary_text = None
             settings.stt_canary_language = None
             settings.tts_timeout_seconds = settings.stt_timeout_seconds = 5.0
+            # Synthetic voices may be kept as plain WAV; with OPSEVAL_AUDIO_ENCRYPTION_KEY set
+            # they are sealed like a real run's, so `opseval audio export` can be tried.
             settings.record_audio = "files"
-            settings.audio_encryption_key = None
             what = f"bug: {bug or 'none'}; STT: {speech}"
             typer.echo(f"Speaking refund agent at {url} over {transport} ({what})\n")
             options = RunOptions(

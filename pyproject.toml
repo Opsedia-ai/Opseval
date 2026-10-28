@@ -19,7 +19,7 @@ pytest-opseval = { workspace = true }
 # The wheel's build backend, locked with hashes for the container image (ADR-0038).
 build = ["hatchling>=1.24"]
 dev = [
-  "opseval[server]",
+  "opseval[server,voice]",
   "pytest-opseval",
   "pytest>=8.0",
   "pytest-asyncio>=0.24",

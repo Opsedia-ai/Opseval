@@ -571,7 +571,9 @@ class TestTurnsHangupsAndLatency:
         assert "hung up" in (record.stop_reason or "")
         assert [f.payload.get("event") for f in record.received()][-1] == "hangup"
 
-    async def test_speech_buffered_while_the_caller_speaks_is_a_barge_in_not_zero(self) -> None:
+    async def test_speech_buffered_while_the_caller_speaks_is_a_barge_in_not_zero(
+        self, tmp_path: Path
+    ) -> None:
         # More speech arrives while Opseval is still busy with the caller's next turn (its
         # TTS). Read only afterwards, it would look like an instant answer (latency 0.0); it
         # arrived before the caller finished, so it is a barge-in: latency not measured.
@@ -592,7 +594,10 @@ class TestTurnsHangupsAndLatency:
                 return await super().synthesize(text, voice=voice, language=language)
 
         record = await attempt(
-            reply, speech=kit(tts=SlowTTS(config("tts"))), sc=scenario("one", "two")
+            reply,
+            speech=kit(tts=SlowTTS(config("tts"))),
+            sc=scenario("one", "two"),
+            recorder=AudioRecorder(tmp_path, "v-001", 0, "files"),
         )
         sent = [f for f in record.frames if f.direction == "sent"]
         turns = [f for f in record.received() if f.text]
@@ -603,6 +608,14 @@ class TestTurnsHangupsAndLatency:
         assert record.voice is not None
         barge = [e for e in record.voice.events if e.kind == "barge_in"]
         assert len(barge) == 1 and barge[0].speaker == "agent"
+        # Tied to the turn it opened by its file number, so playback keeps that overlap.
+        assert turns[1].audio is not None and turns[1].audio.path is not None
+        number = int(turns[1].audio.path.rsplit("/", 1)[-1].split("-")[0])
+        assert (barge[0].detail or "").endswith(f"(turn {number})")
+        from opseval.voice.playback import barged
+        from opseval.voice.playback import turns as audio_turns
+
+        assert barged(record, audio_turns(tmp_path, record)) == {turns[1].seq}
 
     async def test_latency_is_measured_from_this_caller_turn_on_the_arrival_clock(self) -> None:
         def reply(_s: str, _a: ScriptedAgent) -> list[tuple[float, VoiceEvent | str]]:
@@ -998,11 +1011,13 @@ class TestRedactionAndPrivacy:
         from opseval.config import Settings
         from opseval.voice import check_audio_privacy
 
-        with pytest.raises(ConfigError, match="OPSEVAL_RECORD_AUDIO=hashes"):
-            check_audio_privacy(Settings())
-        assert check_audio_privacy(Settings(record_audio="hashes")) == "hashes"
-        assert check_audio_privacy(Settings(), synthetic=True) == "files"
-        with pytest.raises(ConfigError, match="next voice step"):
+        with pytest.raises(ConfigError, match="OPSEVAL_AUDIO_ENCRYPTION_KEY"):
+            check_audio_privacy(Settings(audio_encryption_key=None))
+        hashes = check_audio_privacy(Settings(record_audio="hashes", audio_encryption_key=None))
+        assert (hashes.mode, hashes.key) == ("hashes", None)
+        demo = check_audio_privacy(Settings(audio_encryption_key=None), synthetic=True)
+        assert (demo.mode, demo.key) == ("files", None)
+        with pytest.raises(ConfigError, match="32 random bytes"):  # checked even with hashes
             check_audio_privacy(Settings(record_audio="hashes", audio_encryption_key="k" * 32))
 
     def test_an_audio_path_never_leaves_audio(self, tmp_path: Path) -> None:

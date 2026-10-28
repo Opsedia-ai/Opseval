@@ -74,7 +74,7 @@ class AudioRef(Frozen):
     missing evidence; text scorers still rescore from the transcript."""
     encryption: Literal["none", "aes-256-gcm"] = "none"
     """How the file is (or was, before pruning) encrypted at rest. ADR-0053 V0a records the
-    field; V0c writes encrypted files with ``OPSEVAL_AUDIO_ENCRYPTION_KEY``."""
+    field; V0d seals every file with AES-256-GCM under ``OPSEVAL_AUDIO_ENCRYPTION_KEY``."""
     key_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{16,64}$")
     """A fingerprint of the key the file was encrypted with, never the key: it says which key
     opens the file after a rotation. Set exactly when ``encryption`` is not ``none``."""

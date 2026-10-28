@@ -10,8 +10,11 @@ either can be withheld or deleted alone. Every turn's SHA-256 is recorded on its
 duration. Audio the agent sent that could not be decoded is kept as it came (a ``.raw``
 file), or as its hash alone in hashes mode.
 
-Encryption at rest is the next voice step. Until it lands, :func:`check_audio_privacy`
-refuses a run that would write audio files (exit 3), except the demo's synthetic voices.
+Files are encrypted at rest (``voice/crypto.py``, V0d): with ``OPSEVAL_AUDIO_ENCRYPTION_KEY``
+each file is sealed on its own with AES-256-GCM and gets ``.enc`` after its name
+(``003-agent.wav.enc``). :func:`check_audio_privacy` refuses at launch (exit 3) a run that
+would write audio files without the key, except the demo's synthetic voices, which are
+written as plain WAV unless a key is set.
 """
 
 from __future__ import annotations
@@ -27,34 +30,48 @@ from opseval.audio import Codec, duration_ms, to_wav
 from opseval.config import Settings
 from opseval.errors import ConfigError
 from opseval.models.record import AudioRef
+from opseval.voice.crypto import SUFFIX, AudioKey, FilePlace, load_key, parse_key
 
 SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 Mode = Literal["files", "hashes"]
 
 
-def check_audio_privacy(settings: Settings, *, synthetic: bool = False) -> Mode:
+@dataclass(frozen=True)
+class AudioPlan:
+    """What a voice run keeps, and the key that seals it (``None``: plain files, the demo's
+    synthetic voices only, or hashes, which have no file to seal)."""
+
+    mode: Mode
+    key: AudioKey | None = None
+
+
+def check_audio_privacy(settings: Settings, *, synthetic: bool = False) -> AudioPlan:
     """What a voice run may keep, or :class:`ConfigError` (exit 3) before anything is sent.
 
-    A voice can be biometric data, so audio is only ever stored encrypted (ADR-0053). The
-    encryption library is not a core dependency yet, so for now:
+    A voice can be biometric data, so audio is only ever stored encrypted (ADR-0053):
 
-    - ``OPSEVAL_RECORD_AUDIO=hashes``: allowed, no bytes are written;
-    - ``files`` without a key: refused, unless the voices are the demo's own synthetic ones;
-    - a key set: refused, because the run would claim an encryption this version cannot do.
+    - ``OPSEVAL_RECORD_AUDIO=hashes``: no bytes are written (a key set is still checked, so
+      a malformed one is found now rather than on the first run that needs it);
+    - ``files`` with the key: every file sealed with AES-256-GCM (the ``opseval[voice]``
+      extra; without it, refused naming the install command);
+    - ``files`` without a key: refused, unless the voices are the demo's own synthetic ones.
     """
-    if settings.audio_encryption_key is not None:
-        raise ConfigError(
-            "OPSEVAL_AUDIO_ENCRYPTION_KEY is set, but audio encryption arrives in the next voice "
-            "step and this version cannot encrypt: use OPSEVAL_RECORD_AUDIO=hashes for now"
-        )
+    secret = settings.audio_encryption_key
+    raw = secret.get_secret_value() if secret is not None else None
     mode: Mode = settings.record_audio
-    if mode == "files" and not synthetic:
+    if mode == "hashes":
+        if raw is not None and raw.strip():
+            parse_key(raw)
+        return AudioPlan("hashes")
+    key = load_key(raw)
+    if key is None and not synthetic:
         raise ConfigError(
-            "a voice run records the caller's and the agent's audio, which must be encrypted at "
-            "rest (ADR-0053), and this version cannot encrypt yet: set "
+            "a voice run records the caller's and the agent's audio, which is only ever stored "
+            "encrypted (ADR-0053): set OPSEVAL_AUDIO_ENCRYPTION_KEY (32 random bytes, base64 "
+            "or hex: `opseval audio keygen`) with the voice extra installed, or set "
             "OPSEVAL_RECORD_AUDIO=hashes to keep only each turn's hash and metadata"
         )
-    return mode
+    return AudioPlan("files", key)
 
 
 @dataclass
@@ -66,14 +83,33 @@ class AudioRecorder:
     test_id: str
     attempt: int
     mode: Mode = "hashes"
+    key: AudioKey | None = None
+    """Seals every file (AES-256-GCM). ``None`` writes plain files: only the demo's
+    synthetic voices get there (:func:`check_audio_privacy`)."""
+    run_id: str | None = None
+    """Bound into each sealed file. Default: the run folder's name."""
 
     def _relative(self, turn: int, speaker: str, suffix: str) -> str:
         test = SAFE.sub("_", self.test_id).strip(".") or "scenario"
+        if self.key is not None:
+            suffix += SUFFIX
         return f"audio/{test}/attempt{self.attempt}/{turn:03d}-{speaker}{suffix}"
 
-    def _write(self, relative: str, data: bytes) -> str | None:
+    def _sealed(self, path: str | None) -> tuple[Literal["none", "aes-256-gcm"], str | None]:
+        """How a file was written: ``(encryption, key_id)`` for its ``AudioRef``."""
+        if path is None or self.key is None:
+            return "none", None
+        return "aes-256-gcm", self.key.key_id
+
+    def _write(
+        self, relative: str, data: bytes, turn: int, speaker: Literal["caller", "agent"]
+    ) -> str | None:
         if self.mode != "files" or self.run_dir is None:
             return None
+        if self.key is not None:
+            run_id = self.run_id if self.run_id is not None else self.run_dir.name
+            place = FilePlace(run_id, self.test_id, self.attempt, turn, speaker)
+            data = self.key.seal(data, place)
         path = self.run_dir / relative
         root = (self.run_dir / "audio").resolve()
         if root not in path.resolve().parents:  # never outside audio/, whatever the id
@@ -95,8 +131,11 @@ class AudioRecorder:
     ) -> AudioRef:
         """One decoded turn, as a PCM16 WAV (or its hash alone)."""
         wav = to_wav(pcm16, rate)
-        path = self._write(self._relative(turn, speaker, ".wav"), wav)
+        path = self._write(self._relative(turn, speaker, ".wav"), wav, turn, speaker)
+        encryption, key_id = self._sealed(path)
         return AudioRef(
+            encryption=encryption,
+            key_id=key_id,
             path=path,
             speaker=speaker,
             start_ms=max(0.0, start_ms),
@@ -111,9 +150,12 @@ class AudioRecorder:
         self, *, turn: int, data: bytes, codec: Codec, rate: int, start_ms: float
     ) -> AudioRef:
         """Agent audio that could not be decoded: the bytes as they came, never re-encoded."""
-        path = self._write(self._relative(turn, "agent", ".raw"), data)
+        path = self._write(self._relative(turn, "agent", ".raw"), data, turn, "agent")
         width = 2 if codec == "pcm16" else 1
+        encryption, key_id = self._sealed(path)
         return AudioRef(
+            encryption=encryption,
+            key_id=key_id,
             path=path,
             speaker="agent",
             start_ms=max(0.0, start_ms),
@@ -125,4 +167,4 @@ class AudioRecorder:
         )
 
 
-__all__ = ["AudioRecorder", "Mode", "check_audio_privacy"]
+__all__ = ["AudioPlan", "AudioRecorder", "Mode", "check_audio_privacy"]

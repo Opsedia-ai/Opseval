@@ -44,7 +44,7 @@ check: lint typecheck test schemas status reference docs rulesets
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
 	@mkdir -p build/audit
-	uv export --frozen --package opseval --extra server --no-dev --no-emit-workspace --no-hashes \
+	uv export --frozen --package opseval --extra server --extra voice --no-dev --no-emit-workspace --no-hashes \
 		--format requirements-txt -q -o build/audit/requirements-core.txt
 	uv export --frozen --package pytest-opseval --no-dev --no-emit-workspace --no-hashes \
 		--format requirements-txt -q -o build/audit/requirements-pytest.txt

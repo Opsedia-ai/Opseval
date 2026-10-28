@@ -73,7 +73,7 @@ describe("unmeasured values", () => {
 
 describe("the transcript", () => {
   const entry = (kind: TranscriptEntry["kind"]): TranscriptEntry => ({
-    seq: 3, kind, who: null, text: null, phase: null, latencyMs: null, detail: '{"code": 500}',
+    seq: 3, kind, who: null, text: null, phase: null, latencyMs: null, detail: '{"code": 500}', audio: null,
   });
 
   it("never shows an agent error as an ordinary turn", () => {

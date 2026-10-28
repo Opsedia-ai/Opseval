@@ -18,7 +18,6 @@ When a built console is found, it is served from ``/`` on the same origin as the
 from __future__ import annotations
 
 import hmac
-import re
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import date
@@ -38,13 +37,14 @@ from opseval.catalogue import load_profile
 from opseval.config import Settings
 from opseval.errors import ConfigError
 from opseval.plugins import load_scorers
-from opseval.server import actions, views
+from opseval.server import actions, lookup, views
+from opseval.server import audio as audio_api
 from opseval.server import schemas as s
-from opseval.storage import FileStore, UnknownLayout
+from opseval.server.lookup import safe_id
+from opseval.storage import FileStore
 
 API = "/api/v1"
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
-RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
@@ -61,7 +61,7 @@ def _deny(status: int, code: str, message: str) -> JSONResponse:
 
 
 def _run_id(run_id: str) -> str:
-    if not RUN_ID.match(run_id) or ".." in run_id:
+    if not safe_id(run_id):
         raise HTTPException(404, f"no run {run_id!r}")
     return run_id
 
@@ -71,6 +71,8 @@ CONSOLE_HEADERS = {
     # (clickjacking), and it loads nothing from anywhere but its own origin, fonts included.
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; "
+        # Recorded audio is fetched with the token and played from a blob: URL (ADR-0053).
+        "media-src 'self' blob:; "
         "style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; "
         "base-uri 'none'; "
         "form-action 'none'"
@@ -182,6 +184,7 @@ def create_app(
     app.state.token = token
     app.state.ctx = ctx
     expected = f"Bearer {token}".encode()
+    audio_key = audio_api.ServerKey(settings)
 
     @app.middleware("http")
     async def guard(
@@ -307,19 +310,15 @@ def create_app(
 
     @app.get(API + "/runs/{run_id}/attempts/{test_id}/{index}")
     def attempt(run_id: str, test_id: str, index: int) -> s.AttemptRecordOut:
-        if index < 0 or not RUN_ID.match(test_id):
-            raise actions.ApiError(404, "UNKNOWN_ATTEMPT", "no such attempt")
-        try:
-            out = views.attempt_record(ctx.store, _run_id(run_id), test_id, index)
-        except views.RecordUnreadable as exc:
-            raise actions.ApiError(500, "UNREADABLE_RECORD", f"cannot read {exc}") from exc
-        except UnknownLayout as exc:
-            raise actions.ApiError(409, "UNKNOWN_LAYOUT", str(exc)) from exc
-        if out is None:
+        record = lookup.attempt(ctx, run_id, test_id, index)  # read once, for both
+        out = views.attempt_record(ctx.store, run_id, test_id, index, record=record)
+        if out is None:  # pragma: no cover - the record was just read
             raise actions.ApiError(
-                404, "UNKNOWN_ATTEMPT", f"no record of {test_id} attempt {index} in {run_id}"
+                404, "UNKNOWN_ATTEMPT", f"no record of {test_id} attempt {index}"
             )
-        return out
+        return audio_api.with_audio(out, ctx, record, audio_key)
+
+    audio_api.register(app, ctx, audio_key, API)
 
     @app.get(f"{API}/compare")
     def compare(baseline: str, candidate: str) -> s.Comparison:

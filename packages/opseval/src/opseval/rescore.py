@@ -331,7 +331,7 @@ async def rescore_run(
         run_id,
         f"{now:%Y%m%dT%H%M%S%fZ}",
         result,
-        render_html(result, list(records.values()), prof),
+        render_html(result, list(records.values()), prof, run_dir=store.run_dir(run_id)),
         render_junit(result),
     )
     return RescoreOutcome(result=result, info=info, out_dir=out)
