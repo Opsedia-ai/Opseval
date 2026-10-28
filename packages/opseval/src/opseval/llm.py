@@ -86,7 +86,9 @@ def _sum_known(values: list[N | None]) -> N | None:
     return sum(known[1:], known[0]) if known else None
 
 
-def fold_usage(role: str, model: str, events: list[UsageEvent], rate_limited: int = 0) -> ModelUsage:
+def fold_usage(
+    role: str, model: str, events: list[UsageEvent], rate_limited: int = 0
+) -> ModelUsage:
     """One ``(role, model)``'s events folded into a :class:`ModelUsage`.
 
     Token totals and the cost cover the answered calls and are ``None`` unless every one of

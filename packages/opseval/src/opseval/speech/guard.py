@@ -251,7 +251,6 @@ class GuardedSpeechToText:
             return
 
 
-
 def _since(began: float) -> float:
     return round((time.monotonic() - began) * 1000, 1)
 

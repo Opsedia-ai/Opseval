@@ -30,7 +30,9 @@ def builtin_prices() -> PriceTable:
     return PriceTable.model_validate(yaml.safe_load(text))
 
 
-def price_for(model: str, at: datetime | date, table: PriceTable | None = None) -> ModelPrice | None:
+def price_for(
+    model: str, at: datetime | date, table: PriceTable | None = None
+) -> ModelPrice | None:
     """The row in force for ``model`` on ``at``'s day, or ``None`` (no price).
 
     The newest ``effective_from`` not after that day wins; between rows with the same date,
@@ -38,9 +40,9 @@ def price_for(model: str, at: datetime | date, table: PriceTable | None = None) 
     day = at.date() if isinstance(at, datetime) else at
     best: ModelPrice | None = None
     for row in (table or builtin_prices()).prices:
-        if row.effective_from <= day and row.matches(model):
-            if best is None or row.effective_from >= best.effective_from:
-                best = row
+        in_force = row.effective_from <= day and row.matches(model)
+        if in_force and (best is None or row.effective_from >= best.effective_from):
+            best = row
     return best
 
 

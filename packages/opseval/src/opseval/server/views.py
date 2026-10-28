@@ -140,15 +140,7 @@ def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
 
 def load_results(store: FileStore) -> list[SuiteResult]:
     """Every finished run, newest first. A run without result.json is still in flight."""
-    out: list[SuiteResult] = []
-    for folder in store.root.glob("*/result.json"):
-        if not store.layout_known(folder.parent.name):
-            continue  # listed by _in_flight as an error row: shown, never misread
-        try:
-            out.append(store.load_result(folder.parent.name))
-        except (ValueError, OSError):
-            continue  # a half-written or foreign folder is not a run
-    return sorted(out, key=lambda r: r.started_at, reverse=True)
+    return store.finished_results()
 
 
 def _in_flight(store: FileStore) -> list[s.RunSummary]:

@@ -82,6 +82,11 @@ KNOWN_LAYOUTS = frozenset(
     }
 )
 
+PRE_USAGE_LAYOUTS = KNOWN_LAYOUTS - {LAYOUT}
+"""Layouts written before per-call usage (ADR-0066): their records carry no usage events, and
+their usage rows' totals are as written (a count the provider did not report was added as 0).
+Keep this set when LAYOUT moves on: only layouts before 6 belong in it."""
+
 
 class UnknownLayout(ConfigError):
     """A run folder in a layout this version cannot read: written by a newer Opseval."""
@@ -264,6 +269,20 @@ class FileStore:
 
     def load_result(self, run_id: str) -> SuiteResult:
         return load_result_at(self.run_dir(run_id))
+
+    def finished_results(self) -> list[SuiteResult]:
+        """Every finished run this version can read, newest first. A run without
+        ``result.json`` is still in flight; a re-score lives inside its run's folder and is
+        not a run of its own."""
+        out: list[SuiteResult] = []
+        for folder in self.root.glob("*/result.json"):
+            if not self.layout_known(folder.parent.name):
+                continue  # listed by the console as an error row: shown, never misread
+            try:
+                out.append(self.load_result(folder.parent.name))
+            except (ValueError, OSError):
+                continue  # a half-written or foreign folder is not a run
+        return sorted(out, key=lambda r: r.started_at, reverse=True)
 
     def save_record(self, record: RunRecord) -> Path:
         name = f"{SAFE.sub('_', record.test_id)}__attempt{record.attempt_index}.json"
