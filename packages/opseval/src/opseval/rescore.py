@@ -38,6 +38,7 @@ from opseval.models.results import (
     VerdictChange,
 )
 from opseval.models.scenario import Scenario, ScorerSpec
+from opseval.models.usage import AttemptUsage
 from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
@@ -269,7 +270,8 @@ async def rescore_run(
             record = records.get((old.test_id, a.attempt_index))
             if record is None:
                 raise ConfigError(f"record missing for {old.test_id} attempt {a.attempt_index}")
-            scores = await rescorer.score(record, scenario, prof, a)
+            with meter.attempt(old.test_id, a.attempt_index):
+                scores = await rescorer.score(record, scenario, prof, a)
             before_scores += a.scores
             after_scores += scores
             attempts.append(attempt_verdict(record, scores, a.record_path))
@@ -313,6 +315,11 @@ async def rescore_run(
         gate=new_gate,
         exit_code=exit_code(tests, load_errors=len(original.load_errors), gate=new_gate),
         usage=meter.snapshot(),
+        usage_events=meter.outside_attempts(),
+        attempt_usage=[
+            AttemptUsage(test_id=test_id, attempt_index=index, events=events)
+            for (test_id, index), events in meter.by_attempt().items()
+        ],
         config_digest=config_digest(settings),
         load_errors=original.load_errors,
         rescore=info,

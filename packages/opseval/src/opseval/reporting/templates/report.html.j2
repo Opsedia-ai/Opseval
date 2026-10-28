@@ -164,9 +164,11 @@ forbidden, no matching call, no rule to apply. The passes are honest and they ar
 {% if result.usage %}
 <h2>Model usage</h2>
 {% macro measured(v, fmt='%s') %}{% if v is none %}<span class="muted" title="not measured">—</span>{% else %}{{ fmt % v }}{% endif %}{% endmacro %}
-<table><tr><th>Role</th><th>Model</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th><th>Audio in (s)</th><th>Audio out (s)</th><th>Characters</th><th>Cost (USD)</th></tr>
-{% for u in result.usage %}<tr><td>{{ u.role }}</td><td>{{ u.model }}</td><td>{{ u.calls }}</td><td>{{ measured(u.input_tokens) }}</td><td>{{ measured(u.output_tokens) }}</td><td>{{ measured(u.audio_in_seconds, '%.1f') }}</td><td>{{ measured(u.audio_out_seconds, '%.1f') }}</td><td>{{ measured(u.characters) }}</td><td>{{ 'no rate' if u.cost_usd is none else '%.4f' % u.cost_usd }}</td></tr>{% endfor %}
+{% macro counted(u, v, field) %}{% if v is not none %}{{ v }}{% elif u.reported is not none and u.reported[field] > 0 %}<span class="muted" title="not every answered call reported it, so there is no total">— ({{ u.reported[field] }} of {{ u.reported.answered }} calls reported)</span>{% else %}{{ measured(v) }}{% endif %}{% endmacro %}
+<table><tr><th>Role</th><th>Model</th><th>Calls</th><th>Input tokens</th><th>Cached input</th><th>Output tokens</th><th>Reasoning</th><th>Audio in (s)</th><th>Audio out (s)</th><th>Characters</th><th>Cost (USD)</th></tr>
+{% for u in result.usage %}<tr><td>{{ u.role }}</td><td>{{ u.model }}</td><td>{{ u.calls }}{% if u.failed_calls %} <span class="muted">({{ u.failed_calls }} failed)</span>{% endif %}</td><td>{{ counted(u, u.input_tokens, 'input_tokens') }}</td><td>{{ counted(u, u.cached_input_tokens, 'cached_input_tokens') }}</td><td>{{ counted(u, u.output_tokens, 'output_tokens') }}</td><td>{{ counted(u, u.reasoning_tokens, 'reasoning_tokens') }}</td><td>{{ measured(u.audio_in_seconds, '%.1f') }}</td><td>{{ measured(u.audio_out_seconds, '%.1f') }}</td><td>{{ measured(u.characters) }}</td><td>{% if u.cost_usd is not none %}{{ '%.4f' % u.cost_usd }}{% elif u.reported is not none and u.reported.cost > 0 %}<span class="muted">no total ({{ u.reported.cost }} of {{ u.reported.answered }} calls priced)</span>{% else %}no price{% endif %}</td></tr>{% endfor %}
 </table>
+{% if result.usage | selectattr('reported', 'none') | list %}<p class="muted">Rows without per-call counts were written before Opseval recorded usage per call: their totals are kept as written, when a count the provider did not report was added as 0.</p>{% endif %}
 {% endif %}
 
 <h2>Configuration (secrets redacted)</h2>

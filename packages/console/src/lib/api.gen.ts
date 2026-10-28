@@ -142,6 +142,16 @@ export interface AttemptRecordOut {
   artifactsChecked: boolean;
 }
 
+/** How many answered calls reported each count (ADR-0066). */
+export interface UsageReportedOut {
+  answered: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  cachedInputTokens: number;
+  cost: number;
+}
+
 export interface UsageOut {
   role: string;
   model: string;
@@ -152,6 +162,10 @@ export interface UsageOut {
   audioInSeconds: number | null;
   audioOutSeconds: number | null;
   characters: number | null;
+  reasoningTokens: number | null;
+  cachedInputTokens: number | null;
+  failedCalls: number;
+  reported: UsageReportedOut | null;
 }
 
 export interface SinkOut {
@@ -250,11 +264,139 @@ export interface RunUsage {
   run: string;
   simulatorTokens: number | null;
   judgeTokens: number | null;
+  simulatorTokensComplete: boolean;
+  judgeTokensComplete: boolean;
   costUsd: number | null;
   costComplete: boolean;
   audioInSeconds: number | null;
   audioOutSeconds: number | null;
   characters: number | null;
+  perCall: boolean;
+}
+
+/** A sum and what it covers (ADR-0052). ``value`` null: nothing was measured, never 0. ``complete`` false with a value: a floor, drawn as partial. */
+export interface MeasuredOut {
+  value: number | null;
+  measured: number;
+  of: number;
+  complete: boolean;
+}
+
+/** A sum over the measured units of a denominator. ``value`` null: not measured. ``complete`` false: the numerator was a floor, so the ratio is too (drawn with "≥"). */
+export interface RatioOut {
+  value: number | null;
+  measured: number;
+  of: number;
+  complete: boolean;
+}
+
+export interface UsageBucket {
+  key: string;
+  label: string;
+  start: string;
+  runs: number;
+}
+
+/** One group's values, one per bucket, in the order of the answer's ``buckets``. */
+export interface UsageSeries {
+  group: string;
+  points: MeasuredOut[];
+  total: MeasuredOut;
+}
+
+export interface UsageScopeOut {
+  runs: number;
+  calls: number;
+  failedCalls: number;
+  attempts: number;
+  attemptsWithoutUsage: number;
+  rescoreCalls: number;
+  legacyRuns: string[];
+  unreadableRuns: string[];
+  rescoredRuns: string[];
+  unreadableRescores: string[];
+  inFlightExcluded: boolean;
+}
+
+export interface UsageFiltersOut {
+  suite: string | null;
+  model: string | null;
+  role: string | null;
+  since: string | null;
+  until: string | null;
+  bucket: "day" | "week" | "run";
+}
+
+export interface UsageFilterOptions {
+  suites: string[];
+  roles: string[];
+  models: string[];
+  serverOnly: string[];
+}
+
+export interface RunCostOut {
+  run: string;
+  suite: string;
+  startedAt: string;
+  costUsd: MeasuredOut;
+  passedTests: number;
+  costPerPassedTest: RatioOut;
+  perCall: boolean;
+}
+
+export interface ScenarioCostOut {
+  scenario: string;
+  attempts: number;
+  attemptsMeasured: number;
+  costUsd: MeasuredOut;
+  costPerAttempt: RatioOut;
+  passedRuns: number;
+  costPerPassedTest: RatioOut;
+}
+
+/** Evaluation spend (ADR-0066): never the agent's own cost, never $0 for "no price". */
+export interface CostDashboard {
+  filters: UsageFiltersOut;
+  options: UsageFilterOptions;
+  scope: UsageScopeOut;
+  buckets: UsageBucket[];
+  byRole: UsageSeries[];
+  byModel: UsageSeries[];
+  totalUsd: MeasuredOut;
+  costPerPassedTest: RatioOut;
+  passedTests: number;
+  runs: RunCostOut[];
+  scenarios: ScenarioCostOut[];
+  sources: Record<string, number>;
+}
+
+export interface TokenTotalsOut {
+  input: MeasuredOut;
+  cachedInput: MeasuredOut;
+  output: MeasuredOut;
+  reasoning: MeasuredOut;
+  total: MeasuredOut;
+}
+
+export interface ScenarioTokensOut {
+  scenario: string;
+  attempts: number;
+  attemptsMeasured: number;
+  tokens: MeasuredOut;
+  tokensPerAttempt: RatioOut;
+}
+
+export interface TokensDashboard {
+  filters: UsageFiltersOut;
+  options: UsageFilterOptions;
+  scope: UsageScopeOut;
+  buckets: UsageBucket[];
+  byKind: UsageSeries[];
+  byModel: UsageSeries[];
+  totals: TokenTotalsOut;
+  reasoningShare: RatioOut;
+  tokensPerAttempt: RatioOut;
+  scenarios: ScenarioTokensOut[];
 }
 
 export interface TrendPoint {

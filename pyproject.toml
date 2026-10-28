@@ -142,8 +142,23 @@ source_modules = [
   "opseval.reporting",
   "opseval.rescore",
   "opseval.calibrate",
+  "opseval.analytics.files",
+  "opseval.pricing",
 ]
 forbidden_modules = ["opseval.db", "sqlalchemy", "asyncpg", "alembic"]
+
+[[tool.importlinter.contracts]]
+name = "Analytics answers the API, never depends on it, and never touches a conversation (ADR-0052)"
+type = "forbidden"
+source_modules = ["opseval.analytics", "opseval.pricing"]
+forbidden_modules = [
+  "opseval.server",
+  "opseval.runner",
+  "opseval.driver",
+  "opseval.transport",
+  "opseval.simulator",
+  "opseval.scoring",
+]
 
 [tool.bandit]
 # opseval/testing.py is the plugin contract test kit: its assertions are its product,

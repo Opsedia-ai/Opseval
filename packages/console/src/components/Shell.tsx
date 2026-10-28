@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { BarChart3, ClipboardList, Cog, FlaskConical, GitCompareArrows, Layers, ListChecks, MessageSquare, Play, PieChart, Upload } from "lucide-react";
+import { BarChart3, ClipboardList, Cog, Coins, DollarSign, FlaskConical, GitCompareArrows, Layers, ListChecks, MessageSquare, Play, PieChart, Upload } from "lucide-react";
 import type { ReactNode } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
@@ -13,7 +13,9 @@ const nav: { heading: string; items: { to: string; label: string; icon: ReactNod
   { heading: "Results", items: [
     { to: "/compare", label: "Compare runs", icon: <GitCompareArrows size={18} /> },
     { to: "/trend", label: "Trend", icon: <BarChart3 size={18} /> },
-    { to: "/usage", label: "Usage & cost", icon: <PieChart size={18} /> },
+    { to: "/cost", label: "Cost", icon: <DollarSign size={18} /> },
+    { to: "/tokens", label: "Tokens", icon: <Coins size={18} /> },
+    { to: "/usage", label: "Usage per run", icon: <PieChart size={18} /> },
   ] },
   { heading: "Author", items: [
     { to: "/simulator", label: "Simulator", icon: <MessageSquare size={18} /> },

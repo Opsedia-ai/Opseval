@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from opseval.analytics import AnalyticsStore, UsageFilter
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.errors import ConfigError
@@ -30,7 +31,7 @@ from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import FileStore, process_gone
+from opseval.storage import PRE_USAGE_LAYOUTS, FileStore, process_gone
 from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
 
@@ -140,15 +141,7 @@ def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
 
 def load_results(store: FileStore) -> list[SuiteResult]:
     """Every finished run, newest first. A run without result.json is still in flight."""
-    out: list[SuiteResult] = []
-    for folder in store.root.glob("*/result.json"):
-        if not store.layout_known(folder.parent.name):
-            continue  # listed by _in_flight as an error row: shown, never misread
-        try:
-            out.append(store.load_result(folder.parent.name))
-        except (ValueError, OSError):
-            continue  # a half-written or foreign folder is not a run
-    return sorted(out, key=lambda r: r.started_at, reverse=True)
+    return store.finished_results()
 
 
 def _in_flight(store: FileStore) -> list[s.RunSummary]:
@@ -277,6 +270,12 @@ def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
                 audio_in_seconds=u.audio_in_seconds,
                 audio_out_seconds=u.audio_out_seconds,
                 characters=u.characters,
+                reasoning_tokens=u.reasoning_tokens,
+                cached_input_tokens=u.cached_input_tokens,
+                failed_calls=u.failed_calls,
+                reported=s.UsageReportedOut.model_validate(u.reported.model_dump())
+                if u.reported
+                else None,
             )
             for u in r.usage
         ],
@@ -308,35 +307,55 @@ def _count(values: list[int | None]) -> int | None:
 def usage(store: FileStore) -> list[s.RunUsage]:
     """Per run: tokens per LLM role, speech audio and characters, and the cost. The cost is
     what the priced models cost, with ``cost_complete`` saying whether every model was priced:
-    one unpriced model makes the total a floor, never hides the part that is known."""
+    one unpriced model makes the total a floor, never hides the part that is known. Token
+    totals carry the same flag (``*_tokens_complete``). Costs are the ones stored with each
+    call when it was made, as on the dashboards (ADR-0066)."""
     rows: list[s.RunUsage] = []
     for r in load_results(store):
 
-        def tokens(role: str, r: SuiteResult = r) -> int | None:
-            hits = [u for u in r.usage if u.role == role]
-            return _count([_tokens(u) for u in hits]) if hits else None
+        def tokens(role: str, r: SuiteResult = r) -> tuple[int | None, bool]:
+            """The role's tokens over the models that reported them, and whether every model
+            did (a model whose calls did not all report them is left out: a floor)."""
+            counts = [_tokens(u) for u in r.usage if u.role == role]
+            return _count(counts), bool(counts) and None not in counts
 
         costs = [u.cost_usd for u in r.usage]
         known = _total(costs)
+        simulator, judge = tokens("simulator"), tokens("judge")
         rows.append(
             s.RunUsage(
                 run=r.run_id,
-                simulator_tokens=tokens("simulator"),
-                judge_tokens=tokens("judge"),
+                simulator_tokens=simulator[0],
+                simulator_tokens_complete=simulator[1],
+                judge_tokens=judge[0],
+                judge_tokens_complete=judge[1],
                 cost_usd=round(known, 4) if known is not None else None,
                 cost_complete=bool(costs) and all(c is not None for c in costs),
                 audio_in_seconds=_total([u.audio_in_seconds for u in r.usage]),
                 audio_out_seconds=_total([u.audio_out_seconds for u in r.usage]),
                 characters=_count([u.characters for u in r.usage]),
+                per_call=store.layout(r.run_id) not in PRE_USAGE_LAYOUTS,
             )
         )
     return rows
 
 
 def _tokens(u: ModelUsage) -> int | None:
-    if u.input_tokens is None and u.output_tokens is None:
+    """A row's input plus output tokens; ``None`` unless both are known (a missing count is
+    never added as 0, ADR-0066)."""
+    if u.input_tokens is None or u.output_tokens is None:
         return None
-    return (u.input_tokens or 0) + (u.output_tokens or 0)
+    return u.input_tokens + u.output_tokens
+
+
+def cost_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.CostDashboard:
+    """The Cost dashboard (ADR-0066): every number from the analytics store."""
+    return s.CostDashboard.model_validate(analytics.cost(filters).model_dump(mode="json"))
+
+
+def tokens_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.TokensDashboard:
+    """The Tokens dashboard (ADR-0066)."""
+    return s.TokensDashboard.model_validate(analytics.tokens(filters).model_dump(mode="json"))
 
 
 def trend(store: FileStore) -> list[s.TrendPoint]:

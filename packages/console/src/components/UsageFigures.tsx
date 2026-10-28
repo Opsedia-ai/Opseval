@@ -7,6 +7,12 @@ import type { RunUsage, Usage } from "../lib/types";
 export const Amount = ({ v, digits }: { v: number | null; digits?: number }) =>
   v === null ? <NotMeasured text="—" /> : <Mono>{digits === undefined ? v.toLocaleString() : v.toFixed(digits)}</Mono>;
 
+/** A token total: unknown, complete, or a floor ("≥": a model's calls did not all report it). */
+export function Tokens({ v, complete }: { v: number | null; complete: boolean }) {
+  if (v === null) return <NotMeasured text="—" />;
+  return <span data-partial={complete ? undefined : "true"} title={complete ? undefined : "partial: a model did not report its tokens"}><Mono>{complete ? "" : "≥ "}{v.toLocaleString()}</Mono></span>;
+}
+
 /** The run's cost: unknown, complete, or a floor (some model had no price). */
 export function Cost({ usd, complete, digits = 2 }: { usd: number | null; complete: boolean; digits?: number }) {
   if (usd === null) return <NotMeasured />;
@@ -25,6 +31,8 @@ export function UsageLine({ u }: { u: Usage }) {
   const parts: [string, number | null, number | undefined][] = [
     ["tokens in", u.inputTokens, undefined],
     ["tokens out", u.outputTokens, undefined],
+    ["reasoning", u.reasoningTokens, undefined],
+    ["cached in", u.cachedInputTokens, undefined],
     ["s heard", u.audioInSeconds, 1],
     ["s spoken", u.audioOutSeconds, 1],
     ["characters", u.characters, undefined],

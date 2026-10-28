@@ -646,7 +646,7 @@ class TestRunnerVoiceRules:
         assert not (run_dir / "audio").exists()
         records = list((run_dir / "records").glob("*.json"))
         assert records and '"sha256"' in records[0].read_text()
-        assert json.loads((run_dir / "manifest.json").read_text())["layout"] == "opseval-runs/5"
+        assert json.loads((run_dir / "manifest.json").read_text())["layout"] == "opseval-runs/6"
 
 
 # --- opseval demo --voice ----------------------------------------------------------------
