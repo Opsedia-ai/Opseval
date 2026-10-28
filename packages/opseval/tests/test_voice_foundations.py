@@ -19,8 +19,9 @@ import pytest
 from pydantic import ValidationError
 
 from opseval import audio
-from opseval.errors import TransportTimeout
+from opseval.errors import ConfigError, TransportTimeout, UnsupportedCapability
 from opseval.models.record import (
+    AUDIO_RATES,
     AudioRef,
     FrameRecord,
     RunRecord,
@@ -30,7 +31,9 @@ from opseval.models.record import (
     VoiceTimeline,
     WordTiming,
 )
+from opseval.redaction import redact_frame, redact_words
 from opseval.transport.audio import (
+    DTMF,
     AgentAudio,
     AgentSpeechEnd,
     AttemptClock,
@@ -81,6 +84,48 @@ def test_pcm16_passes_through_and_odd_bytes_are_refused() -> None:
         audio.decode(b"\x01", "pcm16")
 
 
+def test_resampling_rates_and_lengths_are_checked_on_every_path() -> None:
+    for bad in (0, -8_000, 8_000.0, True):
+        with pytest.raises(ValueError, match="positive whole number"):
+            audio.resample(b"", bad, 16_000)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="positive whole number"):
+            audio.Resampler(16_000, bad)  # type: ignore[arg-type]
+    for rates in ((8_000, 8_000), (8_000, 16_000)):
+        with pytest.raises(audio.AudioDecodeError, match="even number"):
+            audio.resample(b"\x01", *rates)
+
+
+def test_streaming_resampling_matches_one_shot_with_no_drift() -> None:
+    speech = tone(1024 * 1000 * 1000 // 44_100, rate=44_100, hz=300)[: 1024 * 1000 * 2]
+    speech += bytes(1024 * 1000 * 2 - len(speech))
+    one_shot = audio.resample(speech, 44_100, 16_000)
+    assert abs(len(one_shot) // 2 - round(1024 * 1000 * 16_000 / 44_100)) <= 1
+    stream = audio.Resampler(44_100, 16_000)
+    chunks = [stream.feed(speech[i : i + 2048]) for i in range(0, len(speech), 2048)]
+    chunked = b"".join(chunks) + stream.flush()
+    # Same bytes, so no drift and no discontinuity where one chunk meets the next.
+    assert chunked == one_shot
+    assert sum(len(c) for c in chunks) > 0  # it streams, rather than holding it all
+
+
+@pytest.mark.parametrize(
+    ("src", "dst"), [(8_000, 16_000), (16_000, 8_000), (8_000, 44_100), (48_000, 22_050)]
+)
+def test_odd_chunks_resample_as_one_buffer(src: int, dst: int) -> None:
+    speech = tone(300, rate=src)
+    stream = audio.Resampler(src, dst)
+    out, i = b"", 0
+    for size in [2, 6, 160, 2, 322, 1000] * 100:
+        out += stream.feed(speech[i : i + size])
+        i += size
+    out += stream.feed(speech[i:]) + stream.flush()
+    one_shot = audio.resample(speech, src, dst)
+    assert out == one_shot
+    assert abs(len(one_shot) // 2 - round(len(speech) // 2 * dst / src)) <= 1
+    assert stream.flush() == b""  # a flushed resampler starts over
+    assert audio.Resampler(src, src).feed(speech[:4]) == speech[:4]
+
+
 def test_resampling_keeps_duration_and_level() -> None:
     speech = tone(500, rate=16_000)
     down = audio.resample(speech, 16_000, 8_000)
@@ -117,6 +162,30 @@ def test_wav_round_trip_stereo_mix_down_and_broken_files() -> None:
     for broken in (b"not audio", eight_bit.getvalue()):
         with pytest.raises(audio.AudioDecodeError):
             audio.from_wav(broken)
+    with pytest.raises(audio.AudioDecodeError, match="11025 Hz is not supported"):
+        audio.from_wav(audio.to_wav(speech, 11_025))
+    # Cut short: the data is 6 bytes, one and a half stereo frames.
+    with pytest.raises(audio.AudioDecodeError, match="whole number of 2-channel frames"):
+        audio.from_wav(stereo.getvalue()[:-2])
+    with pytest.raises(audio.AudioDecodeError, match="cut short"):
+        audio.from_wav(stereo.getvalue()[:-4])
+
+
+def test_codec_tables_warm_up_and_stay_bit_exact() -> None:
+    for codec in audio.CODECS:
+        audio.warm(codec)
+    with pytest.raises(ValueError, match="codec"):
+        audio.warm("opus")  # type: ignore[arg-type]
+    for codec in ("mulaw", "alaw"):
+        table = audio._decode_table(codec)  # type: ignore[arg-type]
+        assert len(b"".join(table)) == 512
+        with pytest.raises(audio.AudioDecodeError, match="even number"):
+            audio.encode(b"\x01\x02\x03", codec)  # type: ignore[arg-type]
+        assert audio.decode(b"", codec) == b"" == audio.encode(b"", codec)  # type: ignore[arg-type]
+
+
+def test_the_record_accepts_exactly_the_audio_rates() -> None:
+    assert AUDIO_RATES == audio.RATES
 
 
 def test_an_audio_format_is_checked() -> None:
@@ -163,8 +232,12 @@ async def test_a_voice_transport_needs_only_the_contract() -> None:
     with pytest.raises(TransportTimeout):  # the agent said nothing more: its fault
         await session.next_event(0.01)
     assert session.transport_events() == () and session.turns == 1
-    with pytest.raises(NotImplementedError, match="cannot send DTMF"):
+    assert DTMF not in Scripted.capabilities
+    # Pressing keys on a transport without DTMF is configuration (exit 3), never dropped and
+    # never the agent's fault.
+    with pytest.raises(UnsupportedCapability, match="cannot send DTMF") as caught:
         await session.send_dtmf("1")
+    assert isinstance(caught.value, ConfigError)
 
 
 def test_the_attempt_clock_is_monotonic_milliseconds() -> None:
@@ -210,10 +283,107 @@ def test_an_audio_path_never_leaves_the_run_folder(path: str) -> None:
 
 def test_hashes_only_and_pruned_audio_are_still_evidence() -> None:
     kept = ref(path=None)
-    assert kept.path is None and kept.sha256 == "a" * 64
-    assert ref(path=None, pruned=True).pruned
+    assert kept.path is None and kept.sha256 == "a" * 64 and kept.hashes_only
+    pruned = ref(path=None, pruned=True)
+    assert pruned.pruned and not pruned.hashes_only
+    assert not ref().hashes_only
     with pytest.raises(ValidationError):
         ref(sha256="not-a-hash")
+
+
+@pytest.mark.parametrize(
+    ("over", "message"),
+    [
+        ({"start_ms": -1.0, "end_ms": 5.0}, "greater than or equal"),
+        ({"start_ms": 10.0, "end_ms": 9.0}, "end before it starts"),
+        ({"rate": 11_025}, "unsupported audio rate"),
+        ({"pruned": True}, "path must be None"),
+        ({"encryption": "aes-256-gcm"}, "key_id"),
+        ({"key_id": "0123456789abcdef"}, "key_id"),
+        ({"key_id": "NOT-A-FINGERPRINT", "encryption": "aes-256-gcm"}, "pattern"),
+        (
+            {"path": None, "encryption": "aes-256-gcm", "key_id": "0123456789abcdef"},
+            "nothing is encrypted",
+        ),
+    ],
+)
+def test_an_audio_ref_is_consistent(over: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ref(**over)
+
+
+def test_encrypted_audio_names_its_key_never_the_key() -> None:
+    sealed = ref(encryption="aes-256-gcm", key_id="0123456789abcdef")
+    assert sealed.key_id == "0123456789abcdef" and ref().encryption == "none"
+    gone = ref(path=None, pruned=True, encryption="aes-256-gcm", key_id="0123456789abcdef")
+    assert gone.encryption == "aes-256-gcm"  # it was encrypted before retention removed it
+    with pytest.raises(ValidationError, match="unsupported audio rate"):
+        VoiceTimeline(codec="pcm16", rate=11_025)
+
+
+# --- credentials spoken aloud (ADR-0033 for word timings) --------------------------------
+
+TOKEN = "sk-proj-abcDEF1234567890xyz"
+
+
+def words(*spoken: str) -> tuple[WordTiming, ...]:
+    return tuple(
+        WordTiming(word=w, start_ms=100.0 * i, end_ms=100.0 * i + 90) for i, w in enumerate(spoken)
+    )
+
+
+def said(timings: tuple[WordTiming, ...]) -> list[str]:
+    return [t.word for t in timings]
+
+
+def test_a_token_spoken_as_one_word_is_redacted() -> None:
+    clean, kinds = redact_words(words("my", "key", "is", TOKEN + ","))
+    assert said(clean) == ["my", "key", "is", "[redacted:openai_key]"]
+    assert kinds == ["openai_key"]
+    assert [t.start_ms for t in clean] == [0.0, 100.0, 200.0, 300.0]  # timings are kept
+
+
+def test_a_token_spoken_word_by_word_is_redacted() -> None:
+    clean, kinds = redact_words(words("my", "key", "is", "sk-", "proj-", "abcDEF", "1234567890xyz"))
+    assert said(clean)[:3] == ["my", "key", "is"]
+    assert set(said(clean)[3:]) == {"[redacted:openai_key]"}
+    assert kinds and set(kinds) == {"openai_key"}
+    assert not any(piece in " ".join(said(clean)) for piece in ("abcDEF", "1234567890"))
+    # Pieces separated by spaces, as some speech-to-text writes a spelled-out header.
+    clean, _ = redact_words(words("Bearer", "abcdef0123456789XYZ", "please"))
+    assert said(clean) == ["[redacted:bearer_token]", "[redacted:bearer_token]", "please"]
+
+
+def test_words_follow_the_turn_text_and_ordinary_words_stay() -> None:
+    # The words do not join back into the token, but the turn's text does.
+    spoken = words("a", "test", "key", "sk", "test", "abc1234567890XYZabc", "ok")
+    text = "a test key sk_test_abc1234567890XYZabc ok"
+    clean, kinds = redact_words(spoken, text)
+    assert said(clean) == ["a", "test", "key"] + ["[redacted:stripe_key]"] * 3 + ["ok"]
+    assert set(kinds) == {"stripe_key"}
+    assert redact_words(words("the", "password", "is", "forgotten")) == (
+        words("the", "password", "is", "forgotten"),
+        [],
+    )
+
+
+def test_the_driver_pass_covers_word_timings() -> None:
+    frame = FrameRecord(
+        seq=0,
+        at=datetime(2026, 10, 28, tzinfo=UTC),
+        direction="sent",
+        kind="message",
+        payload={"note": f"key {TOKEN}"},
+        text=f"my key is {TOKEN}",
+        transcript=TranscriptInfo(source="opseval", words=words("my", "key", "is", TOKEN)),
+    )
+    clean, kinds = redact_frame(frame)
+    dumped = clean.model_dump_json()
+    assert TOKEN not in dumped and "1234567890" not in dumped
+    assert kinds.count("openai_key") == 3  # payload, text, words: each counted
+    assert clean.transcript and said(clean.transcript.words)[-1] == "[redacted:openai_key]"
+    untouched = frame.model_copy(update={"text": "hello", "payload": {}, "transcript": None})
+    assert redact_frame(untouched) == (untouched, [])
 
 
 def test_a_voice_record_round_trips_and_a_text_record_is_unchanged() -> None:
