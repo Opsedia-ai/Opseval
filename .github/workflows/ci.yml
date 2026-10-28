@@ -48,6 +48,8 @@ jobs:
         run: uv run opseval schemas --check
       - name: Project status percentages match their table (docs/STATUS.md)
         run: uv run python scripts/project_status.py --check
+      - name: The ruleset for main requires exactly these CI checks (ADR-0065)
+        run: bash scripts/apply_rulesets.sh --dry-run
       - name: Reference pages match the code (docs/reference/)
         run: uv run python scripts/reference_docs.py --check
       - name: Documentation site builds strictly (no broken link or anchor)
@@ -71,6 +73,25 @@ jobs:
           set +e
           uv run opseval demo --repeats 1 --bug crash
           test $? -eq 3
+
+  # DCO (ADR-0065): every commit in the pull request, and only those (BASE..HEAD, never the
+  # history before it), has a Signed-off-by line matching its author. GitHub's own merge
+  # commits are skipped. No app and no token, so it runs the same on a fork's pull request.
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Every commit in the pull request is signed off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check_dco.py "$BASE" "$HEAD"
 
   console:
     # The web console typechecks, passes its tests (the one rule as the console draws it, and the

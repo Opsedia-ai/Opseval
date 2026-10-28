@@ -1,10 +1,16 @@
-.PHONY: install lint typecheck test check audit demo schemas status reference docs console-types console console-check db-up db-down
+.PHONY: install hooks lint typecheck test check audit demo schemas status reference docs rulesets console-types console console-check db-up db-down
 
 # Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
 ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
 
 install:
 	uv sync
+
+# The pre-push hook (ADR-0065): refuses a push to main, runs ruff and the schema check first.
+# Sets core.hooksPath in this clone's .git/config only.
+hooks:
+	git config --local core.hooksPath scripts/githooks
+	@echo "pre-push hook installed (scripts/githooks/pre-push)"
 
 lint:
 	uv run ruff check .
@@ -18,7 +24,7 @@ typecheck:
 test:
 	uv run pytest --cov=opseval --cov=pytest_opseval --cov-report=term-missing --cov-fail-under=85
 
-check: lint typecheck test schemas status reference docs
+check: lint typecheck test schemas status reference docs rulesets
 
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
@@ -50,6 +56,11 @@ status:
 # docs/reference/ is generated from the scorer registry and config.Settings; a stale page fails.
 reference:
 	uv run python scripts/reference_docs.py --check
+
+# .github/rulesets/main.json is a valid payload and requires exactly the checks ci.yml reports
+# (ADR-0065). A dry run: nothing is sent to GitHub.
+rulesets:
+	bash scripts/apply_rulesets.sh --dry-run >/dev/null
 
 # The documentation site, built strictly (a broken link or anchor fails). Not deployed before Gate 0.
 # Never add --quiet: it hides the warnings that strict mode counts, so nothing would fail.

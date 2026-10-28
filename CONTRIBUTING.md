@@ -17,6 +17,7 @@ Thank you for helping build Opseval! This guide explains how to propose changes 
 git clone https://github.com/Opsedia-ai/Opseval.git
 cd Opseval
 uv sync            # installs the workspace with dev dependencies
+make hooks         # the pre-push hook: refuses a push to main, runs ruff and the schema check
 make check         # ruff, import-linter, bandit, mypy --strict, pytest (coverage >= 85%)
 make audit         # needs network: pip-audit and licence check of runtime dependencies
 make demo          # runs the example refund agent + smoke suite
@@ -45,6 +46,21 @@ git commit -s -m "feat(scoring): add tools.args_valid scorer"
 ```
 
 By signing off, you certify that you wrote the contribution, or otherwise have the right to submit it under the Apache-2.0 licence.
+
+The sign-off must carry the email your commits are authored with (`git config user.email`); the name may differ. The `dco` CI job (`scripts/check_dco.py`) checks every commit of a pull request, and only those, and fails the pull request if one is not signed off. Merge commits GitHub makes ("Update branch") are skipped; a merge you make yourself needs `git merge --signoff`. To sign off commits already on your branch:
+
+```bash
+git rebase --signoff origin/main   # adds the line to every commit since main
+git push --force-with-lease
+```
+
+Dependabot signs off with its own address, which the check accepts. You can run the check yourself: `python3 scripts/check_dco.py origin/main HEAD`.
+
+## `main` is protected
+
+Changes reach `main` only through a pull request ([ADR-0065](docs/adr/0065-protecting-main.md)). `make hooks` sets `core.hooksPath` to `scripts/githooks` in your clone, so `git push` to `main` is refused locally, and any other push first runs ruff and the schema drift check (`SKIP_PRE_PUSH_CHECKS=1` skips those checks, never the refusal). The hook guards against mistakes; it is not a control.
+
+On GitHub, `main` is protected by the ruleset in `.github/rulesets/main.json`: a pull request with an approving code-owner review, every CI job passing (`dco` included), linear history (squash or rebase), and no force push or deletion. GitHub refuses rulesets on the repository while it is private, so the maintainers apply it with `scripts/apply_rulesets.sh --apply` when it goes public; until then the dry run in CI keeps it in step with `ci.yml`. A change to the protection is a change to that file, reviewed like any other. If you rename or add a CI job, update the ruleset in the same pull request (`bash scripts/apply_rulesets.sh` tells you what is out of step).
 
 **Clean contributions only.** Do not submit code, prompts, rubrics or test data copied from an employer's or client's private systems, or from any source whose licence isn't compatible with Apache-2.0.
 
