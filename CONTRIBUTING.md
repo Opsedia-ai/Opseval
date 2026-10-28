@@ -17,6 +17,7 @@ Thank you for helping build Opseval! This guide explains how to propose changes 
 git clone https://github.com/Opsedia-ai/Opseval.git
 cd Opseval
 uv sync            # installs the workspace with dev dependencies
+make hooks         # the pre-push hook: refuses a push to main, runs ruff and the schema check
 make check         # ruff, import-linter, bandit, mypy --strict, pytest (coverage >= 85%)
 make audit         # needs network: pip-audit and licence check of runtime dependencies
 make demo          # runs the example refund agent + smoke suite
@@ -45,6 +46,21 @@ git commit -s -m "feat(scoring): add tools.args_valid scorer"
 ```
 
 By signing off, you certify that you wrote the contribution, or otherwise have the right to submit it under the Apache-2.0 licence.
+
+The sign-off must carry the email your commits are authored with (`git config user.email`); the name may differ. The `dco` CI job (`scripts/check_dco.py`) checks every commit of a pull request, and only those (commits of `main` you merged into your branch are not yours to sign), and fails the pull request if one is not signed off. A merge commit with no changes of its own (GitHub's "Update branch", a clean `git merge main`) is skipped, whoever made it; a merge that changes anything (a conflict you resolved, an edit made while merging) needs a sign-off too: `git merge --signoff`, or `git commit -s` after resolving. To sign off commits already on your branch:
+
+```bash
+git rebase --signoff origin/main   # adds the line to every commit since main
+git push --force-with-lease
+```
+
+Dependabot signs off with its own address, which the check accepts. You can run the check yourself: `python3 scripts/check_dco.py origin/main HEAD`.
+
+## `main` is protected
+
+Changes reach `main` only through a pull request ([ADR-0065](docs/adr/0065-protecting-main.md)). `make hooks` sets `core.hooksPath` to `scripts/githooks` in your clone, so a `git push` to `main` of `Opsedia-ai/Opseval` is refused locally (pushing `main` to your fork is fine), and any other push first runs ruff and the schema drift check (`SKIP_PRE_PUSH_CHECKS=1` skips those checks, never the refusal). Setting `core.hooksPath` switches off the hooks in `.git/hooks`, so `make hooks` refuses when you have hooks of your own there or `core.hooksPath` is already set; move them to `scripts/githooks` or run `make hooks FORCE=1`. The hook guards against mistakes; it is not a control.
+
+On GitHub, `main` is protected by the ruleset in `.github/rulesets/main.json`: a pull request with an approving code-owner review, every CI job passing (`dco` included, each reported by GitHub Actions), linear history (squash or rebase), and no force push or deletion. Repository admins may merge their own pull request without the review (a bypass in `pull_request` mode, needed while there is a single code owner, who cannot approve their own pull request); nobody can push to `main` directly. GitHub refuses rulesets on the repository while it is private, so the maintainers apply it with `scripts/apply_rulesets.sh --apply` when it goes public; until then the dry run in CI keeps it in step with `ci.yml`. A change to the protection is a change to that file, reviewed like any other. If you rename or add a CI job, update the ruleset in the same pull request (`bash scripts/apply_rulesets.sh` tells you what is out of step). A CI job may not have a job-level `if:`: GitHub reports a skipped job as a passing check, so put conditions on its steps.
 
 **Clean contributions only.** Do not submit code, prompts, rubrics or test data copied from an employer's or client's private systems, or from any source whose licence isn't compatible with Apache-2.0.
 

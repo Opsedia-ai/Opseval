@@ -1,10 +1,31 @@
-.PHONY: install lint typecheck test check audit demo schemas status reference docs console-types console console-check db-up db-down
+.PHONY: install hooks lint typecheck test check audit demo schemas status reference docs rulesets console-types console console-check db-up db-down
 
 # Licences allowed for runtime dependencies of the core (see CONTRIBUTING.md).
 ALLOWED_LICENCES := MIT;BSD;Apache;ISC;PSF;Python Software Foundation;MPL 2.0;MPL-2.0
 
 install:
 	uv sync
+
+# The pre-push hook (ADR-0065): refuses a push to main, runs ruff and the schema check first.
+# Sets core.hooksPath in this clone's .git/config only. Setting it switches off every other
+# hook of the clone, so it refuses (unless FORCE=1) when core.hooksPath already points
+# elsewhere or the hooks directory has hooks of its own (anything but the *.sample files).
+hooks:
+	@current=$$(git config --get core.hooksPath || true); \
+	if [ -n "$$current" ] && [ "$$current" != scripts/githooks ]; then \
+		echo "make hooks: core.hooksPath is already $$current; setting it would switch those hooks off." >&2; \
+		if [ "$(FORCE)" != 1 ]; then echo "  Move them to scripts/githooks, or run: make hooks FORCE=1" >&2; exit 1; fi; \
+	elif [ -z "$$current" ]; then \
+		dir=$$(git rev-parse --git-path hooks) || exit 1; \
+		own=$$(find "$$dir" -maxdepth 1 ! -type d ! -name '*.sample' 2>/dev/null | sort); \
+		if [ -n "$$own" ]; then \
+			echo "make hooks: $$dir has hooks that core.hooksPath would switch off:" >&2; \
+			echo "$$own" | sed 's/^/  /' >&2; \
+			if [ "$(FORCE)" != 1 ]; then echo "  Move them to scripts/githooks, or run: make hooks FORCE=1" >&2; exit 1; fi; \
+		fi; \
+	fi; \
+	git config --local core.hooksPath scripts/githooks && \
+	echo "pre-push hook installed (scripts/githooks/pre-push)"
 
 lint:
 	uv run ruff check .
@@ -18,7 +39,7 @@ typecheck:
 test:
 	uv run pytest --cov=opseval --cov=pytest_opseval --cov-report=term-missing --cov-fail-under=85
 
-check: lint typecheck test schemas status reference docs
+check: lint typecheck test schemas status reference docs rulesets
 
 # Needs network: known vulnerabilities and licences of the runtime dependencies in uv.lock.
 audit:
@@ -50,6 +71,11 @@ status:
 # docs/reference/ is generated from the scorer registry and config.Settings; a stale page fails.
 reference:
 	uv run python scripts/reference_docs.py --check
+
+# .github/rulesets/main.json is a valid payload and requires exactly the checks ci.yml reports
+# (ADR-0065). A dry run: nothing is sent to GitHub.
+rulesets:
+	bash scripts/apply_rulesets.sh --dry-run >/dev/null
 
 # The documentation site, built strictly (a broken link or anchor fails). Not deployed before Gate 0.
 # Never add --quiet: it hides the warnings that strict mode counts, so nothing would fail.
