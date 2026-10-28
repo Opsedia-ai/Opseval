@@ -48,6 +48,8 @@ jobs:
         run: uv run opseval schemas --check
       - name: Project status percentages match their table (docs/STATUS.md)
         run: uv run python scripts/project_status.py --check
+      - name: The ruleset for main requires exactly these CI checks (ADR-0065)
+        run: bash scripts/apply_rulesets.sh --dry-run
       - name: Reference pages match the code (docs/reference/)
         run: uv run python scripts/reference_docs.py --check
       - name: Documentation site builds strictly (no broken link or anchor)
@@ -71,6 +73,38 @@ jobs:
           set +e
           uv run opseval demo --repeats 1 --bug crash
           test $? -eq 3
+
+  # DCO (ADR-0065): every commit in the pull request, and only those, has a Signed-off-by line
+  # matching its author. The range is the two parents of the pull request's merge ref
+  # (HEAD^1 = the base branch as merged, HEAD^2 = the pull request's head), so commits of main
+  # already merged into the branch are never checked; `pull_request.base.sha` can be older than
+  # them. Merges with no changes of their own are skipped. No job-level `if:` (a skipped job
+  # would satisfy the required check): outside a pull request the job runs and checks nothing.
+  # No app and no token, so it runs the same on a fork's pull request.
+  dco:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Nothing to check outside a pull request
+        if: github.event_name != 'pull_request'
+        run: echo "dco checks pull requests only; this is a ${GITHUB_EVENT_NAME} run."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Every commit in the pull request is signed off
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          merged=$(git rev-parse --verify HEAD^2)
+          if [ "$merged" != "$PR_HEAD" ]; then
+            echo "dco: the merge ref's second parent ($merged) is not the pull request's head ($PR_HEAD)" >&2
+            exit 2
+          fi
+          python3 scripts/check_dco.py HEAD^1 HEAD^2
 
   console:
     # The web console typechecks, passes its tests (the one rule as the console draws it, and the

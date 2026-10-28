@@ -6,7 +6,7 @@ issues, are in [`ATTENTION.md`](ATTENTION.md). The summary below is **computed**
 `scripts/project_status.py`; `make check` and CI fail if it is out of date, so the headline
 number cannot drift from the rows.
 
-**As of 2026-10-28** (`main` with the guided scenario form, the roadmap ADRs 0049–0066, the voice foundations and speech providers (ADR-0053 V0a, ADR-0054 V0b) and unknown languages refused at load (ADR-0059 step 1); GitHub drop-in workflows, ADR-0058 E1).
+**As of 2026-10-28** (`main` with the guided scenario form, the roadmap ADRs 0049–0066, the voice foundations and speech providers (ADR-0053 V0a, ADR-0054 V0b) and unknown languages refused at load (ADR-0059 step 1), `main` protected softly (ADR-0065); GitHub drop-in workflows, ADR-0058 E1).
 
 ## Completion
 
@@ -52,7 +52,7 @@ PRD gains it.
 | Languages and dialects: MENA, US and Europe, Chinese; unknown languages refused | [ADR-0059](adr/0059-languages-and-dialects.md) | Partial: step 1 — a language with no pack is a load error for an LLM persona (`persona.language`, exit 3), never English (scripted turns load with a warning); judges grade against the resolved pack; packs answer to BCP-47 tags (`en`, `ar`, `ar-EG`, `ar-x-gulf`) and every old alias; a dialect falls back only where a pack declares it, with a warning (`opseval.langpacks`, `tests/test_languages.py`); no new packs, voice maps or `language_script` v2 yet |
 | CI/CD anywhere: Marketplace action, example workflows, server reporting, other CI templates | [ADR-0058](adr/0058-ci-cd-anywhere.md) | Partial: E1 built (action source in `integrations/github-action/`, reusable workflow, examples per trigger; see FR-GATE-03); not built: publishing to `opsedia-ai/opseval-action` (Gate 0), server reporting (E2), other CI templates (E3, FR-GATE-05) |
 | Flexibility ladder L1–L5: datasets, rubric judges, generated scenarios, adaptive attacker, continuous evaluation | ADRs [0060](adr/0060-datasets-and-matrices.md)–[0064](adr/0064-continuous-evaluation.md) | Missing (L0, YAML and the guided form, is ADR-0048) |
-| Protecting `main` | [ADR-0065](adr/0065-protecting-main.md) | Missing: GitHub refuses rulesets on this private repository; soft protection first, rulesets at go-public |
+| Protecting `main` | [ADR-0065](adr/0065-protecting-main.md) | Partial: soft protection on `main` now: the `dco` CI job (`scripts/check_dco.py`, only the pull request's commits), the pre-push hook (`make hooks`, refuses a push to `main` of the upstream repository, runs ruff and the schema check), and the ruleset committed as `.github/rulesets/main.json`, checked against `ci.yml` by `scripts/apply_rulesets.sh --dry-run` in CI (`tests/test_protecting_main.py`). Not yet enforced on the server: GitHub refuses rulesets on this private repository, so it is applied with `--apply` at go-public (ATTENTION I24) |
 
 ## Requirements
 

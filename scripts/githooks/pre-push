@@ -1,0 +1,74 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# Soft protection for `main` (ADR-0065). Installed by `make hooks` (core.hooksPath).
+#
+# - A push to refs/heads/main of the upstream repository (Opsedia-ai/Opseval on GitHub, over
+#   https or ssh, owner and name in any case) is refused: changes reach main through a pull
+#   request. Deleting main there is refused too. Pushing main to another remote (a fork)
+#   goes through, after the checks. With no URL (the hook run by hand), main is refused.
+# - Any other push first runs the fast checks: ruff (lint and format) and the schema drift
+#   check. They check the working tree, not each pushed commit.
+#
+# This is a guard against mistakes, not a control: `git push --no-verify` skips it, and only
+# the ruleset (.github/rulesets/main.json) stops a push on the server.
+# SKIP_PRE_PUSH_CHECKS=1 skips the fast checks only; the main refusal always applies.
+
+set -u
+
+remote_name=${1:-}
+remote_url=${2:-}
+refused=0
+
+# upstream=0 when the URL is the upstream repository: main is protected there only. An empty
+# URL, or grep failing to run (status other than 1, "no match"), counts as upstream.
+upstream=0
+if [ -n "$remote_url" ]; then
+	printf '%s\n' "$remote_url" | grep -Eiq \
+		'^(git@github\.com:|ssh://git@github\.com(:22)?/|https://([^/@]+@)?github\.com/)opsedia-ai/opseval(\.git)?/?$'
+	[ "$?" -eq 1 ] && upstream=1
+fi
+updates=0
+
+while read -r local_ref local_sha remote_ref _; do
+	[ -n "${remote_ref:-}" ] || continue
+	if [ "$remote_ref" = "refs/heads/main" ] && [ "$upstream" -eq 0 ]; then
+		echo "pre-push: refusing to push to main on ${remote_name:-the remote} ($local_ref)." >&2
+		refused=1
+		continue
+	fi
+	# A deletion (local sha all zeros, SHA-1 or SHA-256) needs no checks; an update does.
+	case "$local_sha" in
+		*[!0]*) updates=1 ;;
+	esac
+done
+
+if [ "$refused" -ne 0 ]; then
+	echo "pre-push: main is protected (ADR-0065). Push a branch and open a pull request:" >&2
+	echo "  git switch -c <type>/<topic> && git push -u origin HEAD" >&2
+	exit 1
+fi
+
+if [ "$updates" -eq 0 ] || [ "${SKIP_PRE_PUSH_CHECKS:-0}" = "1" ]; then
+	exit 0
+fi
+
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+
+if ! command -v uv >/dev/null 2>&1; then
+	echo "pre-push: uv is not installed, so the fast checks cannot run." >&2
+	echo "  Install uv (https://docs.astral.sh/uv/) or push with SKIP_PRE_PUSH_CHECKS=1." >&2
+	exit 1
+fi
+
+echo "pre-push: ruff and the schema drift check (SKIP_PRE_PUSH_CHECKS=1 to skip)..." >&2
+uv run --quiet ruff check . &&
+	uv run --quiet ruff format --check . &&
+	uv run --quiet opseval schemas --check
+status=$?
+if [ "$status" -ne 0 ]; then
+	echo "pre-push: the fast checks failed; fix them (ruff format ., opseval schemas) and push again." >&2
+	exit 1
+fi
+exit 0
