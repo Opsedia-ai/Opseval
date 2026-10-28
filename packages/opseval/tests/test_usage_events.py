@@ -22,7 +22,7 @@ from opseval.errors import LLMInfraError
 from opseval.llm import ChatClient, UsageMeter, token_counts
 from opseval.models.record import RunRecord
 from opseval.models.results import ModelUsage, SuiteResult
-from opseval.models.usage import ModelPrice, PriceTable, UsageEvent
+from opseval.models.usage import USAGE_ROLES, ModelPrice, PriceTable, UsageEvent, has_tokens
 from opseval.pricing import builtin_prices, price_for, priced, repriced
 from opseval.runner import RunOptions, launch
 from opseval.scoring import ScoringEngine
@@ -136,6 +136,48 @@ class TestMeter:
         assert sorted(e.input_tokens or 0 for e in meter.events_for("a", 0)) == [1, 10, 20]
         assert len(meter.events_for("b", 0)) == 3
         assert [e.input_tokens for e in meter.outside_attempts()] == [5]
+
+    def test_the_index_agrees_with_the_event_list(self) -> None:
+        """Events are indexed by attempt and by (role, model) as they are added: the answers
+        are the ones a scan of every event would give, in the same order."""
+        meter = UsageMeter()
+        keys = [("a", 0), None, ("b", 1), ("a", 0), ("b", 1), None]
+        for n, key in enumerate(keys):
+            role, model = ("judge", "j") if n % 2 else ("simulator", "s")
+            if key is None:
+                meter.record(role, model, {"prompt_tokens": n, "completion_tokens": 1}, 0)
+                continue
+            with meter.attempt(*key):
+                meter.record(role, model, {"prompt_tokens": n, "completion_tokens": 1}, 0)
+        meter.record_speech_rate_limited("tts", "t", 2)
+        for key in [("a", 0), ("b", 1), ("c", 0)]:
+            scan = tuple(e for k, e in meter.events if k == key)
+            assert meter.events_for(*key) == scan
+        assert meter.outside_attempts() == [e for k, e in meter.events if k is None]
+        assert list(meter.by_attempt()) == [("a", 0), ("b", 1)]
+        rows = meter.snapshot()
+        assert [(r.role, r.model) for r in rows] == [
+            ("simulator", "s"),
+            ("judge", "j"),
+            ("tts", "t"),
+        ]
+        assert [r.calls for r in rows] == [3, 3, 0]
+        assert rows[2].rate_limited_calls == 2
+
+    def test_a_role_with_no_tokens_has_no_token_totals(self) -> None:
+        meter = UsageMeter()
+        meter.record_speech("tts", "t", characters=12, audio_out_seconds=1.0)
+        meter.record_speech("telephony", "carrier", audio_out_seconds=3.0)
+        for row in meter.snapshot():
+            assert (row.input_tokens, row.output_tokens, row.reasoning_tokens) == (None,) * 3
+
+    def test_has_tokens_is_the_one_list(self) -> None:
+        assert {r for r in USAGE_ROLES if has_tokens(r)} == {
+            "simulator",
+            "judge",
+            "attacker",
+            "generator",
+        }
 
     def test_an_unknown_role_is_a_bug_not_a_new_row(self) -> None:
         with pytest.raises(ValueError, match="unknown usage role"):

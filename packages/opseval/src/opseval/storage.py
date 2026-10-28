@@ -82,10 +82,15 @@ KNOWN_LAYOUTS = frozenset(
     }
 )
 
-PRE_USAGE_LAYOUTS = KNOWN_LAYOUTS - {LAYOUT}
+PRE_USAGE_LAYOUTS = frozenset(
+    {LEGACY_LAYOUT, "opseval-runs/2", "opseval-runs/3", "opseval-runs/4", "opseval-runs/5"}
+)
 """Layouts written before per-call usage (ADR-0066): their records carry no usage events, and
 their usage rows' totals are as written (a count the provider did not report was added as 0).
-Keep this set when LAYOUT moves on: only layouts before 6 belong in it."""
+
+The rule: this set is literal and closed. It is never derived from ``LAYOUT`` or
+``KNOWN_LAYOUTS``: when ``LAYOUT`` moves to 7, a layout-6 run still has per-call usage and must
+not become "written before per-call usage". Nothing is ever added to it."""
 
 
 class UnknownLayout(ConfigError):

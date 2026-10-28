@@ -26,7 +26,14 @@ import httpx
 from opseval.config import Settings, check_url_allowed
 from opseval.errors import LLMInfraError, LLMRateLimited, LLMRequestError
 from opseval.models.results import ModelUsage
-from opseval.models.usage import USAGE_ROLES, PriceTable, UsageEvent, UsageReported, UsageRole
+from opseval.models.usage import (
+    USAGE_ROLES,
+    PriceTable,
+    UsageEvent,
+    UsageReported,
+    UsageRole,
+    has_tokens,
+)
 from opseval.pricing import priced
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -92,14 +99,14 @@ def fold_usage(
     """One ``(role, model)``'s events folded into a :class:`ModelUsage`.
 
     Token totals and the cost cover the answered calls and are ``None`` unless every one of
-    them reported the count (``reported`` says how many did). Audio seconds and characters
-    count the calls that produced them, as before (ADR-0054): a speech role that never sent
-    audio shows "not measured", not 0 s."""
+    them reported the count (``reported`` says how many did). A role with no tokens
+    (:func:`~opseval.models.usage.has_tokens`) has ``None`` token totals. Audio seconds and
+    characters count the calls that produced them, as before (ADR-0054): a speech role that
+    never sent audio shows "not measured", not 0 s."""
     answered = [e for e in events if e.answered]
-    speech = role in ("tts", "stt")
 
     def tokens(name: str) -> int | None:
-        if speech:
+        if not has_tokens(role):
             return None
         counts: list[int | None] = [getattr(e, name) for e in answered]
         return _sum_if_all(counts)
@@ -144,7 +151,10 @@ class UsageMeter:
     """The price table; ``None`` is the built-in one."""
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
     events: list[tuple[AttemptKey | None, UsageEvent]] = field(default_factory=list)
-    _order: list[tuple[str, str]] = field(default_factory=list)
+    """Every event in the order it was recorded, with the attempt it belongs to."""
+    _by_attempt: dict[AttemptKey | None, list[UsageEvent]] = field(default_factory=dict)
+    _by_key: dict[tuple[str, str], list[UsageEvent]] = field(default_factory=dict)
+    """Per ``(role, model)``, in the order each was first seen (the snapshot's order)."""
     _extra_rate_limited: dict[tuple[str, str], int] = field(default_factory=dict)
 
     @contextmanager
@@ -159,10 +169,11 @@ class UsageMeter:
     def add(self, event: UsageEvent, *, provider_cost: float | None = None) -> UsageEvent:
         """Price ``event`` with the row in force when it was made and keep it."""
         event = priced(event, self.prices, provider_cost=provider_cost)
-        self.events.append((_ATTEMPT.get(), event))
-        key = (event.role, event.model)
-        if key not in self._order:
-            self._order.append(key)
+        attempt = _ATTEMPT.get()
+        self.events.append((attempt, event))
+        # Indexed as they arrive, so an attempt's events and a snapshot never scan the run.
+        self._by_attempt.setdefault(attempt, []).append(event)
+        self._by_key.setdefault((event.role, event.model), []).append(event)
         return event
 
     def record(
@@ -236,24 +247,22 @@ class UsageMeter:
         if responses:
             key = (role, model)
             self._extra_rate_limited[key] = self._extra_rate_limited.get(key, 0) + responses
-            if key not in self._order:
-                self._order.append(key)
+            self._by_key.setdefault(key, [])
 
     def events_for(self, test_id: str, index: int) -> tuple[UsageEvent, ...]:
-        return tuple(e for k, e in self.events if k == (test_id, index))
+        return tuple(self._by_attempt.get((test_id, index), ()))
 
     def outside_attempts(self) -> list[UsageEvent]:
-        return [e for k, e in self.events if k is None]
+        return list(self._by_attempt.get(None, ()))
+
+    def by_attempt(self) -> dict[AttemptKey, tuple[UsageEvent, ...]]:
+        """Every attempt's events (calls outside any attempt left out), in first-seen order."""
+        return {k: tuple(v) for k, v in self._by_attempt.items() if k is not None}
 
     def snapshot(self) -> list[ModelUsage]:
         return [
-            fold_usage(
-                role,
-                model,
-                [e for _, e in self.events if (e.role, e.model) == (role, model)],
-                self._extra_rate_limited.get((role, model), 0),
-            )
-            for role, model in self._order
+            fold_usage(role, model, events, self._extra_rate_limited.get((role, model), 0))
+            for (role, model), events in self._by_key.items()
         ]
 
 

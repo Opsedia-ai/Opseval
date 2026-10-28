@@ -28,6 +28,17 @@ USAGE_ROLES: tuple[UsageRole, ...] = (
     "telephony",
 )
 
+TOKEN_ROLES: frozenset[UsageRole] = frozenset({"simulator", "judge", "attacker", "generator"})
+"""Roles whose calls are counted in tokens. TTS, STT and telephony calls never have tokens."""
+
+
+def has_tokens(role: str) -> bool:
+    """Whether a call in ``role`` has tokens to count (ADR-0066). The one predicate every token
+    aggregate uses: a TTS, STT or telephony call is left out of token totals and of their
+    ``of``, so a voice attempt's speech calls never make its token total look partial."""
+    return role in TOKEN_ROLES
+
+
 CostSource = Literal["provider", "price_table", "unknown"]
 """Where a call's cost came from: the provider's own answer (it wins, and is labelled), the
 price table, or nowhere ("no price", never $0)."""

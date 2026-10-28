@@ -21,7 +21,7 @@ from opseval.demo.refund_agent import run_agent
 from opseval.rescore import rescore_run
 from opseval.retention import apply, plan
 from opseval.runner import RunOptions, launch
-from opseval.storage import LAYOUT, LEGACY_LAYOUT, FileStore, UnknownLayout
+from opseval.storage import LAYOUT, LEGACY_LAYOUT, PRE_USAGE_LAYOUTS, FileStore, UnknownLayout
 
 FUTURE = "opseval-runs/9"
 
@@ -151,3 +151,10 @@ def test_summary_reads_the_folder_it_is_given(run: Path, name: str) -> None:
         assert CliRunner().invoke(app, ["summary", "."]).exit_code == 0
     finally:
         os.chdir(here)
+
+
+def test_pre_usage_layouts_is_closed_and_never_holds_the_current_layout() -> None:
+    """Runs written before per-call usage (ADR-0066) are layouts 1-5, for ever: when LAYOUT
+    moves on, a layout-6 run must not be read as one without usage events."""
+    assert LAYOUT not in PRE_USAGE_LAYOUTS
+    assert frozenset(f"opseval-runs/{n}" for n in range(1, 6)) == PRE_USAGE_LAYOUTS
