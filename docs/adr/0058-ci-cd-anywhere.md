@@ -335,19 +335,33 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
   (`OPSEVAL_UPLOAD_MAX_MB`, 256 by default, on `Content-Length` and while reading, 413), the
   layout (409 `UNKNOWN_LAYOUT` before the models parse fields they may not know), the models
   (422, the value never echoed), the id against the body, each audio path and sha256 (422
-  `CHECKSUM_MISMATCH`), then the store: an id another project holds is 409 `RUN_ID_TAKEN`, a
-  different run under the id 409 `RUN_EXISTS`, the same run 200 `unchanged`. It writes through
-  `db.run_import.import_from` (the code `runs import` runs, now over a `RunSource` protocol that
-  a folder and an upload both answer), so the run is written whole or not at all and audio goes
-  through the blob store, whose rows record the sha256. A storage outage stays 503, which the
-  client retries.
+  `CHECKSUM_MISMATCH`), then the store. It writes through `db.run_import.import_from` (the code
+  `runs import` runs, now over a `RunSource` protocol that a folder and an upload both answer),
+  so the run is written whole or not at all and audio goes through the blob store, whose rows
+  record the sha256. `import_from` returns a typed `Refusal`, and `server.ci_api.REFUSALS` maps
+  each to its answer in one place: another project's id 409 `RUN_ID_TAKEN`, a different run
+  409 `RUN_EXISTS`, an import of the id in flight 409 `RUN_IMPORTING` with `Retry-After`; the
+  same run is 200 `unchanged`. A storage outage stays 503, which the client retries. The body
+  is parsed and its audio checked in the threadpool, off the event loop; the raw body is let
+  go once parsed and audio is decoded per file (to check it, then again to store it).
+- **One import of a run at a time** (review of #96). `import_from` holds a session-level
+  `pg_try_advisory_lock` on a hash of the run id, on a connection of its own, for the whole
+  import (`DbRunStore.import_lock`), for uploads and `runs import` alike. A second import of
+  the id while the lock is held is refused (`RUN_IMPORTING`) and never removes the first's
+  rows. Postgres drops a session's locks when it ends, so a run row left `importing` while the
+  lock is free belongs to an importer that is gone: only then is it removed and imported
+  again.
 - **Idempotence.** The CLI adds the upload's outcome to its own `result.json` afterwards, so its
-  copy and the server's differ in that one `result.sinks` entry (`server`).
-  `models.upload.same_result` compares results without it, for the upload and for `runs import`,
-  so a re-upload or a later import of the folder is `unchanged`.
-- **Outcome.** Retries on a connection error, a timeout, 408, 425, 429 and 5xx
-  (`OPSEVAL_SERVER_UPLOAD_RETRIES`, 3 by default; 2 s doubling, at most 30 s or `Retry-After`).
-  The outcome is a `SinkOutcome` named `server` written into `result.json` and re-rendered JUnit
+  copy and the server's differ in that one `result.sinks` entry, named `opseval:server`: a
+  reserved name (`check_sink_contract` refuses a plugin sink named `opseval:…`), so a plugin
+  sink called `server` keeps its outcome. `models.upload.same_result` compares results without
+  that one reserved entry, in that one place, for the upload and for `runs import`, so a
+  re-upload or a later import of the folder is `unchanged`. Writing the outcome to a file of its
+  own (`upload.json`) was the alternative; it would have needed every summary, JUnit and the
+  console to read a second file, a larger change for the same result.
+- **Outcome.** Retries on a connection error, a timeout, 408, 425, 429, any 5xx and 409
+  `RUN_IMPORTING` (`OPSEVAL_SERVER_UPLOAD_RETRIES`, 3 by default; 2 s doubling, at most 30 s or
+  `Retry-After`). The outcome is a `SinkOutcome` named `opseval:server` written into `result.json` and re-rendered JUnit
   (a new `failed_sinks` property names any failed sink); the console summary and `opseval
   summary` already name failed sinks. No layout change was needed. A run that could not be
   carried out (exit 3 at launch) uploads nothing and says so.
@@ -359,7 +373,12 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
   loses any user-info. `RunStore.origin(run_id)` (always `None` for folders) and
   `StoredRun.origin` feed `RunSummary.origin`/`.ci`; the console shows a CI badge and a
   `rel="noopener noreferrer"` link to the job, checked again in the browser.
-- **Audit.** `run.upload` (outcome, size, provider) instead of the generic `PUT …` event.
+- **Audit.** `run.upload` (outcome, size, provider) instead of the generic `PUT …` event. Like
+  the generic one, an audit write that fails is logged loudly and the upload still succeeds:
+  the run is stored.
+- **Migration 0007** names its check with `op.f("ck_runs_origin")`, so the database's name is
+  the model's (tested). The released `0005` created `ck_runs_ck_runs_status` while the model
+  says `ck_runs_status`; it is left as shipped (ATTENTION).
 - **CI integrations.** The action takes `server-url`, `project`, `task`, `label`,
   `opseval-public-key`, `opseval-secret-key` (`profile` is no longer required); a project
   without a server, or the reverse, is exit 3. The reusable workflow takes the same inputs and

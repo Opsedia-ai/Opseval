@@ -156,15 +156,19 @@ opseval run suites/smoke.yaml --target wss://agent.staging.example.com/ws \
 - A pull that fails (the server unreachable, a wrong key, a label nothing carries, a stored path
   that is not a catalogue file) is **exit 3**: nothing was evaluated.
 - An upload that fails never changes the code. It is tried again on a connection error, a
-  timeout, 429 or a 5xx (`OPSEVAL_SERVER_UPLOAD_RETRIES`, waiting 2 s, 4 s, 8 s, …, at most
-  30 s or the server's `Retry-After`), never on a refusal (401, 403, 404, 409, 413, 422). The
-  outcome is a `server` entry in `result.sinks`, so a failure is named in the console summary
-  (`NOT PUBLISHED server: …`), the gate summary (`opseval summary`: **Not published**) and the
+  timeout, 408, 425, 429, any 5xx, or 409 `RUN_IMPORTING` (another try of the same run is
+  still being stored) (`OPSEVAL_SERVER_UPLOAD_RETRIES`, waiting 2 s, 4 s, 8 s, …, at most 30 s
+  or the server's `Retry-After`), never on another refusal (401, 403, 404, 409, 413, 422). The
+  outcome is an `opseval:server` entry in `result.sinks` (a name reserved for Opseval, so a
+  plugin sink called `server` keeps its own), so a failure is named in the console summary
+  (`NOT PUBLISHED opseval:server: …`), the gate summary (`opseval summary`: **Not published**) and the
   JUnit file (`failed_sinks` property). The run folder stays; `opseval runs import` can send it
   later.
 - The upload is idempotent by run id: sending the same run again is answered `unchanged`, so a
   try whose answer was lost is safe. A different run under an id the server holds is refused
-  (409), never written over.
+  (409), never written over. Two uploads of one run at once are serialised: the second is
+  answered 409 `RUN_IMPORTING` and tries again, and never removes the first while it is
+  being stored.
 
 The server checks the upload before writing anything: its size (`OPSEVAL_UPLOAD_MAX_MB`, 413),
 its layout (409 for one newer than the server's, before the rest is read), every field with the
