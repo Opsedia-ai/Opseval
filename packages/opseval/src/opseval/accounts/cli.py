@@ -134,8 +134,7 @@ def create_user(
         check_role(role)
         organization = await store.organization(s, org)
         user = await store.create_user(s, email, password=password, name=name)
-        if oidc_subject is not None:
-            assert settings.oidc_issuer is not None
+        if oidc_subject is not None and settings.oidc_issuer:
             await store.link_identity(
                 s, user, settings.oidc_issuer.rstrip("/"), oidc_subject.strip()
             )

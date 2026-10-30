@@ -99,11 +99,10 @@ def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str
         return ApiError(422, "REFUSED", str(exc))
 
     def set_session(response: Response, token: str) -> None:
-        assert accounts is not None
         response.set_cookie(
             cookie,
             token,
-            max_age=int(accounts.lifetime.total_seconds()),
+            max_age=int(need().lifetime.total_seconds()),
             path="/",
             secure=True,
             httponly=True,

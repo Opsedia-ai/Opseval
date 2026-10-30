@@ -16,7 +16,7 @@ import hmac
 import secrets
 
 PUBLIC_PREFIX = "pk-oe-"
-SECRET_PREFIX = "sk-oe-"  # noqa: S105 - a prefix, not a secret
+SECRET_PREFIX = "sk-oe-"  # noqa: S105 # nosec B105 - a prefix, not a secret
 SHOWN_PREFIX = 10
 """How much of a secret a key list shows (``sk-oe-abcd``), to tell keys apart."""
 

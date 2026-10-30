@@ -260,8 +260,7 @@ async def members(s: AsyncSession, project_id: uuid.UUID) -> list[Member]:
     )
     out = []
     for user, org, project in rows:
-        role = effective_role(org, project)
-        assert role is not None  # an org role is always there in this join
+        role = effective_role(org, project) or "viewer"  # the join always has an org role
         out.append(
             Member(
                 user.id,

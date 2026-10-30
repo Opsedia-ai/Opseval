@@ -346,7 +346,8 @@ def create_app(
     async def accounts_guard(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        assert access is not None
+        if access is None:  # pragma: no cover - only called in accounts mode
+            return _deny(500, "NO_ACCESS_CONFIG", "accounts mode is not configured")
         seen = access_mod.view(request, access)
         if not isinstance(seen, access_mod.View):
             return finish(request, _deny(seen.status, seen.code, seen.message))

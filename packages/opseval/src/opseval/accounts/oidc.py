@@ -136,24 +136,25 @@ class OidcClient:
 
     def _key(self, kid: str | None) -> Any:
         now = self._clock()
-        if self._jwks is None or now - self._jwks_at > JWKS_TTL:
-            self._load_jwks(now)
-        assert self._jwks is not None
-        found = [k for k in self._jwks.keys if kid is None or k.key_id == kid]
+        jwks = self._jwks
+        if jwks is None or now - self._jwks_at > JWKS_TTL:
+            jwks = self._load_jwks(now)
+        found = [k for k in jwks.keys if kid is None or k.key_id == kid]
         if not found and now - self._jwks_at > JWKS_REFETCH:
-            self._load_jwks(now)  # a rotation: fetch once more, at most once a minute
-            found = [k for k in self._jwks.keys if kid is None or k.key_id == kid]
+            jwks = self._load_jwks(now)  # a rotation: fetch once more, at most once a minute
+            found = [k for k in jwks.keys if kid is None or k.key_id == kid]
         if len(found) != 1:
             raise OidcError("no single signing key matches the token's kid")
         return found[0]
 
-    def _load_jwks(self, now: float) -> None:
+    def _load_jwks(self, now: float) -> PyJWKSet:
         body = self._get(str(self.discovery()["jwks_uri"]))
         try:
-            self._jwks = PyJWKSet.from_dict(body)
+            jwks = PyJWKSet.from_dict(body)
         except jwt.PyJWTError as exc:
             raise OidcError("the issuer's JWKS cannot be read") from exc
-        self._jwks_at = now
+        self._jwks, self._jwks_at = jwks, now
+        return jwks
 
     def start(self, redirect_uri: str) -> tuple[str, Flow]:
         """The IdP's URL to send the browser to, and what to remember for the callback."""

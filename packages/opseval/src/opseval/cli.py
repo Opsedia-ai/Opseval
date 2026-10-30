@@ -1207,8 +1207,7 @@ def serve(
     prof = profile or str(root / "profile.yaml")
     access = None
     store: DbRunStore | None
-    if accounts_mode:
-        assert project is not None
+    if accounts_mode and project is not None:
         try:
             store = open_run_store(
                 server_settings(settings, database_url),
