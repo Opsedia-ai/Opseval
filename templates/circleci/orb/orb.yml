@@ -184,7 +184,7 @@ commands:
               "OPSEVAL_PUBLIC_KEY:${OE_PUBLIC_KEY_VAR:-}" "OPSEVAL_SECRET_KEY:${OE_SECRET_KEY_VAR:-}"; do
               oe_to="${oe_pair%%:*}"
               oe_from="${oe_pair#*:}"
-              if [ -n "${!oe_from:-}" ]; then export "$oe_to=${!oe_from}"; else unset "$oe_to"; fi
+              if [ -n "$oe_from" ] && [ -n "${!oe_from:-}" ]; then export "$oe_to=${!oe_from}"; else unset "$oe_to"; fi
             done
             # --- begin opseval-ci (a copy of templates/shared/opseval-ci.sh; keep every copy identical)
             set -uo pipefail

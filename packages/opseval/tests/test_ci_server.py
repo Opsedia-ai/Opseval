@@ -106,6 +106,15 @@ class FakeServer:
         return httpx.Client(transport=httpx.MockTransport(self.handler), base_url=server.url)
 
 
+@pytest.fixture(autouse=True)
+def _no_ci_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests set the CI variables they mean; the runner's own (GITHUB_*, CI_*) are cleared,
+    or a test run on GitHub Actions would read its own job as the CI being described."""
+    for field in CiEnvironment.model_fields.values():
+        if field.alias:
+            monkeypatch.delenv(field.alias, raising=False)
+
+
 @pytest.fixture
 def agent() -> Iterator[Callable[[str | None], str]]:
     """The demo agent on its own loop and thread, so the CLI (which runs its own loop) can
