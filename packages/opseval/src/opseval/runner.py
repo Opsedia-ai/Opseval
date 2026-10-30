@@ -30,7 +30,7 @@ from opseval.datasets import Limits
 from opseval.demo import catalogue_dir as demo_catalogue_dir
 from opseval.driver import RATE_LIMITED_NOTE, Driver
 from opseval.errors import ConfigError
-from opseval.langpacks import effective_language
+from opseval.langpacks import effective_language, voice_language
 from opseval.llm import UsageMeter, client_for_role
 from opseval.models.gate import Preset, ResolvedGatePolicy
 from opseval.models.gate import resolve as resolve_gate
@@ -891,9 +891,12 @@ async def _launch(
                     key=audio_plan.key,
                     run_id=run_id,
                 )
-                transport = transport.for_attempt(
-                    recorder, scenario.persona.language, scenario.voice
+                # The pack's tag (ADR-0059), so OPSEVAL_TTS_VOICE_MAP can map ar-SA however
+                # the persona spelled it; providers fall back to the primary subtag.
+                language = voice_language(
+                    scenario.persona, scripted=not scenario.conversation.llm_persona
                 )
+                transport = transport.for_attempt(recorder, language, scenario.voice)
             driver = Driver(
                 scenario=scenario,
                 profile=profile,

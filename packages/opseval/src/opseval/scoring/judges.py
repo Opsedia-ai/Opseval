@@ -469,9 +469,12 @@ class GoalAchievement(Judge):
 
 
 def _switching(scenario: Scenario) -> list[str]:
-    """The languages the caller mixes within a sentence (``voice.code_switching``,
-    ADR-0055), or none."""
-    return list(scenario.voice.code_switching) if scenario.voice is not None else []
+    """The languages the caller mixes within a sentence: ``voice.code_switching`` (ADR-0055),
+    else those of a code-switching pack (``ar-x-codeswitch``, ADR-0059), or none."""
+    if scenario.voice is not None and scenario.voice.code_switching:
+        return list(scenario.voice.code_switching)
+    pack = _spoken(scenario).pack
+    return list(pack.mixes) if pack is not None else []
 
 
 def _switching_rubric(scenario: Scenario) -> tuple[str, ...]:
@@ -522,8 +525,7 @@ class LanguageConsistency(Judge):
     )
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
-        spoken = _spoken(ctx.scenario)
-        return (spoken.language, spoken.dialect or "", *_switching_rubric(ctx.scenario))
+        return (*_spoken(ctx.scenario).rubric, *_switching_rubric(ctx.scenario))
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
         lines = [f"Expected customer language: {_spoken(ctx.scenario).label}"]
@@ -588,8 +590,7 @@ class PersonaConsistency(Judge):
             s.persona.role,
             s.goal,
             s.conversation.flow,
-            spoken.language,
-            spoken.dialect or "",
+            *spoken.rubric,
             *_switching_rubric(s),
         )
 
@@ -927,8 +928,7 @@ class PronunciationDialectFit(Judge):
     )
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
-        spoken = _spoken(ctx.scenario)
-        return (spoken.language, spoken.dialect or "")
+        return _spoken(ctx.scenario).rubric
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
         return [f"Caller's language and dialect: {_spoken(ctx.scenario).label}"]

@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
-import re
-from typing import Annotated, Any, Literal
+import unicodedata
+from collections import Counter
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
+from opseval.langpacks import Script, effective_language
 from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import (
     SCRIPT_EXHAUSTED,
@@ -56,7 +58,9 @@ class RequiredFieldsParams(NoParams):
 
 
 class LanguageScriptParams(NoParams):
-    script: Literal["arabic", "latin"] = "arabic"
+    script: Script | None = None
+    """The script the agent should write in; left out, the persona's language pack decides
+    (``ar-x-codeswitch`` accepts Arabic and Latin)."""
     min_fraction: float | None = Field(default=None, ge=0, le=1)
     """Share of agent messages that must be in the script; the threshold when unset."""
 
@@ -409,40 +413,95 @@ class RequiredFields(Scorer):
         )
 
 
-ARABIC = re.compile(r"[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]")
-LATIN = re.compile(r"[A-Za-z]")
+SCRIPT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "arabic": ("ARABIC",),
+    "latin": ("LATIN", "FULLWIDTH LATIN"),
+    "han": ("CJK",),
+    "kana": ("HIRAGANA", "KATAKANA", "HALFWIDTH KATAKANA"),
+    "hangul": ("HANGUL", "HALFWIDTH HANGUL"),
+    "cyrillic": ("CYRILLIC",),
+    "devanagari": ("DEVANAGARI",),
+    "hebrew": ("HEBREW",),
+    "greek": ("GREEK",),
+    "thai": ("THAI",),
+}
+"""Each script ``output.language_script`` counts, by the start of a letter's Unicode name."""
+
+
+def letter_scripts(text: str) -> Counter[str]:
+    """How many letters of each script ``text`` has (``other`` for scripts not listed).
+    Digits, punctuation, marks and spaces are not letters, so they never count."""
+    counts: Counter[str] = Counter()
+    for ch in text:
+        if unicodedata.category(ch)[0] != "L":
+            continue
+        name = unicodedata.name(ch, "")
+        script = next((k for k, p in SCRIPT_PREFIXES.items() if name.startswith(p)), "other")
+        counts[script] += 1
+    return counts
+
+
+def in_scripts(text: str, scripts: tuple[str, ...]) -> bool:
+    """Whether the expected scripts, together, have more letters than any other script. A
+    message with no letters is not in the script: a blank reply is not an answer in it."""
+    counts = letter_scripts(text)
+    want = sum(counts[s] for s in scripts)
+    other = max((n for s, n in counts.items() if s not in scripts), default=0)
+    return want > other
 
 
 @register
 class LanguageScript(Scorer):
     id = "output.language_script"
+    # 2: counted by Unicode script, ten of them, and the default comes from the persona's
+    # language pack (ADR-0059). v1 counted Arabic against Latin only.
+    version = "2"
     Params = LanguageScriptParams
     axis = Axis.OUTPUT
-    description = "Share of agent messages written mainly in the expected script (arabic|latin)."
+    description = (
+        "Share of agent messages written mainly in the expected script (arabic, latin, han, "
+        "kana, hangul, cyrillic, devanagari, hebrew, greek or thai); the persona's language "
+        "pack gives it when the scenario does not."
+    )
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
-        script = spec.params.get("script", "arabic")
+        script = spec.params.get("script")
         minimum = spec.params.get("min_fraction")
         if minimum is None:  # left out or null: the threshold, as Params documents
             minimum = spec.threshold
-        if script not in ("arabic", "latin") or not isinstance(minimum, int | float):
-            return self.infra(spec, "BAD_PARAMS: script must be arabic|latin")
-        # Markers are the harness's own edit (FR-REC-03), and they are Latin script. Left
-        # in, a redaction inside an Arabic reply could push it under the threshold and
-        # mark the agent down for something the harness did to the evidence.
+        if not isinstance(minimum, int | float):
+            return self.infra(spec, "BAD_PARAMS: min_fraction must be a number")
+        if script is None:
+            spoken = effective_language(
+                ctx.scenario.persona, scripted=not ctx.scenario.conversation.llm_persona
+            )
+            pack = spoken.pack
+            if pack is None:
+                return self.infra(
+                    spec,
+                    f"BAD_PARAMS: no language pack for {spoken.label!r}, so no default "
+                    "script; give params.script",
+                )
+            scripts: tuple[str, ...] = pack.scripts
+        elif script in SCRIPT_PREFIXES:
+            scripts = (script,)
+        else:
+            return self.infra(spec, f"BAD_PARAMS: script must be one of {sorted(SCRIPT_PREFIXES)}")
         # Markers are stripped because they are the harness's own edit and they are Latin
-        # script (FR-REC-03). Messages that become empty are *kept*: a reply that was
-        # nothing but a credential is a real failure to answer in the expected script, and
-        # dropping it would report that as "not measured" and excuse genuinely blank
-        # replies into the bargain.
+        # script (FR-REC-03): left in, a redaction inside an Arabic reply could push it
+        # under the threshold and mark the agent down for something the harness did to the
+        # evidence. Messages that become empty are *kept*: a reply that was nothing but a
+        # credential is a real failure to answer in the expected script, and dropping it
+        # would report that as "not measured" and excuse genuinely blank replies too.
         texts = [strip_markers(f.text) for f in record.received() if f.text]
         if not texts:
             return self.infra(spec, "NOT_MEASURABLE: the agent sent no text")
-        want, other = (ARABIC, LATIN) if script == "arabic" else (LATIN, ARABIC)
-        ok = [len(want.findall(t)) > len(other.findall(t)) for t in texts]
+        ok = [in_scripts(t, scripts) for t in texts]
         fraction = sum(ok) / len(ok)
         spec_eff = spec.model_copy(update={"threshold": float(minimum)})
-        return self.result(spec_eff, fraction, messages=len(texts), in_script=sum(ok))
+        return self.result(
+            spec_eff, fraction, messages=len(texts), in_script=sum(ok), scripts=list(scripts)
+        )
 
 
 @register

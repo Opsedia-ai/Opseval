@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from opseval.catalogue import LoadProblem
 from opseval.datasets import Expansion
-from opseval.langpacks import UnknownLanguage, lookup
+from opseval.langpacks import UnknownLanguage, lookup, narrower
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario
 from opseval.scoring import REGISTRY, effective_specs
@@ -128,6 +128,14 @@ def _language(scenario: Scenario, warn: Callable[[str, str], None]) -> None:
             f"no pack for {found.fallback_from!r} yet: the customer writes with the "
             f"{found.pack.tag} pack instead, so this does not test that dialect",
         )
+    if found.fallback_from is None and scenario.conversation.llm_persona:
+        for fld, alias, tag in narrower(persona.language, persona.dialect, found.pack):
+            warn(
+                f"persona.{fld}",
+                f"{alias!r} still names the {found.pack.tag} pack, as it did before, so saved "
+                f"scenarios keep their meaning; the {tag} pack is more specific (preview) and "
+                f"is used only when named ({tag})",
+            )
 
 
 def _ungraded(

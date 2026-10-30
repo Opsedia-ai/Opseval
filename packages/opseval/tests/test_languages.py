@@ -76,7 +76,7 @@ def test_names_and_tags_resolve_to_the_same_packs(
 
 def test_the_old_pack_names_are_unchanged() -> None:
     """The guided form and saved scenarios write `language` + `dialect`; those stay."""
-    assert {(p.code, p.dialect) for p in PACKS} == {
+    assert {(p.code, p.dialect) for p in PACKS} >= {
         ("en", None),
         ("ar", None),
         ("ar", "egyptian"),
@@ -108,10 +108,13 @@ def test_two_fields_naming_different_packs_are_refused() -> None:
 @pytest.mark.parametrize(
     ("language", "dialect", "tag"),
     [
-        ("ar", "levantine", "ar"),  # MSA, as before ADR-0059, now with a warning
-        ("ar-LB", None, "ar"),
-        ("ar-SA", None, "ar-x-gulf"),
-        ("ar", "kuwaiti", "ar-x-gulf"),
+        ("ar", "yemeni", "ar"),  # MSA, as before ADR-0059, now with a warning
+        ("ar-LY", None, "ar"),
+        ("ar", "maghrebi", "ar"),
+        ("ar-QA", None, "ar-x-gulf"),
+        ("ar", "omani", "ar-x-gulf"),
+        ("ar-SY", None, "ar-x-levant"),
+        ("ar", "palestinian", "ar-x-levant"),
         ("en-US", None, "en"),
         ("en", "GB", "en"),
         # English dialect names load as they did before ADR-0059, now with a warning
@@ -130,7 +133,7 @@ def test_a_declared_fallback_names_what_it_stands_in_for(
 
 
 def test_an_exact_name_beside_a_fallback_tag_is_exact() -> None:
-    assert lookup("ar-SA", "gulf").fallback_from is None
+    assert lookup("ar-QA", "gulf").fallback_from is None
 
 
 def _system(**persona: Any) -> str:
@@ -201,15 +204,15 @@ def test_validate_exits_3(tmp_path: Path, cat_dir: Path) -> None:
 
 def test_a_declared_fallback_loads_with_a_warning(profile: SutProfile) -> None:
     sc = make_scenario(
-        persona={"role": "r", "language": "ar", "dialect": "levantine"},
+        persona={"role": "r", "language": "ar", "dialect": "yemeni"},
         conversation=LLM,
         execution={"repeats": 3},
     )
     warnings = scenario_warnings(sc, "x.yaml", profile)
     assert [w.field for w in warnings] == ["persona.dialect"]
-    assert "levantine" in warnings[0].message and "ar pack" in warnings[0].message
+    assert "yemeni" in warnings[0].message and "ar pack" in warnings[0].message
     by_tag = make_scenario(
-        persona={"role": "r", "language": "ar-SA"}, conversation=LLM, execution={"repeats": 3}
+        persona={"role": "r", "language": "ar-QA"}, conversation=LLM, execution={"repeats": 3}
     )
     assert [w.field for w in scenario_warnings(by_tag, "x.yaml", profile)] == ["persona.language"]
     american = make_scenario(
@@ -223,7 +226,7 @@ def test_a_declared_fallback_loads_with_a_warning(profile: SutProfile) -> None:
 def test_scripted_turns_in_a_fallback_dialect_are_not_warned_about(profile: SutProfile) -> None:
     """The author wrote the turns in the dialect itself; no pack stands in for anything."""
     sc = make_scenario(
-        persona={"role": "r", "language": "ar", "dialect": "levantine"}, execution={"repeats": 3}
+        persona={"role": "r", "language": "ar", "dialect": "yemeni"}, execution={"repeats": 3}
     )
     assert scenario_warnings(sc, "x.yaml", profile) == []
 
@@ -270,7 +273,26 @@ def test_the_guided_form_offers_pack_names(tmp_path: Path) -> None:
     from opseval.server.forms import languages
 
     offered = {lang.code: lang.dialects for lang in languages()}
-    assert offered == {"ar": ["egyptian", "gulf"], "en": []}
+    assert offered == {
+        "ar": [
+            "algerian",
+            "codeswitch",
+            "egyptian",
+            "gulf",
+            "iraqi",
+            "jordanian",
+            "ksa",
+            "kuwaiti",
+            "lebanese",
+            "levantine",
+            "moroccan",
+            "tunisian",
+            "uae",
+        ],
+        "en": [],
+    }
+    # Arabic is offered as a preview: no Arabic pack has had its native-speaker review.
+    assert {lang.code: lang.stable for lang in languages()} == {"ar": False, "en": True}
 
 
 def test_a_copied_demo_catalogue_still_loads(tmp_path: Path, profile: SutProfile) -> None:
@@ -410,24 +432,24 @@ def test_every_spelling_of_one_pack_grades_alike(
 def test_an_llm_persona_is_graded_against_the_pack_it_was_told_to_write(
     profile: SutProfile,
 ) -> None:
-    """ar + levantine: the simulator writes MSA, so the persona judge must not invalidate the
+    """ar + yemeni: the simulator writes MSA, so the persona judge must not invalidate the
     attempt for MSA, and the language judge expects what the customer actually wrote."""
-    lang, persona, *_ = _told(_llm(language="ar", dialect="levantine"), profile)
+    lang, persona, *_ = _told(_llm(language="ar", dialect="yemeni"), profile)
     assert lang == "Expected customer language: ar"
     assert persona == "Persona language: ar"
-    assert _told(_llm(language="ar", dialect="levantine"), profile) == _told(
+    assert _told(_llm(language="ar", dialect="yemeni"), profile) == _told(
         _llm(language="ar"), profile
     )
-    lang, persona, *_ = _told(_llm(language="ar-SA"), profile)
+    lang, persona, *_ = _told(_llm(language="ar-QA"), profile)
     assert persona == "Persona language: ar (gulf)"
-    assert resolve("ar", "gulf").instruction in _system(language="ar-SA")
+    assert resolve("ar", "gulf").instruction in _system(language="ar-QA")
 
 
 def test_scripted_turns_are_graded_against_the_declared_language(profile: SutProfile) -> None:
     """Nothing stands in for scripted turns: the author wrote them in the declared dialect."""
-    lang, persona, *_ = _told(_scripted(language="ar", dialect="levantine"), profile)
-    assert lang == "Expected customer language: ar (levantine)"
-    assert persona == "Persona language: ar (levantine)"
+    lang, persona, *_ = _told(_scripted(language="ar", dialect="yemeni"), profile)
+    assert lang == "Expected customer language: ar (yemeni)"
+    assert persona == "Persona language: ar (yemeni)"
     lang, persona, *_ = _told(_scripted(language="fr"), profile)
     assert lang == "Expected customer language: fr"
 
@@ -437,8 +459,8 @@ def test_effective_language_tags() -> None:
         return effective_language(sc.persona, scripted=not sc.conversation.llm_persona).tag
 
     assert tag(_llm(language="ar", dialect="masri")) == "ar-EG"
-    assert tag(_llm(language="ar", dialect="levantine")) == "ar"
-    assert tag(_scripted(language="ar", dialect="levantine")) is None
+    assert tag(_llm(language="ar", dialect="yemeni")) == "ar"
+    assert tag(_scripted(language="ar", dialect="yemeni")) is None
     assert tag(_scripted(language="fr")) is None
     assert tag(_scripted(language="ar-EG")) == "ar-EG"
 
