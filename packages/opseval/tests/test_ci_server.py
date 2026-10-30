@@ -762,12 +762,6 @@ def test_the_server_sink_is_not_part_of_the_run(tmp_path: Path) -> None:
 # --- against a real server on Postgres --------------------------------------------------------
 
 
-def _bundle(store: FileStore, run_id: str) -> RunUpload:
-    return remote.bundle(
-        store, run_id, ci=CiInfo(provider="github", repository="acme/bot"), catalogue=None
-    )
-
-
 def _split(header: str) -> tuple[str, str]:
     public, secret = header.removeprefix("Bearer ").split(":", 1)
     return public, secret
@@ -1064,21 +1058,6 @@ class TestAgainstARealServer:
             assert sha == hashlib.sha256(data).hexdigest()
         assert world.store.load_error("r-ci-voice") == {"code": "X", "message": "a voice run"}
 
-    async def test_shared_token_mode_has_no_upload(self, tmp_path: Path) -> None:
-        from fastapi.testclient import TestClient
-
-        from opseval.server import create_app
-
-        settings = Settings(_env_file=None, reports_dir=str(tmp_path))
-        c = TestClient(create_app(settings=settings, token="t"), base_url=SERVER)
-        r = c.put(
-            "/api/v1/runs/r1/upload",
-            params={"project": PROJECT, "task": "default"},
-            content=b"{}",
-            headers={"Authorization": "Bearer t"},
-        )
-        assert r.status_code == 409 and r.json()["code"] == "ACCOUNTS_MODE_ONLY"
-
     async def test_migration_0007_goes_down_and_up(self, pg_url: str, tmp_path: Path) -> None:
         from alembic import command
         from sqlalchemy import text
@@ -1116,3 +1095,25 @@ def test_export_model_round_trips() -> None:
     body = export_body()
     export = CatalogueExport.model_validate(body)
     assert export.pulled().items[0].version == 1
+
+
+def test_shared_token_mode_has_no_upload(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from opseval.server import create_app
+
+    settings = Settings(_env_file=None, reports_dir=str(tmp_path))
+    c = TestClient(create_app(settings=settings, token="t"), base_url=SERVER)
+    r = c.put(
+        "/api/v1/runs/r1/upload",
+        params={"project": PROJECT, "task": "default"},
+        content=b"{}",
+        headers={"Authorization": "Bearer t"},
+    )
+    assert r.status_code == 409 and r.json()["code"] == "ACCOUNTS_MODE_ONLY"
+    r = c.get(
+        "/api/v1/catalogue/export",
+        params={"project": PROJECT, "task": "default"},
+        headers={"Authorization": "Bearer t"},
+    )
+    assert r.status_code == 409 and r.json()["code"] == "ACCOUNTS_MODE_ONLY"
