@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, TypeVar
 from urllib.parse import urlsplit
 
 from opseval import __version__
@@ -29,14 +29,14 @@ from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.datasets import Limits
 from opseval.demo import catalogue_dir as demo_catalogue_dir
 from opseval.driver import RATE_LIMITED_NOTE, Driver
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, HarnessError
 from opseval.langpacks import effective_language, voice_language
 from opseval.llm import UsageMeter, client_for_role
 from opseval.models.gate import Preset, ResolvedGatePolicy
 from opseval.models.gate import resolve as resolve_gate
 from opseval.models.preflight import PreflightReport
 from opseval.models.profile import SutProfile
-from opseval.models.record import RunRecord
+from opseval.models.record import RunRecord, TerminalState
 from opseval.models.results import (
     AttemptVerdict,
     SkipKind,
@@ -59,7 +59,7 @@ from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
 from opseval.scoring.base import check_judge_independence
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 from opseval.sinks import build_sinks, publish_all
-from opseval.storage import FileStore
+from opseval.storage import FileStore, RunStore
 from opseval.telemetry import report as report_telemetry
 from opseval.tenants import (
     Lease,
@@ -93,6 +93,7 @@ from opseval.verdicts import (
     skipped,
 )
 from opseval.voice import AudioPlan, AudioRecorder, SpeechKit, VoiceTransport, check_audio_privacy
+from opseval.voice.recording import AudioWriter
 
 TransportFactory = Callable[[SutProfile], Transport]
 
@@ -135,6 +136,10 @@ class RunOptions:
     synthetic_voices: bool = False
     """The voices are the demo's own synthetic ones (``opseval demo --voice``): exempt from
     the rule that recorded audio must be encrypted (ADR-0053). Never set for a real agent."""
+    store: RunStore | None = None
+    """Where the run is written: run folders under ``OPSEVAL_REPORTS_DIR`` by default, or a
+    server-mode store (``opseval run --database-url``, ADR-0051). The runner never knows
+    which."""
 
 
 class _TransportCtor(Protocol):
@@ -482,7 +487,7 @@ class _RunControl:
     def __init__(
         self,
         stop: StopPolicy,
-        store: FileStore,
+        store: RunStore,
         run_id: str,
         policy: ResolvedGatePolicy,
         declared: bool,
@@ -593,6 +598,37 @@ async def launch(
                 await kit.aclose()
 
 
+_T = TypeVar("_T")
+
+
+async def _io(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+    """A store call on a worker thread: storage never blocks the event loop (the agent's
+    turns, the other lanes) and is never on an attempt's clock (review of #93). A failure is
+    raised as it was, a :class:`~opseval.errors.StorageError` for the database or blob store
+    (a harness error: exit 3)."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+async def _flushed(record: RunRecord, writer: AudioWriter) -> RunRecord:
+    """The attempt's audio written (off the loop and off the clock) before its record is
+    saved. Audio that could not be stored makes the attempt a harness failure, its record
+    saying how the conversation itself had ended: evidence is never silently missing, and a
+    storage failure is never the agent's."""
+    try:
+        await asyncio.to_thread(writer.flush)
+    except HarnessError as exc:
+        ended = f"{record.terminal_state.value}: {record.stop_reason}"
+        return record.model_copy(
+            update={
+                "terminal_state": TerminalState.HARNESS_FAILURE,
+                "stop_reason": f"recorded audio could not be stored ({exc}); the "
+                f"conversation had ended as {ended}",
+                "infra_errors": (*record.infra_errors, f"harness: {type(exc).__name__}: {exc}"),
+            }
+        )
+    return record
+
+
 async def _launch(
     catalogue_target: str | Path,
     options: RunOptions,
@@ -675,7 +711,17 @@ async def _launch(
         simulator_model=sim_client.model if sim_client else None,
         judge_independence=settings.judge_independence,
     )
-    store = FileStore(settings.reports_dir)
+    store: RunStore = options.store or FileStore(settings.reports_dir)
+    sealed_only = options.store is not None and getattr(
+        options.store.audio("-"), "sealed_only", False
+    )
+    if audio_plan.mode == "files" and audio_plan.key is None and sealed_only:
+        # Server mode keeps audio only sealed (ADR-0051), the demo's synthetic voices too:
+        # refused before anything is sent, never a plain file written to a shared store.
+        raise ConfigError(
+            "this store keeps recorded audio only encrypted: set "
+            "OPSEVAL_AUDIO_ENCRYPTION_KEY, or OPSEVAL_RECORD_AUDIO=hashes"
+        )
 
     default_where = make_transport(profile, None).target
     health = PreflightReport()
@@ -730,7 +776,11 @@ async def _launch(
     # The hosts attempts actually went to: with per-tenant targets, --target may not be one.
     used = sorted(_tenant_targets(pool, options.target)) if pool else [default_where]
     target_label = ", ".join(_shown(u) for u in used) if pool else default_where
-    store.write_manifest(
+    # Every store call below runs on a worker thread (review of #93): a database or a remote
+    # blob store never blocks the event loop, so the agent's turns, the other lanes and the
+    # console's run thread go on meanwhile. None of them is inside an attempt's clock.
+    await _io(
+        store.write_manifest,
         run_id,
         {
             "run_id": run_id,
@@ -751,14 +801,14 @@ async def _launch(
             "config": config_digest(settings),
         },
     )
-    store.save_profile(run_id, profile)
+    await _io(store.save_profile, run_id, profile)
 
     policy = resolve_gate(
         catalogue.gate, preset=options.gate, fail_on_flaky=settings.gate_fail_on_flaky
     )
     declared = any(sc.criticality is not Criticality.NORMAL for sc in catalogue.scenarios)
     verdicts: list[TestVerdict] = []
-    tracker = ProgressLog(store, run_id, [sc.id for sc in catalogue.scenarios])
+    tracker = await _io(ProgressLog, store, run_id, [sc.id for sc in catalogue.scenarios])
     stop = (catalogue.stop or StopPolicy()).merged(options.stop)
     if options.fail_fast:
         stop = stop.model_copy(update={"fail_fast": True})
@@ -780,7 +830,7 @@ async def _launch(
 
     async def run_one(scenario: Scenario) -> TestVerdict:
         """One scenario from start to verdict: run control, skips, the lease, attempts."""
-        halt = control.before_scenario(scenario)
+        halt = await _io(control.before_scenario, scenario)
         if halt is not None:
             # Named, so what was not run cannot vanish from the result.
             return halt
@@ -790,7 +840,7 @@ async def _launch(
                     "execution": scenario.execution.model_copy(update={"repeats": options.repeats})
                 }
             )
-        store.save_scenario(run_id, scenario)
+        await _io(store.save_scenario, run_id, scenario)
         if scenario.is_blocked:
             return skipped(scenario, VerdictStatus.BLOCKED, "tagged 'blocked'", "quarantine")
         blocked_by = _unmet(scenario, profile, health, sim_client is None)
@@ -829,7 +879,7 @@ async def _launch(
                 )
             tenant = lease.tenant
         # Started only now: a scenario still waiting for a tenant is not running.
-        tracker.started(scenario.id, scenario.execution.repeats)
+        await _io(tracker.started, scenario.id, scenario.execution.repeats)
         try:
             async with refreshing(lease):
                 return await attempts_of(scenario, tenant, lease)
@@ -838,11 +888,17 @@ async def _launch(
                 lease.release()
 
     async def one_attempt(
-        scenario: Scenario, i: int, driver: Driver, lease: Lease | None
+        scenario: Scenario,
+        i: int,
+        driver: Driver,
+        lease: Lease | None,
+        writer: AudioWriter | None = None,
     ) -> tuple[RunRecord, AttemptVerdict]:
         """Drive, enrich, save and score one attempt. Every call it pays for (the simulator,
         speech, the judges) is in the meter's attempt block, and goes into its record."""
         record = await driver.run()
+        if writer is not None:
+            record = await _flushed(record, writer)
         if lease is not None and not lease.check():
             # Another run holds this tenant's lease now: the attempt may have shared
             # the account, so it is the harness's problem, never a verdict.
@@ -857,14 +913,14 @@ async def _launch(
             )
         if trace_source is not None:
             record = await enrich(record, trace_source, profile)
-        path = store.save_record(record)
-        tracker.attempt(scenario.id)
+        ref = await _io(store.save_record, record)
+        await _io(tracker.attempt, scenario.id)
         scores = await engine.score(record, scenario, profile)
-        verdict = attempt_verdict(record, scores, str(path))
+        verdict = attempt_verdict(record, scores, ref)
         # Saved again with the calls the attempt paid for, judges included (ADR-0066). The
         # record was on disk before scoring, so a crash while judging still leaves it.
         record = record.model_copy(update={"usage_events": meter.events_for(scenario.id, i)})
-        store.save_record(record)
+        await _io(store.save_record, record)
         return record, verdict
 
     async def attempts_of(
@@ -877,7 +933,7 @@ async def _launch(
         attempts = []
         rate_limited = False
         for i in range(scenario.execution.repeats):
-            if control.cancel_requested(scenario, done=i):
+            if await _io(control.cancel_requested, scenario, done=i):
                 break
             seed = attempt_seed(scenario.id, i)
             sim: Simulator = (
@@ -886,14 +942,19 @@ async def _launch(
                 else LLMSimulator(scenario, seed, sim_client)
             )
             transport = make_transport(profile, tenant)
+            writer: AudioWriter | None = None
             if isinstance(transport, VoiceTransport):
+                audio = store.audio(run_id)
+                if audio_plan.mode == "files":
+                    writer = AudioWriter(audio, limit_bytes=settings.audio_write_queue_mb * 2**20)
                 recorder = AudioRecorder(
-                    store.run_dir(run_id),
+                    audio,
                     scenario.id,
                     i,
                     audio_plan.mode,
                     key=audio_plan.key,
                     run_id=run_id,
+                    writer=writer,
                 )
                 # The pack's tag (ADR-0059), so OPSEVAL_TTS_VOICE_MAP can map ar-SA however
                 # the persona spelled it; providers are given langpacks.provider_language.
@@ -913,7 +974,7 @@ async def _launch(
                 simulator_timeout_seconds=settings.simulator_timeout_seconds,
             )
             with meter.attempt(scenario.id, i):
-                record, verdict = await one_attempt(scenario, i, driver, lease)
+                record, verdict = await one_attempt(scenario, i, driver, lease, writer)
             rate_limited = rate_limited or RATE_LIMITED_NOTE in record.notes
             attempts.append(verdict)
             state = (
@@ -949,7 +1010,7 @@ async def _launch(
 
     async def decided(scenario: Scenario) -> TestVerdict:
         verdict = await run_one(scenario)
-        tracker.ended(verdict)
+        await _io(tracker.ended, verdict)
         return verdict
 
     if lanes <= 1:
@@ -982,7 +1043,7 @@ async def _launch(
     if control.stopped is not None:
         log(f"stopped early: {control.stopped.detail}")
 
-    tracker.finishing()
+    await _io(tracker.finishing)
     gate = release_gate(verdicts, policy=policy, load_errors=len(catalogue.problems))
     result = SuiteResult(
         opseval_version=__version__,
@@ -1006,12 +1067,13 @@ async def _launch(
     # After the verdict exists and before it is written, so the outcomes are part of the
     # saved result. A sink can never change the verdict; publish_all catches everything.
     result = result.model_copy(update={"sinks": await publish_all(sinks, result, log=log)})
-    store.save_report(
-        run_id,
-        render_html(result, store.load_records(run_id), profile, run_dir=store.run_dir(run_id)),
-    )
-    store.save_junit(run_id, render_junit(result))
-    store.save_result(result)  # written last: marks the run as complete
+
+    def report() -> str:
+        return render_html(result, store.load_records(run_id), profile, run_dir=store.audio(run_id))
+
+    await _io(store.save_report, run_id, await _io(report))
+    await _io(store.save_junit, run_id, render_junit(result))
+    await _io(store.save_result, result)  # written last: marks the run as complete
     # After the result is on disk, so a slow or dead collector cannot cost anything.
     await report_telemetry(
         result,

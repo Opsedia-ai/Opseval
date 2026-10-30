@@ -14,7 +14,7 @@ from opseval.models.gate import describe, looser_than_standard
 from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
-from opseval.retention import read_pruned_marker
+from opseval.storage import FileRunAudio, RunAudio
 from opseval.transcript import connection, transcript
 
 _TEMPLATES = Path(__file__).parent / "templates"
@@ -48,12 +48,16 @@ class AudioNote:
     """By seq: the command that exports an undecodable agent turn's bytes as they came."""
 
 
-def audio_note(record: RunRecord, run_dir: str | Path | None) -> AudioNote | None:
+def audio_note(record: RunRecord, run_dir: RunAudio | str | Path | None) -> AudioNote | None:
     refs = [f.audio for f in record.frames if f.audio is not None]
     if not refs:
         return None
-    folder = Path(run_dir) if run_dir is not None else Path("reports") / record.run_id
-    marker = read_pruned_marker(folder)  # the player's own parser: they never disagree
+    if run_dir is None or isinstance(run_dir, str | Path):
+        path = Path(run_dir) if run_dir is not None else Path("reports") / record.run_id
+        audio: RunAudio = FileRunAudio(path, record.run_id)
+    else:
+        audio = run_dir
+    marker = audio.pruned()  # the player's own parser: they never disagree
     files = [r for r in refs if r.path is not None]
     if marker is not None or any(r.pruned for r in refs):
         said = marker.note if marker is not None else "audio pruned by retention"
@@ -65,9 +69,7 @@ def audio_note(record: RunRecord, run_dir: str | Path | None) -> AudioNote | Non
     if 0 < sealed < len(files):
         state = f"{sealed} of {len(files)} encrypted"
     test, n = record.test_id, record.attempt_index
-    base = (
-        f"opseval audio export {shlex.quote(str(folder))} --test {shlex.quote(test)} --attempt {n}"
-    )
+    base = f"opseval audio export {audio.export_args()} --test {shlex.quote(test)} --attempt {n}"
     raw = {
         f.seq: f"{base} --turn {f.seq} --raw --out "
         + shlex.quote(f"{test}-attempt{n}-turn{f.seq}.raw")
@@ -81,7 +83,7 @@ def render_html(
     result: SuiteResult,
     records: list[RunRecord],
     profile: SutProfile | None = None,
-    run_dir: str | Path | None = None,
+    run_dir: RunAudio | str | Path | None = None,
 ) -> str:
     """Render the self-contained report.
 

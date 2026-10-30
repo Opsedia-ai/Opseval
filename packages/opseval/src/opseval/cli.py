@@ -12,15 +12,23 @@ import sys
 import traceback
 import webbrowser
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional
 
 import typer
 
 from opseval import __version__
 from opseval.catalogue import builtin_profiles, load_catalogue, load_profile
 from opseval.config import Settings
-from opseval.db.cli import catalogue_app, db_app, task_app
-from opseval.errors import ConfigError
+from opseval.db.cli import (
+    DatabaseUrlOpt,
+    catalogue_app,
+    db_app,
+    open_run_store,
+    runs_app,
+    server_settings,
+    task_app,
+)
+from opseval.errors import ConfigError, HarnessError
 from opseval.models.gate import Preset
 from opseval.models.results import SuiteResult
 from opseval.models.stop import StopPolicy
@@ -28,9 +36,12 @@ from opseval.reporting import console_summary
 from opseval.runner import VOICE_TRANSPORTS, RunOptions, launch, voice_language_for
 from opseval.scaffold import PLACEHOLDER_URL, TEMPLATES, Answers, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY, describe_params
-from opseval.storage import FileStore, load_result_at
+from opseval.storage import FileStore, RunStore, load_result_at
 from opseval.verdicts import EXIT_HARNESS, EXIT_NOT_JUDGED
 from opseval.voice.cli import audio_app
+
+if TYPE_CHECKING:
+    from opseval.db.run_store import DbRunStore
 
 app = typer.Typer(
     add_completion=False,
@@ -244,9 +255,25 @@ def list_scorers() -> None:
     typer.echo("Built-in profiles: " + ", ".join(f"builtin:{n}" for n in builtin_profiles()))
 
 
-def _finish(result: SuiteResult, settings: Settings, open_report: bool, junit: Path | None) -> int:
+def _finish(
+    result: SuiteResult,
+    settings: Settings,
+    open_report: bool,
+    junit: Path | None,
+    store: RunStore | None = None,
+) -> int:
     typer.echo("")
     typer.echo(console_summary(result))
+    if store is not None and not isinstance(store, FileStore):
+        typer.echo(f"Stored: run {result.run_id} in the {store.where()}")
+        xml = store.load_junit(result.run_id)
+        if junit is not None and xml is not None:
+            junit.parent.mkdir(parents=True, exist_ok=True)
+            junit.write_text(xml, encoding="utf-8")
+            typer.echo(f"JUnit:  {junit.resolve()}")
+        if open_report:
+            typer.echo("The report is in the database: open the run in the console.")
+        return result.exit_code
     run_dir = (Path(settings.reports_dir) / result.run_id).resolve()
     typer.echo(f"Report: {run_dir / 'report.html'}")
     if junit is not None:
@@ -266,7 +293,35 @@ def _execute(
     except ConfigError as exc:
         typer.secho(f"configuration error: {exc}", fg="red", err=True)
         return EXIT_HARNESS
-    return _finish(result, settings, open_report, junit)
+    return _finish(result, settings, open_report, junit, options.store)
+
+
+def _server_store(
+    settings: Settings, database_url: str | None, project: str | None, task: str | None
+) -> DbRunStore | None:
+    """The database store when server mode is asked for (``--project``), else ``None``: run
+    folders, as always. Exit 3 on anything that keeps it from opening."""
+    if project is None:
+        if database_url:
+            typer.secho("configuration error: --database-url needs --project", fg="red", err=True)
+            raise typer.Exit(EXIT_HARNESS)
+        return None
+    try:
+        return open_run_store(server_settings(settings, database_url), project=project, task=task)
+    except ConfigError as exc:
+        typer.secho(f"configuration error: {exc}", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS) from exc
+
+
+ProjectRunOpt = Annotated[
+    Optional[str],  # noqa: UP045
+    typer.Option(
+        "--project",
+        help="Server mode: org/project. Runs go to the database (OPSEVAL_DATABASE_URL) and "
+        "the blob store, not to a folder (ADR-0051).",
+    ),
+]
+TaskRunOpt = Annotated[str, typer.Option("--task", help="Server mode: the project's task.")]
 
 
 @app.command()
@@ -346,6 +401,9 @@ def run(
     open_report: Annotated[
         bool, typer.Option("--open", help="Open report.html when done.")
     ] = False,
+    database_url: DatabaseUrlOpt = None,
+    project: ProjectRunOpt = None,
+    task: TaskRunOpt = "default",
 ) -> None:
     """Run scenarios against a deployed agent and gate the release."""
     settings = Settings()
@@ -374,7 +432,14 @@ def run(
         verify_llm=verify_llm,
         gate=gate,
     )
-    raise typer.Exit(_execute(path, options, settings, open_report, junit))
+    store = _server_store(settings, database_url, project, task)
+    options.store = store
+    try:
+        code = _execute(path, options, settings, open_report, junit)
+    finally:
+        if store is not None:
+            store.close()
+    raise typer.Exit(code)
 
 
 def _stop_flags(**flags: object) -> StopPolicy | None:
@@ -401,6 +466,15 @@ def prune(
     yes: Annotated[
         bool, typer.Option("--yes", help="Delete. Without it, only show what would go.")
     ] = False,
+    database_url: DatabaseUrlOpt = None,
+    project: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(
+            "--project",
+            help="Server mode: prune org/project's runs in the database and its blob store, "
+            "and the blobs left pending by a crash (ADR-0051).",
+        ),
+    ] = None,
 ) -> None:
     """Delete finished runs older than N days, and recorded audio older than M days (a dry
     run unless you pass --yes).
@@ -410,14 +484,24 @@ def prune(
     the run: the run keeps every turn's hash and transcript, and reads "audio pruned on
     <date>". Exit 3 if anything could not be fully deleted (the rest still is, and listed).
     """
-    from opseval.retention import apply, apply_audio, plan_audio
-    from opseval.retention import plan as plan_prune
 
     settings = Settings()
     root = reports_dir or Path(settings.reports_dir)
     days = older_than or settings.retention_days
     audio_days = audio_older_than or settings.audio_retention_days
-    store = FileStore(root)
+    db = _server_store(settings, database_url, project, None)
+    try:
+        _prune(db or FileStore(root), db, days, audio_days, yes)
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _prune(store: RunStore, db: DbRunStore | None, days: int, audio_days: int, yes: bool) -> None:
+    from opseval.retention import apply, apply_audio, plan_audio
+    from opseval.retention import plan as plan_prune
+
+    root = store.where()
     items = plan_prune(store, older_than_days=days)
     doomed = [i for i in items if i.action == "delete"]
     sounds = plan_audio(store, older_than_days=audio_days, skip=frozenset(i.run_id for i in doomed))
@@ -431,7 +515,13 @@ def prune(
             f"  audio   {sound.run_id}  ({when}: {sound.files} audio file(s), older than "
             f"{audio_days} days; the record stays)"
         )
-    if not doomed and not sounds:
+    orphans = db.orphans() if db is not None else []
+    for orphan in orphans:
+        typer.echo(
+            f"  orphan  {orphan.run_id}/{orphan.name}  (pending since "
+            f"{orphan.created_at:%Y-%m-%d %H:%M}; its run is no longer running)"
+        )
+    if not doomed and not sounds and not orphans:
         typer.echo(
             f"Nothing to prune in {root}: no finished run is older than {days} days, and no "
             f"recorded audio older than {audio_days} days."
@@ -445,6 +535,17 @@ def prune(
         return
     heard = apply_audio(store, sounds, older_than_days=audio_days)
     outcome = apply(store, items)
+    if db is not None:
+        # Listed again: a run whose delete failed part-way left its blobs pending, and they
+        # are swept now, whatever happened to the other runs (review of #93).
+        try:
+            cleaned = db.delete_orphans(db.orphans())
+        except HarnessError as exc:
+            outcome.failed.append(("orphaned blobs", f"{type(exc).__name__}: {exc}"))
+        else:
+            if cleaned.deleted:
+                typer.echo(f"Deleted {len(cleaned.deleted)} orphaned blob(s).")
+            outcome.failed.extend(cleaned.failed)
     typer.echo(
         f"Deleted {len(outcome.deleted)} run(s) and the audio of {len(heard.deleted)} run(s) "
         f"from {root}."
@@ -454,7 +555,10 @@ def prune(
         typer.secho(f"  could not delete {run_id}: {why}", fg="red", err=True)
     if failed:
         typer.secho(
-            f"{len(failed)} run(s) could not be fully pruned; remove them by hand.",
+            f"{len(failed)} run(s) could not be fully pruned; "
+            + (
+                "the next prune retries what is left." if db is not None else "remove them by hand."
+            ),
             fg="red",
             err=True,
         )
@@ -540,13 +644,14 @@ def rescore(
         )
     typer.echo("")
     typer.echo(console_summary(outcome.result))
-    typer.echo(f"Report: {(outcome.out_dir / 'report.html').resolve()}")
+    out_dir = outcome.out_dir or run_dir / f"rescore-{outcome.stamp}"
+    typer.echo(f"Report: {(out_dir / 'report.html').resolve()}")
     if junit is not None:
         junit.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(outcome.out_dir / "junit.xml", junit)
+        shutil.copyfile(out_dir / "junit.xml", junit)
         typer.echo(f"JUnit:  {junit.resolve()}")
     if open_report:
-        webbrowser.open((outcome.out_dir / "report.html").resolve().as_uri())
+        webbrowser.open((out_dir / "report.html").resolve().as_uri())
     raise typer.Exit(outcome.result.exit_code)
 
 
@@ -571,6 +676,7 @@ app.add_typer(telemetry_app, name="telemetry")
 app.add_typer(db_app, name="db")
 app.add_typer(catalogue_app, name="catalogue")
 app.add_typer(task_app, name="task")
+app.add_typer(runs_app, name="runs")
 app.add_typer(audio_app, name="audio")
 
 
@@ -1012,6 +1118,16 @@ def serve(
             "built, otherwise the Vite dev server (http://localhost:5173)."
         ),
     ] = None,
+    database_url: DatabaseUrlOpt = None,
+    project: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(
+            "--project",
+            help="Server mode: read runs from the database for org/project, and write the "
+            "runs the console starts there (ADR-0051).",
+        ),
+    ] = None,
+    task: TaskRunOpt = "default",
 ) -> None:
     """Serve the HTTP API the web console talks to (loopback only, token required)."""
     try:
@@ -1036,8 +1152,11 @@ def serve(
     root = catalogue or catalogue_dir()
     prof = profile or str(root / "profile.yaml")
     settings = Settings()
+    store = _server_store(settings, database_url, project, task)
     try:
         api = create_app(
+            store=store,
+            close_store=True,
             settings=settings,
             catalogue=root,
             profile=prof,
@@ -1070,7 +1189,12 @@ def serve(
         typer.echo("Catalogue: the built-in demo (read-only). Use --catalogue to edit your own.")
     if allow_commit:
         typer.secho("Runs may perform the irreversible outcome (--allow-commit).", fg="yellow")
-    uvicorn.run(api, host=host, port=port, log_level="info")
+    try:
+        uvicorn.run(api, host=host, port=port, log_level="info")
+    finally:
+        close = getattr(store, "close", None)
+        if callable(close):
+            close()  # idempotent: the app's lifespan closed it already on a clean stop
 
 
 def entrypoint() -> None:

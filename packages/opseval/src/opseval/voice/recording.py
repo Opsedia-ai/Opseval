@@ -20,17 +20,19 @@ written as plain WAV unless a key is set.
 from __future__ import annotations
 
 import hashlib
-import os
+import queue
 import re
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from opseval.audio import Codec, duration_ms, to_wav
 from opseval.config import Settings
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, HarnessError, StorageError
 from opseval.models.record import AudioRef
-from opseval.storage import SAFE_ID
+from opseval.storage import SAFE_ID, FileRunAudio, RunAudio, check_audio_path
 from opseval.voice.crypto import SUFFIX, AudioKey, FilePlace, load_key, parse_key
 
 SAFE = re.compile(r"[^A-Za-z0-9_.-]")
@@ -75,12 +77,100 @@ def check_audio_privacy(settings: Settings, *, synthetic: bool = False) -> Audio
     return AudioPlan("files", key)
 
 
+class AudioWriter:
+    """Writes one attempt's audio files on a thread of their own (review of #93).
+
+    The recorder hands each file over and goes on: a slow or remote store (the database's
+    blob store, S3) never blocks the event loop, never counts against the agent's turn or
+    attempt clock, and never stalls another lane. :meth:`flush` waits for every file, after
+    the attempt and before its record is saved; a file that could not be written is raised
+    there as a :class:`StorageError`, so the attempt ends as a harness failure, never as a
+    record that silently lacks its audio. What waits to be written is bounded
+    (``OPSEVAL_AUDIO_WRITE_QUEUE_MB``): past it, the files are not kept, and :meth:`flush`
+    says so the same way."""
+
+    def __init__(self, audio: RunAudio, *, limit_bytes: int = 256 * 1024 * 1024) -> None:
+        self._audio = audio
+        self._limit = limit_bytes
+        self._queue: queue.Queue[tuple[str, bytes] | None] = queue.Queue()
+        self._lock = threading.Lock()
+        self._waiting = 0
+        self._error: BaseException | None = None
+        self._thread: threading.Thread | None = None
+        self.files = 0
+        self.seconds = 0.0
+        """Time spent writing: the harness's, never the agent's."""
+
+    @property
+    def run_id(self) -> str | None:
+        return getattr(self._audio, "run_id", None)
+
+    def submit(self, relative: str, data: bytes) -> None:
+        with self._lock:
+            if self._error is not None:
+                return  # already failed: flush says so
+            if self._waiting + len(data) > self._limit:
+                self._error = StorageError(
+                    f"recorded audio waiting to be stored passed {self._limit // 2**20} MB "
+                    "(OPSEVAL_AUDIO_WRITE_QUEUE_MB): the store is too slow for this call"
+                )
+                return
+            self._waiting += len(data)
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._work, name="opseval-audio-writer", daemon=True
+                )
+                self._thread.start()
+        self._queue.put((relative, data))
+
+    def _work(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                return
+            relative, data = item
+            try:
+                if self._error is None:
+                    started = time.monotonic()
+                    try:
+                        self._audio.write(relative, data)
+                        self.files += 1
+                    finally:
+                        self.seconds += time.monotonic() - started
+            except BaseException as exc:  # noqa: BLE001 - raised by flush, never lost
+                with self._lock:
+                    self._error = self._error or exc
+            finally:
+                with self._lock:
+                    self._waiting -= len(data)
+                self._queue.task_done()
+
+    def flush(self) -> None:
+        """Wait until every file handed over is written (blocking: call it off the event
+        loop), then stop the thread. Raises the first failure as a :class:`StorageError`."""
+        with self._lock:
+            thread, self._thread = self._thread, None
+        if thread is not None:
+            self._queue.put(None)
+            thread.join()
+        error = self._error
+        if error is None:
+            return
+        if isinstance(error, HarnessError):
+            raise error
+        raise StorageError(
+            f"recorded audio could not be stored ({type(error).__name__}: {error})"
+        ) from error
+
+
 @dataclass
 class AudioRecorder:
-    """Keeps one attempt's audio. ``run_dir`` is the run folder; ``None`` keeps hashes only
-    (a run with no folder, such as a test)."""
+    """Keeps one attempt's audio. ``run_dir`` is where the run keeps it: the store's
+    :class:`~opseval.storage.RunAudio`, or a run folder; ``None`` keeps hashes only (a run
+    with nowhere to write, such as a test)."""
 
-    run_dir: Path | None
+    run_dir: RunAudio | Path | None
     test_id: str
     attempt: int
     mode: Mode = "hashes"
@@ -89,6 +179,8 @@ class AudioRecorder:
     synthetic voices get there (:func:`check_audio_privacy`)."""
     run_id: str | None = None
     """Bound into each sealed file. Default: the run folder's name."""
+    writer: AudioWriter | None = None
+    """Writes the files off the event loop (the runner's): ``None`` writes each at once."""
 
     def _relative(self, turn: int, speaker: str, suffix: str) -> str:
         # '@' is kept (storage.SAFE_ID): an expansion's folder (ADR-0060) is never an
@@ -109,18 +201,16 @@ class AudioRecorder:
     ) -> str | None:
         if self.mode != "files" or self.run_dir is None:
             return None
+        audio = FileRunAudio(self.run_dir) if isinstance(self.run_dir, Path) else self.run_dir
         if self.key is not None:
-            run_id = self.run_id if self.run_id is not None else self.run_dir.name
+            run_id = self.run_id if self.run_id is not None else audio.run_id
             place = FilePlace(run_id, self.test_id, self.attempt, turn, speaker)
             data = self.key.seal(data, place)
-        path = self.run_dir / relative
-        root = (self.run_dir / "audio").resolve()
-        if root not in path.resolve().parents:  # never outside audio/, whatever the id
-            raise ValueError(f"audio path {relative!r} leaves the run folder's audio/")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
+        if self.writer is not None:
+            check_audio_path(relative)  # refused here, at once, as a direct write would be
+            self.writer.submit(relative, data)
+        else:
+            audio.write(relative, data)  # never outside audio/, whatever the id (ValueError)
         return relative
 
     def keep(
@@ -170,4 +260,4 @@ class AudioRecorder:
         )
 
 
-__all__ = ["AudioPlan", "AudioRecorder", "Mode", "check_audio_privacy"]
+__all__ = ["AudioPlan", "AudioRecorder", "AudioWriter", "Mode", "check_audio_privacy"]

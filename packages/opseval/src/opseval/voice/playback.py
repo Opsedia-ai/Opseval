@@ -33,7 +33,7 @@ from typing import Literal
 
 from opseval.audio import AudioDecodeError, from_wav, resample
 from opseval.models.record import AudioRef, RunRecord
-from opseval.retention import AUDIO_MARKER, read_pruned_marker
+from opseval.storage import AUDIO_MARKER, AudioPathRefused, FileRunAudio, RunAudio
 from opseval.voice.crypto import (
     HEADER_BYTES,
     SUFFIX,
@@ -74,20 +74,32 @@ class Turn:
         return self.ref.encryption != "none"
 
 
-def _file(run_dir: Path, ref: AudioRef) -> Path:
-    """The file a ref names, never outside the run folder's ``audio/`` (links included)."""
+Source = RunAudio | Path
+"""Where a run's audio is: the store's :class:`~opseval.storage.RunAudio`, or a run folder
+(``opseval audio`` on a folder named on the command line)."""
+
+
+def _source(run_dir: Source) -> RunAudio:
+    return FileRunAudio(run_dir) if isinstance(run_dir, Path) else run_dir
+
+
+def _size(audio: RunAudio, ref: AudioRef) -> int | None:
+    """The size of the file a ref names (``None``: not there), never outside the run's
+    ``audio/`` (links included)."""
     if ref.path is None:
         raise AudioUnavailable("AUDIO_HASHES_ONLY", "only hashes were kept")
-    path = run_dir / ref.path
-    root = (run_dir / "audio").resolve()
-    if root not in path.resolve().parents:
-        raise AudioUnavailable("AUDIO_TAMPERED", f"{ref.path} leaves the run folder's audio/")
-    return path
+    try:
+        return audio.size(ref.path)
+    except AudioPathRefused as exc:
+        raise AudioUnavailable(
+            "AUDIO_TAMPERED", f"{ref.path} leaves the run folder's audio/"
+        ) from exc
 
 
-def turns(run_dir: Path, record: RunRecord) -> list[Turn]:
+def turns(run_dir: Source, record: RunRecord) -> list[Turn]:
     """Every spoken turn of an attempt, in frame order, with what can be done with it."""
-    marker = read_pruned_marker(run_dir)
+    audio = _source(run_dir)
+    marker = audio.pruned()
     out: list[Turn] = []
     for frame in record.frames:
         ref = frame.audio
@@ -103,7 +115,7 @@ def turns(run_dir: Path, record: RunRecord) -> list[Turn]:
             out.append(Turn(frame.seq, ref, "undecodable", note))
         else:
             try:
-                present = _file(run_dir, ref).is_file()
+                present = _size(audio, ref) is not None
             except AudioUnavailable:
                 present = False
             if present:
@@ -129,7 +141,7 @@ def _place(record: RunRecord, ref: AudioRef) -> FilePlace:
     )
 
 
-def find(run_dir: Path, record: RunRecord, seq: int) -> Turn:
+def find(run_dir: Source, record: RunRecord, seq: int) -> Turn:
     for turn in turns(run_dir, record):
         if turn.seq == seq:
             return turn
@@ -173,7 +185,7 @@ def _sealed_size(turn: Turn) -> int:
 
 
 def read_bytes(
-    run_dir: Path, record: RunRecord, turn: Turn, key: AudioKey | None, *, raw: bool = False
+    run_dir: Source, record: RunRecord, turn: Turn, key: AudioKey | None, *, raw: bool = False
 ) -> bytes:
     """A turn's audio as it was recorded (a WAV; with ``raw``, an undecodable turn's bytes
     as the agent sent them), checked against the record's hash. Held in memory only.
@@ -186,18 +198,20 @@ def read_bytes(
     problem = key_problem(turn, key)
     if problem is not None:
         raise problem
-    path = _file(run_dir, turn.ref)
+    audio = _source(run_dir)
     try:
-        size = path.stat().st_size
+        size = _size(audio, turn.ref)
+        if size is None:
+            raise FileNotFoundError(turn.ref.path)
         if size > MAX_FILE_BYTES or size > _sealed_size(turn):
             raise AudioUnavailable(
                 "AUDIO_TAMPERED",
                 f"{turn.ref.path} is {size} bytes, larger than the record says it was written",
             )
-        blob = path.read_bytes()
+        blob = audio.read(turn.ref.path or "")
     except FileNotFoundError as exc:
         # Retention may have emptied audio/ since the turn was listed: say so, not "missing".
-        marker = read_pruned_marker(run_dir)
+        marker = audio.pruned()
         if marker is not None:
             raise AudioUnavailable("AUDIO_PRUNED", f"turn {turn.seq}: {marker.note}") from exc
         raise AudioUnavailable(
@@ -220,7 +234,7 @@ def read_bytes(
     return data
 
 
-def turn_wav(run_dir: Path, record: RunRecord, seq: int, key: AudioKey | None) -> bytes:
+def turn_wav(run_dir: Source, record: RunRecord, seq: int, key: AudioKey | None) -> bytes:
     """One turn, as a playable WAV."""
     return read_bytes(run_dir, record, find(run_dir, record, seq), key)
 
@@ -274,7 +288,7 @@ Speaker = Literal["caller", "agent"]
 
 
 def call_turns(
-    run_dir: Path,
+    run_dir: Source,
     record: RunRecord,
     key: AudioKey | None,
     *,
@@ -447,7 +461,7 @@ def _header(rate: int, channels: int, data_bytes: int) -> bytes:
 
 
 def whole_call(
-    run_dir: Path,
+    run_dir: Source,
     record: RunRecord,
     key: AudioKey | None,
     *,

@@ -38,9 +38,10 @@ from opseval.analytics.models import (
     TokenTotals,
     UsageScope,
 )
+from opseval.errors import HarnessError
 from opseval.models.results import ModelUsage, SuiteResult, VerdictStatus
 from opseval.models.usage import UsageEvent, has_tokens
-from opseval.storage import PRE_USAGE_LAYOUTS, FileStore, load_result_at
+from opseval.storage import KNOWN_LAYOUTS, PRE_USAGE_LAYOUTS, RunStore
 
 AttemptKey = tuple[str, int]
 RESCORE = " (rescore)"
@@ -200,35 +201,39 @@ def _ratio(num: Measured, measured: int, of: int) -> Ratio:
 
 
 class FileAnalytics:
-    """The analytics store over a :class:`FileStore` (local mode)."""
+    """The analytics store over a :class:`~opseval.storage.RunStore`: run folders in local
+    mode, and the run store in server mode until analytics has tables of its own (ADR-0052).
+    It reads through the store's contract only."""
 
-    def __init__(self, store: FileStore) -> None:
+    def __init__(self, store: RunStore) -> None:
         self.store = store
         self._cache: dict[str, tuple[Stamp, RunUsage]] = {}
+        self._unreadable: list[str] = []
+        """Finished runs whose result could not be read on the last pass: named in every
+        answer's scope, never silently left out (review of #93)."""
 
     # --- reading ------------------------------------------------------------------------
 
     def _latest_rescore(self, run_id: str) -> tuple[str, float]:
-        found = sorted(self.store.run_dir(run_id).glob("rescore-*/result.json"))
+        found = self.store.rescores(run_id)
         if not found:
             return "", -1.0
-        try:
-            return found[-1].parent.name, found[-1].stat().st_mtime
-        except OSError:
-            return found[-1].parent.name, -1.0
+        at = self.store.changed_at(run_id, found[-1])
+        return found[-1], -1.0 if at is None else at
 
     def _finished(self) -> list[RunUsage]:
         """Every finished run, newest first, each parsed once and then reused until its
         ``result.json`` (or its latest re-score) changes. One request reads them once and
         shares them between the filter options and the answer."""
         runs: list[RunUsage] = []
-        for path in self.store.root.glob("*/result.json"):
-            run_id = path.parent.name
-            if not self.store.layout_known(run_id):
+        unreadable: list[str] = []
+        for stored in self.store.listing():  # one query in the database
+            run_id = stored.run_id
+            if not stored.finished or stored.layout not in KNOWN_LAYOUTS:
                 continue  # listed by the console as an error row: shown, never misread
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
+            mtime = stored.changed_at
+            if mtime is None:
+                unreadable.append(run_id)
                 continue
             stamp: Stamp = (mtime, *self._latest_rescore(run_id))
             hit = self._cache.get(run_id)
@@ -237,11 +242,13 @@ class FileAnalytics:
                 continue
             try:
                 result = self.store.load_result(run_id)
-            except (ValueError, OSError):
-                continue  # a half-written or foreign folder is not a run
+            except (ValueError, OSError, HarnessError):
+                unreadable.append(run_id)  # named in the scope, never silently dropped
+                continue
             usage = self._read(result, stamp[1])
             self._cache[run_id] = (stamp, usage)
             runs.append(usage)
+        self._unreadable = sorted(unreadable)
         return sorted(runs, key=lambda r: r.result.started_at, reverse=True)
 
     def _read(self, result: SuiteResult, rescore: str) -> RunUsage:
@@ -253,18 +260,18 @@ class FileAnalytics:
         try:
             for record in self.store.load_records(run_id):
                 attempts[(record.test_id, record.attempt_index)] = record.usage_events
-        except (ValueError, OSError):
+        except (ValueError, OSError, HarnessError):
             unreadable = True
         rescore_events: tuple[UsageEvent, ...] = ()
         rescore_unreadable = False
         if rescore:
             try:
-                again = load_result_at(self.store.run_dir(run_id) / rescore)
+                again = self.store.load_rescore(run_id, rescore)
                 rescore_events = (
                     *(e for a in again.attempt_usage for e in a.events),
                     *again.usage_events,
                 )
-            except (ValueError, OSError):
+            except (ValueError, OSError, HarnessError):
                 rescore_unreadable = True
         return RunUsage(
             result=result,
@@ -291,7 +298,9 @@ class FileAnalytics:
                 "no organisation, project, task or label"
             )
         picked: list[RunUsage] = []
-        left_out: list[str] = []
+        # A run whose result cannot be read cannot be filtered either: named, whatever the
+        # filters, rather than left out of the scope without a word.
+        left_out: list[str] = list(self._unreadable)
         for run in reversed(finished):  # oldest first
             result = run.result
             day = result.started_at.astimezone(UTC).date()

@@ -25,18 +25,21 @@ removed, so a prune stopped part-way still reads as pruned.
 
 from __future__ import annotations
 
-import json
-import os
-import re
-import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Literal
 
-from opseval.storage import FileStore, process_gone
+from opseval.errors import HarnessError
+from opseval.storage import (
+    AUDIO_MARKER,
+    RUN_NAME,
+    PrunedMarker,
+    RunStore,
+    process_gone,
+    read_pruned_marker,
+)
 
-RUN_FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+RUN_FOLDER = RUN_NAME
 """The same names the console accepts as run ids."""
 
 Action = Literal["delete", "keep"]
@@ -50,7 +53,7 @@ class PruneItem:
     started_at: datetime | None = None
 
 
-def _started(store: FileStore, run_id: str) -> datetime | None:
+def _started(store: RunStore, run_id: str) -> datetime | None:
     raw = store.load_manifest(run_id).get("started_at")
     if not isinstance(raw, str):
         return None
@@ -61,33 +64,30 @@ def _started(store: FileStore, run_id: str) -> datetime | None:
     return at if at.tzinfo else at.replace(tzinfo=UTC)
 
 
-def _ended(store: FileStore, folder: Path) -> str | None:
+def _ended(store: RunStore, run_id: str) -> str | None:
     """How the run ended, or ``None`` if it may still be going."""
-    if (folder / "result.json").is_file():
+    if store.has_result(run_id):
         return "finished"
-    if (folder / "error.json").is_file():
+    if store.has_error(run_id):
         return "could not be carried out"
-    if process_gone(store.load_manifest(folder.name)):
+    if process_gone(store.load_manifest(run_id)):
         return "interrupted"
     return None
 
 
-def plan(store: FileStore, *, older_than_days: int, now: datetime | None = None) -> list[PruneItem]:
+def plan(store: RunStore, *, older_than_days: int, now: datetime | None = None) -> list[PruneItem]:
     """What a prune would do to each run folder, oldest first. Deletes nothing."""
     if older_than_days < 1:
         raise ValueError("older_than_days must be at least 1")
     cutoff = (now or datetime.now(UTC)) - timedelta(days=older_than_days)
     items: list[PruneItem] = []
-    if not store.root.is_dir():
-        return items
-    for folder in sorted(store.root.iterdir()):
-        name = folder.name
-        if folder.is_symlink() or not folder.is_dir() or not RUN_FOLDER.match(name):
-            continue  # not ours to judge: left alone, and not listed
-        if not (folder / "manifest.json").is_file():
-            continue  # not a run folder
+    for name in store.run_ids():
+        if not store.deletable(name):
+            continue  # not ours to judge (a link, a foreign name): left alone, and not listed
+        if not store.exists(name):
+            continue  # not a run
         started = _started(store, name)
-        ended = _ended(store, folder)
+        ended = _ended(store, name)
         if not store.layout_known(name):
             reason = f"written by a newer Opseval (layout {store.layout(name)!r})"
             items.append(PruneItem(name, "keep", reason, started))
@@ -114,27 +114,7 @@ class PruneOutcome:
     """Runs that could not be (fully) removed, with why."""
 
 
-def _remove_run(folder: Path) -> None:
-    """Delete one run folder in an order that is safe to stop at any point.
-
-    Everything else goes first, then the manifest, then the result or error file. If it
-    stops part-way, the folder still reads as a finished run, or no longer as a run at
-    all; never as one that is still going.
-    """
-    markers = ("manifest.json", "result.json", "error.json")
-    for child in folder.iterdir():
-        if child.name in markers:
-            continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-    for name in markers:
-        (folder / name).unlink(missing_ok=True)
-    folder.rmdir()
-
-
-def apply(store: FileStore, items: list[PruneItem]) -> PruneOutcome:
+def apply(store: RunStore, items: list[PruneItem]) -> PruneOutcome:
     """Delete the folders the plan marked ``delete``, carrying on past any that fail.
 
     Each folder is checked again just before it goes, so a plan cannot delete something
@@ -142,68 +122,23 @@ def apply(store: FileStore, items: list[PruneItem]) -> PruneOutcome:
     """
     deleted: list[str] = []
     failed: list[tuple[str, str]] = []
-    root = store.root.resolve()
     for item in items:
         if item.action != "delete":
             continue
-        folder = store.root / item.run_id
-        if folder.is_symlink() or not folder.is_dir() or folder.resolve().parent != root:
-            continue
-        if _ended(store, folder) is None or not store.layout_known(item.run_id):
-            continue
         try:
-            _remove_run(folder)
-        except OSError as exc:
+            if not store.deletable(item.run_id):
+                continue
+            if _ended(store, item.run_id) is None or not store.layout_known(item.run_id):
+                continue
+            gone = store.delete_run(item.run_id)
+        except (OSError, HarnessError) as exc:
+            # One run's storage failure (a legal hold, a store answering 503) is listed and
+            # the prune goes on: never a reason to keep every other expired run.
             failed.append((item.run_id, f"{type(exc).__name__}: {exc}"))
             continue
-        deleted.append(item.run_id)
+        if gone:
+            deleted.append(item.run_id)
     return PruneOutcome(deleted=deleted, failed=failed)
-
-
-AUDIO_MARKER = "PRUNED.json"
-"""``audio/PRUNED.json``: written by :func:`apply_audio` before it removes a run's audio.
-The one name every reader uses (``voice.playback`` and the report import it from here);
-retention does not import the voice package."""
-
-
-@dataclass(frozen=True)
-class PrunedMarker:
-    """What :func:`apply_audio` left in place of a run's audio."""
-
-    pruned_at: datetime | None
-    readable: bool = True
-    """``False``: the marker is there but cannot be read. The audio still counts as pruned
-    (a reader never plays around a marker, and never calls a pruned run's audio missing)."""
-
-    @property
-    def note(self) -> str:
-        """In words, the same in the player, the CLI and the report."""
-        if not self.readable:
-            return "audio pruned (marker unreadable)"
-        if self.pruned_at is not None:
-            return f"audio pruned on {self.pruned_at.date().isoformat()}"
-        return "audio pruned by retention"
-
-
-def read_pruned_marker(run_dir: Path) -> PrunedMarker | None:
-    """The run's audio prune marker, or ``None`` when there is none. The one parser the
-    player, the CLI and the report share, so they never disagree on a run."""
-    path = run_dir / "audio" / AUDIO_MARKER
-    try:
-        data = json.loads(path.read_text("utf-8"))
-    except (FileNotFoundError, NotADirectoryError):
-        return PrunedMarker(None, readable=False) if os.path.lexists(path) else None
-    except (OSError, ValueError):
-        return PrunedMarker(None, readable=False)
-    if not isinstance(data, dict):
-        return PrunedMarker(None, readable=False)
-    at = data.get("pruned_at")
-    if isinstance(at, str):
-        try:
-            return PrunedMarker(datetime.fromisoformat(at))
-        except ValueError:
-            pass
-    return PrunedMarker(None)
 
 
 @dataclass(frozen=True)
@@ -213,22 +148,8 @@ class AudioPruneItem:
     started_at: datetime
 
 
-def _audio_files(folder: Path) -> list[Path] | None:
-    """The files under a run's ``audio/``, marker aside; ``None`` when ``audio/`` is not a
-    plain folder of ours (absent, or a link: never followed)."""
-    audio = folder / "audio"
-    if audio.is_symlink() or not audio.is_dir():
-        return None
-    found: list[Path] = []
-    for root, dirs, names in os.walk(audio, followlinks=False):
-        here = Path(root)
-        found.extend(here / n for n in names if not (here == audio and n == AUDIO_MARKER))
-        dirs[:] = [d for d in dirs if not (here / d).is_symlink()]
-    return found
-
-
 def plan_audio(
-    store: FileStore,
+    store: RunStore,
     *,
     older_than_days: int,
     now: datetime | None = None,
@@ -240,27 +161,22 @@ def plan_audio(
         raise ValueError("older_than_days must be at least 1")
     cutoff = (now or datetime.now(UTC)) - timedelta(days=older_than_days)
     items: list[AudioPruneItem] = []
-    if not store.root.is_dir():
-        return items
-    for folder in sorted(store.root.iterdir()):
-        name = folder.name
-        if name in skip or folder.is_symlink() or not folder.is_dir():
-            continue
-        if not RUN_FOLDER.match(name) or not (folder / "manifest.json").is_file():
+    for name in store.run_ids():
+        if name in skip or not store.deletable(name) or not store.exists(name):
             continue
         started = _started(store, name)
         if started is None or started > cutoff or not store.layout_known(name):
             continue
-        if _ended(store, folder) is None:
+        if _ended(store, name) is None:
             continue  # may still be recording
-        files = _audio_files(folder)
+        files = store.audio(name).count()
         if files:
-            items.append(AudioPruneItem(name, len(files), started))
+            items.append(AudioPruneItem(name, files, started))
     return sorted(items, key=lambda i: (i.started_at, i.run_id))
 
 
 def apply_audio(
-    store: FileStore,
+    store: RunStore,
     items: list[AudioPruneItem],
     *,
     older_than_days: int,
@@ -271,41 +187,15 @@ def apply_audio(
     at = now or datetime.now(UTC)
     done: list[str] = []
     failed: list[tuple[str, str]] = []
-    root = store.root.resolve()
     for item in items:
-        folder = store.root / item.run_id
-        if folder.is_symlink() or not folder.is_dir() or folder.resolve().parent != root:
-            continue
-        if _ended(store, folder) is None or not store.layout_known(item.run_id):
-            continue
-        files = _audio_files(folder)
-        if not files:
-            continue
-        audio = folder / "audio"
         try:
-            marker = audio / AUDIO_MARKER
-            earlier: list[object] = []
-            try:
-                previous = json.loads(marker.read_text("utf-8"))
-                if isinstance(previous, dict) and isinstance(previous.get("history"), list):
-                    earlier = previous["history"]
-            except (OSError, ValueError):
-                pass
-            body = {
-                "pruned_at": at.isoformat(),
-                "older_than_days": older_than_days,
-                "files": len(files),
-                "history": [*earlier, {"pruned_at": at.isoformat(), "files": len(files)}],
-            }
-            tmp = marker.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(body, indent=2), encoding="utf-8")
-            os.replace(tmp, marker)
-            for path in files:
-                path.unlink(missing_ok=True)
-            for sub in sorted((p for p in audio.rglob("*") if p.is_dir()), reverse=True):
-                if not sub.is_symlink() and not any(sub.iterdir()):
-                    sub.rmdir()
-        except OSError as exc:
+            if not store.deletable(item.run_id):
+                continue
+            if _ended(store, item.run_id) is None or not store.layout_known(item.run_id):
+                continue
+            if not store.audio(item.run_id).prune(at=at, older_than_days=older_than_days):
+                continue
+        except (OSError, HarnessError) as exc:
             failed.append((item.run_id, f"{type(exc).__name__}: {exc}"))
             continue
         done.append(item.run_id)

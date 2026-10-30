@@ -1,15 +1,15 @@
 # Server mode (preview)
 
-Server mode keeps the catalogue in Postgres, versioned the way Langfuse versions prompts
-(ADR-0047). Each scenario, suite and profile gets numbered, immutable versions, and labels such
+Server mode keeps the catalogue and the runs in Postgres, the catalogue versioned the way
+Langfuse versions prompts (ADR-0047) and each run's files in a blob store (ADR-0051). Each scenario, suite and profile gets numbered, immutable versions, and labels such
 as `production` and `staging` point at one version each. You push a catalogue folder in, promote
 versions with labels, and pull a label back out as a folder that `opseval run` takes as it is.
 
 Local mode does not change: the CLI on catalogue folders and run folders needs no database.
 
 !!! note "Preview"
-    The catalogue is the first part. The console on the database, runs in the database,
-    accounts and API keys, and workers follow, in the order ADR-0047 sets out.
+    The catalogue and the runs are built. The console's project and task views, accounts and
+    API keys, and workers follow, in the order ADR-0047 sets out.
 
 ## Set up
 
@@ -97,3 +97,65 @@ When you upgrade from a database made before tasks existed, `opseval db upgrade`
 project a `default` task with kind `chat` and modality `text`, and moves its catalogue into it.
 If the project has exactly one profile, the upgrade links it. Change the kind or modality
 afterwards with `opseval task update default …`.
+
+## Runs in the database
+
+With `--project`, a run is written to the database and its files (the result, each attempt's
+record, the report, the JUnit XML and any recorded audio) to the blob store, instead of a run
+folder. Without `--project` nothing changes: run folders under `OPSEVAL_REPORTS_DIR`.
+
+```bash
+opseval run ./release/suites/smoke.yaml --profile ./release/profile.yaml --target wss://… \
+  --project acme/support-bot --task default          # exit codes as always
+
+opseval serve --project acme/support-bot             # the console reads (and starts) runs there
+opseval prune --project acme/support-bot --yes       # old runs, old audio, orphaned blobs
+
+# Move existing run folders in (any layout Opseval has written). Run it again safely.
+opseval runs import reports/* --project acme/support-bot --task default
+
+# Listen back to a voice run kept in the database (the report prints this command).
+opseval audio export <run id> --project acme/support-bot --test vr-001 --out call.wav
+```
+
+The rows (runs, attempts, scores, verdicts, per-turn metrics, usage events) are for queries; what
+a reader sees is the JSON the run wrote, read back from the blob store. Two rules are in the
+schema itself: a score is empty exactly when its status is `infra_error` (a harness problem is
+never stored as a 0), and a metric with no value must say why.
+
+### The blob store
+
+| Setting | Default | |
+|---|---|---|
+| `OPSEVAL_BLOB_STORE` | `file` | `file` (a folder) or `s3` (AWS S3, MinIO, R2 or any S3-compatible store) |
+| `OPSEVAL_BLOB_DIR` | `.blobs` inside `OPSEVAL_REPORTS_DIR` | the folder, for `file`; an absolute path (a relative one is refused) |
+| `OPSEVAL_S3_ENDPOINT`, `OPSEVAL_S3_BUCKET`, `OPSEVAL_S3_REGION`, `OPSEVAL_S3_PREFIX` | | where, for `s3` (path-style addressing). The endpoint's host must be in `OPSEVAL_ALLOWED_HOSTS`, and anything but loopback must use https |
+| `OPSEVAL_S3_ACCESS_KEY_ID`, `OPSEVAL_S3_SECRET_ACCESS_KEY` | | secrets; requests are signed (SigV4) by Opseval itself, no AWS SDK |
+| `OPSEVAL_S3_SERVER_SIDE_ENCRYPTION` | `true` | asks the store to encrypt every object at rest. MinIO refuses it without a KMS configured: the error names this setting; set it to `false` there (audio is sealed by Opseval either way) |
+| `OPSEVAL_S3_TIMEOUT_SECONDS` | `30` | how long one S3 request may take |
+| `OPSEVAL_STORAGE_TIMEOUT_SECONDS` | `60` | how long one database call (and each SQL statement) may take before it fails as a harness error |
+| `OPSEVAL_AUDIO_WRITE_QUEUE_MB` | `256` | recorded audio waiting to be stored, at most, during a call |
+| `OPSEVAL_BLOB_PENDING_GRACE_HOURS` | `24` | how long a blob may stay *pending* before `prune` treats it as an orphan |
+
+Back up both the database and the blob store: each holds half of a run.
+
+| Rule | Why |
+|---|---|
+| A blob is recorded *pending* before it is uploaded, and *committed* with the row that refers to it | A crash leaves a pending row that `prune` cleans up, never a row pointing at nothing |
+| `prune` deletes an orphan's object first, then its row, and never lists the store to guess | A crash mid-cleanup is retried; an object Opseval has no row for is not Opseval's to delete |
+| Audio is stored only encrypted (`OPSEVAL_AUDIO_ENCRYPTION_KEY`), the demo's voices too | A voice can be biometric data; plain audio is refused before the run starts |
+| A blob store or database failure is a harness error (exit 3); the console answers `503 STORAGE_UNAVAILABLE` | A run whose record could not be kept was not measured; a run is never shown as missing because storage is down |
+| Storage runs off the event loop and off the agent's clock: audio is written by a background writer during a call, everything else on a worker thread | A slow store never turns into the agent's `TIMEOUT`, never adds to a latency, and never stalls another lane |
+| Every write names its project, and checks it changed exactly one row | One project never changes another's run, even with a run id that collides |
+| A run is deleted rows first (marked `deleting`, no longer listed), then its objects; what a failure leaves is swept by the next `prune` | Never a row pointing at a missing object; a legal hold or a store outage on one run never keeps the others |
+| A finished run that cannot be read is listed with `RUN_UNREADABLE`, never left out; a blob store set to another folder or bucket says `BLOB_STORE_MISMATCH` | Nothing disappears silently |
+| `runs import` skips a run already imported unchanged and refuses a different run with the same id | Importing twice is safe; nothing is overwritten |
+| `runs import` refuses a folder still running, unreadable, or with plain audio, whole | A run is never half-imported |
+| `runs import` refuses an id another project holds, before reading or writing anything | An import never touches another project |
+| An import cut short is marked `importing`, and the next import replaces it | A crash mid-import is retried, not stuck |
+| A folder keeps its layout when imported | A run written before per-call usage still reads as one |
+
+The Cost and Tokens dashboards work on runs in the database as on folders: they read through
+the same store. Indexed analytics over the usage and metric rows come with ADR-0052's
+`PgAnalytics`.
+

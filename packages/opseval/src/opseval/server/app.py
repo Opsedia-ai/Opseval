@@ -17,9 +17,10 @@ When a built console is found, it is served from ``/`` on the same origin as the
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -35,13 +36,13 @@ from opseval.analytics import FileAnalytics, UnsupportedFilter, UsageFilter
 from opseval.analytics.models import Bucket
 from opseval.catalogue import load_profile
 from opseval.config import Settings
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, StorageError
 from opseval.plugins import load_scorers
 from opseval.server import actions, lookup, views
 from opseval.server import audio as audio_api
 from opseval.server import schemas as s
 from opseval.server.lookup import safe_id
-from opseval.storage import FileStore
+from opseval.storage import FileStore, RunStore
 
 API = "/api/v1"
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -152,6 +153,8 @@ def create_app(
     allow_commit: bool = False,
     allowed_hosts: frozenset[str] = LOOPBACK_NAMES,
     console_dir: Path | None = None,
+    store: RunStore | None = None,
+    close_store: bool = False,
 ) -> FastAPI:
     settings = settings or Settings()
     # A suite may name a plugin's scorer; without this the console would reject it as
@@ -162,7 +165,7 @@ def create_app(
         token = configured.get_secret_value() if configured else secrets.token_urlsafe(24)
     ctx = actions.ServerContext(
         settings=settings,
-        store=FileStore(settings.reports_dir),
+        store=store or FileStore(settings.reports_dir),
         catalogue=catalogue,
         profile=load_profile(profile) if profile else None,
         profile_path=profile,
@@ -170,8 +173,20 @@ def create_app(
         read_only=read_only,
         allow_commit=allow_commit,
     )
+
     # No unauthenticated /docs or /openapi.json: the schema lives under /api, behind the token.
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            # The server's own store (server mode): its connections and loop go with it.
+            close = getattr(ctx.store, "close", None)
+            if close_store and callable(close):
+                close()
+
     app = FastAPI(
+        lifespan=lifespan,
         title="Opseval API",
         version=__version__,
         docs_url=None,
@@ -230,6 +245,12 @@ def create_app(
     @app.exception_handler(actions.ApiError)
     def _api_error(_: Request, exc: actions.ApiError) -> JSONResponse:
         return _deny(exc.status, exc.code, exc.message)
+
+    @app.exception_handler(StorageError)
+    def _storage_error(_: Request, exc: StorageError) -> JSONResponse:
+        # The database or the blob store is down: a harness problem, said as such. Never a
+        # 404 (the run is not gone) and never an empty list (nothing was left out on purpose).
+        return _deny(503, "STORAGE_UNAVAILABLE", str(exc))
 
     @app.exception_handler(UnsupportedFilter)
     def _unsupported_filter(_: Request, exc: UnsupportedFilter) -> JSONResponse:
@@ -290,7 +311,7 @@ def create_app(
         return s.Health(
             status="ok",
             version=__version__,
-            reports_dir=str(ctx.store.root),
+            reports_dir=ctx.store.where(),
             catalogue=str(catalogue) if catalogue else None,
             profile=ctx.profile.name if ctx.profile else None,
             read_only=read_only,
@@ -299,10 +320,14 @@ def create_app(
 
     @app.get(f"{API}/runs")
     def runs() -> list[s.RunSummary]:
-        return views.list_runs(ctx.store)
+        failed = ctx.unrecorded()  # first: a failure written now is listed by the store
+        return views.with_unrecorded(views.list_runs(ctx.store), failed)
 
     @app.get(API + "/runs/{run_id}")
     def run(run_id: str) -> s.RunDetail:
+        failed = ctx.unrecorded().get(run_id)
+        if failed is not None:
+            return views.unrecorded_detail(run_id, failed)
         detail = views.run_detail(ctx.store, _run_id(run_id))  # RunInProgress: 409
         if detail is None:
             raise actions.ApiError(404, "UNKNOWN_RUN", f"no run {run_id!r}")

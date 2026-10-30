@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pure read functions: files on disk in, API shapes out. No HTTP in here."""
+"""Pure read functions: the run store in, API shapes out. No HTTP in here, and no path: a run
+is read through :class:`~opseval.storage.RunStore` only, whichever store it is (ADR-0051)."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import yaml
 from opseval.analytics import AnalyticsStore, UsageFilter
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, check_url_allowed, config_digest
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, StorageError
 from opseval.models.gate import (
     PRESETS,
     SETTINGS,
@@ -32,31 +33,11 @@ from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import PRE_USAGE_LAYOUTS, FileStore, process_gone
+from opseval.storage import KNOWN_LAYOUTS, PRE_USAGE_LAYOUTS, RunStore, StoredRun, process_gone
 from opseval.transcript import connection, short, transcript
-from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
+from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS, gate_state
 
 JUDGED_STATUSES = {VerdictStatus.PASSED, VerdictStatus.FAILED}
-
-
-def gate_state(result: SuiteResult) -> s.GateState:
-    """What a finished run means for the release. The one place this is decided.
-
-    A harness error is never drawn as an agent failure, and an agent failure is never
-    drawn as green: exit 1 under a blocking gate is ``blocked``, under a passing gate
-    (only normal scenarios failed) it is ``gaps``.
-    """
-    if result.exit_code == EXIT_HARNESS:
-        return "harness_error"
-    if result.gate.status != "pass":
-        # What blocked decides it: an agent failure (or a flaky scenario, when flaky
-        # blocks) is "blocked"; only what could not be judged is "not_judged".
-        if result.gate.policy is not None:
-            by_agent = result.gate.agent_blocked
-        else:  # a result from before gate policies (ADR-0032): read its reasons
-            by_agent = any(": failed (" in b or b.endswith(": flaky") for b in result.gate.blocking)
-        return "blocked" if by_agent else "not_judged"
-    return "safe" if result.safe_to_release else "gaps"
 
 
 def _counts(tests: list[TestVerdict]) -> tuple[int, int, int, int]:
@@ -80,22 +61,36 @@ def summarise(result: SuiteResult) -> s.RunSummary:
     )
 
 
-def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
-    """A run folder without result.json: still running, or it could not be carried out."""
-    m = store.load_manifest(folder.name)
-    error = store.load_error(folder.name)
+def _stored(store: RunStore, run_id: str) -> StoredRun:
+    """One run as a listing sees it, through the store's single-run reads."""
+    finished = store.has_result(run_id)
+    return StoredRun(
+        run_id=run_id,
+        layout=store.layout(run_id),
+        manifest=store.load_manifest(run_id),
+        finished=finished,
+        error=store.load_error(run_id),
+        progress=store.load_progress(run_id),
+        cancel_requested=store.cancel_requested(run_id),
+        changed_at=None,
+    )
+
+
+def _unfinished(run: StoredRun) -> s.RunSummary | None:
+    """A run without a result: still running, or it could not be carried out."""
+    m, error = run.manifest, run.error
     if not m and error is None:
         return None  # not a run folder
-    if not store.layout_known(folder.name):
+    if run.layout not in KNOWN_LAYOUTS:
         # Written by a newer Opseval: shown as an error the reader can act on (upgrade),
         # never read with rules that may not apply to it, and never silently dropped.
         error = {
             "code": "UNKNOWN_LAYOUT",
-            "message": f"layout {store.layout(folder.name)!r} "
+            "message": f"layout {run.layout!r} "
             "was written by a newer Opseval; upgrade to read this run",
         }
     common = {
-        "id": str(m.get("run_id", folder.name)),
+        "id": str(m.get("run_id", run.run_id)),
         "suite": str(m.get("suite", "")),
         "started_at": m.get("started_at") or (error or {}).get("at"),
         "passed": None,  # not measured: never draw an unfinished run as zeros
@@ -115,14 +110,29 @@ def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
             gate="harness_error",
             error=f"{error.get('code', 'HARNESS_ERROR')}: {error.get('message', '')}",
         )
+    return s.RunSummary(**common, state="running", gate=None, progress=_progress(run))
+
+
+def _unreadable(run: StoredRun, reason: str) -> s.RunSummary:
+    """A finished run whose result cannot be read: listed as an error row, never dropped."""
+    m = run.manifest
     return s.RunSummary(
-        **common, state="running", gate=None, progress=_progress(store, folder.name)
+        id=run.run_id,
+        suite=str(m.get("suite", "")),
+        started_at=m.get("started_at"),
+        state="harness_error",
+        gate="harness_error",
+        passed=None,
+        failed=None,
+        unjudged=None,
+        flaky=None,
+        error=f"RUN_UNREADABLE: {reason}",
     )
 
 
-def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
+def _progress(run: StoredRun) -> s.RunProgress | None:
     """The runner's own account of how far it got (progress.json), or ``None``."""
-    p = store.load_progress(run_id)
+    p = run.progress
     if p is None:
         return None
     rows = [
@@ -136,32 +146,110 @@ def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
         attempts_recorded=sum(r.attempts for r in rows),
         current=p.current,
         scenarios=rows,
-        cancel_requested=store.cancel_requested(run_id),
+        cancel_requested=run.cancel_requested,
     )
 
 
-def load_results(store: FileStore) -> list[SuiteResult]:
-    """Every finished run, newest first. A run without result.json is still in flight."""
-    return store.finished_results()
+def load_results(store: RunStore) -> list[SuiteResult]:
+    """Every finished run that can be read, newest first. A run without result.json is still
+    in flight; one whose result cannot be read is an error row of :func:`list_runs`."""
+    return store.read_finished().results
 
 
-def _in_flight(store: FileStore) -> list[s.RunSummary]:
-    out: list[s.RunSummary] = []
-    if not store.root.is_dir():
-        return out
-    for folder in store.root.iterdir():
-        if not folder.is_dir():
+def list_runs(store: RunStore) -> list[s.RunSummary]:
+    """Runs in flight (and runs that are errors: could not be carried out, a newer layout, a
+    result that cannot be read), newest first, then the finished runs, newest first. A store
+    with an index (the database) answers from it without reading any result."""
+    errors: list[s.RunSummary] = []
+    finished: list[tuple[str, s.RunSummary]] = []
+    for run in store.listing():
+        if not run.finished or run.layout not in KNOWN_LAYOUTS:
+            summary = _unfinished(run)
+            if summary is not None:
+                errors.append(summary)
             continue
-        if (folder / "result.json").is_file() and store.layout_known(folder.name):
+        if run.counts is not None:
+            c = run.counts
+            summary = s.RunSummary(
+                id=run.run_id,
+                suite=c.suite,
+                started_at=c.started_at.isoformat(),
+                state="finished",
+                gate=c.gate,
+                passed=c.passed,
+                failed=c.failed,
+                unjudged=c.unjudged,
+                flaky=c.flaky,
+            )
+            finished.append((c.started_at.isoformat(), summary))
             continue
-        summary = _unfinished(store, folder)
-        if summary is not None:
-            out.append(summary)
-    return sorted(out, key=lambda r: r.started_at or "", reverse=True)
+        try:
+            result = store.load_result(run.run_id)
+        except (ValueError, OSError, StorageError) as exc:
+            errors.append(_unreadable(run, _reason(exc)))
+            continue
+        finished.append((result.started_at.isoformat(), summarise(result)))
+    errors.sort(key=lambda r: r.started_at or "", reverse=True)
+    finished.sort(key=lambda f: f[0], reverse=True)
+    return errors + [f[1] for f in finished]
 
 
-def list_runs(store: FileStore) -> list[s.RunSummary]:
-    return _in_flight(store) + [summarise(r) for r in load_results(store)]
+def _failed_row(run_id: str, error: dict[str, Any]) -> s.RunSummary:
+    return s.RunSummary(
+        id=run_id,
+        suite="",
+        started_at=error.get("at"),
+        state="harness_error",
+        gate="harness_error",
+        passed=None,
+        failed=None,
+        unjudged=None,
+        flaky=None,
+        error=f"{error.get('code', 'HARNESS_ERROR')}: {error.get('message', '')} "
+        "(not yet recorded in the store, which could not be written)",
+    )
+
+
+def with_unrecorded(
+    rows: list[s.RunSummary], failures: dict[str, dict[str, Any]]
+) -> list[s.RunSummary]:
+    """The listing with the runs whose failure this process holds because the store could not
+    take it: shown as the harness errors they are, never left "running"."""
+    if not failures:
+        return rows
+    out = [
+        _failed_row(r.id, failures[r.id]) if r.id in failures and r.state == "running" else r
+        for r in rows
+    ]
+    listed = {r.id for r in rows}
+    extra = [_failed_row(i, e) for i, e in failures.items() if i not in listed]
+    return extra + out
+
+
+def unrecorded_detail(run_id: str, error: dict[str, Any]) -> s.RunDetail:
+    summary = _failed_row(run_id, error)
+    return s.RunDetail(
+        summary=summary,
+        target="",
+        profile="",
+        gate_status="block",
+        gate_summary=(
+            "Not judged: Opseval could not carry out this run, and the store could not record "
+            f"why. This is a harness problem, not an agent failure. {summary.error}"
+        ),
+        blocking=[],
+        warnings=[],
+        exit_code=EXIT_HARNESS,
+        safe_to_release=False,
+        tests=[],
+        usage=[],
+        load_errors=[],
+    )
+
+
+def _reason(exc: BaseException) -> str:
+    text = str(exc).splitlines()[0] if str(exc) else ""
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 class RunInProgress(Exception):
@@ -172,9 +260,11 @@ class RunInProgress(Exception):
         self.progress = progress
 
 
-def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
-    folder = store.run_dir(run_id)
-    summary = _unfinished(store, folder) if folder.is_dir() else None
+def _error_detail(
+    store: RunStore, run_id: str, unreadable: str | None = None
+) -> s.RunDetail | None:
+    run = _stored(store, run_id)
+    summary = _unreadable(run, unreadable) if unreadable is not None else _unfinished(run)
     if summary is None:
         return None  # no such run
     if summary.state == "running":
@@ -199,16 +289,20 @@ def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
     )
 
 
-def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
+def run_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
     """A finished run, or one that could not be carried out; ``None`` if there is no such run.
 
     Raises :class:`RunInProgress` while it is still running, so a caller can tell "wait"
     from "not found" (a console that waits on a typo waits for ever).
     """
-    path = store.run_dir(run_id) / "result.json"
-    if not path.is_file() or not store.layout_known(run_id):
+    if not store.has_result(run_id) or not store.layout_known(run_id):
         return _error_detail(store, run_id)
-    r = store.load_result(run_id)
+    try:
+        r = store.load_result(run_id)
+    except (ValueError, OSError) as exc:
+        # A result that cannot be read is said, never a 500 nor "no such run". A storage
+        # outage (StorageError) is not this: the console answers 503 STORAGE_UNAVAILABLE.
+        return _error_detail(store, run_id, _reason(exc))
     tests = [
         s.TestOut(
             id=t.test_id,
@@ -305,7 +399,7 @@ def _count(values: list[int | None]) -> int | None:
     return sum(known) if known else None
 
 
-def usage(store: FileStore) -> list[s.RunUsage]:
+def usage(store: RunStore) -> list[s.RunUsage]:
     """Per run: tokens per LLM role, speech audio and characters, and the cost. The cost is
     what the priced models cost, with ``cost_complete`` saying whether every model was priced:
     one unpriced model makes the total a floor, never hides the part that is known. Token
@@ -359,7 +453,7 @@ def tokens_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.Token
     return s.TokensDashboard.model_validate(analytics.tokens(filters).model_dump(mode="json"))
 
 
-def trend(store: FileStore) -> list[s.TrendPoint]:
+def trend(store: RunStore) -> list[s.TrendPoint]:
     points = []
     for r in reversed(load_results(store)):
         passed, failed, _, _ = _counts(r.tests)
@@ -376,7 +470,7 @@ def trend(store: FileStore) -> list[s.TrendPoint]:
     return points
 
 
-def scenario_trend(store: FileStore, *, suite: str | None, limit: int) -> s.ScenarioTrend:
+def scenario_trend(store: RunStore, *, suite: str | None, limit: int) -> s.ScenarioTrend:
     """Every scenario's verdict across the last ``limit`` finished runs (of one suite).
 
     Computed here, never in the browser (ADR-0029). A scenario that was not in a run has an
@@ -431,9 +525,9 @@ def _area_scores(r: SuiteResult) -> dict[str, float | None]:
     return {k: (fmean(v) if v else None) for k, v in buckets.items()}
 
 
-def compare(store: FileStore, base_id: str, cand_id: str) -> s.Comparison | None:
+def compare(store: RunStore, base_id: str, cand_id: str) -> s.Comparison | None:
     for rid in (base_id, cand_id):
-        if not (store.run_dir(rid) / "result.json").is_file() or not store.layout_known(rid):
+        if not store.has_result(rid) or not store.layout_known(rid):
             return None
     base, cand = store.load_result(base_id), store.load_result(cand_id)
     before = {t.test_id: t for t in base.tests}
@@ -698,7 +792,7 @@ def _redacted(text: str | None) -> str | None:
 
 
 def attempt_record(
-    store: FileStore, run_id: str, test_id: str, index: int, *, record: RunRecord | None = None
+    store: RunStore, run_id: str, test_id: str, index: int, *, record: RunRecord | None = None
 ) -> s.AttemptRecordOut | None:
     """One attempt's conversation; ``None`` if that attempt has no record (yet). ``record``
     is the attempt's record when the caller has read it already: it is not read again."""

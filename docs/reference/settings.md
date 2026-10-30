@@ -84,3 +84,16 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_SERVE_TOKEN` | secret | unset (secret) | The console API token. Random on every `opseval serve` start when unset (ADR-0031). |
 | `OPSEVAL_CONSOLE_DIR` | text | unset | The built web console (``packages/console/dist``) for ``opseval serve`` to serve. When unset, a source checkout's build is found on its own (ADR-0034). |
 | `OPSEVAL_DATABASE_URL` | secret | unset (secret) | Postgres for server mode: ``postgresql://user:password@host:5432/opseval``. It carries a password, so it is a secret. Its host must be allowlisted, and a host other than localhost needs TLS (``?ssl=require``, ``verify-ca`` or ``verify-full``). |
+| `OPSEVAL_BLOB_STORE` | `file` \| `s3` | `file` | Where server mode keeps run files (records, results, reports, audio): ``file`` (a folder, ``OPSEVAL_BLOB_DIR``) or ``s3`` (any S3-compatible store). |
+| `OPSEVAL_BLOB_DIR` | text | unset | The folder ``OPSEVAL_BLOB_STORE=file`` keeps objects in: an absolute path (a relative one is refused, since it would move with the working directory). Unset: ``.blobs`` inside ``OPSEVAL_REPORTS_DIR``, resolved once at start. Each blob's row records the folder it was written to, so a server started on another folder says so rather than reporting the run's files as missing. |
+| `OPSEVAL_S3_ENDPOINT` | text | unset | The S3 endpoint (``https://s3.eu-west-1.amazonaws.com``, a MinIO or R2 URL). Its host must be allowlisted, and anything but loopback must use https. |
+| `OPSEVAL_S3_BUCKET` | text | unset | The bucket objects are kept in (path-style addressing). |
+| `OPSEVAL_S3_REGION` | text | `us-east-1` | The region requests are signed for (SigV4). |
+| `OPSEVAL_S3_PREFIX` | text | empty | A prefix for every object key (``opseval/``), so a bucket can be shared. |
+| `OPSEVAL_S3_ACCESS_KEY_ID` | secret | unset (secret) | The S3 access key id. |
+| `OPSEVAL_S3_SECRET_ACCESS_KEY` | secret | unset (secret) | The S3 secret access key. |
+| `OPSEVAL_S3_SERVER_SIDE_ENCRYPTION` | bool | `True` | Ask the store to encrypt every object at rest (``x-amz-server-side-encryption: AES256``), recorded on the blob's row. Audio is sealed by Opseval besides, always. |
+| `OPSEVAL_STORAGE_TIMEOUT_SECONDS` | number | `60.0` | How long one server-mode storage call (a database round trip, and each SQL statement as ``statement_timeout``) may take before it fails as a harness error (exit 3), rather than hang the run or the console. |
+| `OPSEVAL_S3_TIMEOUT_SECONDS` | number | `30.0` | How long one S3 request may take before it fails as a harness error. |
+| `OPSEVAL_AUDIO_WRITE_QUEUE_MB` | integer | `256` | Recorded audio waiting to be written by a call's background writer, at most (ADR-0051): audio is stored off the event loop and off the agent's clock. Past it the call's audio is not kept and the attempt ends as a harness failure, never silently without its files. |
+| `OPSEVAL_BLOB_PENDING_GRACE_HOURS` | number | `24.0` | A blob still ``pending`` this long after it was written, in a run that is no longer running, is an orphan (a crash between the upload and its row): ``opseval prune`` deletes it, the object first and then its row. |

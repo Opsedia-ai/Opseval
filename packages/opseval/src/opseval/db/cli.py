@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Annotated, Optional, TypeVar
 import typer
 
 from opseval.config import Settings
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, StorageError
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
     from opseval.db.catalogue_store import ItemSummary, PushReport, TaskSummary, VersionInfo
+    from opseval.db.run_store import DbRunStore
 
 EXIT_HARNESS = 3  # opseval.verdicts.EXIT_HARNESS, without importing the run path
 T = TypeVar("T")
@@ -399,3 +400,89 @@ def catalogue_label(
 
     _run(work)
     typer.echo(f"{kind} {name}: {label} → v{version}")
+
+
+# --- runs in the database (ADR-0051) ---------------------------------------------------------
+
+runs_app = typer.Typer(
+    help="Runs in the database (ADR-0051): import run folders.", no_args_is_help=True
+)
+
+
+def open_run_store(settings: Settings, *, project: str | None, task: str | None) -> DbRunStore:
+    """The database run store the settings name, or :class:`ConfigError` (exit 3) saying why
+    not: the extra missing, the database unreachable or refusing, the schema behind."""
+    _modules()
+    from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+
+    from opseval.blobs import blob_store
+    from opseval.db.run_store import DbRunStore
+
+    try:
+        return DbRunStore.connect(settings, blob_store(settings), project=project, task=task)
+    except (ConnectionError, TimeoutError, socket.gaierror) as exc:
+        raise ConfigError(f"cannot reach the database: {exc}") from exc
+    except DBAPIError as exc:
+        reason = str(exc.orig).splitlines()[0] if exc.orig is not None else type(exc).__name__
+        raise ConfigError(f"the database refused: {reason}") from exc
+    except SQLAlchemyError as exc:
+        raise ConfigError(f"database error ({type(exc).__name__}): {exc}") from exc
+    except StorageError as exc:
+        raise ConfigError(f"storage unavailable: {exc}") from exc
+
+
+def server_settings(settings: Settings, database_url: str | None) -> Settings:
+    """``--database-url`` in place of ``OPSEVAL_DATABASE_URL`` (the variable is better: a
+    command line is visible to every user of the machine)."""
+    if database_url:
+        from pydantic import SecretStr
+
+        settings.database_url = SecretStr(database_url)
+    return settings
+
+
+DatabaseUrlOpt = Annotated[
+    Optional[str],  # noqa: UP045
+    typer.Option(
+        "--database-url",
+        help="Postgres for server mode. Prefer OPSEVAL_DATABASE_URL: a command line is "
+        "visible to other users.",
+    ),
+]
+
+
+@runs_app.command("import")
+def runs_import(
+    folders: Annotated[list[Path], typer.Argument(help="Run folders, e.g. reports/<run_id>.")],
+    project: ProjectOpt,
+    task: TaskOpt = "default",
+    database_url: DatabaseUrlOpt = None,
+) -> None:
+    """Import finished run folders into the database (idempotent on the run id).
+
+    Each folder is read and checked as every reader checks it; one that cannot be read whole
+    is reported and skipped, never half-imported. A run already imported unchanged is
+    skipped; a different run under an id the database holds is refused. Exit 3 when any
+    folder was refused."""
+    from opseval.storage import FileStore
+
+    settings = server_settings(Settings(), database_url)
+    try:
+        store = open_run_store(settings, project=project, task=task)
+    except ConfigError as exc:
+        raise _fail(exc) from exc
+    from opseval.db.run_import import import_run
+
+    refused = 0
+    try:
+        for folder in folders:
+            path = folder.resolve()
+            outcome = import_run(FileStore(path.parent), path.name, store)
+            refused += outcome.outcome == "refused"
+            colour = "red" if outcome.outcome == "refused" else None
+            typer.secho(f"  {outcome.outcome:<9} {outcome.run_id}: {outcome.detail}", fg=colour)
+    finally:
+        store.close()
+    if refused:
+        typer.secho(f"{refused} folder(s) were not imported.", fg="red", err=True)
+        raise typer.Exit(EXIT_HARNESS)

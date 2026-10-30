@@ -117,7 +117,7 @@ def describe(ctx: ServerContext, record: RunRecord, key: ServerKey) -> s.Attempt
     """A voice attempt's audio as the console shows it; ``None`` for a text attempt. The
     turns are listed once and the whole call is judged from them, before any file is read
     (its size included: a call too large to build is ``too_large``, never attempted)."""
-    run_dir = ctx.store.run_dir(record.run_id)
+    run_dir = ctx.store.audio(record.run_id)
     found = turns(run_dir, record)
     if not found:
         return None
@@ -198,7 +198,7 @@ def register(app: FastAPI, ctx: ServerContext, key: ServerKey, api: str) -> None
     ) -> Response:
         record = lookup.attempt(ctx, run_id, test_id, index)
         try:
-            call = whole_call(ctx.store.run_dir(run_id), record, key.state()[0], stereo=not mono)
+            call = whole_call(ctx.store.audio(run_id), record, key.state()[0], stereo=not mono)
         except AudioUnavailable as exc:
             raise unavailable(exc) from exc
         return _audio(call.wav, f"{test_id}-attempt{index}-call")
@@ -209,7 +209,7 @@ def register(app: FastAPI, ctx: ServerContext, key: ServerKey, api: str) -> None
     ) -> Response:
         """One turn as a WAV; with ``raw``, an undecodable agent turn's bytes as they came."""
         record = lookup.attempt(ctx, run_id, test_id, index)
-        run_dir = ctx.store.run_dir(run_id)
+        run_dir = ctx.store.audio(run_id)
         try:
             turn = find(run_dir, record, seq)
             data = read_bytes(run_dir, record, turn, key.state()[0], raw=raw)
