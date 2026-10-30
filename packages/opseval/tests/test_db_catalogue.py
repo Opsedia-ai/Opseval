@@ -318,7 +318,7 @@ class TestReadingAFolder:
 
 class TestSchema:
     async def test_upgrade_reaches_head(self, engine: AsyncEngine) -> None:
-        assert await migrate.current(engine) == migrate.head() == "0006"
+        assert await migrate.current(engine) == migrate.head() == "0008"
 
     async def test_the_migrations_create_exactly_the_models(self, engine: AsyncEngine) -> None:
         def diff(conn):  # type: ignore[no-untyped-def]
@@ -332,7 +332,7 @@ class TestSchema:
 
     async def test_upgrading_twice_changes_nothing(self, engine: AsyncEngine) -> None:
         await migrate.upgrade(engine)
-        assert await migrate.current(engine) == "0006"
+        assert await migrate.current(engine) == "0008"
 
     async def test_two_upgrades_at_once_both_succeed(self, pg_url: str) -> None:
         import asyncio

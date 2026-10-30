@@ -265,8 +265,10 @@ class ModelUsage(BaseModel):
         was not recorded."""
         if self.unpriced_calls is None:
             return None
-        answered = self.reported.answered if self.reported is not None else (
-            self.calls - self.failed_calls
+        answered = (
+            self.reported.answered
+            if self.reported is not None
+            else (self.calls - self.failed_calls)
         )
         return CostParts(
             known_usd=self.cost_known_usd,

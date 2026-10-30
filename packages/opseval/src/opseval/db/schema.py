@@ -35,6 +35,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     MetaData,
     String,
@@ -331,6 +332,8 @@ class Run(Base):
         ForeignKeyConstraint(["task_id", "project_id"], ["tasks.id", "tasks.project_id"]),
         # The target of the child tables' (run, project, task) keys.
         UniqueConstraint("id", "project_id", "task_id"),
+        # The dashboards pick a project's (or a task's) runs by date (ADR-0052, migration 0008).
+        Index("ix_runs_project_started", "project_id", "task_id", "started_at"),
     )
 
     id: Mapped[str] = mapped_column(String(RUN_ID_MAX), primary_key=True)
@@ -464,6 +467,14 @@ class Attempt(Base):
     redaction_applied: Mapped[bool] = mapped_column(Boolean, nullable=False)
     passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     invalid_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """The persona's language as declared (the dashboards' filter, migration 0008)."""
+    dialect: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    voice: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    """A spoken attempt (its record has a voice timeline). Null on rows written before 0008."""
+    usage_recorded: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    """The record carries its usage events (``()`` included): false is "not measured"; null on
+    rows written before 0008, read as not measured too."""
     record_blob_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("blobs.id", ondelete="RESTRICT"), nullable=False
     )
@@ -523,6 +534,8 @@ class VerdictRow(Base):
     cut_short_of: Mapped[int | None] = mapped_column(Integer, nullable=True)
     criticality: Mapped[str] = mapped_column(String(16), nullable=False)
     pass_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The scenario's name as it ran (the verdict matrix); null on rows written before 0008."""
 
 
 class AttemptMetric(Base):
@@ -533,6 +546,7 @@ class AttemptMetric(Base):
     __tablename__ = "attempt_metrics"
     __table_args__ = (
         CheckConstraint("value IS NOT NULL OR reason IS NOT NULL", name="unmeasured_reason"),
+        Index("ix_attempt_metrics_name", "name", "attempt_id"),
     )
 
     id: Mapped[uuid.UUID] = _id()
@@ -590,6 +604,76 @@ class UsageEventRow(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     cost_source: Mapped[str] = mapped_column(String(32), nullable=False)
     price_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    rescore: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """The re-score (its stamp) that made this call; null for the run's own calls. The
+    dashboards count only a run's latest re-score (migration 0008)."""
+
+
+class RunUsageRow(Base):
+    """A run's usage rows (``SuiteResult.usage``), one per ``(role, model)``, as written: the
+    dashboards read them for runs written before per-call usage (migration 0008)."""
+
+    __tablename__ = "run_usage"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "project_id", "task_id"],
+            ["runs.id", "runs.project_id", "runs.task_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    run_id: Mapped[str] = mapped_column(String(RUN_ID_MAX), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    """The ``ModelUsage`` row as the result holds it."""
+
+
+PRICE_UNITS = ("tokens", "characters", "seconds")
+MATCH_KINDS = ("exact", "glob")
+"""How a project's price row names its models: one name, or a glob with ``*`` (never a
+regular expression: a pattern typed in a browser must not be able to hang the server)."""
+
+
+class ModelPriceRow(Base):
+    """A project's own price (ADR-0066 D2), over the built-in table shipped in
+    ``pricing/builtin.yaml``. An edit adds a row; nothing rewrites or deletes one, so a run's
+    cost can always be traced to the row in force when its calls were made."""
+
+    __tablename__ = "model_prices"
+    __table_args__ = (
+        CheckConstraint(_one_of("unit", PRICE_UNITS), name="unit"),
+        CheckConstraint(_one_of("match_kind", MATCH_KINDS), name="match_kind"),
+        CheckConstraint(
+            "coalesce(least(input, output, reasoning, cached_input, audio_in, audio_out, "
+            "characters), 0) >= 0",
+            name="not_negative",
+        ),
+        Index("ix_model_prices_project_effective", "project_id", "effective_from"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    pattern: Mapped[str] = mapped_column(String(200), nullable=False)
+    match_kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    unit: Mapped[str] = mapped_column(String(16), nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    input: Mapped[float | None] = mapped_column(Float, nullable=True)
+    output: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reasoning: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cached_input: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audio_in: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audio_out: Mapped[float | None] = mapped_column(Float, nullable=True)
+    characters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    """Who added it (a user's id or a key's public id), as the audit event says."""
+    created_at: Mapped[datetime] = _created()
 
 
 # --- accounts and access (ADR-0050) ----------------------------------------------------------

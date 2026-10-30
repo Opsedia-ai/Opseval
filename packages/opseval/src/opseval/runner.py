@@ -681,7 +681,11 @@ async def _launch(
     # Built before the run: a destination that is not allowlisted is a configuration
     # error, and finding that out after a suite has something to publish is too late.
     sinks = build_sinks(settings)
-    meter = UsageMeter()
+    # Server mode prices with the project's own rows too (ADR-0066 D2); a folder, with the
+    # built-in table. Read once, before the first call: a row added mid-run is in force from
+    # its own instant, so it would price nothing this run had already made.
+    price_table = getattr(options.store, "price_table", None)
+    meter = UsageMeter(prices=price_table() if callable(price_table) else None)
     voice = options.transport in VOICE_TRANSPORTS and options.transport_factory is None
     _check_voice_scenarios(catalogue.scenarios, options.transport)
     kit: SpeechKit | None = None

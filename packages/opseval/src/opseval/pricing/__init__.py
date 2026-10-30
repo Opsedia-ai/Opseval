@@ -6,7 +6,9 @@ has an ``effective_from`` date; a call is priced with the newest matching row in
 day it was made, and the cost is stored with the call: it is never recomputed, so a price
 added later (whatever its ``effective_from``) never changes what an earlier run cost. A model
 with no row has no price: ``None``, never $0. A cost the provider reported itself wins and is
-labelled ``provider``. Per-project price overrides need the database and come in D2.
+labelled ``provider``. In server mode a project adds its own rows (``model_prices``, ADR-0066
+D2): they win over the built-in ones, are matched by name or glob (never a regex), and are in
+force from the instant they were added, never before, so adding one reprices nothing.
 """
 
 from __future__ import annotations
@@ -34,17 +36,31 @@ def builtin_prices() -> PriceTable:
 def price_for(
     model: str, at: datetime | date, table: PriceTable | None = None
 ) -> ModelPrice | None:
-    """The row in force for ``model`` on ``at``'s day, or ``None`` (no price).
+    """The row in force for ``model`` at ``at``, or ``None`` (no price).
 
-    The newest ``effective_from`` not after that day wins; between rows with the same date,
-    the later one in the table (an addition, never a rewrite)."""
-    day = at.date() if isinstance(at, datetime) else at
+    A project's own row in force wins over the built-in table (ADR-0066 D2); within each, the
+    newest in force wins, and between rows from the same moment the later one in the table
+    (an addition, never a rewrite)."""
     best: ModelPrice | None = None
     for row in (table or builtin_prices()).prices:
-        in_force = row.effective_from <= day and row.matches(model)
-        if in_force and (best is None or row.effective_from >= best.effective_from):
+        if not (row.in_force(at) and row.matches(model)):
+            continue
+        if best is None or _later(row, best):
             best = row
     return best
+
+
+def _later(row: ModelPrice, best: ModelPrice) -> bool:
+    if row.project != best.project:
+        return row.project
+    if row.effective_at is not None and best.effective_at is not None:
+        return row.effective_at >= best.effective_at
+    return row.effective_from >= best.effective_from
+
+
+def with_project(rows: list[ModelPrice] | tuple[ModelPrice, ...]) -> PriceTable:
+    """The built-in table with a project's own rows (server mode) after it."""
+    return PriceTable(prices=(*builtin_prices().prices, *rows))
 
 
 def _tokens_cost(price: ModelPrice, event: UsageEvent) -> float | None:
@@ -109,4 +125,4 @@ def priced(
     )
 
 
-__all__ = ["builtin_prices", "price_for", "priced"]
+__all__ = ["builtin_prices", "price_for", "priced", "with_project"]
