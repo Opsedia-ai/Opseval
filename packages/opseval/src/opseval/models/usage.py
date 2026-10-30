@@ -290,8 +290,8 @@ class CostParts:
 
     @property
     def complete(self) -> bool:
-        """Every call was priced (and there was at least one)."""
-        return self.priced > 0 and self.unpriced == 0
+        """Every call was priced (and there was a cost to give)."""
+        return self.known_usd is not None and self.unpriced == 0
 
     @property
     def total_usd(self) -> float | None:
