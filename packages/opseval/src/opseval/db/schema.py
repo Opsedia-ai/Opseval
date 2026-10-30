@@ -44,7 +44,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 NAMING = {
@@ -152,7 +152,12 @@ class Organization(Base):
 
 class Project(Base):
     __tablename__ = "projects"
-    __table_args__ = (UniqueConstraint("organization_id", "slug"),)
+    __table_args__ = (
+        UniqueConstraint("organization_id", "slug"),
+        # The target of project_memberships' (project, organization) key (ADR-0050), so a
+        # membership can never name a project of another organisation.
+        UniqueConstraint("id", "organization_id"),
+    )
 
     id: Mapped[uuid.UUID] = _id()
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -300,6 +305,11 @@ class CatalogueLabel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    protected: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
+    """Only an admin or owner, or a key holding ``label:protected``, may move it (ADR-0050).
+    ``production`` is protected whatever this says (``accounts.roles.DEFAULT_PROTECTED``)."""
 
 
 # --- runs and blobs (ADR-0051) ---------------------------------------------------------------
@@ -585,3 +595,167 @@ class UsageEventRow(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     cost_source: Mapped[str] = mapped_column(String(32), nullable=False)
     price_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+
+# --- accounts and access (ADR-0050) ----------------------------------------------------------
+
+ROLES = ("viewer", "member", "admin", "owner")
+"""Organisation roles, lowest first. A project membership may only lower one (in core)."""
+SCOPES = ("runs:read", "runs:start", "catalogue:write", "catalogue:label", "label:protected")
+"""What an API key may be granted. ``label:protected`` is never implied by another scope."""
+ACTOR_KINDS = ("user", "key", "anonymous", "cli")
+
+
+class User(Base):
+    """A person. The email is stored case-folded; it is never the join key of a sign-in
+    (``identities`` is). ``password_hash`` is argon2id, null for an OIDC-only user."""
+
+    __tablename__ = "users"
+    __table_args__ = (CheckConstraint("email = lower(email)", name="email_folded"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
+    name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = _created()
+
+
+class Identity(Base):
+    """An OIDC identity, ``(issuer, subject)``, linked to one user."""
+
+    __tablename__ = "identities"
+    __table_args__ = (UniqueConstraint("issuer", "subject"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    issuer: Mapped[str] = mapped_column(String(500), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class UserSession(Base):
+    """A signed-in browser. ``id`` is the sha256 of the cookie's token: the token itself is
+    never stored. A session ends at ``expires_at`` (absolute) or when idle too long."""
+
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    csrf_secret: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = _created()
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class OrgMembership(Base):
+    __tablename__ = "org_memberships"
+    __table_args__ = (CheckConstraint(_one_of("role", ROLES), name="role"),)
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class ProjectMembership(Base):
+    """A role for one project, lower than the user's organisation role. A raise is refused
+    when written, and the effective role is the lower of the two whatever the row says."""
+
+    __tablename__ = "project_memberships"
+    __table_args__ = (
+        CheckConstraint(_one_of("role", ROLES), name="role"),
+        ForeignKeyConstraint(
+            ["organization_id", "user_id"],
+            ["org_memberships.organization_id", "org_memberships.user_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "organization_id"],
+            ["projects.id", "projects.organization_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, index=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class ApiKey(Base):
+    """A project's API key: ``public_key`` (``pk-oe-…``) names it, the secret (``sk-oe-…``) is
+    shown once and kept only as its sha256. A system key (Opseval's own automation) can never
+    hold ``label:protected``: the database refuses it too."""
+
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        CheckConstraint(
+            "scopes <@ ARRAY[" + ", ".join(repr(s) for s in SCOPES) + "]::varchar[]",
+            name="scopes",
+        ),
+        CheckConstraint("NOT (system AND 'label:protected' = ANY(scopes))", name="system"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    public_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    secret_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    secret_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    """The first characters of the secret, to tell keys apart in a list."""
+    scopes: Mapped[list[str]] = mapped_column(ARRAY(String(32)), nullable=False)
+    task_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=True
+    )
+    """The tasks it may touch; null means every task of the project."""
+    system: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    """Whose role caps it, checked at each use. A key whose creator is gone holds nothing."""
+    created_at: Mapped[datetime] = _created()
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditEvent(Base):
+    """Who did what, where and when: every write and every sign-in (ADR-0050). The ids are
+    plain columns, not keys, so an event outlives what it names. The viewer is ``ee/``."""
+
+    __tablename__ = "audit_events"
+    __table_args__ = (CheckConstraint(_one_of("actor_kind", ACTOR_KINDS), name="actor_kind"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    actor_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    actor_id: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    """A user's id, a key's public id, or the email a failed sign-in gave."""
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detail: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
