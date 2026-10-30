@@ -83,15 +83,27 @@ def effective_role(org_role: str | None, project_role: str | None) -> Role | Non
     return project if rank(project) < rank(org) else org
 
 
-def key_scopes(granted: list[str], creator_role: Role | None, *, system: bool) -> frozenset[str]:
+def key_scopes(
+    granted: list[str],
+    creator_role: Role | None,
+    *,
+    system: bool,
+    creator_kind: str = "user",
+) -> frozenset[str]:
     """What a key may do now: what it was granted, within its creator's current role (a
-    system key also within :data:`SYSTEM_MAX`). Never ``manage``."""
+    system key also within :data:`SYSTEM_MAX`). Never ``manage``.
+
+    ``creator_kind="cli"`` is a system key ``opseval admin`` minted with nobody behind it: it
+    holds at most :data:`SYSTEM_MAX`. A person's key whose person is gone, disabled or without
+    a role (``creator_role`` ``None``) holds **nothing**: it never falls back to the CLI's cap.
+    """
     held = frozenset(granted) - {MANAGE}
-    if system:
-        cap = SYSTEM_MAX if creator_role is None else SYSTEM_MAX & ROLE_SCOPES[creator_role]
-    else:
-        cap = ROLE_SCOPES[creator_role] if creator_role is not None else frozenset()
-    return held & cap
+    if creator_kind == "cli":
+        return held & SYSTEM_MAX if system else frozenset()
+    if creator_role is None:
+        return frozenset()
+    cap = ROLE_SCOPES[creator_role]
+    return held & (cap & SYSTEM_MAX if system else cap)
 
 
 def grantable(creator_role: Role | None, *, system: bool) -> frozenset[str]:

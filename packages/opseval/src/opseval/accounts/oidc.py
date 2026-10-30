@@ -5,7 +5,8 @@
   endpoint its discovery document names, must be on ``OPSEVAL_ALLOWED_HOSTS`` and use https
   (loopback aside, for a local test IdP); anything else is refused before any redirect.
 - Discovery and the JWKS are fetched over verified TLS (httpx's default), never following a
-  redirect. The discovery document must name exactly the configured issuer.
+  redirect. The discovery document's ``issuer``, and every ID token's ``iss``, must equal the
+  configured issuer exactly (OIDC Discovery 4.3): ``https://idp/`` and ``https://idp`` differ.
 - The ID token is checked: signature against the JWKS (asymmetric algorithms only, never
   ``none`` or an HMAC the client secret could forge), ``iss``, ``aud`` (and ``azp`` when there
   are several audiences), ``exp``, ``iat`` and the ``nonce`` of this sign-in.
@@ -81,7 +82,9 @@ class OidcClient:
         http: httpx.Client | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self.issuer = issuer.rstrip("/")
+        self.issuer = issuer.strip()
+        """Exactly as configured: discovery's ``issuer`` and every token's ``iss`` must equal
+        it character for character (OIDC Discovery 4.3), trailing slash and all."""
         self.client_id = client_id
         self._secret = client_secret
         self.allowlist = allowlist
@@ -116,8 +119,11 @@ class OidcClient:
 
     def discovery(self) -> dict[str, Any]:
         if self._discovery is None:
-            doc = self._get(f"{self.issuer}/.well-known/openid-configuration")
-            if str(doc.get("issuer", "")).rstrip("/") != self.issuer:
+            # Discovery 4: a trailing "/" is removed from the issuer before the well-known path
+            # is added; the issuer itself is compared exactly.
+            base = self.issuer.rstrip("/")
+            doc = self._get(f"{base}/.well-known/openid-configuration")
+            if doc.get("issuer") != self.issuer:
                 raise OidcError("the discovery document names another issuer")
             for name in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
                 url = doc.get(name)

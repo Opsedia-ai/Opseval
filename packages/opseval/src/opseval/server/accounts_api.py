@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from opseval.accounts.service import Accounts, KeyRow
     from opseval.server.access import AccessConfig
 
-FLOW_COOKIE = "__Host-opseval-oidc"
 LOGIN_PAGE = "/login"
 """Where the console shows sign-in (and an OIDC failure, as ``?error=CODE``)."""
 
@@ -70,8 +69,12 @@ def session_out(
     )
 
 
-def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str) -> None:
+def register(app: FastAPI, access: AccessConfig | None, api: str) -> None:
     accounts = access.accounts if access is not None else None
+    # Cookie names and Secure follow the public URL (AccessConfig.session_cookie).
+    cookie = access.session_cookie if access is not None else "opseval-session"
+    flow_cookie = access.flow_cookie if access is not None else "opseval-oidc"
+    secure = access.secure if access is not None else False
 
     def need() -> Accounts:
         if accounts is None:
@@ -104,7 +107,7 @@ def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str
             token,
             max_age=int(need().lifetime.total_seconds()),
             path="/",
-            secure=True,
+            secure=secure,
             httponly=True,
             samesite="lax",
         )
@@ -151,7 +154,7 @@ def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str
         acc = need()
         acc.logout(principal(request), address=address(request))
         response = Response(status_code=204)
-        response.delete_cookie(cookie, path="/", secure=True, httponly=True, samesite="lax")
+        response.delete_cookie(cookie, path="/", secure=secure, httponly=True, samesite="lax")
         return response
 
     @app.get(api + "/auth/oidc/start")
@@ -161,12 +164,12 @@ def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str
         acc = need()
         redirect_uri = f"{request.state.origin}{api}/auth/oidc/callback"
         try:
-            url, handle = acc.oidc_start(redirect_uri)
+            url, handle = acc.oidc_start(redirect_uri, address=address(request))
         except LoginRefused as exc:
             return login_refused(exc)
         response = RedirectResponse(url, status_code=302)
         response.set_cookie(
-            FLOW_COOKIE, handle, max_age=600, path="/", secure=True, httponly=True, samesite="lax"
+            flow_cookie, handle, max_age=600, path="/", secure=secure, httponly=True, samesite="lax"
         )
         return response
 
@@ -177,7 +180,7 @@ def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str
         from opseval.accounts.service import LoginRefused
 
         acc = need()
-        handle = request.cookies.get(FLOW_COOKIE, "")
+        handle = request.cookies.get(flow_cookie, "")
         try:
             if error or not code or not state:
                 raise LoginRefused(401, "OIDC_FAILED", "the identity provider refused")
@@ -193,7 +196,7 @@ def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str
         else:
             response = RedirectResponse("/", status_code=302)
             set_session(response, new.token)
-        response.delete_cookie(FLOW_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
+        response.delete_cookie(flow_cookie, path="/", secure=secure, httponly=True, samesite="lax")
         return response
 
     # --- API keys ------------------------------------------------------------------------
@@ -258,7 +261,9 @@ def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str
                 email=body.email,
                 role=body.role,
                 project_role=body.project_role,
+                project_role_given="project_role" in body.model_fields_set,
                 password=body.password,
+                oidc_subject=body.oidc_subject,
                 address=address(request),
             )
         except ValueError as exc:
@@ -312,4 +317,4 @@ def register(app: FastAPI, access: AccessConfig | None, api: str, *, cookie: str
         return labels_out()
 
 
-__all__ = ["FLOW_COOKIE", "LOGIN_PAGE", "register", "session_out"]
+__all__ = ["LOGIN_PAGE", "register", "session_out"]

@@ -99,7 +99,20 @@ class AccessConfig:
 
     @property
     def secure(self) -> bool:
+        """Served at an https public URL: HSTS, and ``__Host-`` cookies marked ``Secure``."""
         return self.public_url is not None and self.public_url.scheme == "https"
+
+    @property
+    def session_cookie(self) -> str:
+        """``__Host-opseval-session`` (``Secure``) behind https. On plain-http loopback, where a
+        ``Secure`` cookie is dropped by some browsers and a ``__Host-`` name requires
+        ``Secure``, ``opseval-session``: still HttpOnly, SameSite=Lax and host-only."""
+        return "__Host-opseval-session" if self.secure else "opseval-session"
+
+    @property
+    def flow_cookie(self) -> str:
+        """The OIDC sign-in's browser binding, named by the same rule."""
+        return "__Host-opseval-oidc" if self.secure else "opseval-oidc"
 
 
 def _trusted(address: str, proxies: list[Network]) -> bool:
@@ -131,14 +144,45 @@ def _forwarded(header: str | None) -> dict[str, str]:
     return out
 
 
-def _client(peer: str, chain: str | None, proxies: list[Network]) -> str:
-    """The client address: the right-most ``X-Forwarded-For`` entry that is not one of our
-    proxies (anything left of it was written by the client and proves nothing)."""
-    hops = [h.strip() for h in (chain or "").split(",") if h.strip()]
-    for hop in reversed(hops):
-        if not _trusted(hop, proxies):
-            return hop
-    return hops[0] if hops else peer
+def _hop(raw: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """One ``X-Forwarded-For`` entry or ``Forwarded`` ``for=`` value as an address, without
+    quotes, brackets or port (``"[2001:db8::1]:443"``, ``1.2.3.4:5``); ``None`` when it is not
+    an address (``unknown``, an obfuscated name)."""
+    value = raw.strip().strip('"').strip()
+    if value.startswith("["):
+        end = value.find("]")
+        value = value[1:end] if end > 0 else ""
+    elif value.count(":") == 1:  # IPv4 with a port; a bare IPv6 has several colons
+        value = value.split(":", 1)[0]
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _forwarded_for(header: str) -> list[str]:
+    """Every ``for=`` of a ``Forwarded`` header, in order."""
+    out: list[str] = []
+    for element in header.split(","):
+        for pair in element.split(";"):
+            key, sep, value = pair.partition("=")
+            if sep and key.strip().lower() == "for":
+                out.append(value)
+    return out
+
+
+def _client(peer: str, hops: list[str], proxies: list[Network]) -> str:
+    """The client address: walking the forwarded chain from the right, the first hop that is
+    not one of our proxies (anything left of it was written by the client and proves nothing).
+    A hop that cannot be read stops the walk at the peer: never guess."""
+    for raw in reversed(hops):
+        ip = _hop(raw)
+        if ip is None:
+            return peer
+        if not any(ip in net for net in proxies):
+            return str(ip)
+    first = _hop(hops[0]) if hops else None
+    return str(first) if first is not None else peer
 
 
 def view(request: Request, config: AccessConfig | None) -> View | Denial:
@@ -157,8 +201,12 @@ def view(request: Request, config: AccessConfig | None) -> View | Denial:
         fwd = _forwarded(request.headers.get("forwarded"))
         proto = fwd.get("proto") or _last(request.headers.get("x-forwarded-proto"))
         host = fwd.get("host") or _last(request.headers.get("x-forwarded-host")) or host
-        chain = fwd.get("for") or request.headers.get("x-forwarded-for")
-        address = _client(peer, chain, config.trusted_proxies).strip("[]")
+        forwarded = request.headers.get("forwarded")
+        if forwarded:
+            hops = _forwarded_for(forwarded)
+        else:
+            hops = [h for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+        address = _client(peer, hops, config.trusted_proxies)
         https = (proto or "").lower() == "https"
     if host_name(host) != public.host:
         return Denial(403, "HOST_NOT_ALLOWED", f"this server answers as {public.host} only")

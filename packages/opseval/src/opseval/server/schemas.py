@@ -1039,9 +1039,12 @@ class MemberIn(ApiIn):
     role: RoleName | None
     """The organisation role; ``None`` removes the person from the organisation."""
     project_role: RoleName | None = None
-    """A lower role on this project only; raising it is an Enterprise feature."""
+    """A lower role on this project only; raising it is an Enterprise feature. Left out: an
+    existing project role is kept. ``null`` sent explicitly: it is cleared."""
     password: str | None = Field(default=None, min_length=12, max_length=1024)
     """A first password, when the email is new. Without one the user signs in with OIDC."""
+    oidc_subject: str | None = Field(default=None, min_length=1, max_length=255)
+    """Link the person's identity at the configured OIDC issuer (the ID token's ``sub``)."""
 
 
 class MemberOut(Api):

@@ -74,6 +74,15 @@ class TestRoles:
         assert key_scopes(granted, "viewer", system=False) == {"runs:read"}
         assert key_scopes(granted, None, system=False) == frozenset()  # creator gone
 
+    def test_a_system_key_whose_creator_is_gone_holds_nothing(self) -> None:
+        granted = ["runs:read", "runs:start"]
+        assert key_scopes(granted, None, system=True) == frozenset()
+        assert key_scopes(granted, None, system=True, creator_kind="user") == frozenset()
+        # Only a key the CLI minted with nobody behind it has the system cap.
+        assert key_scopes(granted, None, system=True, creator_kind="cli") == frozenset(granted)
+        assert key_scopes(["catalogue:write"], "viewer", system=True) == frozenset()
+        assert key_scopes(granted, None, system=False, creator_kind="cli") == frozenset()
+
     def test_a_system_key_never_holds_label_protected(self) -> None:
         assert "label:protected" not in SYSTEM_MAX
         assert key_scopes(["label:protected"], "owner", system=True) == frozenset()
@@ -160,27 +169,58 @@ class TestRateLimit:
         now = [1000.0]
         limiter = LoginLimiter(clock=lambda: now[0])
         for _ in range(ACCOUNT_FREE):
-            assert limiter.wait("1.2.3.4", "a@x") == 0
-            limiter.failed("1.2.3.4", "a@x")
-        assert limiter.wait("1.2.3.4", "a@x") == 0  # the allowance is spent, no wait yet
-        limiter.failed("1.2.3.4", "a@x")
-        assert limiter.wait("1.2.3.4", "a@x") == pytest.approx(1.0)
-        limiter.failed("1.2.3.4", "a@x")
+            assert limiter.begin("1.2.3.4", "a@x") == 0  # reserved, counted as a failure
+        assert limiter.begin("1.2.3.4", "a@x") == pytest.approx(1.0)  # the allowance is spent
+        now[0] += 1.0
+        assert limiter.begin("1.2.3.4", "a@x") == 0
         assert limiter.wait("1.2.3.4", "a@x") == pytest.approx(2.0)
         assert limiter.wait("5.6.7.8", "a@x") == pytest.approx(2.0)  # per account too
         assert limiter.wait("1.2.3.4", "b@x") == 0  # the address is below its own allowance
         for _ in range(30):
-            limiter.failed("1.2.3.4", "a@x")
+            now[0] += MAX_WAIT
+            limiter.begin("1.2.3.4", "a@x")
         assert limiter.wait("1.2.3.4", "a@x") == pytest.approx(MAX_WAIT)
         now[0] += MAX_WAIT + 1
         assert limiter.wait("9.9.9.9", "a@x") == 0
 
-    def test_a_success_clears_the_account_not_the_address(self) -> None:
+    def test_a_success_gives_the_attempt_back(self) -> None:
         limiter = LoginLimiter(clock=lambda: 0.0)
-        for _ in range(40):
-            limiter.failed("1.2.3.4", f"user{_}@x")
-        limiter.succeeded("user0@x")
-        assert limiter.wait("1.2.3.4", "user0@x") > 0  # the address keeps guessing others
+        for _ in range(ACCOUNT_FREE * 3):
+            assert limiter.begin("1.2.3.4", "a@x") == 0
+            limiter.succeeded("1.2.3.4", "a@x")
+
+    def test_a_success_clears_the_account_not_the_address(self) -> None:
+        from opseval.accounts.ratelimit import ADDRESS_FREE
+
+        limiter = LoginLimiter(clock=lambda: 0.0)
+        assert limiter.begin("1.2.3.4", "user0@x") == 0
+        for i in range(1, ADDRESS_FREE):
+            assert limiter.begin("1.2.3.4", f"user{i}@x") == 0
+        assert limiter.wait("1.2.3.4", "anyone@x") > 0
+        limiter.succeeded("1.2.3.4", "user0@x")  # only its own attempt comes back
+        assert limiter.wait("1.2.3.4", "user0@x") == 0
+        assert limiter.begin("1.2.3.4", "user99@x") == 0
+        assert limiter.wait("1.2.3.4", "user0@x") > 0  # the address keeps its other failures
+
+    def test_a_parallel_burst_never_exceeds_the_allowance(self) -> None:
+        """Check and count are one step: 50 threads at once, at most the allowance passes."""
+        import threading
+
+        limiter = LoginLimiter()
+        barrier = threading.Barrier(50)
+        passed: list[int] = []
+
+        def attempt() -> None:
+            barrier.wait()
+            if limiter.begin("1.2.3.4", "a@x") == 0:
+                passed.append(1)
+
+        threads = [threading.Thread(target=attempt) for _ in range(50)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(passed) == ACCOUNT_FREE
 
 
 # --- OIDC against a fake identity provider ----------------------------------------------------
@@ -197,6 +237,7 @@ class FakeIdp:
         self.other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.kid = "k1"
         self.codes: dict[str, str] = {}
+        self.issuer = ISSUER
         self.issuer_in_discovery = ISSUER
         self.token_requests: list[dict[str, list[str]]] = []
 
@@ -232,7 +273,7 @@ class FakeIdp:
     def token(self, nonce: str, *, key: Any = None, alg: str = "RS256", **claims: Any) -> str:
         now = int(time.time())
         body = {
-            "iss": ISSUER,
+            "iss": self.issuer,
             "aud": CLIENT,
             "sub": "user-123",
             "email": "ada@example.com",
@@ -252,9 +293,9 @@ class FakeIdp:
         self.codes[code] = self.token(nonce, **kw)
         return code
 
-    def client(self, **kw: Any) -> OidcClient:
+    def client(self, issuer: str = ISSUER, **kw: Any) -> OidcClient:
         return OidcClient(
-            issuer=ISSUER,
+            issuer=issuer,
             client_id=CLIENT,
             client_secret="s3cret",
             allowlist={"idp.example.com"},
@@ -346,6 +387,24 @@ class TestOidc:
         idp.issuer_in_discovery = "https://evil.example.com"
         with pytest.raises(OidcError, match="another issuer"):
             idp.client().start("https://x/cb")
+
+    def test_a_trailing_slash_issuer_is_compared_exactly(self, idp: FakeIdp) -> None:
+        """OIDC Discovery 4.3: the issuer is compared exactly, slash and all."""
+        idp.issuer = idp.issuer_in_discovery = ISSUER + "/"
+        client = idp.client(issuer=ISSUER + "/")  # configured as the IdP names itself
+        _, flow = _started(client)
+        assert client.finish(flow, code=idp.issue(flow.nonce), state=flow.state).issuer == (
+            ISSUER + "/"
+        )
+        with pytest.raises(OidcError, match="another issuer"):
+            idp.client(issuer=ISSUER).start("https://x/cb")  # the slash left off
+
+    def test_a_token_whose_iss_differs_by_a_slash_is_refused(self, idp: FakeIdp) -> None:
+        client = idp.client()
+        _, flow = _started(client)
+        code = idp.issue(flow.nonce, iss=ISSUER + "/")
+        with pytest.raises(OidcError, match="another issuer"):
+            client.finish(flow, code=code, state=flow.state)
 
     def test_an_issuer_off_the_allowlist_is_refused_before_any_redirect(self) -> None:
         with pytest.raises(ConfigError, match="OPSEVAL_ALLOWED_HOSTS"):
@@ -505,6 +564,102 @@ class TestForwardedHeaders:
         assert plain.status_code == 403  # never plain http
         page = TestClient(app, base_url="https://opseval.example.com").get("/nothing")
         assert "max-age=" in page.headers["strict-transport-security"]
+
+
+class TestClientAddress:
+    """The client is the first hop, from the right, that is not one of our proxies."""
+
+    proxies = parse_proxies("10.0.0.0/8, 192.168.1.1, 2001:db8:ffff::/48")
+
+    @pytest.mark.parametrize(
+        ("hops", "want"),
+        [
+            (["203.0.113.9"], "203.0.113.9"),
+            # The client wrote the leftmost entry itself: it proves nothing.
+            (["6.6.6.6", "203.0.113.9", "10.0.0.7"], "203.0.113.9"),
+            # Two trusted proxies in a row are both skipped.
+            (["203.0.113.9", "192.168.1.1", "10.0.0.7"], "203.0.113.9"),
+            # Ports, brackets and quotes are stripped.
+            (['"[2001:db8::1]:443"'], "2001:db8::1"),
+            (["1.2.3.4:5", "10.0.0.7:8080"], "1.2.3.4"),
+            (["2001:db8::2"], "2001:db8::2"),
+            # An unreadable hop: never guess, the peer it is.
+            (["unknown", "10.0.0.7"], "10.0.0.5"),
+            (["_hidden"], "10.0.0.5"),
+            # Every hop ours: the leftmost.
+            (["10.0.0.9", "10.0.0.7"], "10.0.0.9"),
+            ([], "10.0.0.5"),
+        ],
+    )
+    def test_the_walk(self, hops: list[str], want: str) -> None:
+        from opseval.server.access import _client
+
+        assert _client("10.0.0.5", hops, self.proxies) == want
+
+    def test_forwarded_lists_every_for(self) -> None:
+        from opseval.server.access import _forwarded_for
+
+        header = 'for=1.2.3.4;proto=https, for="[2001:db8::1]:443";host=x, by=10.0.0.1'
+        assert _forwarded_for(header) == ["1.2.3.4", '"[2001:db8::1]:443"']
+
+
+class TestOidcFlowsInFlight:
+    def accounts(self) -> Accounts:
+        from .test_accounts import FakeIdp as Idp
+
+        acc = Accounts(
+            _NoDatabase(),
+            _served(),
+            idle=timedelta(minutes=5),
+            lifetime=timedelta(hours=1),
+            oidc=Idp().client(),
+        )
+        return acc
+
+    def test_a_flow_expires(self) -> None:
+        from opseval.accounts.service import FLOW_TTL, LoginRefused
+
+        acc = self.accounts()
+        now = [0.0]
+        acc.clock = lambda: now[0]
+        _, handle = acc.oidc_start("https://x/cb", address="1.1.1.1")
+        now[0] += FLOW_TTL + 1
+        acc.oidc_start("https://x/cb", address="2.2.2.2")  # prunes on the way
+        assert len(acc._flows) == 1
+        with pytest.raises(LoginRefused) as refused:
+            acc.oidc_finish(handle, code="c", state="s", address="1.1.1.1")
+        assert refused.value.code == "OIDC_NO_FLOW"
+
+    def test_one_address_cannot_flood_the_flows(self) -> None:
+        from opseval.accounts.service import FLOW_STARTS, FLOW_WINDOW, LoginRefused
+
+        acc = self.accounts()
+        now = [0.0]
+        acc.clock = lambda: now[0]
+        _, real = acc.oidc_start("https://x/cb", address="5.5.5.5")
+        for _ in range(FLOW_STARTS):
+            acc.oidc_start("https://x/cb", address="6.6.6.6")
+        with pytest.raises(LoginRefused) as refused:
+            acc.oidc_start("https://x/cb", address="6.6.6.6")
+        assert refused.value.status == 429 and refused.value.retry_after
+        assert tokens.digest(real) in acc._flows  # the real sign-in is still there
+        now[0] += FLOW_WINDOW
+        acc.oidc_start("https://x/cb", address="6.6.6.6")  # a minute later it may start again
+
+
+class TestCookieNames:
+    def test_secure_host_cookie_only_behind_https(self) -> None:
+        acc = Accounts(_NoDatabase(), _served(), idle=timedelta(1), lifetime=timedelta(1))
+        loopback = AccessConfig(accounts=acc)
+        assert (loopback.session_cookie, loopback.flow_cookie) == (
+            "opseval-session",
+            "opseval-oidc",
+        )
+        local = AccessConfig(accounts=acc, public_url=PublicUrl.parse("http://localhost:8000"))
+        assert local.session_cookie == "opseval-session" and not local.secure
+        public = AccessConfig(accounts=acc, public_url=PublicUrl.parse("https://o.example.com"))
+        assert public.session_cookie == "__Host-opseval-session" and public.secure
+        assert public.flow_cookie == "__Host-opseval-oidc"
 
 
 class TestAccountsModeWithoutAnyone:

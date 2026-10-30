@@ -12,7 +12,8 @@ request has to prove who it comes from, not merely that a web page could send it
 - **Origin check** on writes: a browser always sends ``Origin`` on a cross-site POST.
 
 **Accounts mode** (ADR-0050, a database or a public URL is configured): sessions (a
-``__Host-`` cookie) and API keys authenticate; the shared token is off. An ``Authorization``
+``__Host-`` cookie behind https, ``opseval-session`` on plain-http loopback) and API keys
+authenticate; the shared token is off. An ``Authorization``
 header is authoritative: a bad key is 401 even beside a valid cookie. A cookie-authenticated
 write needs a same-origin ``Origin`` and the session's ``X-CSRF-Token``. With a public URL,
 ``Host`` must be its host, HSTS is sent, and forwarded headers count only from a trusted proxy.
@@ -65,7 +66,6 @@ from opseval.storage import FileStore, RunStore
 
 API = "/api/v1"
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-SESSION_COOKIE = "__Host-opseval-session"
 log = logging.getLogger("opseval.server")
 
 _RUN = "/runs/{run_id}"
@@ -368,7 +368,7 @@ def create_app(
                     _deny(401, "INVALID_KEY", "the API key is unknown, expired or revoked"),
                 )
         else:
-            cookie = request.cookies.get(SESSION_COOKIE)
+            cookie = request.cookies.get(access.session_cookie)
             if cookie:
                 principal = await run_in_threadpool(accounts.from_cookie, cookie)
         if request.method in UNSAFE_METHODS and (principal is None or principal.via_cookie):
@@ -676,7 +676,7 @@ def create_app(
             raise HTTPException(422, detail=[p.model_dump(by_alias=True) for p in out.problems])
         return out
 
-    accounts_api.register(app, access, API, cookie=SESSION_COOKIE)
+    accounts_api.register(app, access, API)
     check_policies(app)
     return app
 

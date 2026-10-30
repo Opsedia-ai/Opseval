@@ -5,11 +5,9 @@ Creates ``users``, ``identities`` (OIDC ``(issuer, subject)``, never joined by e
 ``sessions`` (only the hash of a session token is stored), ``org_memberships``,
 ``project_memberships`` (a role that may only lower the organisation role), ``api_keys`` (the
 secret kept only as its hash; a system key can never hold ``label:protected``) and
-``audit_events``. Adds ``catalogue_labels.protected``, set for every ``production`` label, and a
-unique ``(id, organization_id)`` on ``projects`` for the memberships' key.
-
-Adding a column with a constant default and a unique index on ``projects`` are the only changes
-to existing tables; both are quick on tables of this size.
+``audit_events`` and ``protected_labels`` (a label protected in a task by name, whether or not
+an item carries it yet). Adds a unique ``(id, organization_id)`` on ``projects`` for the
+memberships' key, the only change to an existing table.
 
 The downgrade drops the tables, and with them every account; it refuses, changing nothing,
 while any user exists.
@@ -34,6 +32,7 @@ JSONB = postgresql.JSONB()
 ROLES = ("viewer", "member", "admin", "owner")
 SCOPES = ("runs:read", "runs:start", "catalogue:write", "catalogue:label", "label:protected")
 ACTOR_KINDS = ("user", "key", "anonymous", "cli")
+CREATOR_KINDS = ("user", "cli")
 """Copied, not imported: a migration describes the schema as it was when it was written."""
 
 
@@ -46,11 +45,6 @@ def _created(name: str = "created_at") -> sa.Column:  # type: ignore[type-arg]
 
 
 def upgrade() -> None:
-    op.add_column(
-        "catalogue_labels",
-        sa.Column("protected", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-    )
-    op.execute("UPDATE catalogue_labels SET protected = true WHERE label = 'production'")
     op.create_unique_constraint("uq_projects_id", "projects", ["id", "organization_id"])
 
     op.create_table(
@@ -152,6 +146,7 @@ def upgrade() -> None:
         sa.Column("scopes", postgresql.ARRAY(sa.String(32)), nullable=False),
         sa.Column("task_ids", postgresql.ARRAY(UUID), nullable=True),
         sa.Column("system", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("creator_kind", sa.String(8), nullable=False),
         sa.Column("created_by", UUID, nullable=True),
         _created(),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
@@ -165,7 +160,7 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
-            ["created_by"], ["users.id"], name="fk_api_keys_created_by_users", ondelete="SET NULL"
+            ["created_by"], ["users.id"], name="fk_api_keys_created_by_users", ondelete="CASCADE"
         ),
         sa.UniqueConstraint("public_key", name="uq_api_keys_public_key"),
         sa.CheckConstraint(
@@ -175,8 +170,26 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "NOT (system AND 'label:protected' = ANY(scopes))", name="ck_api_keys_system"
         ),
+        sa.CheckConstraint(_one_of("creator_kind", CREATOR_KINDS), name="ck_api_keys_creator_kind"),
+        sa.CheckConstraint(
+            "(creator_kind = 'user' AND created_by IS NOT NULL) "
+            "OR (creator_kind = 'cli' AND created_by IS NULL AND system)",
+            name="ck_api_keys_creator",
+        ),
     )
     op.create_index("ix_api_keys_project_id", "api_keys", ["project_id"])
+    op.create_index("ix_api_keys_created_by", "api_keys", ["created_by"])
+
+    op.create_table(
+        "protected_labels",
+        sa.Column("task_id", UUID, nullable=False),
+        sa.Column("label", sa.String(36), nullable=False),
+        _created(),
+        sa.PrimaryKeyConstraint("task_id", "label", name="pk_protected_labels"),
+        sa.ForeignKeyConstraint(
+            ["task_id"], ["tasks.id"], name="fk_protected_labels_task_id_tasks", ondelete="CASCADE"
+        ),
+    )
 
     op.create_table(
         "audit_events",
@@ -206,6 +219,7 @@ def downgrade() -> None:
             "Delete them first, or stay at 0006"
         )
     for table in (
+        "protected_labels",
         "audit_events",
         "api_keys",
         "project_memberships",
@@ -216,4 +230,3 @@ def downgrade() -> None:
     ):
         op.drop_table(table)
     op.drop_constraint("uq_projects_id", "projects", type_="unique")
-    op.drop_column("catalogue_labels", "protected")

@@ -305,11 +305,6 @@ class CatalogueLabel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    protected: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false"), default=False
-    )
-    """Only an admin or owner, or a key holding ``label:protected``, may move it (ADR-0050).
-    ``production`` is protected whatever this says (``accounts.roles.DEFAULT_PROTECTED``)."""
 
 
 # --- runs and blobs (ADR-0051) ---------------------------------------------------------------
@@ -604,6 +599,9 @@ ROLES = ("viewer", "member", "admin", "owner")
 SCOPES = ("runs:read", "runs:start", "catalogue:write", "catalogue:label", "label:protected")
 """What an API key may be granted. ``label:protected`` is never implied by another scope."""
 ACTOR_KINDS = ("user", "key", "anonymous", "cli")
+CREATOR_KINDS = ("user", "cli")
+"""Who made an API key: a person (``created_by`` names them; their role caps the key), or
+``opseval admin`` on the command line (a system key only, ``created_by`` null by design)."""
 
 
 class User(Base):
@@ -705,6 +703,13 @@ class ApiKey(Base):
             name="scopes",
         ),
         CheckConstraint("NOT (system AND 'label:protected' = ANY(scopes))", name="system"),
+        CheckConstraint(_one_of("creator_kind", CREATOR_KINDS), name="creator_kind"),
+        # A person's key names them; a command-line key is a system key and names nobody.
+        CheckConstraint(
+            "(creator_kind = 'user' AND created_by IS NOT NULL) "
+            "OR (creator_kind = 'cli' AND created_by IS NULL AND system)",
+            name="creator",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _id()
@@ -724,14 +729,30 @@ class ApiKey(Base):
     system: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false"), default=False
     )
+    creator_kind: Mapped[str] = mapped_column(String(8), nullable=False)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    """Whose role caps it, checked at each use. A key whose creator is gone holds nothing."""
+    """Whose role caps it, checked at each use. Deleting the person deletes their keys; a
+    disabled person's, or one without a role, hold nothing."""
     created_at: Mapped[datetime] = _created()
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProtectedLabel(Base):
+    """A label an admin protected in a task (ADR-0050): only an admin or owner, or a key
+    holding ``label:protected``, may move it. Kept by name, whether or not any item carries the
+    label yet. ``production`` is protected without a row (``accounts.roles.DEFAULT_PROTECTED``)."""
+
+    __tablename__ = "protected_labels"
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True
+    )
+    label: Mapped[str] = mapped_column(String(36), primary_key=True)
+    created_at: Mapped[datetime] = _created()
 
 
 class AuditEvent(Base):

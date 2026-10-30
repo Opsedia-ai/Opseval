@@ -13,6 +13,7 @@ Every change here and its audit event commit in one transaction.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -41,11 +42,15 @@ from opseval.db.schema import ApiKey, Task, User
 
 T = TypeVar("T")
 
-SESSION_COOKIE = "__Host-opseval-session"
-FLOW_COOKIE = "__Host-opseval-oidc"
 TOUCH_EVERY = timedelta(seconds=60)
 """``last_seen_at`` and ``last_used_at`` are written at most this often, not on every call."""
 MAX_FLOWS = 1000
+"""OIDC sign-ins in flight, at most. Each lives :data:`FLOW_TTL` seconds; a flood would have
+to come from many addresses (:data:`FLOW_STARTS`) to push real ones out."""
+FLOW_TTL = 600.0
+FLOW_STARTS = 10
+"""OIDC sign-ins one address may start per :data:`FLOW_WINDOW` seconds."""
+FLOW_WINDOW = 60.0
 
 
 class Database(Protocol):
@@ -118,8 +123,11 @@ class Accounts:
         self.limiter = limiter or LoginLimiter()
         self.oidc = oidc
         self.now = now
-        self._flows: OrderedDict[str, Flow] = OrderedDict()
+        self._flows: OrderedDict[str, tuple[Flow, float]] = OrderedDict()
+        """Flows by the digest of their browser handle, with when (monotonic) they began."""
+        self._starts: dict[str, list[float]] = {}
         self._flows_lock = threading.Lock()
+        self.clock: Callable[[], float] = time.monotonic
 
     # --- plumbing ------------------------------------------------------------------------
 
@@ -184,76 +192,97 @@ class Accounts:
 
     def from_cookie(self, token: str) -> Principal | None:
         """The signed-in user a session cookie names, or ``None`` (unknown, expired, idle too
-        long, or the user disabled). An ended session is deleted."""
+        long, or the user disabled). Read in a read-only transaction; a write happens only when
+        the session must end (it is deleted) or ``last_seen_at`` is due."""
         if not token or len(token) > 256:
             return None
         sid = tokens.digest(token)
         now = self.now()
 
-        async def go(s: AsyncSession) -> Principal | None:
+        async def read(s: AsyncSession) -> tuple[str, Principal | None]:
             found = await store.get_session(s, sid)
             if found is None:
-                return None
+                return "none", None
             session, user = found
             if (
                 user.disabled_at is not None
                 or now >= session.expires_at
                 or now - session.last_seen_at > self.idle
             ):
-                await store.close_session(s, sid)
-                return None
-            if now - session.last_seen_at > TOUCH_EVERY:
-                await store.touch_session(s, sid, now)
+                return "close", None
             role = await store.role_on(s, user.id, self.served.project_id)
-            return self._user_principal(
+            principal = self._user_principal(
                 user,
                 role,
                 via_cookie=True,
                 csrf=tokens.csrf_token(session.csrf_secret, sid),
                 session_id=sid,
             )
+            return ("touch" if now - session.last_seen_at > TOUCH_EVERY else "ok"), principal
 
-        return self._write(go)
+        what, principal = self._read(read)
+        if what == "close":
+
+            async def close(s: AsyncSession) -> None:
+                await store.close_session(s, sid)
+
+            self._write(close)
+        elif what == "touch":
+
+            async def touch(s: AsyncSession) -> None:
+                await store.touch_session(s, sid, now)
+
+            self._write(touch)
+        return principal
 
     def from_key(self, header: str) -> Principal | None:
         """The key an ``Authorization`` header carries, or ``None`` when it is not a valid,
         current key (401). A valid key of another project or task is a principal that sees
-        nothing (404)."""
+        nothing (404). Read-only, except ``last_used_at`` when it is due."""
         parsed = tokens.parse_key(header)
         if parsed is None:
             return None
         public, secret = parsed
         now = self.now()
 
-        async def go(s: AsyncSession) -> Principal | None:
+        async def read(s: AsyncSession) -> tuple[bool, Principal | None]:
             key = await store.find_key(s, public)
             given = tokens.digest(secret)
             if key is None or not tokens.same(given, key.secret_hash):
-                return None
+                return False, None
             if key.revoked_at is not None or (key.expires_at is not None and now >= key.expires_at):
-                return None
+                return False, None
             creator_role: Role | None = None
-            if key.created_by is not None:
+            if key.creator_kind == "user" and key.created_by is not None:
                 creator = await store.get_user(s, key.created_by)
                 if creator is not None and creator.disabled_at is None:
                     creator_role = await store.role_on(s, creator.id, key.project_id)
             visible = key.project_id == self.served.project_id and (
                 key.task_ids is None or self.served.task_id in key.task_ids
             )
-            if key.last_used_at is None or now - key.last_used_at > TOUCH_EVERY:
-                await store.touch_key(s, key.id, now)
-            return Principal(
+            due = key.last_used_at is None or now - key.last_used_at > TOUCH_EVERY
+            return due, Principal(
                 kind="key",
                 id=key.public_key,
                 name=key.name,
                 role=creator_role,
-                scopes=key_scopes(key.scopes, creator_role, system=key.system),
+                scopes=key_scopes(
+                    key.scopes, creator_role, system=key.system, creator_kind=key.creator_kind
+                ),
                 visible=visible,
                 key_id=key.id,
                 system=key.system,
             )
 
-        return self._write(go)
+        due, principal = self._read(read)
+        if due and principal is not None and principal.key_id is not None:
+            key_id = principal.key_id
+
+            async def touch(s: AsyncSession) -> None:
+                await store.touch_key(s, key_id, now)
+
+            self._write(touch)
+        return principal
 
     # --- signing in and out --------------------------------------------------------------
 
@@ -263,7 +292,7 @@ class Accounts:
         """A new session for a right email and password. The session the browser had, if
         any, is ended (a new id at every sign-in). Wrong, unknown or disabled: one answer."""
         folded = email.strip().lower()[:320]
-        wait = self.limiter.wait(address, folded)
+        wait = self.limiter.begin(address, folded)  # reserved and counted before the check
         if wait > 0:
             raise LoginRefused(
                 429, "TOO_MANY_ATTEMPTS", "too many failed sign-ins; wait and try again", wait
@@ -295,9 +324,8 @@ class Accounts:
 
         new = self._write(go)
         if new is None:
-            self.limiter.failed(address, folded)
             raise LoginRefused(401, "LOGIN_FAILED", "the email or password is wrong")
-        self.limiter.succeeded(folded)
+        self.limiter.succeeded(address, folded)
         return new
 
     def logout(self, principal: Principal, *, address: str) -> None:
@@ -310,17 +338,45 @@ class Accounts:
 
     # --- OIDC ----------------------------------------------------------------------------
 
-    def oidc_start(self, redirect_uri: str) -> tuple[str, str]:
-        """The IdP URL and the browser-binding handle to set as a cookie."""
+    def _prune(self, now: float) -> None:
+        """Drop expired flows (oldest first) and start counts older than the window. Under
+        the lock."""
+        while self._flows:
+            _, (_, began) = next(iter(self._flows.items()))
+            if now - began <= FLOW_TTL:
+                break
+            self._flows.popitem(last=False)
+        for address in list(self._starts):
+            recent = [t for t in self._starts[address] if now - t < FLOW_WINDOW]
+            if recent:
+                self._starts[address] = recent
+            else:
+                del self._starts[address]
+
+    def oidc_start(self, redirect_uri: str, *, address: str = "") -> tuple[str, str]:
+        """The IdP URL and the browser-binding handle to set as a cookie. At most
+        :data:`FLOW_STARTS` per address per minute (429)."""
         if self.oidc is None:
             raise LoginRefused(404, "OIDC_OFF", "OIDC sign-in is not configured")
+        with self._flows_lock:
+            now = self.clock()
+            self._prune(now)
+            starts = self._starts.setdefault(address, [])
+            if len(starts) >= FLOW_STARTS:
+                wait = FLOW_WINDOW - (now - starts[0])
+                raise LoginRefused(
+                    429, "TOO_MANY_ATTEMPTS", "too many sign-ins started; wait a minute", wait
+                )
+            starts.append(now)
         try:
             url, flow = self.oidc.start(redirect_uri)
         except OidcError as exc:
             raise LoginRefused(502, "OIDC_UNAVAILABLE", str(exc)) from exc
         handle = tokens.new_token()
         with self._flows_lock:
-            self._flows[tokens.digest(handle)] = flow
+            now = self.clock()
+            self._prune(now)
+            self._flows[tokens.digest(handle)] = (flow, now)
             while len(self._flows) > MAX_FLOWS:
                 self._flows.popitem(last=False)
         return url, handle
@@ -331,7 +387,10 @@ class Accounts:
         if self.oidc is None:
             raise LoginRefused(404, "OIDC_OFF", "OIDC sign-in is not configured")
         with self._flows_lock:
-            flow = self._flows.pop(tokens.digest(handle), None) if handle else None
+            now = self.clock()
+            self._prune(now)
+            held = self._flows.pop(tokens.digest(handle), None) if handle else None
+        flow = held[0] if held is not None else None
         if flow is None:
             raise LoginRefused(400, "OIDC_NO_FLOW", "no sign-in was started from this browser")
         try:
@@ -378,8 +437,10 @@ class Accounts:
             raise LoginRefused(
                 403,
                 "NO_ACCOUNT",
-                "no Opseval account is linked to this sign-in: ask an admin to create one "
-                "(`opseval admin create-user --oidc-subject`); sign-up is off",
+                "no Opseval account is linked to this sign-in (sign-up is off): ask an admin to "
+                "link it, `opseval admin link-identity <email> --oidc-subject <sub>` for an "
+                "existing user or `opseval admin create-user … --oidc-subject <sub>` for a new "
+                "one; the subject is in the failed sign-in's audit event",
             )
         return new
 
@@ -494,16 +555,26 @@ class Accounts:
         *,
         email: str,
         role: str | None,
-        project_role: str | None,
         password: str | None,
         address: str,
+        project_role: str | None = None,
+        project_role_given: bool = False,
+        oidc_subject: str | None = None,
     ) -> None:
-        """Give a person a role in this project's organisation, and optionally a lower role on
-        this project; a new email creates the user (with ``password``, or OIDC-only). Only an
-        owner grants or changes ``owner``; nobody changes their own role."""
+        """Give a person a role in this project's organisation; a new email creates the user
+        (with ``password``, or OIDC-only). Only an owner grants or changes ``owner``; nobody
+        changes their own role.
+
+        The project role changes only when ``project_role_given``: then ``project_role`` is
+        the new, lower role, or ``None`` to clear it. Otherwise an existing project membership
+        is left as it is. ``oidc_subject`` links the person's identity at the configured
+        issuer (email is never the join key)."""
         if principal.user_id is None or MANAGE not in principal.scopes:
             raise AccessRefused(403, "FORBIDDEN", "only an admin or owner manages members")
         new = check_role(role) if role is not None else None
+        issuer = self.oidc.issuer if self.oidc is not None else None
+        if oidc_subject is not None and issuer is None:
+            raise AccessRefused(409, "OIDC_OFF", "OIDC sign-in is not configured on this server")
 
         async def go(s: AsyncSession) -> None:
             org = self.served.organization_id
@@ -523,16 +594,29 @@ class Accounts:
             if mine != "owner" and "owner" in (old, new):
                 raise AccessRefused(403, "OWNER_ONLY", "only an owner grants or changes owner")
             await store.set_org_role(s, org, user.id, new)
-            if new is not None:
+            if new is not None and project_role_given:
                 await store.set_project_role(s, self.served.project_id, user.id, project_role)
+            detail: dict[str, Any] = {"from": old, "to": new}
+            if project_role_given:
+                detail["project_role"] = project_role
             await self._audit(
                 s,
                 principal,
                 "member.create" if created else "role.set",
                 target=user.email,
                 address=address,
-                detail={"from": old, "to": new, "project_role": project_role},
+                detail=detail,
             )
+            if oidc_subject is not None and issuer is not None:
+                await store.link_identity(s, user, issuer, oidc_subject.strip())
+                await self._audit(
+                    s,
+                    principal,
+                    "identity.link",
+                    target=user.email,
+                    address=address,
+                    detail={"issuer": issuer, "subject": oidc_subject.strip()},
+                )
 
         self._write(go)
 
@@ -583,21 +667,21 @@ class Accounts:
 
     def protect_label(
         self, principal: Principal, *, label: str, protected: bool, address: str
-    ) -> int:
+    ) -> bool:
         if MANAGE not in principal.scopes:
             raise AccessRefused(403, "FORBIDDEN", "only an admin or owner protects labels")
 
-        async def go(s: AsyncSession) -> int:
-            count = await store.set_protection(s, self.served.task_id, label, protected)
+        async def go(s: AsyncSession) -> bool:
+            changed = await store.set_protection(s, self.served.task_id, label, protected)
             await self._audit(
                 s,
                 principal,
                 "label.protect" if protected else "label.unprotect",
                 target=label,
                 address=address,
-                detail={"rows": count},
+                detail={"changed": changed},
             )
-            return count
+            return changed
 
         return self._write(go)
 
@@ -612,8 +696,6 @@ async def resolve_served(s: AsyncSession, project_ref: str, task_slug: str) -> S
 
 
 __all__ = [
-    "FLOW_COOKIE",
-    "SESSION_COOKIE",
     "Accounts",
     "Database",
     "KeyRow",

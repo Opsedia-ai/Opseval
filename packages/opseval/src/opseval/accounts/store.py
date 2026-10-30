@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from opseval.accounts import tokens
@@ -45,6 +46,7 @@ from opseval.db.schema import (
     OrgMembership,
     Project,
     ProjectMembership,
+    ProtectedLabel,
     Task,
     User,
     UserSession,
@@ -357,9 +359,11 @@ async def create_key(
     system: bool = False,
     creator: User | None,
     expires_at: datetime | None = None,
+    via_cli: bool = False,
 ) -> tuple[ApiKey, str]:
     """A new key and its secret (shown once). The scopes must be within what the creator may
-    grant on this project now; a system key never holds ``label:protected``."""
+    grant on this project now; a system key never holds ``label:protected``. A key with no
+    creator is only ever a system key minted by ``opseval admin`` (``via_cli``)."""
     try:
         granted = check_scopes(scopes)
     except ValueError as exc:
@@ -373,8 +377,13 @@ async def create_key(
             "SYSTEM_KEY_PROTECTED_LABEL",
             "a system key can never hold label:protected: automation never moves a protected label",
         )
-    if creator is None and not system:
-        raise AccessRefused(422, "NO_CREATOR", "a key needs the user whose role caps it")
+    if creator is None and not (system and via_cli):
+        raise AccessRefused(
+            422,
+            "NO_CREATOR",
+            "a key needs the user whose role caps it (only `opseval admin create-key --system` "
+            "makes a key with nobody behind it)",
+        )
     if creator is not None:
         role = await role_on(s, creator.id, project_id)
         allowed = grantable(role, system=system)
@@ -404,6 +413,7 @@ async def create_key(
         scopes=list(granted),
         task_ids=task_ids,
         system=system,
+        creator_kind="user" if creator is not None else "cli",
         created_by=creator.id if creator is not None else None,
         expires_at=expires_at,
     )
@@ -480,58 +490,54 @@ async def audit(
 
 
 async def label_protected(s: AsyncSession, task_id: uuid.UUID, label: str) -> bool:
+    """Whether ``label`` is protected in the task: by default (``production``), or because an
+    admin protected it, whether or not any item carries it yet."""
     if label in DEFAULT_PROTECTED:
         return True
     hit = await s.scalar(
-        select(func.count())
-        .select_from(CatalogueLabel)
-        .join(CatalogueItem, CatalogueItem.id == CatalogueLabel.item_id)
-        .where(
-            CatalogueItem.task_id == task_id,
-            CatalogueLabel.label == label,
-            CatalogueLabel.protected.is_(True),
+        select(ProtectedLabel.label).where(
+            ProtectedLabel.task_id == task_id, ProtectedLabel.label == label
         )
     )
-    return bool(hit)
+    return hit is not None
+
+
+async def protected_labels(s: AsyncSession, task_id: uuid.UUID) -> set[str]:
+    rows = await s.scalars(select(ProtectedLabel.label).where(ProtectedLabel.task_id == task_id))
+    return set(DEFAULT_PROTECTED) | {str(r) for r in rows}
 
 
 async def move_label(
     s: AsyncSession, task: Task, kind: str, name: str, version: int, label: str
 ) -> bool:
-    """Point ``label`` at a version, keeping its protection. Returns whether it is protected.
-    Authorization is the caller's: this only moves it."""
+    """Point ``label`` at a version. Returns whether it is protected. Authorization is the
+    caller's: this only moves it."""
     protected = await label_protected(s, task.id, label)
     await set_label(s, task, kind, name, version, label)
-    await s.execute(
-        update(CatalogueLabel)
-        .where(
-            CatalogueLabel.label == label,
-            CatalogueLabel.item_id.in_(
-                select(CatalogueItem.id).where(CatalogueItem.task_id == task.id)
-            ),
-        )
-        .values(protected=protected)
-    )
     return protected
 
 
-async def set_protection(s: AsyncSession, task_id: uuid.UUID, label: str, protected: bool) -> int:
-    """Protect or unprotect a label on every item of a task that carries it. A label that is
-    protected by default cannot be unprotected."""
+async def set_protection(s: AsyncSession, task_id: uuid.UUID, label: str, protected: bool) -> bool:
+    """Protect or unprotect a label in a task, by name. Returns whether anything changed. A
+    label protected by default cannot be unprotected."""
     check_label(label)
-    if not protected and label in DEFAULT_PROTECTED:
-        raise AccessRefused(409, "ALWAYS_PROTECTED", f"{label!r} is always protected")
-    result = await s.execute(
-        update(CatalogueLabel)
-        .where(
-            CatalogueLabel.label == label,
-            CatalogueLabel.item_id.in_(
-                select(CatalogueItem.id).where(CatalogueItem.task_id == task_id)
-            ),
+    if label in DEFAULT_PROTECTED:
+        if not protected:
+            raise AccessRefused(409, "ALWAYS_PROTECTED", f"{label!r} is always protected")
+        return False
+    if protected:
+        result = await s.execute(
+            insert(ProtectedLabel)
+            .values(task_id=task_id, label=label)
+            .on_conflict_do_nothing(index_elements=[ProtectedLabel.task_id, ProtectedLabel.label])
         )
-        .values(protected=protected)
-    )
-    return int(getattr(result, "rowcount", 0))
+    else:
+        result = await s.execute(
+            delete(ProtectedLabel).where(
+                ProtectedLabel.task_id == task_id, ProtectedLabel.label == label
+            )
+        )
+    return bool(getattr(result, "rowcount", 0))
 
 
 @dataclass(frozen=True)
@@ -550,16 +556,14 @@ async def labels(s: AsyncSession, task_id: uuid.UUID) -> list[LabelRow]:
             CatalogueItem.name,
             CatalogueLabel.label,
             CatalogueVersion.version,
-            CatalogueLabel.protected,
         )
         .join(CatalogueLabel, CatalogueLabel.item_id == CatalogueItem.id)
         .join(CatalogueVersion, CatalogueVersion.id == CatalogueLabel.version_id)
         .where(CatalogueItem.task_id == task_id)
         .order_by(CatalogueItem.kind, CatalogueItem.name, CatalogueLabel.label)
     )
-    return [
-        LabelRow(k, n, lab, int(v), bool(p) or lab in DEFAULT_PROTECTED) for k, n, lab, v, p in rows
-    ]
+    protected = await protected_labels(s, task_id)
+    return [LabelRow(k, n, lab, int(v), lab in protected) for k, n, lab, v in rows]
 
 
 __all__ = [
@@ -585,6 +589,7 @@ __all__ = [
     "move_label",
     "open_session",
     "organization",
+    "protected_labels",
     "project_org",
     "rehash",
     "revoke_key",

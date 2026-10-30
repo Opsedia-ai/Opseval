@@ -135,9 +135,7 @@ def create_user(
         organization = await store.organization(s, org)
         user = await store.create_user(s, email, password=password, name=name)
         if oidc_subject is not None and settings.oidc_issuer:
-            await store.link_identity(
-                s, user, settings.oidc_issuer.rstrip("/"), oidc_subject.strip()
-            )
+            await store.link_identity(s, user, settings.oidc_issuer.strip(), oidc_subject.strip())
         await store.set_org_role(s, organization.id, user.id, role)
         await _project_role(s, project, user.id, project_role)
         await _audit(
@@ -185,6 +183,43 @@ def set_role(
 
     _apply(work)
     typer.echo(f"{email.strip().lower()}: {role} in {org}")
+
+
+@admin_app.command("link-identity")
+def link_identity(
+    email: Annotated[str, typer.Argument(help="The existing user's email.")],
+    oidc_subject: Annotated[
+        str,
+        typer.Option(
+            "--oidc-subject",
+            help="The ID token's sub at OPSEVAL_OIDC_ISSUER (a refused sign-in's audit event "
+            "carries it).",
+        ),
+    ],
+) -> None:
+    """Let an existing user sign in with OIDC. Email is never used to match a sign-in, so the
+    identity is linked here, by its subject."""
+    settings = Settings()
+    if not settings.oidc_issuer:
+        raise _fail(ConfigError("link-identity needs OPSEVAL_OIDC_ISSUER"))
+    issuer = settings.oidc_issuer.strip()
+
+    async def work(s: AsyncSession) -> None:
+        from opseval.accounts import store
+
+        user = await store.find_user(s, email)
+        if user is None:
+            raise store.AccessRefused(404, "UNKNOWN_USER", f"no user {email!r}")
+        await store.link_identity(s, user, issuer, oidc_subject.strip())
+        await _audit(
+            s,
+            "identity.link",
+            target=user.email,
+            detail={"issuer": issuer, "subject": oidc_subject.strip()},
+        )
+
+    _apply(work)
+    typer.echo(f"linked {email.strip().lower()} to {oidc_subject.strip()} at {issuer}")
 
 
 @admin_app.command("create-key")
@@ -260,6 +295,7 @@ def create_key(
             task_ids=task_ids,
             system=system,
             creator=creator,
+            via_cli=True,
             expires_at=datetime.now(UTC) + timedelta(days=expires_days) if expires_days else None,
         )
         await _audit(

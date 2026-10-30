@@ -49,7 +49,7 @@ RIVAL = "rival/bot"
 PW = "correct horse battery staple"
 BASE = "https://127.0.0.1"
 ORIGIN = {"Origin": BASE}
-COOKIE = "__Host-opseval-session"
+COOKIE = "opseval-session"  # loopback without an https public URL (no Secure)
 ROLES = ("owner", "admin", "member", "viewer")
 
 
@@ -182,15 +182,54 @@ class TestSignIn:
         assert r.status_code == 200
         cookie = r.headers["set-cookie"]
         assert cookie.startswith(f"{COOKIE}=")
-        for flag in ("Secure", "HttpOnly", "SameSite=lax", "Path=/"):
+        for flag in ("HttpOnly", "SameSite=lax", "Path=/"):
             assert flag in cookie, flag
-        assert "Domain" not in cookie
+        # Plain-http loopback: no __Host- name and no Secure, which some browsers would drop.
+        assert "Domain" not in cookie and "Secure" not in cookie
         body = r.json()
         assert body["user"] == {"kind": "user", "name": "viewer@acme.test", "role": "viewer"}
         assert body["capabilities"] == ["runs:read"] and body["hasAccess"]
         token = cookie.split(";")[0].split("=", 1)[1]
         # Only the token's hash is stored.
         assert world.sql("SELECT count(*) FROM sessions WHERE id = :t", t=token)[0][0] == 0
+
+    def test_behind_https_the_cookie_is_host_prefixed_and_secure(self, world: World) -> None:
+        from opseval.server.access import PublicUrl
+
+        settings = settings_for(world.url, world.tmp)
+        access = access_config(
+            settings,
+            world.store,
+            project=PROJECT,
+            task="default",
+            public_url="https://opseval.example.com",
+        )
+        assert isinstance(access.public_url, PublicUrl)
+        cat = world.tmp / "cat"
+        app = create_app(
+            settings=settings,
+            catalogue=cat,
+            profile=cat / "profile.yaml",
+            store=world.store,
+            access=access,
+        )
+        c = TestClient(app, base_url="https://opseval.example.com")
+        r = c.post(
+            f"{API}/auth/login",
+            json={"email": "viewer@acme.test", "password": PW},
+            headers={"Origin": "https://opseval.example.com"},
+        )
+        assert r.status_code == 200, r.text
+        cookie = r.headers["set-cookie"]
+        assert cookie.startswith("__Host-opseval-session=")
+        for flag in ("Secure", "HttpOnly", "SameSite=lax", "Path=/"):
+            assert flag in cookie, flag
+        assert "Domain" not in cookie
+        assert c.get(f"{API}/runs").status_code == 200
+        # The loopback name is not read behind https.
+        plain = TestClient(app, base_url="https://opseval.example.com")
+        token = cookie.split(";")[0].split("=", 1)[1]
+        assert plain.get(f"{API}/runs", cookies={COOKIE: token}).status_code == 401
 
     def test_a_new_session_at_every_sign_in_and_the_old_one_ends(self, world: World) -> None:
         c = world.login("member@acme.test")
@@ -243,9 +282,9 @@ class TestSignIn:
                 json={"email": "admin@acme.test", "password": "not-it-at-all"},
                 headers=ORIGIN,
             ).status_code
-            for _ in range(7)
+            for _ in range(6)
         ]
-        assert codes[:6] == [401] * 6 and codes[6] == 429
+        assert codes[:5] == [401] * 5 and codes[5] == 429
         r = c.post(
             f"{API}/auth/login", json={"email": "admin@acme.test", "password": PW}, headers=ORIGIN
         )
@@ -428,11 +467,7 @@ class TestRoleMatrix:
         assert r.status_code == 200
         roles = {m["email"]: m["role"] for m in r.json()}
         assert roles["member@acme.test"] == "admin"
-        assert world.events("role.set")[0].detail == {
-            "from": "member",
-            "to": "admin",
-            "project_role": None,
-        }
+        assert world.events("role.set")[0].detail == {"from": "member", "to": "admin"}
 
     def test_an_admin_adds_a_member_who_can_sign_in(self, world: World) -> None:
         admin = world.login("admin@acme.test")
@@ -681,7 +716,7 @@ class TestOidcSignIn:
         r = c.get(f"{API}/auth/oidc/start", follow_redirects=False)
         assert r.status_code == 302
         assert r.headers["location"].startswith("https://idp.example.com/authorize?")
-        assert "__Host-opseval-oidc=" in r.headers["set-cookie"]
+        assert "opseval-oidc=" in r.headers["set-cookie"]
         return {k: v[0] for k, v in parse_qs(urlparse(r.headers["location"]).query).items()}
 
     def test_a_linked_identity_signs_in(self, oidc_world: tuple[World, Any]) -> None:
@@ -880,3 +915,181 @@ def test_serve_in_accounts_mode_prints_no_token(
     assert "Accounts: acme/bot task default" in res.output and "#token=" not in res.output
     assert seen["proxy_headers"] is False and seen["api"].state.token is None
     assert seen["api"].state.access.accounts.served.project_ref == PROJECT
+
+
+# --- review of #95 ---
+
+
+class TestReviewFixes:
+    def test_a_parallel_burst_of_wrong_passwords_hits_the_database_only_the_allowance(
+        self, world: World
+    ) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from opseval.accounts.ratelimit import ACCOUNT_FREE
+        from opseval.accounts.service import LoginRefused
+
+        def attempt(_: int) -> str:
+            try:
+                world.accounts.login("admin@acme.test", "wrong-password", address="9.9.9.9")
+            except LoginRefused as exc:
+                return exc.code
+            return "OK"
+
+        with ThreadPoolExecutor(12) as pool:
+            codes = list(pool.map(attempt, range(12)))
+        assert codes.count("LOGIN_FAILED") == ACCOUNT_FREE
+        assert codes.count("TOO_MANY_ATTEMPTS") == 12 - ACCOUNT_FREE
+        assert len(world.events("login.failed")) == ACCOUNT_FREE
+
+    def test_a_system_key_whose_creator_is_disabled_holds_nothing(self, world: World) -> None:
+        key = world.key("admin@acme.test", ["runs:read"], system=True)
+        c = world.client(headers={"Authorization": key})
+        assert c.get(f"{API}/runs").status_code == 200
+
+        async def disable(s: AsyncSession) -> None:
+            user = await acc.find_user(s, "admin@acme.test")
+            assert user is not None
+            await acc.disable_user(s, user, datetime.now(UTC))
+
+        world.store.run_in_session(disable, write=True)
+        r = c.get(f"{API}/runs")
+        assert r.status_code == 403  # never the system cap of a CLI key
+
+    def test_deleting_a_person_deletes_their_keys(self, world: World) -> None:
+        key = world.key("admin@acme.test", ["runs:read"], system=True)
+        world.execute("DELETE FROM users WHERE email = 'admin@acme.test'")
+        assert world.sql("SELECT count(*) FROM api_keys")[0][0] == 0
+        assert world.client(headers={"Authorization": key}).get(f"{API}/runs").status_code == 401
+
+    def test_a_cli_system_key_has_the_system_cap_and_names_nobody(self, world: World) -> None:
+        key = world.key("", ["runs:read", "runs:start"], system=True, via_cli=True)
+        c = world.client(headers={"Authorization": key})
+        assert c.get(f"{API}/runs").status_code == 200
+        assert world.sql("SELECT creator_kind, created_by FROM api_keys")[0] == ("cli", None)
+        # The database refuses a creator-less key that is not a CLI system key.
+        with pytest.raises(Exception) as refused:
+            world.execute(
+                "INSERT INTO api_keys (id, project_id, name, public_key, secret_hash, "
+                "secret_prefix, scopes, system, creator_kind) VALUES (gen_random_uuid(), "
+                ":p, 'x', 'pk-oe-x', :h, 'sk-oe-x', ARRAY['runs:read'], false, 'cli')",
+                p=world.accounts.served.project_id,
+                h="0" * 64,
+            )
+        assert "ck_api_keys_creator" in str(refused.value.__cause__)
+
+    def test_a_role_change_keeps_the_project_role_unless_asked(self, world: World) -> None:
+        owner = world.login("owner@acme.test")
+        r = owner.put(f"{API}/auth/members", json={"email": "lowered@acme.test", "role": "admin"})
+        assert r.status_code == 200, r.text
+        rows = {m["email"]: m for m in r.json()}
+        assert rows["lowered@acme.test"]["projectRole"] == "viewer"  # untouched
+        assert rows["lowered@acme.test"]["role"] == "viewer"
+        r = owner.put(
+            f"{API}/auth/members",
+            json={"email": "lowered@acme.test", "role": "admin", "projectRole": None},
+        )
+        rows = {m["email"]: m for m in r.json()}
+        assert rows["lowered@acme.test"]["projectRole"] is None  # an explicit null clears it
+        assert rows["lowered@acme.test"]["role"] == "admin"
+
+    def test_protecting_an_unused_label_holds_at_its_first_move(self, world: World) -> None:
+        admin = world.login("admin@acme.test")
+        r = admin.put(
+            f"{API}/catalogue/labels/protection", json={"label": "release", "protected": True}
+        )
+        assert r.status_code == 200
+        member = world.login("member@acme.test")
+        r = member.put(f"{API}/catalogue/labels", json={**MOVE, "label": "release"})
+        assert r.status_code == 403 and r.json()["code"] == "PROTECTED_LABEL"
+        r = admin.put(f"{API}/catalogue/labels", json={**MOVE, "label": "release"})
+        assert r.status_code == 200 and r.json() == {"protected": True}
+
+    def test_resolving_a_caller_writes_only_when_due(self, world: World) -> None:
+        writes: list[bool] = []
+        real = world.store.run_in_session
+
+        def counting(fn: Any, *, write: bool = False) -> Any:
+            writes.append(write)
+            return real(fn, write=write)
+
+        c = world.login("viewer@acme.test")
+        token = c.cookies[COOKIE]
+        key = world.key("admin@acme.test", ["runs:read"])
+        world.accounts.db = type("Counting", (), {"run_in_session": staticmethod(counting)})()
+        assert world.accounts.from_key(key) is not None  # first use: last_used_at written
+        assert writes == [False, True]
+        writes.clear()
+        for _ in range(3):
+            assert world.accounts.from_cookie(token) is not None
+            assert world.accounts.from_key(key) is not None
+        assert writes == [False] * 6  # nothing due: read transactions only
+        world.clock[0] += timedelta(minutes=2)
+        world.accounts.from_cookie(token)
+        assert writes[-2:] == [False, True]  # last_seen_at is due
+
+
+class TestLinkingIdentities:
+    def test_link_identity_from_the_cli_then_sign_in(
+        self, oidc_world: tuple[World, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.cli import app
+
+        world, idp = oidc_world
+        monkeypatch.setenv("OPSEVAL_DATABASE_URL", world.url)
+        monkeypatch.setenv("OPSEVAL_ALLOWED_HOSTS", "127.0.0.1,idp.example.com")
+        monkeypatch.setenv("OPSEVAL_OIDC_ISSUER", "https://idp.example.com")
+        monkeypatch.setenv("OPSEVAL_DOTENV", "false")
+        res = CliRunner().invoke(
+            app, ["admin", "link-identity", "viewer@acme.test", "--oidc-subject", "user-123"]
+        )
+        assert res.exit_code == 0, res.output
+        c = world.client(follow_redirects=False)
+        q = TestOidcSignIn().start(c)
+        r = c.get(
+            f"{API}/auth/oidc/callback", params={"code": idp.issue(q["nonce"]), "state": q["state"]}
+        )
+        assert r.headers["location"] == "/"
+        assert c.get(f"{API}/auth/session").json()["user"]["name"] == "viewer@acme.test"
+        res = CliRunner().invoke(
+            app, ["admin", "link-identity", "member@acme.test", "--oidc-subject", "user-123"]
+        )
+        assert res.exit_code == 3 and "linked to a user already" in res.output
+
+    def test_an_admin_links_an_identity_through_the_api(
+        self, oidc_world: tuple[World, Any]
+    ) -> None:
+        world, idp = oidc_world
+        admin = world.login("admin@acme.test")
+        r = admin.put(
+            f"{API}/auth/members",
+            json={"email": "sso@acme.test", "role": "member", "oidcSubject": "user-123"},
+        )
+        assert r.status_code == 200, r.text
+        c = world.client(follow_redirects=False)
+        q = TestOidcSignIn().start(c)
+        c.get(
+            f"{API}/auth/oidc/callback", params={"code": idp.issue(q["nonce"]), "state": q["state"]}
+        )
+        assert c.get(f"{API}/auth/session").json()["user"]["name"] == "sso@acme.test"
+        assert world.events("identity.link")[0].detail["subject"] == "user-123"
+
+    def test_without_oidc_an_identity_cannot_be_linked(self, world: World) -> None:
+        admin = world.login("admin@acme.test")
+        r = admin.put(
+            f"{API}/auth/members",
+            json={"email": "member@acme.test", "role": "member", "oidcSubject": "x"},
+        )
+        assert r.status_code == 409 and r.json()["code"] == "OIDC_OFF"
+
+    def test_no_account_says_how_to_link(self, oidc_world: tuple[World, Any]) -> None:
+        from opseval.accounts.service import LoginRefused
+
+        world, idp = oidc_world
+        _, handle = world.accounts.oidc_start("https://127.0.0.1/cb", address="1.1.1.1")
+        flow = next(iter(world.accounts._flows.values()))[0]
+        with pytest.raises(LoginRefused) as refused:
+            world.accounts.oidc_finish(
+                handle, code=idp.issue(flow.nonce), state=flow.state, address="1.1.1.1"
+            )
+        assert "opseval admin link-identity" in refused.value.message
