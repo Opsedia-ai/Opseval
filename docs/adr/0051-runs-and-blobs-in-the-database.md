@@ -1,6 +1,6 @@
 # ADR-0051: Runs and blobs in the database
 
-- **Status:** Accepted (implemented 2026-10-30, see Implementation)
+- **Status:** Proposed (implemented 2026-10-30, see Implementation)
 - **Date:** 2026-10-28
 - **Deciders:** Opseval maintainers (owner request 2026-10-28)
 
