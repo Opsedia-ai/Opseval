@@ -25,8 +25,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from opseval.models.record import VoiceMetric, VoiceMetricName, VoiceSpan
+from opseval.models.record import (
+    VoiceAgentHeard,
+    VoiceAgentTurn,
+    VoiceBargeIn,
+    VoiceCallerTurn,
+    VoiceMetric,
+    VoiceMetricInputs,
+    VoiceMetricName,
+    VoiceSpan,
+    VoiceTimeline,
+)
 from opseval.speech.wer import word_error_rate
+
+METRICS_VERSION = "2"
+"""The metric rules' version, recorded with the inputs (``VoiceMetricInputs.version``). Bump it
+when a rule changes: ``opseval rescore`` then recomputes the rows of a stored call from its
+inputs instead of reusing them. 2: review of #91 (play-out per turn, harness spans beside the
+agent's path, the agent's transcripts attributed by time and joined per caller turn)."""
 
 PAUSE_FLOOR_MS = 200.0
 """A pause inside an agent turn shorter than this is the gap between words, not dead air."""
@@ -42,8 +58,9 @@ class CallerTurn:
     turn: int
     text: str
     """What the caller said: the reference for the agent's transcript (before any noise)."""
-    agent_heard: str | None = None
-    """The agent's own (final) transcript of this turn, if its protocol sent one."""
+    start_ms: float = 0.0
+    end_ms: float = 0.0
+    barge_in: bool = False
 
 
 @dataclass
@@ -52,7 +69,10 @@ class AgentTurn:
     confidence: float | None = None
     heard: str | None = None
     """How Opseval heard the turn (``stt``, ``second_stt``, ``unintelligible``,
-    ``asr_failed``); None when it was never transcribed (cut short)."""
+    ``asr_failed``, ``cut_short``); None when it was never transcribed."""
+    burst: bool = False
+    """Its audio arrived faster than real time on the turn-based bridge (see
+    :class:`opseval.models.record.VoiceAgentTurn`)."""
 
 
 @dataclass
@@ -61,6 +81,8 @@ class PlannedBargeIn:
     after_ms: int
     fired_at_ms: float | None = None
     """When the caller began talking over the agent; None if it never did."""
+    ended_at_ms: float | None = None
+    """When the caller finished the interruption."""
     reason: str | None = None
     """Why it never fired (the agent's turn was shorter than ``after_ms``, or never came)."""
 
@@ -75,7 +97,68 @@ class CallLog:
     callers: list[CallerTurn] = field(default_factory=list)
     agents: list[AgentTurn] = field(default_factory=list)
     barge_ins: list[PlannedBargeIn] = field(default_factory=list)
+    heard: list[tuple[float, str]] = field(default_factory=list)
+    """Every final transcript the agent sent of the caller, as (arrival, text), redacted."""
     agent_transcripts_seen: bool = False
+
+    def inputs(self) -> VoiceMetricInputs:
+        """The record's copy of everything but the spans (layout 8), for ``rescore``."""
+        return VoiceMetricInputs(
+            version=METRICS_VERSION,
+            call_start_ms=max(0.0, self.call_start_ms),
+            callers=tuple(
+                VoiceCallerTurn(
+                    turn=c.turn,
+                    text=c.text,
+                    start_ms=max(0.0, c.start_ms),
+                    end_ms=max(0.0, c.end_ms),
+                    barge_in=c.barge_in,
+                )
+                for c in self.callers
+            ),
+            agents=tuple(
+                VoiceAgentTurn(turn=a.turn, heard=a.heard, confidence=a.confidence, burst=a.burst)
+                for a in self.agents
+            ),
+            agent_heard=(
+                tuple(VoiceAgentHeard(at_ms=max(0.0, at), text=t) for at, t in self.heard)
+                if self.agent_transcripts_seen
+                else None
+            ),
+            barge_ins=tuple(
+                VoiceBargeIn(
+                    agent_turn=b.agent_turn,
+                    after_ms=b.after_ms,
+                    fired_at_ms=b.fired_at_ms,
+                    ended_at_ms=b.ended_at_ms,
+                    reason=b.reason,
+                )
+                for b in self.barge_ins
+            ),
+        )
+
+    @classmethod
+    def from_timeline(cls, timeline: VoiceTimeline) -> CallLog | None:
+        """The log a stored call was computed from, or None when the record predates the
+        inputs (layouts before 8)."""
+        found = timeline.inputs
+        if found is None or timeline.spans is None:
+            return None
+        return cls(
+            mode=timeline.mode,
+            call_start_ms=found.call_start_ms,
+            spans=list(timeline.spans),
+            callers=[
+                CallerTurn(c.turn, c.text, c.start_ms, c.end_ms, c.barge_in) for c in found.callers
+            ],
+            agents=[AgentTurn(a.turn, a.confidence, a.heard, a.burst) for a in found.agents],
+            barge_ins=[
+                PlannedBargeIn(b.agent_turn, b.after_ms, b.fired_at_ms, b.ended_at_ms, b.reason)
+                for b in found.barge_ins
+            ],
+            heard=[(h.at_ms, h.text) for h in found.agent_heard or ()],
+            agent_transcripts_seen=found.agent_heard is not None,
+        )
 
 
 def _row(
@@ -127,8 +210,16 @@ def _turns(spans: list[VoiceSpan], speaker: str) -> list[_Turn]:
 
 
 def _harness_in(spans: list[VoiceSpan], start: float, end: float) -> VoiceSpan | None:
+    """A harness span that held the line during ``[start, end]``. One that ran beside the
+    agent's path (``holds_line`` False: the session kept stamping the agent's audio on
+    arrival meanwhile, the duplex driver) does not make a gap unplaceable: the agent could
+    have spoken, and when it did is known."""
     return next(
-        (s for s in spans if s.kind == "harness" and _overlap(s.start_ms, s.end_ms, start, end)),
+        (
+            s
+            for s in spans
+            if s.kind == "harness" and s.holds_line and _overlap(s.start_ms, s.end_ms, start, end)
+        ),
         None,
     )
 
@@ -178,6 +269,7 @@ def _gap_before(agent: _Turn, callers: list[_Turn], agents: list[_Turn]) -> _Gap
 
 def _latency_and_dead_air(log: CallLog, spans: list[VoiceSpan]) -> list[VoiceMetric]:
     callers, agents = _turns(spans, "caller"), _turns(spans, "agent")
+    bursts = {a.turn for a in log.agents if a.burst}
     rows: list[VoiceMetric] = []
     for agent in agents:
         gap = _gap_before(agent, callers, agents)
@@ -220,6 +312,13 @@ def _latency_and_dead_air(log: CallLog, spans: list[VoiceSpan]) -> list[VoiceMet
                 degraded=latency_degraded,
             )
         )
+        if agent.turn in bursts:
+            degraded = True
+            notes.append(
+                f"{UNPLACEABLE}: agent turn {agent.turn}'s audio arrived faster than it plays "
+                "(the turn-based bridge places it by arrival), so pauses inside it are not on "
+                "the clock"
+            )
         pauses = 0.0
         for left, right in zip(agent.spans, agent.spans[1:], strict=False):
             start, end = left.end_ms, right.start_ms
@@ -343,6 +442,20 @@ def _yields(log: CallLog, spans: list[VoiceSpan]) -> list[VoiceMetric]:
     return rows
 
 
+def _attributed(log: CallLog) -> dict[int, list[str]]:
+    """The agent's final transcripts per caller turn, attributed by time: a transcript belongs
+    to the last caller turn that had started when it arrived (it cannot be of a turn not yet
+    spoken), and every final of one turn is kept, in order: an agent that sends one final per
+    phrase (a caller pausing mid-sentence) heard the whole turn, not its last phrase."""
+    starts = sorted(log.callers, key=lambda c: c.start_ms)
+    found: dict[int, list[str]] = {}
+    for at, text in sorted(log.heard, key=lambda h: h[0]):
+        began = [c for c in starts if c.start_ms <= at]
+        if began:
+            found.setdefault(began[-1].turn, []).append(text)
+    return found
+
+
 def _asr_wer(log: CallLog) -> list[VoiceMetric]:
     name: VoiceMetricName = "voice.agent_asr_wer"
     if not log.agent_transcripts_seen:
@@ -355,13 +468,15 @@ def _asr_wer(log: CallLog) -> list[VoiceMetric]:
                 "(a transcript event with of: caller)",
             )
         ]
+    heard = _attributed(log)
     rows = []
     for caller in log.callers:
-        if caller.agent_heard is None:
+        said = heard.get(caller.turn)
+        if not said:
             reason = "the agent sent no transcript of this caller turn"
             rows.append(_row(name, None, "wer", turn=caller.turn, reason=reason))
             continue
-        wer = word_error_rate(caller.text, caller.agent_heard)
+        wer = word_error_rate(caller.text, " ".join(said))
         rows.append(_row(name, wer, "wer", turn=caller.turn))
     return rows
 
@@ -400,6 +515,7 @@ def compute(log: CallLog) -> tuple[VoiceMetric, ...]:
 
 
 __all__ = [
+    "METRICS_VERSION",
     "NOT_MEASURABLE",
     "PAUSE_FLOOR_MS",
     "UNPLACEABLE",

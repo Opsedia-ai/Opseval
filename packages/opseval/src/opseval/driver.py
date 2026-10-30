@@ -153,6 +153,10 @@ class Driver:
         self._infra: list[str] = []
         self._injections: list[str] = []
         self._user_turns = 0
+        self._interjected_turns = 0
+        """Customer turns the session spoke on its own (planted barge-ins): recorded and
+        counted in ``user_turns``, but never against ``max_turns``, which budgets the turns
+        the scenario wrote (review of #91)."""
         self._occurrences: Counter[str] = Counter()
         self._rejections: Counter[str] = Counter()
         self._last_sent_at: float | None = None
@@ -261,8 +265,11 @@ class Driver:
             raise
         return sent()
 
+    def _budget_spent(self) -> bool:
+        return self._user_turns - self._interjected_turns >= self.s.conversation.max_turns
+
     async def _send_user(self, session: Session, text: str) -> None:
-        if self._user_turns >= self.s.conversation.max_turns:
+        if self._budget_spent():
             raise _Stop(TerminalState.MAX_TURNS_EXHAUSTED, "turn budget spent")
         frame = render_frame(
             self.p.user_message_frame, {"text": text, "timezone": self.s.persona.timezone}
@@ -542,7 +549,9 @@ class Driver:
             text = payload.get(self.p.text_field) if isinstance(payload, dict) else None
             text = text if isinstance(text, str) else None
             # Transport chatter (e.g. a late resume confirmation) is never the agent's reply.
-            if waiting and kind is not FrameKind.HANDSHAKE:
+            # A frame that came before the customer's latest turn ended (a duplex barge-in) is
+            # recorded, but it is never the answer to that turn.
+            if waiting and kind is not FrameKind.HANDSHAKE and not session.stale(payload):
                 waiting = not (
                     session.replies_in_send
                     or self.p.answers(kind, text, payload)
@@ -580,6 +589,7 @@ class Driver:
             self._last_sent_at = time.monotonic()
             self._record("sent", frame, FrameKind.USER_MESSAGE, text)
             self._user_turns += 1
+            self._interjected_turns += 1
         return bool(spoken)
 
     def _policy(self, name: str) -> CheckpointPolicy:
@@ -644,7 +654,7 @@ class Driver:
             if self._rejections[name] > policy.max_rejections:
                 interrupt()
                 raise _Stop(TerminalState.MAX_TURNS_EXHAUSTED, f"rejection loop guard at {name!r}")
-        if self._user_turns >= self.s.conversation.max_turns:
+        if self._budget_spent():
             interrupt()
             raise _Stop(TerminalState.MAX_TURNS_EXHAUSTED, "turn budget spent")
 

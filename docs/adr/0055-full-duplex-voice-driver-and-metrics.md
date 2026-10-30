@@ -221,3 +221,73 @@ Not built yet:
 - Greetings: the caller's opening is spoken as soon as the call is open, as the text driver
   opens; an agent that greets may be talked over by it, which is never counted against the
   agent (the caller started that overlap).
+
+## Review of #91 (2026-10-30)
+
+The code review of V1 found ways a harness problem could still read as the agent's, and an
+agent failure as "not measured". Fixed, each with a fault-injection test
+(`tests/test_voice_duplex_review.py`):
+
+- **Play-out never carries over.** The turn-based bridge places the agent's audio by arrival
+  (it never plays it out: the caller answers once the turn is over), so a turn sent faster than
+  real time no longer pushes the next turn's spans late; its own pauses are then not on the
+  clock, which degrades that turn's dead air (`UNPLACEABLE`), never hides it. The duplex driver
+  keeps the play-out clock and re-anchors it when the caller starts a turn.
+- **A duplex turn ends when its audio has played out**, whatever ended it (the agent's
+  `speech_end`, silence in its audio, an answering data message); speech read meanwhile is
+  handed to the next turn in order. A planned barge-in fires `after_ms` into the speech as it
+  plays, so an agent that sends three seconds of audio in 200 ms is still interrupted and its
+  yield measured.
+- **An interruption is answered only by what follows it.** It is released to the driver once
+  everything the agent sent before it ended has been handed over, so the record shows the cut
+  turn first; a data message that arrived while the caller was still interrupting is recorded
+  but never the answer (new `Session.stale` hook). An agent silent after a barge-in is the
+  agent's `TIMEOUT`.
+- **Interruptions are not scripted turns.** Planted silences and the noise seed count the turns
+  spoken through `send` only, and an interruption is recorded as a customer turn (counted in
+  `user_turns`) but never against `max_turns`, which budgets the turns the scenario wrote.
+- **Harness spans say whether they held the line** (`VoiceSpan.holds_line`). On the duplex
+  driver the session stamps every agent event on arrival while Opseval works, so its STT, TTS
+  and noise mixing run beside the agent's path and never make a gap unplaceable: eight seconds
+  of silence after a barge-in are eight seconds of dead air, even while the cut fragment is
+  still being transcribed. The turn-based bridge keeps the old rule (a harness span holds the
+  line).
+- **Noise is mixed in a worker thread**, as a `noise` harness span, so it never stalls the
+  session's reader (agent audio arriving meanwhile keeps its arrival time). The generator is
+  unchanged (`opseval-noise/1`), so a seed gives the same noise as before; it was not
+  vectorised (the `array` module has no vector arithmetic and numpy is not a dependency).
+- **Cut short only when the agent stopped**: within 1 s of the caller cutting in, after at most
+  2 s of speech (`CUT_YIELD_MS`, `CUT_FRAGMENT_MS`). An agent that talked on gets the canary
+  like any turn, so `voice.intelligible` can fail it. A cut-short fragment's unusable text is
+  removed from what the judges read, and a trusted harness fact says "agent spoken turn N was
+  cut short by the caller's interruption" for every turn the agent stopped for.
+- **The interruption's failure never replaces the turn's outcome.** The turn's own result, or
+  its own error (an `SttError` stays a harness error), is kept; the interruption's error is a
+  timeline note. The agent hanging up during it is the agent ending the call (the next
+  customer turn is unheard: `TIMEOUT`), as for any hang-up; a line that closed with no
+  hang-up is the transport's failure (not judged), raised by the next read or send after the
+  cut turn was recorded.
+- **The agent's own transcript** (`voice.agent_asr_wer`): every final is kept with its arrival
+  time and attributed to the last caller turn that had started when it arrived; the finals of
+  one turn are joined, so a caller pausing mid-sentence is graded on the whole turn.
+- **Code-switching reaches the judges.** With `voice.code_switching`, the language and persona
+  judges (version 4) are told the listed languages and the rubric digest includes them, so
+  `rescore` re-grades: switching between them is expected of the persona, and an agent
+  mirroring the caller's switches within them is acceptable.
+- **`judge.pronunciation_dialect_fit`** (version 2): the words the STT was unsure of are the
+  agent's, so they go inside the fence as each agent turn's `unsure_words`; the harness facts
+  hold only numbers (per-turn confidence, how many words, the bound). A mean or lowest
+  confidence under `OPSEVAL_STT_MIN_CONFIDENCE` (now recorded in the timeline) degrades it,
+  with the reason.
+- **No second reader.** `DuplexBridge` reads the session directly: a `duplex` session already
+  stamps every event on arrival with its own reader (`audio-ws` does), which is now part of
+  what the capability promises. `close()` cancels only the interruption it owns and lets an
+  outside cancellation through.
+- **Rescore recomputes the metrics.** The timeline keeps their inputs (`VoiceTimeline.inputs`:
+  caller texts, redacted, and times; the agent's transcripts with arrival; agent turns; barge-in
+  plans and outcomes; `METRICS_VERSION`). The metrics are computed from what the record keeps,
+  and a `voice.*` metric scorer (version 2) recomputes them when the stored rules' version is
+  older (`details.recomputed_from`). Layout `opseval-runs/8`; 1–7 still read (a layout-7 record
+  keeps its stored rows), `PRE_USAGE_LAYOUTS` unchanged.
+- The decision to generate noise rather than bundle CC0 clips is the maintainers' to take:
+  `docs/ATTENTION.md` D18. This ADR stays *Proposed*.

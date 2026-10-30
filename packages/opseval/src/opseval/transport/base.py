@@ -107,6 +107,12 @@ class Session(ABC):
         then waits for the agent's answer to it like to any other turn."""
         return []
 
+    def stale(self, payload: Any) -> bool:
+        """Whether a received frame came before the customer's latest turn ended, so it
+        cannot be the answer to it: the duplex voice driver's frames that arrived while the
+        caller was still interrupting (ADR-0055, review of #91). Recorded, never an answer."""
+        return False
+
     def frame_media(self, direction: str, payload: Any) -> FrameMedia | None:
         """The audio behind a frame just sent or received, or ``None`` (text sessions)."""
         return None

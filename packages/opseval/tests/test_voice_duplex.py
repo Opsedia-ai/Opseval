@@ -54,6 +54,7 @@ from opseval.speech.guard import GuardedSpeechToText, GuardedTextToSpeech
 from opseval.transport.audio import (
     DUPLEX,
     AgentAudio,
+    AgentFrame,
     AgentSpeechEnd,
     AgentSpeechStart,
     AgentTranscript,
@@ -88,7 +89,16 @@ CHUNK_MS = 20
 
 class DuplexAgent(AudioSession):
     """Answers each caller turn with ``reply`` in tones, 20 ms a chunk in real time. Caller
-    audio with energy while it speaks stops it (``yields``), with a ``speech_end``."""
+    audio with energy while it speaks stops it (``yields``), with a ``speech_end``.
+
+    Faults and shapes for the review of #91: ``burst`` (agent turn numbers whose audio is sent
+    all at once, followed by ``trailing_ms`` of silence; an interruption then sends one
+    ``speech_end``, its play-back stopping), ``answer_delay`` (seconds of silence before
+    answering a caller who interrupted it), ``garble`` (agent turns spoken as noise no STT
+    reads), ``notify`` (a notification before the first turn's speech), ``while_cut`` (a
+    data message sent while the caller interrupts), ``hangup_on_cut`` (the agent hangs up and
+    closes the line on the ``hangup_on_cut``-th chunk of the caller's interruption), and
+    ``phrases`` (a final transcript of the caller per phrase, after 300 ms of silence)."""
 
     capabilities: ClassVar[frozenset[str]] = frozenset({DUPLEX})
 
@@ -100,41 +110,122 @@ class DuplexAgent(AudioSession):
         yields: bool = True,
         transcripts: bool = False,
         greet: str | None = None,
+        burst: frozenset[int] = frozenset(),
+        trailing_ms: int = 0,
+        answer_delay: float = 0.0,
+        garble: frozenset[int] = frozenset(),
+        notify: bool = False,
+        while_cut: dict[str, Any] | None = None,
+        hangup_on_cut: int | None = None,
+        phrases: bool = False,
+        replies: list[str] | None = None,
+        hangup: bool = True,
     ) -> None:
         super().__init__(fmt, AttemptClock())
         self.reply, self.yields, self.transcripts, self.greet = reply, yields, transcripts, greet
-        self._events: asyncio.Queue[VoiceEvent] = asyncio.Queue()
+        self.burst, self.trailing_ms, self.answer_delay = burst, trailing_ms, answer_delay
+        self.garble, self.notify, self.while_cut = garble, notify, while_cut
+        self.hangup_on_cut, self.phrases = hangup_on_cut, phrases
+        self.replies, self.hangup = replies, hangup
+        self._events: asyncio.Queue[VoiceEvent | BaseException] = asyncio.Queue()
         self._buffer: list[bytes] = []
         self.heard: list[str] = []
         self.received: list[bytes] = []
         self.sent: list[bytes] = []
         self._speaking: asyncio.Task[None] | None = None
         self._interrupted = False
+        self._was_cut = False
+        self._playing_until = 0.0
+        self._turns = 0
+        self._cut_chunks = 0
+        self._closed = False
+        self._quiet_ms = 0.0
+        self._voiced = False
 
     async def start(self) -> None:
         if self.greet is not None:
             self._speaking = asyncio.create_task(self._speak(self.greet, None))
 
     def _talking(self) -> bool:
-        return self._speaking is not None and not self._speaking.done()
+        loop = asyncio.get_running_loop()
+        return (
+            self._speaking is not None and not self._speaking.done()
+        ) or loop.time() < self._playing_until
 
     async def send_audio(self, pcm16: bytes) -> None:
+        if self._closed:
+            from opseval.errors import TransportClosed
+
+            raise TransportClosed("the agent closed the line")
         self._buffer.append(pcm16)
         self.received.append(pcm16)
-        if self._talking() and has_energy(pcm16):
+        if self.phrases:
+            if has_energy(pcm16):
+                self._voiced, self._quiet_ms = True, 0.0
+            else:
+                self._quiet_ms += len(pcm16) / 2 / self.format.rate * 1000
+                if self._voiced and self._quiet_ms >= 300:
+                    self._voiced = False
+                    self._final()
+        if (self._talking() or self._cut_chunks) and has_energy(pcm16):
+            first = not self._interrupted
             self._interrupted = True
+            self._cut_chunks += 1
+            if first and self.while_cut is not None:
+                asyncio.get_running_loop().call_later(
+                    0.1,
+                    self._events.put_nowait,
+                    AgentFrame(self.clock.now_ms() + 100, self.while_cut),
+                )
+            if first and self.yields and asyncio.get_running_loop().time() < self._playing_until:
+                # Its buffered audio stops playing: a "clear".
+                self._playing_until = 0.0
+                await self._events.put(AgentSpeechEnd(self.clock.now_ms()))
+            if self.hangup_on_cut is not None and self._cut_chunks == self.hangup_on_cut:
+                from opseval.errors import TransportClosed
+                from opseval.transport.audio import Hangup
+
+                if self.hangup:
+                    await self._events.put(Hangup(self.clock.now_ms(), "agent"))
+                await self._events.put(TransportClosed("the agent closed the line"))
+                self._closed = True
+
+    def _final(self) -> None:
+        said = tones.decode_all(b"".join(self._buffer), self.format.rate)
+        self._buffer.clear()
+        if said:
+            self._events.put_nowait(AgentTranscript(self.clock.now_ms(), said, of="caller"))
 
     async def _speak(self, text: str, previous: asyncio.Task[None] | None) -> None:
         if previous is not None and not previous.done():
             await previous
-        self._interrupted = False
-        pcm = tones.encode(text, self.format.rate)
-        step = self.format.rate * CHUNK_MS // 1000 * 2
+        self._turns += 1
+        number = self._turns
+        if self._was_cut and self.answer_delay:
+            await asyncio.sleep(self.answer_delay)
+        self._interrupted = self._was_cut = False
+        if self.replies:
+            text = self.replies[min(number, len(self.replies)) - 1]
+        if self.notify and number == 1:
+            await self._events.put(AgentFrame(self.clock.now_ms(), {"type": "response.created"}))
+        rate = self.format.rate
+        pcm = tones.noise(3.0, rate) if number in self.garble else tones.encode(text, rate)
+        step = rate * CHUNK_MS // 1000 * 2
         loop = asyncio.get_running_loop()
         began = loop.time()
         await self._events.put(AgentSpeechStart(self.clock.now_ms()))
+        if number in self.burst:
+            for i in range(0, len(pcm), step):
+                self.sent.append(pcm[i : i + step])
+                await self._events.put(AgentAudio(self.clock.now_ms(), pcm[i : i + step]))
+            quiet = bytes(2 * (rate * self.trailing_ms // 1000))
+            for i in range(0, len(quiet), step):
+                await self._events.put(AgentAudio(self.clock.now_ms(), quiet[i : i + step]))
+            self._playing_until = began + len(pcm) / 2 / rate
+            return
         for k, i in enumerate(range(0, len(pcm), step)):
             if self.yields and self._interrupted:
+                self._was_cut = True
                 break
             ahead = began + k * CHUNK_MS / 1000 - loop.time()
             if ahead > 0:
@@ -145,19 +236,28 @@ class DuplexAgent(AudioSession):
 
     async def end_of_caller_turn(self, *, timeout: float | None = None) -> None:
         said = tones.decode_all(b"".join(self._buffer), self.format.rate)
+        if self.phrases:
+            self._final()
         self._buffer.clear()
         self.heard.append(said)
-        if self.transcripts:
+        if self.transcripts and not self.phrases:
             await self._events.put(AgentTranscript(self.clock.now_ms(), said, of="caller"))
+        if self._interrupted and self.yields:
+            self._was_cut = True
+        self._cut_chunks = 0
         self._speaking = asyncio.create_task(self._speak(self.reply, self._speaking))
 
     async def next_event(self, timeout: float) -> VoiceEvent:
         try:
-            return await asyncio.wait_for(self._events.get(), timeout)
+            item = await asyncio.wait_for(self._events.get(), timeout)
         except TimeoutError as exc:
             from opseval.errors import TransportTimeout
 
             raise TransportTimeout("nothing") from exc
+        if isinstance(item, BaseException):
+            self._events.put_nowait(item)
+            raise item
+        return item
 
     async def close(self) -> None:
         if self._speaking is not None:
@@ -581,7 +681,8 @@ def test_agent_wer_and_confidence_rows() -> None:
     assert row.value is None and NOT_MEASURABLE in (row.reason or "")
     heard = CallLog(
         mode="duplex",
-        callers=[CallerTurn(1, "hello there", "hello where"), CallerTurn(2, "yes")],
+        callers=[CallerTurn(1, "hello there", 0, 500), CallerTurn(2, "yes", 1000, 1200)],
+        heard=[(600.0, "hello where")],
         agents=[
             AgentTurn(1, 0.9, "stt"),
             AgentTurn(2, None, "stt"),
@@ -768,8 +869,10 @@ async def test_the_dialect_judge_names_unsure_words_and_needs_speech() -> None:
     spoken = voice_record(None).model_copy(update={"frames": (frame,)})
     assert judge.not_measurable(spoken, ctx()) is None
     facts = "\n".join(judge.harness_facts(spoken))
-    assert "basha (0.20)" in facts and "ahlan (0.90)" not in facts
+    # The unsure words are the agent's (untrusted): in the fenced turn, never in the facts.
+    assert "basha" not in facts and "1 agent word(s)" in facts
     assert "agent turn 1: 0.80" in facts
+    assert '"unsure_words": ["basha"]' in judge.digest(spoken, ctx())
     sc = scenario(None)
     arabic = sc.model_copy(update={"persona": sc.persona.model_copy(update={"language": "ar"})})
     assert judge.rubric_hash(ctx(sc)) != judge.rubric_hash(ctx(arabic))

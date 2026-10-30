@@ -179,7 +179,13 @@ class VoiceSpan(Frozen):
     barge_in: bool = False
     """A caller turn the scenario planted to interrupt the agent (``voice.barge_in``)."""
     detail: str | None = None
-    """For a harness span: what ran (``tts``, ``stt``, ``canary``)."""
+    """For a harness span: what ran (``tts``, ``stt``, ``canary``, ``noise``)."""
+    holds_line: bool = True
+    """For a harness span: whether the agent's audio could not be heard (placed on the clock)
+    while it ran. ``False`` on the duplex driver, whose session stamps every agent event on
+    arrival while Opseval works (the ``duplex`` capability): such a span is beside the agent's
+    path, and a gap it overlaps is measured. Only a span that holds the line leaves a gap
+    out (``UNPLACEABLE``, review of #91)."""
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -239,6 +245,65 @@ class NoiseInfo(Frozen):
     seed: int
 
 
+class VoiceCallerTurn(Frozen):
+    """One caller turn, as the metrics read it (ADR-0055)."""
+
+    turn: int = Field(ge=1)
+    """The caller's own turn number in the call (planted interruptions included), as on its
+    speech span."""
+    text: str
+    """What the caller said, before any noise (redacted): the agent WER's reference."""
+    start_ms: float = Field(ge=0)
+    end_ms: float = Field(ge=0)
+    barge_in: bool = False
+
+
+class VoiceAgentTurn(Frozen):
+    """One spoken agent turn, as the metrics read it."""
+
+    turn: int = Field(ge=1)
+    heard: str | None = None
+    """How Opseval heard it (``stt``, ``second_stt``, ``unintelligible``, ``asr_failed``,
+    ``cut_short``); None when it was never transcribed."""
+    confidence: float | None = None
+    burst: bool = False
+    """Its audio arrived faster than it plays (turn-based bridge): pauses inside it are not on
+    the clock, so its dead air is degraded."""
+
+
+class VoiceAgentHeard(Frozen):
+    """One final transcript the agent sent of the caller (``AgentTranscript(of=caller)``),
+    stamped on arrival; attributed to a caller turn by time when the metrics are computed."""
+
+    at_ms: float = Field(ge=0)
+    text: str
+
+
+class VoiceBargeIn(Frozen):
+    """A planted interruption and what became of it."""
+
+    agent_turn: int = Field(ge=1)
+    after_ms: int = Field(ge=0)
+    fired_at_ms: float | None = None
+    ended_at_ms: float | None = None
+    """When the caller finished the interruption."""
+    reason: str | None = None
+
+
+class VoiceMetricInputs(Frozen):
+    """Everything besides the spans that the voice metrics are computed from (layout 8)."""
+
+    version: str
+    """The metric rules' version (``voice.metrics.METRICS_VERSION``) the stored rows were
+    computed with."""
+    call_start_ms: float = Field(default=0.0, ge=0)
+    callers: tuple[VoiceCallerTurn, ...] = ()
+    agents: tuple[VoiceAgentTurn, ...] = ()
+    agent_heard: tuple[VoiceAgentHeard, ...] | None = None
+    """None: the agent sent no transcript of the caller at all (its WER is not measurable)."""
+    barge_ins: tuple[VoiceBargeIn, ...] = ()
+
+
 class VoiceTimeline(Frozen):
     """A voice attempt's timeline on its monotonic clock (ADR-0053, ADR-0055)."""
 
@@ -255,6 +320,14 @@ class VoiceTimeline(Frozen):
     """The raw voice metrics, computed from ``spans`` when the attempt ended. None on older
     records: not measured, never 0."""
     noise: NoiseInfo | None = None
+    inputs: VoiceMetricInputs | None = None
+    """What the metrics were computed from besides ``spans`` (layout 8): caller texts and
+    times, the agent's own transcripts with their arrival, agent turns, planted barge-ins.
+    ``opseval rescore`` recomputes the metrics from them when the metric rules changed
+    (``inputs.version``). None on older records: their stored metrics are used as written."""
+    stt_min_confidence: float | None = Field(default=None, ge=0, le=1)
+    """``OPSEVAL_STT_MIN_CONFIDENCE`` when the call ran (layout 8): the bound under which a
+    word or turn Opseval heard counts as unsure (``judge.pronunciation_dialect_fit``)."""
 
     @field_validator("rate")
     @classmethod

@@ -13,6 +13,9 @@ The one rule, for metrics:
 - A row measured on partial evidence (a gap the clocks could not place was left out) marks the
   score ``degraded``, with the reason.
 - A record from before voice metrics (layouts 3 to 6) has none: ``NOT_MEASURABLE``.
+- A record that keeps the metric inputs (layout 8) but was computed with older rules
+  (``inputs.version``) is recomputed from them, so ``opseval rescore`` grades a stored call by
+  today's rules (``details.recomputed_from``); a layout-7 record keeps its stored rows.
 
 No scorer here reads what the agent said (``reads_text`` is ``False``): a voice attempt whose
 STT failed is still timed.
@@ -29,6 +32,7 @@ from opseval.models.record import RunRecord, VoiceMetric, VoiceMetricName
 from opseval.models.results import Axis, ScoreResult
 from opseval.models.scenario import ScorerSpec
 from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
+from opseval.voice.metrics import METRICS_VERSION, CallLog, compute
 
 NOT_MEASURABLE = "NOT_MEASURABLE"
 
@@ -56,16 +60,30 @@ class _MetricScorer(Scorer):
 
     metric: ClassVar[VoiceMetricName]
     reads_text = False
+    version = "2"  # 2: rows recomputed from the record's inputs under newer rules (#91 review)
 
     def _rows(self, record: RunRecord, spec: ScorerSpec) -> list[VoiceMetric] | ScoreResult:
         if record.voice is None:
             return self.infra(spec, f"{NOT_MEASURABLE}: not a voice attempt")
-        if record.voice.metrics is None:
+        metrics = record.voice.metrics
+        inputs = record.voice.inputs
+        if inputs is not None and inputs.version != METRICS_VERSION:
+            log = CallLog.from_timeline(record.voice)
+            if log is not None:
+                metrics = compute(log)
+        if metrics is None:
             return self.infra(
                 spec,
                 f"{NOT_MEASURABLE}: this record was written before voice metrics (ADR-0055)",
             )
-        return [m for m in record.voice.metrics if m.name == self.metric]
+        return [m for m in metrics if m.name == self.metric]
+
+    @staticmethod
+    def _recomputed(record: RunRecord) -> dict[str, Any]:
+        inputs = record.voice.inputs if record.voice is not None else None
+        if inputs is None or inputs.version == METRICS_VERSION:
+            return {}
+        return {"recomputed_from": inputs.version, "metrics_version": METRICS_VERSION}
 
     def _params(self, spec: ScorerSpec) -> Any:
         assert self.Params is not None  # nosec B101 - every scorer here has one
@@ -109,8 +127,13 @@ class _MetricScorer(Scorer):
                 spec,
                 f"{NOT_MEASURABLE}: {why or 'no row was recorded'}",
                 rows=[_shown(r) for r in found],
+                **self._recomputed(record),
             )
-        return self.check(params, found, [r.value for r in measured if r.value is not None], spec)
+        result = self.check(params, found, [r.value for r in measured if r.value is not None], spec)
+        extra = self._recomputed(record)
+        if not extra:
+            return result
+        return result.model_copy(update={"details": {**result.details, **extra}})
 
     def check(
         self, params: Any, rows: list[VoiceMetric], values: list[float], spec: ScorerSpec
@@ -149,7 +172,6 @@ class FirstAudioParams(NoParams):
 class TimeToFirstAudio(_MetricScorer):
     id = "voice.time_to_first_audio_ms"
     metric = "voice.time_to_first_audio_ms"
-    version = "1"
     Params = FirstAudioParams
     axis = Axis.OUTPUT
     description = (
@@ -176,7 +198,6 @@ class LatencyParams(_AtLeastOne):
 class TurnLatency(_MetricScorer):
     id = "voice.turn_latency_ms"
     metric = "voice.turn_latency_ms"
-    version = "1"
     Params = LatencyParams
     axis = Axis.OUTPUT
     description = (
@@ -206,7 +227,6 @@ class YieldParams(NoParams):
 class BargeInYield(_MetricScorer):
     id = "voice.barge_in_yield_ms"
     metric = "voice.barge_in_yield_ms"
-    version = "1"
     Params = YieldParams
     axis = Axis.FLOW
     description = (
@@ -241,7 +261,6 @@ class TalkOverParams(NoParams):
 class TalkOver(_MetricScorer):
     id = "voice.talk_over_ratio"
     metric = "voice.talk_over_ratio"
-    version = "1"
     Params = TalkOverParams
     axis = Axis.FLOW
     description = (
@@ -266,7 +285,6 @@ class DeadAirParams(_AtLeastOne):
 class DeadAir(_MetricScorer):
     id = "voice.dead_air_ms"
     metric = "voice.dead_air_ms"
-    version = "1"
     Params = DeadAirParams
     axis = Axis.FLOW
     description = (
@@ -300,7 +318,6 @@ class AgentWerParams(_AtLeastOne):
 class AgentAsrWer(_MetricScorer):
     id = "voice.agent_asr_wer"
     metric = "voice.agent_asr_wer"
-    version = "1"
     Params = AgentWerParams
     axis = Axis.OUTPUT
     description = (
@@ -340,7 +357,6 @@ class ConfidenceParams(_AtLeastOne):
 class AsrConfidence(_MetricScorer):
     id = "voice.asr_confidence"
     metric = "voice.asr_confidence"
-    version = "1"
     Params = ConfidenceParams
     axis = Axis.OUTPUT
     description = (

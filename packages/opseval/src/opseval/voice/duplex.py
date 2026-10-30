@@ -5,9 +5,10 @@ The turn-based bridge (:mod:`opseval.voice.bridge`) sends the caller's audio as 
 line takes it and only then listens. :class:`DuplexBridge` schedules the same call on a
 timeline instead:
 
-- **The line is read all the time.** A reader task pulls every agent event off the session
-  (stamped on arrival by the transport, on the attempt's monotonic clock) into an inbox, while
-  the caller speaks, while the simulator thinks and while the STT works.
+- **The line is stamped all the time.** A ``duplex`` session stamps every agent event on
+  arrival with its own reader, on the attempt's monotonic clock, while the caller speaks, the
+  simulator thinks and the STT works; the driver reads those stamps, so its own work never
+  moves the agent's times (and runs beside the agent's path: ``VoiceSpan.holds_line``).
 - **The caller speaks in real time.** Its audio is paced chunk by chunk on the attempt's
   clock, so its span is how long it really talked, and overlap is real overlap.
 - **The caller can interrupt.** ``voice.barge_in`` plants an interruption ``after_ms`` into an
@@ -15,7 +16,8 @@ timeline instead:
   time) is streamed over the agent while the agent is still read. The agent's turn ends when
   it stops talking (its own end-of-speech event, which after an interruption is taken as its
   play-back stopping, or silence); the interruption becomes a customer turn in the record
-  (:meth:`caller_interjections`), and the agent owes it an answer like any other turn.
+  (:meth:`caller_interjections`), right after everything the agent sent before it ended, and
+  the agent owes it an answer that begins after it, like any other turn.
 - **Audio plays out.** An agent turn is not over until the audio already sent has had time to
   play (a chunk cannot play before it arrives, nor over the one before it): a caller that
   started talking over buffered agent audio would be the harness barging in.
@@ -30,27 +32,38 @@ so the two schedulers cannot drift apart on anything but scheduling.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from typing import Any
 
 from opseval.audio import duration_ms
-from opseval.errors import ConfigError, TransportTimeout
+from opseval.errors import ConfigError, TransportError, TransportTimeout
 from opseval.models.profile import SutProfile, render_frame
 from opseval.models.voice import BargeIn, VoiceSpec
-from opseval.transport.audio import DUPLEX, AudioSession, VoiceEvent
+from opseval.redaction import redact_text
+from opseval.transport.audio import DUPLEX, AudioSession, Hangup, VoiceEvent
 from opseval.transport.base import FrameMedia
-from opseval.voice import noise as noises
 from opseval.voice.bridge import SpeechKit, VoiceBridge, _Turn
 from opseval.voice.metrics import PAUSE_FLOOR_MS, PlannedBargeIn
 from opseval.voice.recording import AudioRecorder
 
-_INBOX_WAIT = 3_600.0
-"""How long the reader waits for one event before simply waiting again: the attempt's own
-deadline, not this, bounds the call."""
+CUT_YIELD_MS = 1_000.0
+"""An interrupted agent turn counts as cut short only when the agent stopped within this long
+of the caller cutting in. One that kept talking was not cut: if no STT can read it, that is the
+agent's unintelligibility, decided by the canary like any turn (review of #91)."""
+
+CUT_FRAGMENT_MS = 2_000.0
+"""...and only when it said at most this much before it stopped: a longer stretch is enough
+for any STT, so an unreadable one is not excused as a fragment."""
+
+_MIN_WAIT = 0.001
+"""The shortest read: a zero timeout would never hand over an event already queued on some
+Python versions (``asyncio.wait_for`` cancels before the getter runs)."""
+
+_DRAIN_WAIT = 0.05
 
 
 class DuplexBridge(VoiceBridge):
     mode = "duplex"
+    holds_line = False
 
     def __init__(
         self,
@@ -69,8 +82,6 @@ class DuplexBridge(VoiceBridge):
                 "voice.barge_in"
             )
         super().__init__(audio, profile, kit, recorder, language=language, voice=voice)
-        self._inbox: asyncio.Queue[VoiceEvent | BaseException] = asyncio.Queue()
-        self._reader: asyncio.Task[None] | None = None
         self._plans: dict[int, tuple[BargeIn, PlannedBargeIn]] = {}
         for plan in self.voice.barge_in:
             planned = PlannedBargeIn(agent_turn=plan.agent_turn, after_ms=plan.after_ms)
@@ -80,51 +91,31 @@ class DuplexBridge(VoiceBridge):
         self._prepared = False
         self._firing: asyncio.Task[None] | None = None
         self._barged: _Turn | None = None
+        self._barged_at = 0.0
+        self._playout = 0.0
+        """Where the agent's audio has played out to, on the attempt's clock: a chunk cannot
+        play before it arrives, nor over the one before it. Re-anchored when the caller starts
+        a turn, so audio left unplayed then never delays the agent's next turn."""
         self._voiced_end = 0.0
         """Where the current agent turn's last voiced chunk ends, on the play-out clock."""
+        self._floor: float | None = None
+        """When the caller's latest interruption ended: a data message that arrived before it
+        cannot be the answer to it."""
         self._interjections: list[tuple[dict[str, Any], str]] = []
         self._interjection_media: list[tuple[dict[str, Any], FrameMedia]] = []
+        self._broken: BaseException | None = None
+        """An interruption that could not be finished for a reason other than the agent hanging
+        up: raised by the next read or send, after the turn it cut into was handed over."""
 
-    # --- the line, read all the time --------------------------------------------------------
-    def _listen(self) -> None:
-        if self._reader is None:
-            self._reader = asyncio.create_task(self._read())
-
-    async def _read(self) -> None:
-        while True:
-            try:
-                event = await self.audio.next_event(_INBOX_WAIT)
-            except TransportTimeout:
-                continue
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - handed to whoever reads next
-                self._inbox.put_nowait(exc)
-                return
-            self._inbox.put_nowait(event)
-
+    # --- the line --------------------------------------------------------------------------
     async def _next_event(self, wait: float) -> VoiceEvent:
-        self._listen()
         if self._held:
             return self._held.popleft()
-        try:
-            item = self._inbox.get_nowait()
-        except asyncio.QueueEmpty:
-            if wait <= 0:
-                raise TransportTimeout("nothing from the agent") from None
-            try:
-                item = await asyncio.wait_for(self._inbox.get(), timeout=wait)
-            except TimeoutError as exc:
-                raise TransportTimeout(f"nothing from the agent within {wait:.2f}s") from exc
-        if isinstance(item, BaseException):
-            self._inbox.put_nowait(item)  # a closed line stays closed for every later read
-            raise item
-        return item
+        return await self.audio.next_event(max(wait, _MIN_WAIT))
 
     # --- the caller, in real time --------------------------------------------------------------
     async def _stream(self, pcm: bytes) -> None:
         """Send the caller's audio paced on the attempt's clock, one chunk per ``chunk_ms``."""
-        self._listen()
         step = max(2, self.rate * self.cfg.chunk_ms // 1000 * 2)
         began = self.audio.clock.now_ms()
         for k, i in enumerate(range(0, len(pcm), step)):
@@ -142,25 +133,45 @@ class DuplexBridge(VoiceBridge):
         return duration_ms(pcm, self.rate)
 
     async def send(self, frame: dict[str, Any], *, timeout: float | None = None) -> None:
+        if self._broken is not None and not self._hung_up:
+            raise self._broken
         if not self._prepared:
             # Every planted interruption is spoken (and mixed) before the caller's first
             # word: no TTS ever runs while the agent is the one expected to speak.
             self._prepared = True
             for number, (plan, _) in sorted(self._plans.items()):
                 clean = await self._say(plan.say)
-                sent = clean
-                if self.voice.noise is not None:
-                    sent = noises.mix(clean, self.rate, self.voice.noise, turn=1_000 + number)
-                self._phrases[number] = (clean, sent)
+                self._phrases[number] = (clean, await self._mix(clean, 1_000 + number))
+        # A new caller turn: audio the agent left unplayed no longer delays its next turn.
+        self._playout = self.audio.clock.now_ms()
+        self._floor = None
         # The caller talks in real time here: that is the caller's time, not the agent's, so
         # the attempt deadline is paused for it like for the simulator (ADR-0042).
         await self._clock(super().send(frame, timeout=timeout))
 
+    async def receive(self, timeout: float) -> Any:
+        if not self._queue and self._broken is not None and not self._hung_up:
+            raise self._broken
+        return await super().receive(timeout)
+
     # --- the agent's turn ---------------------------------------------------------------------
     def _played(self, turn: _Turn, at_ms: float, pcm: bytes, voiced: bool) -> None:
-        super()._played(turn, at_ms, pcm, voiced)
-        if voiced and turn.stretches:
-            self._voiced_end = turn.stretches[-1][1]
+        """Lay a chunk on the play-out clock: it plays when it arrived, or when the chunk
+        before it has finished, whichever is later."""
+        turn.last_ms = at_ms
+        start = max(at_ms, self._playout)
+        end = start + duration_ms(pcm, self.rate)
+        self._playout = end
+        if not voiced:
+            return
+        if turn.stretches and start - turn.stretches[-1][1] < PAUSE_FLOOR_MS:
+            turn.stretches[-1][1] = end
+        else:
+            turn.stretches.append([start, end])
+        self._voiced_end = turn.stretches[-1][1]
+
+    def _burst(self, turn: _Turn) -> bool:
+        return False  # placed on the play-out clock: its pauses are where they play
 
     def _number(self, turn: _Turn) -> int:
         """The agent turn number this turn will be recorded under."""
@@ -169,14 +180,16 @@ class DuplexBridge(VoiceBridge):
     def _due(self, turn: _Turn) -> float | None:
         now = self.audio.clock.now_ms()
         waits = []
-        silence = 0.0 if turn.said_end else self.cfg.end_of_turn_silence_ms
+        silence = 0.0 if turn.done else self.cfg.end_of_turn_silence_ms
         if self._voiced_end + silence > now:
             waits.append((self._voiced_end + silence - now) / 1000)
         found = self._plans.get(self._number(turn))
-        if found is not None and self._firing is None and turn.voiced_ms is not None:
+        if found is not None and self._firing is None and turn.stretches:
             plan, planned = found
             if planned.fired_at_ms is None:
-                fire_at = turn.voiced_ms + plan.after_ms
+                # Against the play-out clock: into the agent's speech as the caller hears it,
+                # however fast its audio arrived.
+                fire_at = turn.stretches[0][0] + plan.after_ms
                 if now >= fire_at:
                     # Only over speech: into silence it would interrupt nothing (and the
                     # yield would be not measured), so it waits for the agent to speak on.
@@ -187,11 +200,11 @@ class DuplexBridge(VoiceBridge):
         return min(waits) if waits else None
 
     def _playing(self, turn: _Turn) -> bool:
-        silence = 0.0 if turn.said_end else self.cfg.end_of_turn_silence_ms
+        silence = 0.0 if turn.done else self.cfg.end_of_turn_silence_ms
         return self.audio.clock.now_ms() < self._voiced_end + silence
 
     def _speech_ended(self, turn: _Turn, at_ms: float) -> bool:
-        if turn is self._barged and turn.stretches:
+        if turn is self._barged and turn.stretches and at_ms >= self._barged_at:
             # After an interruption, the agent's end of speech is its play-back stopping (a
             # "clear" on most voice protocols): what it had sent and not yet played is gone.
             last = turn.stretches[-1]
@@ -200,21 +213,26 @@ class DuplexBridge(VoiceBridge):
             self._playout = min(self._playout, max(at_ms, last[1]))
         return self.audio.clock.now_ms() >= self._voiced_end
 
+    def _stale(self, at_ms: float) -> bool:
+        return self._floor is not None and at_ms < self._floor
+
     def _fire(self, turn: _Turn, plan: BargeIn, planned: PlannedBargeIn) -> None:
         self._barged = turn
-        planned.fired_at_ms = self.audio.clock.now_ms()
+        self._barged_at = planned.fired_at_ms = self.audio.clock.now_ms()
         self._firing = asyncio.create_task(self._interject(plan, planned))
 
     async def _interject(self, plan: BargeIn, planned: PlannedBargeIn) -> None:
         clean, sent = self._phrases[plan.agent_turn]
         start = self.audio.clock.now_ms()
-        planned.fired_at_ms = start
+        self._barged_at = planned.fired_at_ms = start
         self._event(start, "speech_start", "caller")
         await self._stream(sent)
         media, number = await self._caller_done(
             plan.say, clean, sent, start, timeout=None, barge_in=True
         )
         self._sent = None  # recorded through caller_interjections, not send()
+        assert self._caller_end_ms is not None  # nosec B101 - set by _caller_done
+        planned.ended_at_ms = self._floor = self._caller_end_ms
         # "(turn N)": the caller's file number, as the bridge tags an agent's barge-in.
         self._event(
             start,
@@ -226,15 +244,23 @@ class DuplexBridge(VoiceBridge):
         self._interjections.append((frame, plan.say))
         self._interjection_media.append((frame, media))
 
+    def _yielded(self, turn: _Turn) -> bool:
+        return (
+            turn is self._barged
+            and bool(turn.stretches)
+            and self._voiced_end - self._barged_at <= CUT_YIELD_MS
+        )
+
     def _cut(self, turn: _Turn) -> bool:
-        return turn is self._barged
+        spoke = sum(end - start for start, end in turn.stretches)
+        return self._yielded(turn) and spoke <= CUT_FRAGMENT_MS
 
     def _turn_closed(self, turn: _Turn, number: int) -> None:
         found = self._plans.get(number)
         if found is None or found[1].fired_at_ms is not None or turn.voiced_ms is None:
             return
         plan, planned = found
-        spoke = self._voiced_end - turn.voiced_ms
+        spoke = self._voiced_end - (turn.stretches[0][0] if turn.stretches else turn.voiced_ms)
         planned.reason = (
             f"agent turn {number} stopped speaking {spoke:.0f} ms into its speech, before the "
             f"planned interruption at {plan.after_ms} ms"
@@ -244,15 +270,69 @@ class DuplexBridge(VoiceBridge):
         try:
             # The agent's (cut) turn is transcribed while the caller is still finishing its
             # interruption, so the STT works in the caller's time, not the agent's.
-            return await super()._finish(turn)
+            result = await super()._finish(turn)
+        except BaseException:
+            # The turn's own failure (an SttError: Opseval's) is what ended it; the
+            # interruption's outcome is only noted, never put in its place.
+            await self._settle()
+            raise
+        await self._settle()
+        return result
+
+    async def _settle(self) -> None:
+        """Wait for the interruption to finish, and keep its failure from replacing the turn's
+        result (review of #91). The agent hanging up during it is the agent ending the call,
+        as for any hang-up; any other failure is noted and raised by the next read or send,
+        after the turn it cut into was handed over."""
+        firing, self._firing = self._firing, None
+        self._voiced_end = 0.0
+        if firing is None:
+            return
+        (outcome,) = await asyncio.gather(firing, return_exceptions=True)
+        if not isinstance(outcome, BaseException):
+            return
+        what, _ = redact_text(f"{type(outcome).__name__}: {outcome}")
+        self._event(
+            self.audio.clock.now_ms(),
+            "barge_in",
+            "caller",
+            f"the caller's interruption could not be finished ({what})",
+        )
+        if isinstance(outcome, TransportError) and await self._hangup_behind():
+            return
+        if isinstance(outcome, Exception):
+            self._broken = outcome
+
+    async def _hangup_behind(self) -> bool:
+        """Whether the agent hung up before the line failed: its events still queued on the
+        session are read (and kept for the next turn), and a hang-up among them ends the call
+        as the agent's (the customer's next turn is then unheard: TIMEOUT)."""
+        if self._hung_up:
+            return True
+        kept: list[VoiceEvent] = []
+        try:
+            while True:
+                event = await self.audio.next_event(_DRAIN_WAIT)
+                if isinstance(event, Hangup):
+                    self._event(event.at_ms, "hangup", event.by)
+                    self._hung_up = True
+                    note = self._notification("hangup", by=event.by)
+                    self._enders.append(note)
+                    self._queue.append(note)
+                    return True
+                kept.append(event)
+        except (TransportTimeout, TransportError):
+            return False
         finally:
-            firing, self._firing = self._firing, None
-            if firing is not None:
-                await firing
-            self._voiced_end = 0.0
+            self._held.extend(kept)
 
     # --- Session hooks -------------------------------------------------------------------------
     def caller_interjections(self) -> list[tuple[dict[str, Any], str]]:
+        """The interruption is released once everything the agent sent before it ended has
+        been handed over, so the record shows the cut turn first, and none of those frames
+        can be taken for the answer to it (review of #91)."""
+        if self._queue:
+            return []
         found, self._interjections = self._interjections, []
         return found
 
@@ -265,12 +345,25 @@ class DuplexBridge(VoiceBridge):
         return super().frame_media(direction, payload)
 
     async def close(self) -> None:
-        for task in (self._firing, self._reader):
+        task, self._firing = self._firing, None
+        try:
             if task is not None and not task.done():
+                current = asyncio.current_task()
+                before = current.cancelling() if current is not None else 0
                 task.cancel()
-                with contextlib.suppress(BaseException):
+                try:
                     await task
-        await super().close()
+                except asyncio.CancelledError:
+                    # Only the cancellation this close asked for is swallowed: one from
+                    # outside (the attempt being cancelled) goes on (review of #91).
+                    if current is not None and current.cancelling() > before:
+                        raise
+                except Exception:  # noqa: BLE001, S110 - closing: its failure is moot  # nosec B110
+                    pass
+            elif task is not None and not task.cancelled():
+                task.exception()  # retrieved, so never "exception was never retrieved"
+        finally:
+            await super().close()
 
 
-__all__ = ["DuplexBridge"]
+__all__ = ["CUT_FRAGMENT_MS", "CUT_YIELD_MS", "DuplexBridge"]

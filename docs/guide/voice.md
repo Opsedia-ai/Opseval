@@ -99,16 +99,21 @@ voice:
   # code_switching: [ar, en]      # an LLM caller mixes both in a sentence (needs caller_voice)
 ```
 
-On the duplex driver the line is read all the time, the caller's audio is paced in real time, and
-an agent turn is not over until its audio has played out. A planted barge-in is spoken (and
-mixed) before the call starts, streamed over the agent at `after_ms` into its speech, and becomes
-a customer turn in the record; the agent owes it an answer like any other turn. Duplex needs a
+On the duplex driver the agent's events are stamped as they arrive all the time, the caller's
+audio is paced in real time, and an agent turn is not over until its audio has played out, however
+fast it was sent. A planted barge-in is spoken (and mixed) before the call starts, streamed over
+the agent at `after_ms` into its speech as it plays, and becomes a customer turn in the record,
+right after the turn it cut into. The agent owes it an answer that begins after it: nothing it
+sent before the interruption ended counts, and silence after a barge-in is the agent's timeout.
+An interruption is not one of the scenario's turns: `silences[].caller_turn` counts the turns the
+scenario wrote (and checkpoint answers), and `max_turns` is never spent on it. Duplex needs a
 streaming transport: `audio-ws`. `audio-http` hears the caller only once a turn is over, so a
 duplex scenario on it is refused at launch (exit 3), as is a `voice:` block on a text transport.
 `silences`, `noise` and `caller_voice` also work on the turn-based bridge.
 
-The noise is generated, not recorded: no clips to license and no recorded speech in the package.
-It is mixed into what the agent hears only. The STT canary and every reference text use the
+The noise is generated, not recorded: no clips to license and no recorded speech in the package
+(whether to add recorded clips later is open: `ATTENTION.md` D18). It is mixed, in a worker thread
+so it never delays the agent's timestamps, into what the agent hears only. The STT canary and every reference text use the
 caller's clean audio and words, and the agent's own audio is never touched.
 
 ### Voice metrics, and gating on them
@@ -133,20 +138,24 @@ scorers:
 | Metric | What it measures | Never counted |
 |---|---|---|
 | `voice.time_to_first_audio_ms` | to the agent's first audio: from the call's start if it greets, else from the end of the caller's opening | Opseval's TTS and STT time |
-| `voice.turn_latency_ms` | the caller's last sample to the agent's first audio, per turn; p50/p95 computed from the turns (nearest rank) | a turn the agent began over the caller (not measured), a gap Opseval's TTS/STT overlapped (left out, degraded) |
+| `voice.turn_latency_ms` | the caller's last sample to the agent's first audio, per turn; p50/p95 computed from the turns (nearest rank) | a turn the agent began over the caller (not measured), a gap Opseval's TTS/STT held the line through (turn-based bridge only: left out, degraded) |
 | `voice.barge_in_yield_ms` | how long the agent kept talking after a planted interruption | not measured without one, or when the agent had already stopped |
 | `voice.talk_over_ratio` | the share of the agent's speech it began while the caller was talking | overlap the caller started (a barge-in is the caller's doing) |
-| `voice.dead_air_ms` | silence while the agent is the party expected to speak: its answer gap and its pauses (≥ 200 ms) in a turn | planted silences, a gap that ends in caller speech, harness time |
-| `voice.agent_asr_wer` | the agent's own transcript of the caller (a `transcript` event with `of: caller`) against what the caller said, before noise | not measured when the agent sends none |
+| `voice.dead_air_ms` | silence while the agent is the party expected to speak: its answer gap (also after a barge-in) and its pauses (≥ 200 ms) in a turn | planted silences, a gap that ends in caller speech, harness time that held the line |
+| `voice.agent_asr_wer` | the agent's own transcripts of the caller (`transcript` events with `of: caller`; every final of a turn, attributed by arrival time) against what the caller said, before noise | not measured when the agent sends none |
 | `voice.asr_confidence` | Opseval's STT confidence on the agent's turns (mean, lowest) | a turn without a confidence, or not heard |
 | `voice.transfer` | the agent handed the call over (or not), to the target, in time | — |
-| `judge.pronunciation_dialect_fit` | a quoted LLM judge: the agent's register and dialect for this caller; words the STT was unsure of are named so they are not graded as pronunciation | — |
+| `judge.pronunciation_dialect_fit` | a quoted LLM judge: the agent's register and dialect for this caller; words the STT was unsure of are named on their turn (inside the fenced conversation) so they are not graded as pronunciation; a mean or lowest confidence under `OPSEVAL_STT_MIN_CONFIDENCE` degrades it | — |
 
 Talk-over and barge-in yield need the duplex driver; on the turn-based bridge they are "not
-measured" and say so. A turn the caller cut short that no STT could read is left out of
-`voice.intelligible` (a fragment is not proof of bad audio). An STT outage during a barge-in turn
-is a harness error (not judged), never a failed yield. Records from before these metrics read as
-not measured.
+measured" and say so. A turn the caller cut short, where the agent stopped within a second and
+had said at most two, that no STT could read is left out of `voice.intelligible` (a fragment is
+not proof of bad audio) and of what the judges read; they are told the turn was cut short. An
+agent that talked on is not excused. An STT outage during a barge-in turn is a harness error (not
+judged), never a failed yield, and the agent hanging up during an interruption is the agent
+ending the call. With `code_switching`, the language and persona judges are told which languages
+the caller mixes. Records from before these metrics read as not measured; records since layout 8
+keep the metrics' inputs, so `opseval rescore` recomputes them when the rules change.
 
 ## How a spoken turn is judged
 

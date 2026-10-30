@@ -234,6 +234,9 @@ def _voice_degraded(score: ScoreResult, voice: Any) -> ScoreResult:
         reasons.append(voice.judge_degraded)
     if not reasons:
         return score
+    prior = score.details.get("degraded_by")
+    if isinstance(prior, str) and prior:
+        reasons.insert(0, prior)  # a scorer's own reason is kept, never overwritten
     details = {**score.details, "degraded_by": "; ".join(reasons)}
     return score.model_copy(update={"degraded": True, "details": details})
 
