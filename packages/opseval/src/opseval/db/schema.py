@@ -222,6 +222,12 @@ event.listen(Task.__table__, "after_create", _after_create)
 event.listen(Task.__table__, "before_drop", _before_drop)
 
 
+ITEM_NAME_MAX = 200
+"""``catalogue_items.name``: a push checks every item against it before writing."""
+ITEM_PATH_MAX = 500
+"""``catalogue_versions.path``."""
+
+
 class CatalogueItem(Base):
     """One scenario, suite, profile or dataset (ADR-0060), by the name it is known by in its
     task. A dataset's name is its path (``datasets/orders.csv``)."""
@@ -245,8 +251,8 @@ class CatalogueItem(Base):
     consistent."""
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    """A scenario's id, a suite's name, a profile's name."""
+    name: Mapped[str] = mapped_column(String(ITEM_NAME_MAX), nullable=False)
+    """A scenario's id, a suite's name, a profile's name, a dataset's path."""
     created_at: Mapped[datetime] = _created()
 
 
@@ -261,7 +267,7 @@ class CatalogueVersion(Base):
         ForeignKey("catalogue_items.id", ondelete="CASCADE"), nullable=False, index=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    path: Mapped[str] = mapped_column(String(500), nullable=False)
+    path: Mapped[str] = mapped_column(String(ITEM_PATH_MAX), nullable=False)
     """Where the file goes when the catalogue is written out (``scenarios/llm/x.yaml``), so
     a suite's ``include`` globs select the same files they did in the folder."""
     source: Mapped[str] = mapped_column(Text, nullable=False)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import ipaddress
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 from dotenv import dotenv_values
@@ -20,6 +20,11 @@ from opseval.errors import AllowedHostError
 
 REDACTED = "***redacted***"
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+MaxExpansion = Annotated[int, Field(ge=1, le=100_000)]
+MaxDatasetBytes = Annotated[int, Field(ge=1)]
+DEFAULT_MAX_EXPANSION = 100
+DEFAULT_MAX_DATASET_BYTES = 5 * 1024 * 1024
 
 
 class Settings(BaseSettings):
@@ -238,11 +243,11 @@ class Settings(BaseSettings):
     """How long to wait for a free tenant before skipping the scenario."""
     reports_dir: str = "reports"
     """Where run folders are written."""
-    max_expansion: int = Field(default=100, ge=1, le=100_000)
+    max_expansion: MaxExpansion = DEFAULT_MAX_EXPANSION
     """The most scenarios one scenario's ``dataset:`` and ``matrix:`` may expand to (ADR-0060).
     Over it is a load error naming the count, never a truncation: a truncated set would drop
     coverage silently."""
-    max_dataset_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
+    max_dataset_bytes: MaxDatasetBytes = DEFAULT_MAX_DATASET_BYTES
     """The largest dataset file (CSV or JSONL under ``datasets/``) a load reads or a
     ``catalogue push`` stores. Over it is an error naming the file."""
 
@@ -293,6 +298,22 @@ class Settings(BaseSettings):
 
     def allowlist(self) -> set[str]:
         return {h.strip().lower() for h in self.allowed_hosts.split(",") if h.strip()}
+
+
+class CatalogueLimits(BaseSettings):
+    """Only ``OPSEVAL_MAX_EXPANSION`` and ``OPSEVAL_MAX_DATASET_BYTES`` (ADR-0060), parsed
+    exactly as :class:`Settings` parses them. Loading a catalogue reads these two alone, so a
+    broken setting it does not use (a judge URL, a timeout) never stops a validation."""
+
+    model_config = SettingsConfigDict(env_prefix="OPSEVAL_", env_file=".env", extra="ignore")
+
+    max_expansion: MaxExpansion = DEFAULT_MAX_EXPANSION
+    max_dataset_bytes: MaxDatasetBytes = DEFAULT_MAX_DATASET_BYTES
+
+    def __init__(self, **values: Any) -> None:
+        if "_env_file" not in values and _dotenv_off():
+            values["_env_file"] = None
+        super().__init__(**values)
 
 
 def _dotenv_off() -> bool:

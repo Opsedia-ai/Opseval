@@ -550,6 +550,19 @@
       "additionalProperties": false,
       "description": "One value of the matrix's ``persona`` axis: fields that replace the scenario's own.",
       "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
         "role": {
           "anyOf": [
             {
@@ -660,8 +673,7 @@
           "type": "null"
         }
       ],
-      "default": null,
-      "title": "Dataset"
+      "default": null
     },
     "difficulty": {
       "$ref": "#/$defs/Difficulty",

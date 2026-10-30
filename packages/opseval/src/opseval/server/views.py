@@ -495,7 +495,11 @@ def load_scenarios(catalogue: Path | None, profile: SutProfile | None) -> s.Cata
     scenario_root = catalogue / "scenarios" if (catalogue / "scenarios").is_dir() else catalogue
     try:
         cat, _ = load_catalogue(
-            scenario_root, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+            scenario_root,
+            profile,
+            known_scorers=REGISTRY,
+            known_invariants=set(INVARIANTS),
+            root=catalogue,  # where datasets/ is, whatever the folder is called (ADR-0060)
         )
     except ConfigError:
         return s.CatalogueOut(scenarios=[], problems=[])
@@ -541,7 +545,11 @@ def list_suites(
             if not isinstance(raw, dict):
                 raise ConfigError("a suite file must be a mapping")
             cat, _ = load_catalogue(
-                f, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+                f,
+                profile,
+                known_scorers=REGISTRY,
+                known_invariants=set(INVARIANTS),
+                root=catalogue,
             )
             count = len(cat.scenarios)
         except (ConfigError, yaml.YAMLError, OSError) as exc:

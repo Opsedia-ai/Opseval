@@ -25,14 +25,19 @@ import yaml
 from pydantic import ValidationError
 
 from opseval.advice import Configured, expansion_warnings, scenario_warnings
-from opseval.catalogue import check_scenario_source, check_scenario_text, load_catalogue
+from opseval.catalogue import (
+    Catalogue,
+    check_scenario_source,
+    check_scenario_text,
+    load_catalogue,
+)
 from opseval.config import Settings
 from opseval.datasets import Limits
 from opseval.errors import ConfigError, OpsevalError
 from opseval.llm import UsageMeter, client_for_role
 from opseval.models.gate import GatePolicy, from_flat, to_yaml_block
 from opseval.models.profile import SutProfile
-from opseval.models.scenario import Scenario, Suite
+from opseval.models.scenario import DATASET_FOLDER, DATASET_SUFFIXES, Scenario, Suite
 from opseval.models.stop import StopPolicy
 from opseval.runner import RunOptions, launch, new_run_id
 from opseval.scoring import INVARIANTS, REGISTRY
@@ -94,16 +99,28 @@ def scenario_root(catalogue: Path) -> Path:
     return catalogue / "scenarios" if (catalogue / "scenarios").is_dir() else catalogue
 
 
-def _load(target: Path, profile: SutProfile) -> list[Scenario]:
+def _load_all(ctx: ServerContext, target: Path) -> Catalogue:
+    """``target`` (a folder or a suite of the server's catalogue) as the loader reads it, with
+    the server's catalogue as the folder datasets are under and the server's limits."""
+    root, profile = ctx.need_catalogue()
     cat, _ = load_catalogue(
-        target, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+        target,
+        profile,
+        known_scorers=REGISTRY,
+        known_invariants=set(INVARIANTS),
+        limits=Limits.from_settings(ctx.settings),
+        root=root,
     )
-    return cat.scenarios
+    return cat
+
+
+def _load(ctx: ServerContext, target: Path) -> list[Scenario]:
+    return _load_all(ctx, target).scenarios
 
 
 def _scenario(ctx: ServerContext, sid: str) -> Scenario:
-    root, profile = ctx.need_catalogue()
-    for sc in _load(scenario_root(root), profile):
+    root, _profile = ctx.need_catalogue()
+    for sc in _load(ctx, scenario_root(root)):
         if sc.id == sid:
             return sc
     raise ApiError(404, "UNKNOWN_SCENARIO", f"no valid scenario {sid!r}")
@@ -381,7 +398,7 @@ def save_suite(ctx: ServerContext, body: s.SuiteIn) -> s.SuiteOut:
     try:
         temp.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), "utf-8")
         try:
-            count = len(_load(temp, profile))
+            count = len(_load(ctx, temp))
         except ConfigError as exc:
             raise ApiError(422, "INVALID_SUITE", str(exc)) from exc
         if count == 0:
@@ -437,7 +454,13 @@ def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
     # top) is checked for clashes and its scenarios do not vanish behind a new folder.
     scenarios = scenario_root(root)
     folder = scenarios / body.family
-    existing_ids = {sc.id for sc in _load(scenarios, profile)} if scenarios.is_dir() else set()
+    # A dataset or matrix scenario's authored id is taken as well as each of its expanded
+    # ids (ADR-0060): importing `id: refund` beside it would replace it.
+    existing_ids = (
+        {i for sc in _load(ctx, scenarios) for i in (sc.id, sc.base_id)}
+        if scenarios.is_dir()
+        else set()
+    )
     problems: list[s.Problem] = []
     parsed: list[tuple[str, str, Scenario]] = []
     seen_names: set[str] = set()
@@ -491,7 +514,24 @@ def import_scenarios(ctx: ServerContext, body: s.ImportIn) -> s.ImportOut:
 
 # --- the scenario editor ---------------------------------------------------------------
 
-_INDEX: dict[Path, tuple[tuple[tuple[str, int, int], ...], dict[str, Path]]] = {}
+
+@dataclass(frozen=True)
+class _Index:
+    """Where each valid scenario id lives. A file's identity is its **authored** id; the ids a
+    dataset or matrix expands it to (``<id>@<hash>``, ADR-0060) open the same file."""
+
+    authored: dict[str, Path]
+    expanded: dict[str, Path]
+
+    def file_of(self, sid: str) -> Path | None:
+        return self.authored.get(sid) or self.expanded.get(sid)
+
+    def id_of(self, path: Path) -> str | None:
+        """The authored id of a file (never one of its expansions)."""
+        return next((k for k, v in self.authored.items() if v == path), None)
+
+
+_INDEX: dict[Path, tuple[tuple[tuple[str, int, int], ...], _Index]] = {}
 _LOCKS: dict[Path, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -500,33 +540,41 @@ def _etag(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def _id_index(ctx: ServerContext) -> dict[str, Path]:
-    """Valid scenario id -> file, parsed again only when a scenario file changed (the
-    editor validates as you type: reparsing the catalogue on every pause is too slow)."""
-    root, profile = ctx.need_catalogue()
+def _id_index(ctx: ServerContext) -> _Index:
+    """Valid scenario ids -> file, parsed again only when a scenario or dataset file changed
+    (the editor validates as you type: reparsing the catalogue on every pause is too slow).
+    A changed dataset changes the expanded ids, so ``datasets/`` is in the signature too."""
+    root, _profile = ctx.need_catalogue()
     folder = scenario_root(root)
     files = sorted(folder.rglob("*.y*ml")) if folder.is_dir() else []
+    data = root / DATASET_FOLDER
+    files += sorted(p for p in data.rglob("*") if p.suffix in DATASET_SUFFIXES)
     signature = tuple(
-        (str(f), f.stat().st_mtime_ns, f.stat().st_size)
+        (str(f), st.st_mtime_ns, st.st_size)
         for f in files
-        if not f.name.startswith(".")
+        if not f.name.startswith(".") and (st := _stat(f)) is not None
     )
     cached = _INDEX.get(folder)
     if cached is not None and cached[0] == signature:
         return cached[1]
-    cat, _ = load_catalogue(
-        folder,
-        profile,
-        known_scorers=REGISTRY,
-        known_invariants=set(INVARIANTS),
-        limits=Limits.from_settings(ctx.settings),
-    )
-    index = {sid: Path(src).resolve() for sid, src in cat.sources.items()}
-    # A dataset or matrix scenario is also found by its authored id (ADR-0060), so an id
-    # clash with it is caught and its file opens by that id.
-    index.update({base: Path(e.file).resolve() for base, e in cat.expansions.items()})
+    cat = _load_all(ctx, folder)
+    authored: dict[str, Path] = {}
+    expanded: dict[str, Path] = {}
+    for sid, src in cat.sources.items():
+        (expanded if "@" in sid else authored)[sid] = Path(src).resolve()
+    # A dataset or matrix scenario is found by its authored id too, so an id clash with it
+    # is caught and its file opens by that id.
+    authored.update({base: Path(e.file).resolve() for base, e in cat.expansions.items()})
+    index = _Index(authored, expanded)
     _INDEX[folder] = (signature, index)
     return index
+
+
+def _stat(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except OSError:  # a dangling link, or a file removed while listing: not a scenario
+        return None
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -554,20 +602,23 @@ def _source(root: Path, path: Path, data: bytes, sid: str | None) -> s.ScenarioS
 
 def scenario_source(ctx: ServerContext, rel: str) -> s.ScenarioSourceOut:
     root, path = _scenario_file(ctx, rel)
-    sid = next((k for k, v in _id_index(ctx).items() if v == path), None)
+    sid = _id_index(ctx).id_of(path)
     return _source(root, path, path.read_bytes(), sid)
 
 
 def scenario_source_by_id(ctx: ServerContext, sid: str) -> s.ScenarioSourceOut:
     root, _ = ctx.need_catalogue()
-    path = _id_index(ctx).get(sid)
+    index = _id_index(ctx)
+    path = index.file_of(sid)
     if path is None:
         raise ApiError(404, "UNKNOWN_SCENARIO", f"no valid scenario {sid!r}")
-    return _source(root, path, path.read_bytes(), sid)
+    # The file's own id: an expanded id opens its template, which is what the file says.
+    return _source(root, path, path.read_bytes(), index.id_of(path) or sid)
 
 
 def _suites_selecting(root: Path, sid: str) -> list[str]:
-    """Suites that pick this id by filter, which a rename would leave selecting nothing."""
+    """Suites that pick this authored id by filter, or one of its expansions
+    (``id=<sid>@<hash>``, ADR-0060), which a rename would leave selecting nothing."""
     out = []
     for f in sorted((root / "suites").glob("[!.]*.yaml")):
         try:
@@ -575,7 +626,10 @@ def _suites_selecting(root: Path, sid: str) -> list[str]:
         except (yaml.YAMLError, OSError):
             continue
         filters = raw.get("filters", []) if isinstance(raw, dict) else []
-        if isinstance(filters, list) and f"id={sid}" in filters:
+        if isinstance(filters, list) and any(
+            isinstance(flt, str) and (flt == f"id={sid}" or flt.startswith(f"id={sid}@"))
+            for flt in filters
+        ):
             out.append(f.stem)
     return out
 
@@ -615,12 +669,13 @@ def _check_scenario(
             out.append(_problem(where, "file", f"{family}/{body.file_name} already exists"))
     if sc is not None:
         index = _id_index(ctx)
-        other = index.get(sc.id)
+        # ``sc`` is the scenario as written: its authored id is the file's identity.
+        other = index.authored.get(sc.id)
         if other is not None and other != editing:
             out.append(
                 _problem(where, "id", f"id {sc.id!r} is already used by {_rel(root, other)}")
             )
-        before = next((k for k, v in index.items() if v == editing), None) if editing else None
+        before = index.id_of(editing) if editing else None
         if before is not None and before != sc.id:
             for suite in _suites_selecting(root, before):
                 out.append(

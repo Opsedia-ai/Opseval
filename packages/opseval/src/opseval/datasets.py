@@ -24,6 +24,7 @@ import hashlib
 import io
 import itertools
 import json
+import math
 import re
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -32,20 +33,22 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from opseval import config
 from opseval.errors import ConfigError
 from opseval.models.scenario import (
     DATASET_FOLDER,
     MATRIX_AXES,
     VARIABLE_NAME,
     Matrix,
+    PersonaVariant,
     Scenario,
 )
 
 Value = str | int | float | bool
 """A dataset cell. CSV cells are strings; JSONL keeps numbers and booleans."""
 
-DEFAULT_MAX_EXPANSION = 100
-DEFAULT_MAX_DATASET_BYTES = 5 * 1024 * 1024
+DEFAULT_MAX_EXPANSION = config.DEFAULT_MAX_EXPANSION
+DEFAULT_MAX_DATASET_BYTES = config.DEFAULT_MAX_DATASET_BYTES
 
 PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 NAME = re.compile(VARIABLE_NAME)
@@ -83,17 +86,23 @@ class Limits:
     """The largest dataset file read or pushed (``OPSEVAL_MAX_DATASET_BYTES``)."""
 
     @classmethod
-    def from_settings(cls, settings: Any = None) -> Limits:
-        """From ``config.Settings`` (read now when not given): the only reader of the
-        environment. A broken setting is a configuration error, never the default."""
-        if settings is None:
-            from opseval.config import Settings
-
-            try:
-                settings = Settings()
-            except ValueError as exc:
-                raise ConfigError(f"invalid settings: {exc}") from exc
+    def from_settings(cls, settings: Any) -> Limits:
+        """From a ``config.Settings`` already read (the server's, the runner's)."""
         return cls(settings.max_expansion, settings.max_dataset_bytes)
+
+    @classmethod
+    def from_env(cls) -> Limits:
+        """Read now, and only these two settings (``config.CatalogueLimits``): a broken
+        setting a load does not use is ignored, and a broken limit is a configuration error
+        naming it, never the default."""
+        try:
+            found = config.CatalogueLimits()
+        except ValidationError as exc:
+            named = "; ".join(
+                f"OPSEVAL_{'.'.join(map(str, e['loc'])).upper()}: {e['msg']}" for e in exc.errors()
+            )
+            raise ConfigError(f"invalid setting {named}") from exc
+        return cls(found.max_expansion, found.max_dataset_bytes)
 
 
 # --- placeholders ----------------------------------------------------------------------
@@ -314,12 +323,15 @@ def read_dataset(root: Path, rel: str, *, max_bytes: int) -> Dataset:
         raise DatasetError(f"{rel}: a link to a file outside {DATASET_FOLDER}/")
     if not path.is_file():
         raise DatasetError(f"{rel}: no such dataset under {base}")
-    size = path.stat().st_size
-    if size > max_bytes:
-        raise DatasetError(
-            f"{rel}: {size} bytes, over the {max_bytes}-byte limit (OPSEVAL_MAX_DATASET_BYTES)"
-        )
-    data = path.read_bytes()
+    try:
+        size = path.stat().st_size
+        if size > max_bytes:
+            raise DatasetError(
+                f"{rel}: {size} bytes, over the {max_bytes}-byte limit (OPSEVAL_MAX_DATASET_BYTES)"
+            )
+        data = path.read_bytes()
+    except OSError as exc:  # no permission, or removed meanwhile: named, never a traceback
+        raise DatasetError(f"{rel}: cannot be read ({exc.strerror})") from exc
     columns, rows = parse_dataset(rel, data)
     return Dataset(
         path=rel,
@@ -357,21 +369,65 @@ Problem = tuple[str, str]
 """``(field, message)``; the caller adds the file."""
 
 
-def _cells(matrix: Matrix | None) -> list[dict[str, Any]]:
-    """Every cell, in axis order, less ``exclude``. Persona is its index."""
+MATRIX_SCAN_LIMIT = 100_000
+"""The most cells a matrix with ``exclude`` may have before exclude. Excludes are applied one
+cell at a time; a bigger space would take long to scan for the few cells left in it."""
+
+
+def _axes(matrix: Matrix) -> list[tuple[str, list[Any]]]:
+    return [(a, getattr(matrix, a)) for a in MATRIX_AXES if getattr(matrix, a)]
+
+
+def _raw_cell_count(matrix: Matrix | None) -> int:
+    """Cells before ``exclude``: the product of the axes' lengths, computed, not built."""
+    return math.prod(len(values) for _a, values in _axes(matrix)) if matrix else 1
+
+
+def _excluded(cell: Mapping[str, Any], rule: Mapping[str, str | int], matrix: Matrix) -> bool:
+    for key, value in rule.items():
+        if key == "persona" and isinstance(value, str):
+            # A persona named in an exclude by its ``name`` (an int is its index).
+            if matrix.persona[cell["persona"]].name != value:
+                return False
+        elif cell.get(key) != value:
+            return False
+    return True
+
+
+def _iter_cells(matrix: Matrix | None) -> Iterator[dict[str, Any]]:
+    """Every cell, in axis order, less ``exclude``, one at a time (persona is its index), so
+    the cap can stop the count before a large matrix is ever built."""
     if matrix is None:
-        return [{}]
-    axes = [(a, getattr(matrix, a)) for a in MATRIX_AXES if getattr(matrix, a)]
-    out = []
+        yield {}
+        return
+    axes = _axes(matrix)
     for combo in itertools.product(*(range(len(values)) for _a, values in axes)):
         cell = {
             name: (i if name == "persona" else values[i])
             for (name, values), i in zip(axes, combo, strict=True)
         }
-        if any(all(cell.get(k) == v for k, v in rule.items()) for rule in matrix.exclude):
-            continue
-        out.append(cell)
-    return out
+        if not any(_excluded(cell, rule, matrix) for rule in matrix.exclude):
+            yield cell
+
+
+def persona_label(variant: PersonaVariant) -> str:
+    """How a persona variant is named in text (``{{persona}}``) and in provenance: its
+    ``name``, else the first 8 hex digits of SHA-256 over its content. Never its place in
+    the list, which would change when the personas are reordered."""
+    if variant.name is not None:
+        return variant.name
+    canonical = json.dumps(
+        variant.model_dump(exclude_none=True), sort_keys=True, ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
+
+
+def _shown(cell: Mapping[str, Any], matrix: Matrix | None) -> dict[str, str]:
+    """The cell as text and provenance show it: a persona by :func:`persona_label`."""
+    return {
+        k: persona_label(matrix.persona[v]) if k == "persona" and matrix else str(v)
+        for k, v in cell.items()
+    }
 
 
 def _case_hash(
@@ -459,7 +515,9 @@ def _apply_cell(data: dict[str, Any], cell: Mapping[str, Any], matrix: Matrix) -
     if "dialect" in cell:
         persona["dialect"] = cell["dialect"]
     if "persona" in cell:
-        persona.update(matrix.persona[cell["persona"]].model_dump(exclude_unset=True))
+        # The variant's name names the cell; its other fields replace the persona's own.
+        variant = matrix.persona[cell["persona"]]
+        persona.update(variant.model_dump(exclude_unset=True, exclude={"name"}))
 
 
 def _validation_problems(exc: ValidationError, label: str) -> list[Problem]:
@@ -497,7 +555,10 @@ def expand(
         except ValidationError as exc:
             return [], _validation_problems(exc, ""), None
 
-    lim = limits()
+    try:
+        lim = limits()
+    except ConfigError as exc:  # a broken OPSEVAL_MAX_* setting, named
+        return [], [("dataset" if spec is not None else "matrix", str(exc))], None
     dataset: Dataset | None = None
     if spec is not None:
         if root is None:
@@ -523,6 +584,17 @@ def expand(
     found, used = _template_problems(data, columns | axes, kinds)
     problems += found
     for index, variant in enumerate(matrix.persona if matrix else []):
+        for name, value in variant.model_dump(exclude_none=True).items():
+            if name == "role" or not isinstance(value, str) or not has_template_syntax(value):
+                continue
+            # A variant's name and timezone decide which scenario this is, like the
+            # scenario's own non-text fields: never a placeholder.
+            problems.append(
+                (
+                    f"matrix.persona.{index}.{name}",
+                    "this field cannot hold a placeholder (only text fields can)",
+                )
+            )
         if variant.role is not None:
             # A variant's role is authored text, like the scenario's own: it may use the row.
             more, names = _template_problems(
@@ -536,23 +608,38 @@ def expand(
     rows: list[tuple[int | None, dict[str, Value | None]]] = (
         list(dataset.rows) if dataset else [(None, {})]
     )
-    cells = _cells(matrix)
-    total = len(rows) * len(cells)
-    if not cells:
-        return [], [("matrix.exclude", "excludes every cell, so nothing would run")], None
-    if total > lim.max_expansion:
+    # The cap is checked before any cell is built: the product of the axes is computed,
+    # and excludes are applied while counting, stopping one past the cap (ADR-0060).
+    cap = lim.max_expansion
+    where = "dataset" if dataset else "matrix"
+    over = (
+        f"over the limit of {cap} per scenario (OPSEVAL_MAX_EXPANSION); split the dataset or "
+        "raise the limit"
+    )
+    raw = _raw_cell_count(matrix)
+    if matrix is None or not matrix.exclude:
+        total = len(rows) * raw
+        if total > cap:
+            shape = f"{len(rows)} row(s) x {raw} matrix cell(s)"
+            return [], [(where, f"expands to {total} scenarios ({shape}), {over}")], None
+    elif raw > MATRIX_SCAN_LIMIT:
         return (
             [],
             [
                 (
-                    "dataset" if dataset else "matrix",
-                    f"expands to {total} scenarios ({len(rows)} row(s) x {len(cells)} matrix "
-                    f"cell(s)), over the limit of {lim.max_expansion} per scenario "
-                    "(OPSEVAL_MAX_EXPANSION); split the dataset or raise the limit",
+                    "matrix",
+                    f"has {raw} cells before exclude, more than the {MATRIX_SCAN_LIMIT} a "
+                    "matrix with exclude may have; list fewer values",
                 )
             ],
             None,
         )
+    cells = list(itertools.islice(_iter_cells(matrix), cap // len(rows) + 1))
+    if not cells:
+        return [], [("matrix.exclude", "excludes every cell, so nothing would run")], None
+    if len(rows) * len(cells) > cap:
+        shape = f"{len(rows)} row(s) x at least {len(cells)} matrix cell(s)"
+        return [], [(where, f"expands to more than {cap} scenarios ({shape}), {over}")], None
 
     info = Expansion(
         base_id=template.id,
@@ -567,7 +654,8 @@ def expand(
     by_hash: dict[str, str] = {}
     by_content: dict[str, str] = {}
     for (row, values), cell in itertools.product(rows, cells):
-        label = case_label(row, dataset.path if dataset else None, cell)
+        shown = _shown(cell, matrix)
+        label = case_label(row, dataset.path if dataset else None, shown)
         blank = [
             k
             for k, v in values.items()
@@ -591,7 +679,7 @@ def expand(
             continue
         by_hash[digest] = label
         text_values = {k: as_text(v) for k, v in clean.items()}
-        text_values.update({k: str(v) for k, v in cell.items()})
+        text_values.update(shown)
         case = copy.deepcopy(data)
         if matrix is not None:
             _apply_cell(case, cell, matrix)
@@ -614,7 +702,7 @@ def expand(
             "dataset": dataset.path if dataset else None,
             "dataset_digest": dataset.digest if dataset else None,
             "row": row,
-            "matrix": dict(cell),
+            "matrix": shown,
         }
         try:
             out.append(Scenario.model_validate(case))

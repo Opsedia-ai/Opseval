@@ -18,7 +18,13 @@ from opseval.errors import ConfigError
 from opseval.langpacks import UnknownLanguage, lookup
 from opseval.models.gate import GatePolicy
 from opseval.models.profile import SutProfile
-from opseval.models.scenario import RESERVED_STOP_AT, PolicyAction, Scenario, Suite
+from opseval.models.scenario import (
+    DATASET_FOLDER,
+    RESERVED_STOP_AT,
+    PolicyAction,
+    Scenario,
+    Suite,
+)
 from opseval.models.stop import StopPolicy
 
 
@@ -250,14 +256,30 @@ def _validate_authored(
         return None, _problems_from(path, exc)
 
 
-def catalogue_root(path: Path, *, fallback: Path) -> Path:
-    """The folder a scenario file's ``datasets/`` path is relative to (ADR-0060): the parent
-    of the nearest ``scenarios`` folder above it, else ``fallback`` (the loaded folder, or a
-    single file's own folder)."""
-    for parent in path.parents:
-        if parent.name == "scenarios":
-            return parent.parent
-    return fallback
+def suite_root(path: Path) -> Path:
+    """The catalogue folder of a suite file: the parent of its ``suites/`` folder, else its
+    own folder. Resolved first, so ``full.yaml`` run from inside ``suites/`` is the same."""
+    path = path.resolve()
+    return path.parent.parent if path.parent.name == "suites" else path.parent
+
+
+def dataset_root(target: Path) -> Path:
+    """The catalogue folder whose ``datasets/`` a load reads (ADR-0060), decided once for the
+    whole load from what was loaded, never per scenario file and never by a folder's name
+    alone: the nearest folder, starting at the loaded folder (or a single file's own folder),
+    that holds ``profile.yaml`` or ``datasets/``. Without one, the loaded folder (the parent
+    of a loaded ``scenarios`` folder, the ``opseval init`` layout) or a file's own folder.
+
+    A suite's is its catalogue folder (:func:`suite_root`). The server, the editor and import
+    pass their catalogue folder instead, so they and the loader agree."""
+    path = target.resolve()
+    start = path if path.is_dir() else path.parent
+    for folder in (start, *start.parents):
+        if (folder / "profile.yaml").is_file() or (folder / DATASET_FOLDER).is_dir():
+            return folder
+    if path.is_dir() and path.name == "scenarios":
+        return path.parent
+    return start
 
 
 @dataclass
@@ -287,7 +309,7 @@ def check_expanded(
 
     def lim() -> Limits:
         if not cached:
-            cached.append(limits or Limits.from_settings())
+            cached.append(limits or Limits.from_env())
         return cached[0]
 
     cases, problems, info = expand(template, root=root, limits=lim)
@@ -397,8 +419,7 @@ def _match_filter(scenario: Scenario, flt: str) -> bool:
 def suite_files(path: Path, suite: Suite) -> list[Path]:
     """The scenario files a suite file selects, before its filters: what ``include`` matches
     under the catalogue root, less ``exclude``, never outside the root or in ``suites/``."""
-    root = path.parent.parent if path.parent.name == "suites" else path.parent
-    root = root.resolve()
+    root = suite_root(path)
     chosen: set[Path] = set()
     for pattern in suite.include:
         for f in root.glob(pattern):
@@ -419,11 +440,13 @@ def load_catalogue(
     known_invariants: set[str],
     filters: list[str] | None = None,
     limits: Limits | None = None,
+    root: Path | None = None,
 ) -> tuple[Catalogue, str]:
     """Load a scenario file, a directory, or a suite file. Returns (catalogue, suite name).
 
     A scenario with ``dataset:`` or ``matrix:`` becomes its expansions (ADR-0060); ``limits``
-    (default: from settings, read only if something expands) caps them."""
+    (default: from settings, read only if something expands) caps them. ``root`` is the
+    catalogue folder their ``datasets/`` paths are under (default: :func:`dataset_root`)."""
     path = Path(target)
     if not path.exists():
         raise ConfigError(f"{path}: no such file or directory")
@@ -450,13 +473,13 @@ def load_catalogue(
         suite_stop = suite.stop
         all_filters += suite.filters
         files = suite_files(path, suite)
-        fallback = path.parent.parent if path.parent.name == "suites" else path.parent
+        data_root = root or suite_root(path)
     elif path.is_dir():
         files = sorted(p for p in path.rglob("*.yaml") if "suites" not in p.parts)
-        fallback = path.parent if path.name == "scenarios" else path
+        data_root = root or dataset_root(path)
     else:
         files = [path]
-        fallback = path.parent
+        data_root = root or dataset_root(path)
 
     cat = Catalogue(gate=suite_gate, stop=suite_stop)
     seen: dict[str, str] = {}
@@ -479,7 +502,7 @@ def load_catalogue(
             profile,
             known,
             known_invariants,
-            root=catalogue_root(f, fallback=fallback),
+            root=data_root,
             limits=limits,
         )
         cat.problems.extend(found.problems)

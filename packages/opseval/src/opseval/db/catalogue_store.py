@@ -40,6 +40,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from opseval.catalogue import KnownScorers, load_catalogue, load_profile, suite_files
 from opseval.datasets import DatasetError, Limits, parse_dataset
 from opseval.db.schema import (
+    ITEM_NAME_MAX,
+    ITEM_PATH_MAX,
     MODALITIES,
     TASK_KINDS,
     CatalogueItem,
@@ -174,20 +176,56 @@ def _files(root: Path, *, max_dataset_bytes: int) -> list[tuple[str, Path]]:
         if kind == "dataset":
             if not path.resolve().is_relative_to(data.resolve()):
                 raise ConfigError(f"{path}: a link to a file outside {DATASET_FOLDER}/")
-            if path.stat().st_size > max_dataset_bytes:
+            if _size(path) > max_dataset_bytes:
                 raise ConfigError(
                     f"{path}: larger than {max_dataset_bytes} bytes (OPSEVAL_MAX_DATASET_BYTES)"
                 )
-        elif path.stat().st_size > MAX_FILE_BYTES:
+        elif _size(path) > MAX_FILE_BYTES:
             raise ConfigError(f"{path}: larger than {MAX_FILE_BYTES // 1024} KB")
     return found
+
+
+def _unreadable(path: Path, exc: OSError) -> ConfigError:
+    why = "a link to nothing" if path.is_symlink() and not path.exists() else exc.strerror
+    return ConfigError(f"{path}: cannot be read ({why}); fix or remove it, nothing was pushed")
+
+
+def _size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError as exc:  # a dangling link, or no permission: named, never a traceback
+        raise _unreadable(path, exc) from exc
+
+
+def _read_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise _unreadable(path, exc) from exc
+
+
+def _check_lengths(files: list[CatalogueFile]) -> None:
+    """Every item's name and path fit their columns, checked for every kind before the
+    transaction: a long dataset path or suite name is refused naming the file, never a
+    database error halfway through a push."""
+    for f in files:
+        if len(f.name) > ITEM_NAME_MAX:
+            raise ConfigError(
+                f"{f.path}: {f.kind} name is {len(f.name)} characters, over the {ITEM_NAME_MAX} "
+                "the catalogue stores; shorten it"
+            )
+        if len(f.path) > ITEM_PATH_MAX:
+            raise ConfigError(
+                f"{f.path[:80]}…: path is {len(f.path)} characters, over the {ITEM_PATH_MAX} the "
+                "catalogue stores; shorten it"
+            )
 
 
 def _dataset_file(root: Path, path: Path) -> CatalogueFile:
     """A dataset as it is stored: its text exactly (line endings too, so a pulled file has the
     digest the pushed one had), named by its path, which is how scenarios name it."""
     rel = path.relative_to(root).as_posix()
-    raw = path.read_bytes()
+    raw = _read_bytes(path)
     try:
         columns, rows = parse_dataset(rel, raw)
     except DatasetError as exc:
@@ -211,7 +249,7 @@ def read_folder(
     root = root.resolve()
     if not root.is_dir():
         raise ConfigError(f"{root}: not a folder")
-    limits = limits or Limits.from_settings()
+    limits = limits or Limits.from_env()
     found = _files(root, max_dataset_bytes=limits.max_dataset_bytes)
     profile = load_profile(root / "profile.yaml")
     # The registry stays a mapping, so each scorer's params are checked too (ADR-0043).
@@ -273,7 +311,10 @@ def read_folder(
         if kind == "dataset":
             out.append(_dataset_file(root, path))
             continue
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:  # pragma: no cover - the loader read it a moment ago
+            raise _unreadable(path, exc) from exc
         _refuse_aliases(text, rel)
         data = yaml.safe_load(text)
         if not isinstance(data, dict):  # pragma: no cover - the loader refused it already
@@ -293,6 +334,7 @@ def read_folder(
         # JSON can hold every value the loader accepted; dates become ISO strings.
         content = json.loads(json.dumps(data, default=str))
         out.append(CatalogueFile(kind=kind, name=name, path=rel, source=text, content=content))
+    _check_lengths(out)
     return out
 
 

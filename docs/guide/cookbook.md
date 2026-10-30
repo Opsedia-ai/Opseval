@@ -100,10 +100,10 @@ dataset: datasets/orders.csv
 matrix:
   language: [ar-EG, ar-x-gulf, ar]        # Egyptian, Gulf, MSA
   persona:
-    - {role: an impatient customer, typing_noise: 0.2}
-    - {role: a first-time customer}
+    - {name: impatient, role: an impatient customer, typing_noise: 0.2}
+    - {name: first-time, role: a first-time customer}
   exclude:
-    - {language: ar, persona: 0}          # persona by its index
+    - {language: ar, persona: impatient}  # persona by its name (or its index from 0)
 persona: {role: customer, language: ar}
 conversation:
   flow: Ask for a refund on order {{order_id}}. Answer questions briefly.
@@ -121,13 +121,15 @@ What to know:
   message, flow, scripted turns, injections, checkpoint feedback, expected outcome, policy,
   string scorer params), never in ids, tags, tool names or numbers. A value is inserted as it
   is: `a: b`, a newline or `{{x}}` in a cell stays text. `{{language}}`, `{{dialect}}` and
-  `{{persona}}` (the variant's index) name the matrix cell.
+  `{{persona}}` name the matrix cell; `{{persona}}` is the variant's `name`, or, without
+  one, an 8-hex hash of what the variant says (never its place in the list).
 - **Mistakes fail at load**, with the file, the row and the field: a placeholder with no column,
   a blank cell (unless its column is in `allow_blank`), two identical rows, a nested JSONL value,
   a path outside `datasets/`, an unknown language for an LLM customer, or `{{…}}` in a scenario
   with no `dataset:` or `matrix:`.
 - **The cap**: one scenario may expand to `OPSEVAL_MAX_EXPANSION` scenarios (100). Over it is a
-  load error, never a cut-down set. Dataset files are limited to `OPSEVAL_MAX_DATASET_BYTES`
+  load error, never a cut-down set; it is counted before anything is built, so a huge matrix
+  fails at once. A matrix with `exclude` may have at most 100,000 cells before the exclude. Dataset files are limited to `OPSEVAL_MAX_DATASET_BYTES`
   (5 MB).
 - `opseval validate` prints each scenario's expansion and its attempts (count × repeats), and
   warns about a column no placeholder reads. `--filter id=refund-by-order-type` selects every

@@ -22,25 +22,50 @@
   - **Matrix axes.** `language` sets `persona.language` and drops the template's `dialect`
     (it belonged to the template's language) unless a `dialect` axis is present; `persona`
     variants override `role`, `typing_noise` and `timezone`, and a variant's role may use
-    placeholders. `{{persona}}` is the variant's index. A column named like a declared axis is
+    placeholders. A column named like a declared axis is
     refused. An `exclude` naming an axis the matrix lacks, or a value it does not list, is a
     load error, and excluding every cell is one too.
+  - **Persona variants** may carry a `name` (`[A-Za-z0-9][A-Za-z0-9_.-]{0,39}`, unique).
+    `{{persona}}` and `expanded_from.matrix.persona` are that name, else the first 8 hex
+    digits of SHA-256 over the variant's content, never its index (reordering would change
+    the text). `exclude` names a variant by index or name. A variant's `role` takes
+    placeholders; its `name` and `timezone`, like any non-text field, may not.
   - **Languages** are checked per expansion by the existing reference check, so the ADR-0059
     rule holds unchanged: an unknown language is a load error for an LLM persona and a warning
     for scripted turns.
   - **Fields that cannot hold a placeholder** (tags, tool names, checkpoint names, …) refuse
     `{{` in any scenario; `\{{` is resolved in plain scenarios too.
-  - **The catalogue root** for `datasets/` is the parent of the nearest `scenarios` folder
-    above the file, else the loaded folder (or a suite's root, or a single file's folder). The
-    editor and import pass the server's catalogue root.
+  - **The catalogue root** for `datasets/` is decided once per load, from what was loaded,
+    never per file or by a folder's name alone (`catalogue.dataset_root`): a suite's catalogue
+    folder; for a folder or a single file (paths resolved first, so `validate .` inside
+    `scenarios/` works), the nearest folder from there up holding `profile.yaml` or
+    `datasets/`; without one, the loaded folder (a loaded `scenarios` folder's parent) or a
+    file's own folder. The server, its editor and import pass the server's catalogue folder
+    (`load_catalogue(root=…)`), so a flat catalogue, or a family folder named `scenarios`,
+    reads the same rows everywhere.
+  - **The cap is counted before anything is built**: the product of the axes is computed;
+    with no `exclude` it is exact and refused at once. With `exclude`, cells are generated
+    one at a time and counting stops one past the cap; a matrix over 100,000 cells before
+    exclude (`datasets.MATRIX_SCAN_LIMIT`) is refused rather than scanned.
+  - **Identity in the editor**: a template's file is known by its **authored** id (the
+    server's index keeps authored and expanded ids apart). A rename is checked against
+    suites selecting `id=<base>` and `id=<base>@<hash>`; an unchanged template is never a
+    rename. Import refuses an authored id a dataset scenario holds. The index's cache
+    signature includes `datasets/**`, so a new row is seen.
   - **Selection.** An authored id selects every expansion in `--filter id=`, a suite's
     `filters` and the console's run-these-scenarios list (`RunOptions.only_ids`). Duplicate ids
     are checked on the authored id. Tags and criticality are inherited.
   - **Snapshots** are named by id with `@` kept (`storage.SAFE_ID`), so an expansion never
     shares a file with an authored `a_1a2b3c4d`. No layout bump: an older reader refuses a
     snapshot with `expanded_from` (`extra="forbid"`) rather than misreading it.
-  - **Settings** are read only when a scenario expands (`datasets.Limits`), so a catalogue
-    with no dataset never reads them.
+  - **Settings** are read only when a scenario expands, and only the two limits
+    (`config.CatalogueLimits`, `Limits.from_env`), so a broken unrelated setting never stops a
+    load or `validate`; a broken limit is a load problem naming `OPSEVAL_MAX_…`.
+  - **Field paths**: a reserved `@` is reported at `id`; `dataset:` is decided by shape (a
+    string is a path, a mapping a spec), so a bad path is one problem at `dataset.path`.
+  - **Audio folders** use `storage.SAFE_ID` like snapshots and records (`@` kept).
+  - **Push** names a dangling or unreadable file (no traceback), and refuses an item name over
+    200 characters (`db.schema.ITEM_NAME_MAX`) or a path over 500 before the transaction.
   - **Migration `0004`** widens `ck_catalogue_items_kind`. `0001` created it as
     `ck_catalogue_items_ck_catalogue_items_kind` (the naming convention applied twice); `0004`
     drops either name and creates the models' `ck_catalogue_items_kind`, and its downgrade

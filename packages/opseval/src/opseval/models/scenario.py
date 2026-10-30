@@ -11,7 +11,15 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from opseval.models.gate import GatePolicy
 from opseval.models.stop import StopPolicy
@@ -229,13 +237,17 @@ class DatasetSpec(Strict):
 class PersonaVariant(Strict):
     """One value of the matrix's ``persona`` axis: fields that replace the scenario's own."""
 
+    name: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")] | None = None
+    """How ``{{persona}}``, provenance and ``exclude`` name this variant. Without it, the
+    first 8 hex digits of SHA-256 over the variant's content: never its index, which would
+    change when the personas are reordered."""
     role: str | None = Field(default=None, min_length=1)
     typing_noise: Annotated[float, Field(ge=0.0, le=1.0)] | None = None
     timezone: str | None = None
 
     @model_validator(mode="after")
     def _something(self) -> PersonaVariant:
-        if not self.model_fields_set:
+        if not self.model_fields_set - {"name"}:
             raise ValueError("a persona variant needs at least one of role, typing_noise, timezone")
         return self
 
@@ -249,7 +261,8 @@ class Matrix(Strict):
     """Dialect names, for the older ``language`` + ``dialect`` spelling."""
     persona: list[PersonaVariant] = Field(default_factory=list)
     exclude: list[dict[str, str | int]] = Field(default_factory=list)
-    """Cells left out, each named by some of its axes (``persona`` by its index from 0)."""
+    """Cells left out, each named by some of its axes (``persona`` by its index from 0, or
+    by its ``name``)."""
 
     @model_validator(mode="after")
     def _check(self) -> Matrix:
@@ -260,6 +273,9 @@ class Matrix(Strict):
             seen = [v.model_dump(exclude_none=True) if name == "persona" else v for v in values]
             if any(seen.count(v) > 1 for v in seen):
                 raise ValueError(f"{name}: a value is listed twice")
+        names = [p.name for p in self.persona if p.name is not None]
+        if len(set(names)) != len(names):
+            raise ValueError("persona: a name is given to two variants")
         for index, rule in enumerate(self.exclude):
             if not rule:
                 raise ValueError(f"exclude.{index}: empty; name the axes of the cells to leave out")
@@ -270,9 +286,14 @@ class Matrix(Strict):
                         f"(axes: {', '.join(axes)})"
                     )
                 if key == "persona":
+                    if isinstance(value, str):
+                        if value not in names:
+                            raise ValueError(f"exclude.{index}.persona: no persona named {value!r}")
+                        continue
                     if isinstance(value, bool) or not isinstance(value, int):
                         raise ValueError(
-                            f"exclude.{index}.persona: name a persona by its index (0, 1, …)"
+                            f"exclude.{index}.persona: name a persona by its index (0, 1, …) "
+                            "or its name"
                         )
                     if not 0 <= value < len(self.persona):
                         raise ValueError(
@@ -298,7 +319,21 @@ class ExpandedFrom(Strict):
     row: Annotated[int, Field(ge=1)] | None = None
     """The row's line in the dataset file (the CSV header is row 1)."""
     matrix: dict[str, str | int] = Field(default_factory=dict)
-    """The matrix cell: ``language``/``dialect`` values, ``persona`` by index."""
+    """The matrix cell: ``language``/``dialect`` values, ``persona`` by its name (or content
+    hash when it has none)."""
+
+
+def _id_error(value: str, message: str) -> None:
+    """Raise a problem at ``id`` from a model check (it needs ``expanded_from``, which is
+    validated after ``id``), so the editor marks the field rather than the whole file."""
+    raise ValidationError.from_exception_data(
+        "Scenario",
+        [
+            InitErrorDetails(
+                type=PydanticCustomError("value_error", message), loc=("id",), input=value
+            )
+        ],
+    )
 
 
 class Scenario(Strict):
@@ -316,7 +351,7 @@ class Scenario(Strict):
     expectations: Expectations = Field(default_factory=Expectations)
     scorers: list[ScorerSpec] | Literal["default"] = "default"
     execution: ExecutionSpec = Field(default_factory=ExecutionSpec)
-    dataset: DatasetSpec | str | None = None
+    dataset: DatasetSpec | None = None
     """A CSV or JSONL file under ``datasets/``: one scenario per row, ``{{column}}`` in text
     replaced by the row's value (ADR-0060). A plain string is the path."""
     matrix: Matrix | None = None
@@ -326,28 +361,30 @@ class Scenario(Strict):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    @field_validator("dataset")
+    @field_validator("dataset", mode="before", json_schema_input_type=DatasetSpec | str | None)
     @classmethod
-    def _dataset(cls, value: DatasetSpec | str | None) -> DatasetSpec | None:
-        return DatasetSpec(path=value) if isinstance(value, str) else value
+    def _dataset(cls, value: object) -> object:
+        # Decided by the input's shape, so a mistake is one problem at its field
+        # (``dataset.path``), never a union error from both forms.
+        return {"path": value} if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _expansion(self) -> Scenario:
         if self.expanded_from is None:
             if "@" in self.id:
-                raise ValueError(
-                    "id: '@' is reserved for the scenarios a dataset or matrix expands to"
+                _id_error(
+                    self.id, "'@' is reserved for the scenarios a dataset or matrix expands to"
                 )
             return self
         if self.dataset is not None or self.matrix is not None:
             raise ValueError("an expanded scenario has no dataset or matrix of its own")
         if self.id != f"{self.expanded_from.base_id}@{self.expanded_from.hash}":
-            raise ValueError("id: an expanded scenario's id is <base_id>@<hash>")
+            _id_error(self.id, "an expanded scenario's id is <base_id>@<hash>")
         return self
 
     @property
     def dataset_spec(self) -> DatasetSpec | None:
-        return self.dataset if isinstance(self.dataset, DatasetSpec) else None
+        return self.dataset
 
     @property
     def is_template(self) -> bool:

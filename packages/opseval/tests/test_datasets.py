@@ -10,7 +10,9 @@ stable under reordering, and a saved run is graded from exactly what ran.
 from __future__ import annotations
 
 import json
+import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,7 @@ from opseval.datasets import (
     Limits,
     TemplateError,
     parse_dataset,
+    persona_label,
     placeholders,
     render,
 )
@@ -41,7 +44,7 @@ from opseval.demo import catalogue_dir
 from opseval.demo.refund_agent import run_agent
 from opseval.models.profile import SutProfile
 from opseval.models.results import VerdictStatus
-from opseval.models.scenario import Matrix, Scenario
+from opseval.models.scenario import Matrix, PersonaVariant, Scenario
 from opseval.rescore import rescore_run
 from opseval.runner import RunOptions, launch
 from opseval.scoring import INVARIANTS, REGISTRY
@@ -265,7 +268,9 @@ class TestModel:
             ({"language": ["en"], "exclude": [{"dialect": "x"}]}, "not an axis"),
             ({"language": ["en"], "exclude": [{"language": "fr"}]}, "not one of"),
             ({"persona": [{"role": "a"}], "exclude": [{"persona": 1}]}, "no persona 1"),
-            ({"persona": [{"role": "a"}], "exclude": [{"persona": "a"}]}, "by its index"),
+            ({"persona": [{"role": "a"}], "exclude": [{"persona": "a"}]}, "no persona named"),
+            ({"persona": [{"name": "x", "role": "a"}, {"name": "x", "role": "b"}]}, "two variants"),
+            ({"persona": [{"name": "only"}]}, "at least one of"),
             ({"persona": [{}]}, "at least one of"),
             ({"language": ["en"], "exclude": [{}]}, "empty"),
         ],
@@ -463,7 +468,7 @@ class TestExpansion:
     def test_the_cap_comes_from_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPSEVAL_MAX_EXPANSION", "7")
         monkeypatch.setenv("OPSEVAL_MAX_DATASET_BYTES", "99")
-        assert Limits.from_settings() == Limits(7, 99)
+        assert Limits.from_env() == Limits(7, 99)
         assert Limits.from_settings(Settings(_env_file=None, max_expansion=3)).max_expansion == 3
 
     def test_an_oversized_dataset_is_named(self, tmp_path: Path) -> None:
@@ -546,7 +551,7 @@ class TestMatrix:
             "language": ["ar-EG", "ar-x-gulf", "ar", "en"],
             "persona": [
                 {"role": "an impatient customer with order {{order_id}}", "typing_noise": 0.2},
-                {"role": "a first-time customer"},
+                {"name": "first-timer", "role": "a first-time customer"},
             ],
             "exclude": [{"language": "en", "persona": 0}],
         },
@@ -575,11 +580,18 @@ class TestMatrix:
             "an impatient customer with order 10483",
         }
         one = egyptian[0]
-        assert one.name == "Refund in ar-EG as persona 0"
+        # {{persona}} is the variant's name, else a hash of what it says: never its index.
+        impatient = persona_label(
+            PersonaVariant(role="an impatient customer with order {{order_id}}", typing_noise=0.2)
+        )
+        assert re.fullmatch(r"[0-9a-f]{8}", impatient)
+        assert one.name == f"Refund in ar-EG as persona {impatient}"
         assert one.expanded_from is not None and one.expanded_from.matrix == {
             "language": "ar-EG",
-            "persona": 0,
+            "persona": impatient,
         }
+        named = [s for s in found if s.persona.role == "a first-time customer"]
+        assert named and all(s.name.endswith("as persona first-timer") for s in named)
         assert not any(s.persona.language == "en" and s.persona.typing_noise == 0.2 for s in found)
 
     def test_reordering_personas_keeps_ids(self, tmp_path: Path) -> None:
@@ -908,6 +920,63 @@ class TestCatalogueStore:
         with pytest.raises(ConfigError, match="outside datasets/"):
             self.read(cat_dir)
 
+    def test_a_dangling_or_unreadable_dataset_is_named(self, tmp_path: Path) -> None:
+        import os
+
+        from opseval.errors import ConfigError
+
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+        gone = cat_dir / "datasets" / "gone.csv"
+        gone.symlink_to(cat_dir / "datasets" / "missing.csv")
+        with pytest.raises(ConfigError, match=r"gone\.csv: cannot be read \(a link to nothing\)"):
+            self.read(cat_dir)
+        gone.unlink()
+        locked = cat_dir / "datasets" / "orders.csv"
+        locked.chmod(0)
+        try:
+            if os.access(locked, os.R_OK):  # pragma: no cover - running as root
+                pytest.skip("permissions are not enforced for this user")
+            with pytest.raises(ConfigError, match=r"orders\.csv: cannot be read"):
+                self.read(cat_dir)
+            # The loader names it too, as a problem at the scenario's dataset.
+            assert any("cannot be read" in p for p in problems_of(load(cat_dir)))
+        finally:
+            locked.chmod(0o644)
+
+    def test_a_name_too_long_to_store_is_refused_before_the_push(self, tmp_path: Path) -> None:
+        from opseval.errors import ConfigError
+
+        long = "datasets/" + "n" * 195 + ".csv"
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS, long: ORDERS})
+        with pytest.raises(ConfigError, match="dataset name is 208 characters, over the 200"):
+            self.read(cat_dir)
+
+    async def test_a_refused_folder_writes_nothing(self, pg_url: str, tmp_path: Path) -> None:
+        from sqlalchemy import func, select
+
+        from opseval.db import migrate
+        from opseval.db.engine import make_engine, sessions
+        from opseval.db.schema import CatalogueItem
+        from opseval.errors import ConfigError
+
+        engine = make_engine(
+            Settings(_env_file=None, allowed_hosts="127.0.0.1", database_url=pg_url)
+        )
+        await migrate.upgrade(engine)
+        try:
+            long = "datasets/" + "n" * 195 + ".csv"
+            cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS, long: ORDERS})
+            (cat_dir / "datasets" / "gone.jsonl").symlink_to(cat_dir / "datasets" / "nowhere.jsonl")
+            with pytest.raises(ConfigError, match="gone.jsonl: cannot be read"):
+                self.read(cat_dir)
+            (cat_dir / "datasets" / "gone.jsonl").unlink()
+            with pytest.raises(ConfigError, match="over the 200"):
+                self.read(cat_dir)
+            async with sessions(engine)() as s:
+                assert await s.scalar(select(func.count()).select_from(CatalogueItem)) == 0
+        finally:
+            await engine.dispose()
+
     @pytest.mark.parametrize(
         ("path", "ok"),
         [
@@ -1037,3 +1106,288 @@ class TestCatalogueStore:
             assert await migrate.current(engine) == "0004"
         finally:
             await engine.dispose()
+
+
+# --- the editor's identity of a file, import clashes, the index cache ---------------------
+
+
+def console(cat_dir: Path, tmp_path: Path, profile: Path | None = None) -> Any:
+    from fastapi.testclient import TestClient
+
+    from opseval.server import create_app
+
+    api = create_app(
+        settings=Settings(_env_file=None, reports_dir=str(tmp_path / "r")),
+        catalogue=cat_dir,
+        profile=profile or cat_dir / "profile.yaml",
+        token="t",
+    )
+    return TestClient(api, base_url="http://127.0.0.1:8000", headers={"Authorization": "Bearer t"})
+
+
+def suite_with(cat_dir: Path, name: str, flt: str) -> None:
+    (cat_dir / "suites" / f"{name}.yaml").write_text(
+        f"name: {name}\ninclude: ['scenarios/**/*.yaml']\nfilters: ['{flt}']\n", "utf-8"
+    )
+
+
+class TestEditorIdentity:
+    """A dataset scenario's file is known by its authored id, never one of its expansions."""
+
+    def test_an_unchanged_template_is_never_a_rename(self, tmp_path: Path) -> None:
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+        one = mine(load(cat_dir))[0].id
+        suite_with(cat_dir, "base", "id=refund")
+        suite_with(cat_dir, "row", f"id={one}")
+        c = console(cat_dir, tmp_path)
+        text = (cat_dir / "scenarios" / "ds.yaml").read_text("utf-8")
+        body = c.post(
+            "/api/v1/scenarios/validate", json={"text": text, "file": "scenarios/ds.yaml"}
+        ).json()
+        assert body["ok"] and body["problems"] == [], body
+        # The file opens with its own id, by path, by its base id and by an expansion.
+        assert c.get("/api/v1/scenarios/source?file=scenarios/ds.yaml").json()["id"] == "refund"
+        assert c.get("/api/v1/scenarios/refund/source").json()["id"] == "refund"
+        assert c.get(f"/api/v1/scenarios/{one}/source").json()["file"] == "scenarios/ds.yaml"
+
+    def test_renaming_the_base_empties_suites_selecting_it_or_an_expansion(
+        self, tmp_path: Path
+    ) -> None:
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+        one = mine(load(cat_dir))[0].id
+        suite_with(cat_dir, "base", "id=refund")
+        suite_with(cat_dir, "row", f"id={one}")
+        suite_with(cat_dir, "other", "id=refund-other")
+        c = console(cat_dir, tmp_path)
+        text = (cat_dir / "scenarios" / "ds.yaml").read_text("utf-8")
+        renamed = text.replace("id: refund", "id: refund2")
+        body = c.post(
+            "/api/v1/scenarios/validate", json={"text": renamed, "file": "scenarios/ds.yaml"}
+        ).json()
+        messages = sorted(p["message"] for p in body["problems"])
+        assert messages == [
+            "suite 'base' selects id=refund: renaming empties it",
+            "suite 'row' selects id=refund: renaming empties it",
+        ]
+
+    def test_import_refuses_an_authored_id_a_dataset_scenario_holds(self, tmp_path: Path) -> None:
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+        c = console(cat_dir, tmp_path)
+        text = yaml.safe_dump(plain(id="refund"))
+        out = c.post(
+            "/api/v1/scenarios/import",
+            json={"family": "more", "files": [{"name": "same.yaml", "text": text}]},
+        )
+        assert out.status_code == 422
+        assert any(
+            p["message"] == "would replace existing scenario 'refund'" for p in out.json()["detail"]
+        )
+        assert not (cat_dir / "scenarios" / "more").exists()
+
+    def test_a_new_row_refreshes_the_index(self, tmp_path: Path) -> None:
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+        c = console(cat_dir, tmp_path)
+        before = {s.id for s in mine(load(cat_dir))}
+        for sid in before:  # the index is built and cached
+            assert c.get(f"/api/v1/scenarios/{sid}/source").status_code == 200
+        (cat_dir / "datasets" / "orders.csv").write_text(ORDERS + "10484,lost\n", "utf-8")
+        [new] = {s.id for s in mine(load(cat_dir))} - before
+        assert c.get(f"/api/v1/scenarios/{new}/source").status_code == 200
+
+
+# --- one dataset root per load -----------------------------------------------------------
+
+
+def _family_named_scenarios(tmp_path: Path) -> Path:
+    cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+    family = cat_dir / "scenarios" / "scenarios"
+    family.mkdir()
+    (cat_dir / "scenarios" / "ds.yaml").rename(family / "ds.yaml")
+    return cat_dir
+
+
+class TestDatasetRoot:
+    def test_a_family_named_scenarios(self, tmp_path: Path) -> None:
+        cat_dir = _family_named_scenarios(tmp_path)
+        profile = load_profile(cat_dir / "profile.yaml")
+        for target in (
+            cat_dir / "suites" / "full.yaml",
+            cat_dir / "scenarios",
+            cat_dir / "scenarios" / "scenarios",
+            cat_dir / "scenarios" / "scenarios" / "ds.yaml",
+        ):
+            loaded, _ = load_catalogue(
+                target, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+            )
+            assert len(mine(loaded)) == 2, (target, loaded.problems)
+
+    def test_a_flat_catalogue_in_a_folder_named_scenarios(self, tmp_path: Path) -> None:
+        flat = tmp_path / "x" / "scenarios"
+        (flat / "datasets").mkdir(parents=True)
+        (flat / "datasets" / "orders.csv").write_text(ORDERS, "utf-8")
+        (flat / "ds.yaml").write_text(yaml.safe_dump(SCRIPTED), "utf-8")
+        profile_path = catalogue_dir() / "profile.yaml"
+        loaded, _ = load_catalogue(
+            flat,
+            load_profile(profile_path),
+            known_scorers=REGISTRY,
+            known_invariants=set(INVARIANTS),
+        )
+        assert len(mine(loaded)) == 2, loaded.problems
+        # The server (a flat catalogue: scenarios at its top) reads the same datasets.
+        c = console(flat, tmp_path, profile_path)
+        ids = {s["id"] for s in c.get("/api/v1/scenarios").json()["scenarios"]}
+        assert {s.id for s in mine(loaded)} <= ids
+        text = (flat / "ds.yaml").read_text("utf-8")
+        body = c.post("/api/v1/scenarios/validate", json={"text": text, "file": "ds.yaml"}).json()
+        assert body["ok"] and len(body["expanded"]) == 2, body
+
+    def test_validate_from_inside_scenarios_with_a_relative_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+        monkeypatch.chdir(cat_dir / "scenarios")
+        for target in (".", "ds.yaml"):
+            out = runner.invoke(app, ["validate", target, "--profile", "../profile.yaml"])
+            assert "refund: expands to 2 scenario(s)" in out.output, (target, out.output)
+        monkeypatch.chdir(cat_dir / "suites")
+        out = runner.invoke(app, ["validate", "full.yaml", "--profile", "../profile.yaml"])
+        assert "refund: expands to 2 scenario(s)" in out.output, out.output
+
+
+# --- the cap before anything is built; the limits alone from settings -------------------
+
+
+class TestCapAndLimits:
+    BIG: dict[str, Any] = {
+        "language": [f"l{i}" for i in range(300)],
+        "dialect": [f"d{i}" for i in range(300)],
+        "persona": [{"role": f"customer {i}"} for i in range(300)],
+    }
+
+    def test_a_huge_matrix_is_refused_before_it_is_built(self, tmp_path: Path) -> None:
+        scenario = plain(matrix=self.BIG)
+        cat_dir = catalogue(tmp_path, scenario, {})
+        started = time.perf_counter()
+        cat = load(cat_dir)
+        assert time.perf_counter() - started < 0.5
+        [problem] = problems_of(cat)
+        assert "expands to 27000000 scenarios" in problem and "OPSEVAL_MAX_EXPANSION" in problem
+        # With an exclude, a space too large to scan is refused up front too.
+        excluded = plain(matrix={**self.BIG, "exclude": [{"language": "l0"}]})
+        started = time.perf_counter()
+        cat = load(catalogue(tmp_path, excluded, {}))
+        assert time.perf_counter() - started < 0.5
+        assert any("27000000 cells before exclude" in p for p in problems_of(cat))
+
+    def test_excludes_are_counted_lazily_up_to_the_cap(self, tmp_path: Path) -> None:
+        matrix = {
+            "language": [f"l{i}" for i in range(50)],
+            "persona": [{"role": f"customer {i}"} for i in range(50)],
+            "exclude": [{"language": "l0"}],
+        }
+        cat = load(catalogue(tmp_path, plain(matrix=matrix), {}), limits=Limits(max_expansion=10))
+        [problem] = problems_of(cat)
+        assert "expands to more than 10 scenarios" in problem
+        assert "at least 11 matrix cell(s)" in problem
+        # Under the cap, the exclude is exact.
+        small = {"language": ["en", "ar"], "dialect": ["egyptian", "gulf"], "exclude": []}
+        small["exclude"] = [{"language": "en", "dialect": "gulf"}]
+        cat = load(catalogue(tmp_path, plain(matrix=small), {}), limits=Limits(max_expansion=3))
+        assert len(mine(cat)) == 3, problems_of(cat)
+
+    def test_a_broken_unrelated_setting_never_stops_a_load(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPSEVAL_DOTENV", "false")
+        monkeypatch.setenv("OPSEVAL_RETENTION_DAYS", "not a number")
+        with pytest.raises(ValueError):
+            Settings()
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+        profile = load_profile(cat_dir / "profile.yaml")
+        loaded, _ = load_catalogue(
+            cat_dir / "scenarios", profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+        )
+        assert len(mine(loaded)) == 2
+        out = runner.invoke(
+            app,
+            ["validate", str(cat_dir / "scenarios"), "--profile", str(cat_dir / "profile.yaml")],
+        )
+        assert out.exit_code == 0, out.output
+        assert "refund: expands to 2 scenario(s)" in out.output
+
+    def test_a_broken_limit_is_a_load_error_naming_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPSEVAL_DOTENV", "false")
+        monkeypatch.setenv("OPSEVAL_MAX_EXPANSION", "0")
+        cat_dir = catalogue(tmp_path, SCRIPTED, {"datasets/orders.csv": ORDERS})
+        profile = load_profile(cat_dir / "profile.yaml")
+        loaded, _ = load_catalogue(
+            cat_dir / "scenarios", profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
+        )
+        assert mine(loaded) == []
+        assert any("invalid setting OPSEVAL_MAX_EXPANSION" in p for p in problems_of(loaded))
+        # A catalogue with nothing to expand never reads it.
+        assert any(s.id == "rf-001" for s in loaded.scenarios)
+
+
+# --- persona variants, field paths, audio folders ----------------------------------------
+
+
+class TestPersonaVariants:
+    def test_a_variants_non_text_fields_hold_no_placeholder(self, tmp_path: Path) -> None:
+        matrix = {"persona": [{"role": "a {{kind}} customer", "timezone": "{{order_id}}"}]}
+        cat = load(
+            catalogue(tmp_path, with_(SCRIPTED, matrix=matrix), {"datasets/orders.csv": ORDERS})
+        )
+        assert problems_of(cat) == [
+            "matrix.persona.0.timezone: this field cannot hold a placeholder (only text fields can)"
+        ]
+
+    def test_a_variants_role_is_substituted_and_its_name_is_not_a_persona_field(
+        self, tmp_path: Path
+    ) -> None:
+        matrix = {"persona": [{"name": "rushed", "role": "a {{kind}} customer"}]}
+        scenario = with_(SCRIPTED, matrix=matrix, name="Refund {{order_id}} as {{persona}}")
+        cat = load(catalogue(tmp_path, scenario, {"datasets/orders.csv": ORDERS}))
+        found = sorted(mine(cat), key=lambda s: s.name)
+        assert [s.persona.role for s in found] == ["a damaged customer", "a late customer"]
+        assert [s.name for s in found] == ["Refund 10482 as rushed", "Refund 10483 as rushed"]
+        assert all(
+            s.expanded_from and s.expanded_from.matrix == {"persona": "rushed"} for s in found
+        )
+        # An exclude may name a variant by its name.
+        two = {
+            "persona": [*matrix["persona"], {"role": "calm"}],
+            "exclude": [{"persona": "rushed"}],
+        }
+        cat = load(
+            catalogue(tmp_path, with_(SCRIPTED, matrix=two), {"datasets/orders.csv": ORDERS})
+        )
+        assert {s.persona.role for s in mine(cat)} == {"calm"}
+
+
+class TestFieldPaths:
+    def test_a_reserved_at_is_reported_at_id(self, tmp_path: Path) -> None:
+        cat = load(catalogue(tmp_path, plain(id="refund@1a2b3c4d"), {}))
+        assert problems_of(cat) == [
+            "id: '@' is reserved for the scenarios a dataset or matrix expands to"
+        ]
+
+    @pytest.mark.parametrize("dataset", ["orders.csv", {"path": "orders.csv"}])
+    def test_a_bad_dataset_is_one_problem_at_its_path(
+        self, tmp_path: Path, dataset: str | dict[str, str]
+    ) -> None:
+        cat = load(catalogue(tmp_path, with_(SCRIPTED, dataset=dataset), {}))
+        [problem] = problems_of(cat)
+        assert problem.startswith("dataset.path: ") and "under datasets/" in problem
+
+
+def test_an_expansion_never_shares_an_audio_folder_with_an_authored_id() -> None:
+    from opseval.voice.recording import AudioRecorder
+
+    expanded = AudioRecorder(None, "a@1a2b3c4d", 0)._relative(1, "caller", ".wav")
+    authored = AudioRecorder(None, "a_1a2b3c4d", 0)._relative(1, "caller", ".wav")
+    assert expanded == "audio/a@1a2b3c4d/attempt0/001-caller.wav"
+    assert expanded != authored
