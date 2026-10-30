@@ -12,6 +12,7 @@ import yaml
 
 from opseval.analytics import AnalyticsStore, UsageFilter
 from opseval.analytics.costs import events_cost, rows_cost
+from opseval.analytics.dashboards import flips
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.errors import ConfigError, StorageError
@@ -573,17 +574,14 @@ def scenario_trend(store: RunStore, *, suite: str | None, limit: int) -> s.Scena
                     flaky=found.flaky if found else False,
                 )
             )
-        # Within one suite only: two suites can run a scenario differently (repeats,
-        # thresholds), so alternating between them is not the scenario changing.
-        flips = 0
-        for name in {r.suite for r in chosen}:
-            judged = [
-                c.status
-                for c, r in zip(cells, chosen, strict=True)
-                if r.suite == name and c.status in JUDGED_STATUSES
-            ]
-            flips += sum(1 for a, b in zip(judged, judged[1:], strict=False) if a != b)
-        rows.append(s.ScenarioTrendRow(id=test_id, name=names[test_id], cells=cells, flips=flips))
+        judged = [
+            (r.suite, c.status.value)
+            for c, r in zip(cells, chosen, strict=True)
+            if c.status in JUDGED_STATUSES
+        ]
+        rows.append(
+            s.ScenarioTrendRow(id=test_id, name=names[test_id], cells=cells, flips=flips(judged))
+        )
     runs = [
         s.TrendRun(run=r.run_id, label=r.started_at.strftime("%b %-d %H:%M"), suite=r.suite)
         for r in chosen

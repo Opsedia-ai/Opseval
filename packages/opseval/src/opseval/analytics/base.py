@@ -86,15 +86,20 @@ class UsageFilter:
     def server_only(self) -> list[str]:
         return [name for name in SERVER_ONLY_FILTERS if getattr(self, name) is not None]
 
-    def refuse(self, question: str, *names: str) -> None:
-        """Refuse filters set that do not apply to ``question``, and those no store records:
-        a filter is applied or refused, never ignored (ADR-0052)."""
+    def refuse_not_recorded(self) -> None:
+        """Refuse filters no store can apply, whatever the mode: checked first, so local and
+        server mode give the same reason (``FILTER_NOT_RECORDED``) for a label."""
         recorded = [n for n in NOT_RECORDED_FILTERS if getattr(self, n) is not None]
         if recorded:
             raise FilterNotRecorded(
                 f"filter by {', '.join(recorded)}: runs do not record the catalogue label they "
                 "ran yet, so no run can be picked by it"
             )
+
+    def refuse(self, question: str, *names: str) -> None:
+        """Refuse filters set that do not apply to ``question``, and those no store records:
+        a filter is applied or refused, never ignored (ADR-0052)."""
+        self.refuse_not_recorded()
         given = [n for n in names if getattr(self, n) is not None]
         if given:
             raise FilterNotApplicable(

@@ -1309,7 +1309,7 @@ class DbRunStore:
         base = f"{RESCORE_PREFIX}{stamp}/"
         if self._blob(run_id, base + "result.json") is not None:
             raise FileExistsError(base)
-        project_id, _ = self._owner(run_id)
+        project_id, task_id = self._owner(run_id)
         ids = [
             self._put_pending(run_id, base + "report.html", "report", html.encode(), "text/html"),
             self._put_pending(run_id, base + "junit.xml", "junit", xml.encode(), "application/xml"),
@@ -1322,7 +1322,6 @@ class DbRunStore:
             ),
         ]
 
-        project_id, task_id = self._owner(run_id)
         events = [*(e for a in result.attempt_usage for e in a.events), *result.usage_events]
 
         async def go(s: AsyncSession) -> None:

@@ -477,8 +477,10 @@ class TestUsage:
     def test_label_is_not_recorded_and_task_needs_server_mode(self, files: FileStore) -> None:
         with pytest.raises(UnsupportedFilter, match="server mode"):
             FileAnalytics(files).usage(UsageFilter(task="default"))
-        with pytest.raises(UnsupportedFilter):
-            FileAnalytics(files).quality(UsageFilter(label="production"))
+        # A label is refused for the same reason in every mode: runs do not record it.
+        for question in ("cost", "tokens", "latency", "quality", "voice", "usage"):
+            with pytest.raises(FilterNotRecorded):
+                getattr(FileAnalytics(files), question)(UsageFilter(label="production"))
 
 
 class TestKnownPartCost:
@@ -673,6 +675,8 @@ class TestEndpoints:
         assert r.status_code == 400 and r.json()["code"] == "FILTER_NOT_APPLICABLE"
         r = api.get("/api/v1/analytics/voice", params={"task": "default"})
         assert r.status_code == 400 and r.json()["code"] == "FILTER_NEEDS_SERVER_MODE"
+        r = api.get("/api/v1/analytics/cost", params={"label": "production"})
+        assert r.status_code == 400 and r.json()["code"] == "FILTER_NOT_RECORDED"
         r = api.get("/api/v1/analytics/cost", params={"language": "ar"})
         assert r.status_code == 400 and r.json()["code"] == "FILTER_NOT_APPLICABLE"
         body = api.get("/api/v1/analytics/quality", params={"language": "ar"}).json()

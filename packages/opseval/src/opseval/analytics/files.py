@@ -22,7 +22,7 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from opseval.analytics.base import (
     NOT_RECORDED_FILTERS,
@@ -36,6 +36,7 @@ from opseval.analytics.dashboards import (
     CallFacts,
     RunFacts,
     VerdictFacts,
+    bucket_of,
     fold_latency,
     fold_quality,
     fold_usage,
@@ -200,16 +201,7 @@ class _Scope:
 
 
 def _bucket_of(result: RunHead, bucket: str) -> tuple[str, str, datetime]:
-    started = result.started_at.astimezone(UTC)
-    if bucket == "run":
-        return result.run_id, started.strftime("%b %-d %H:%M"), started
-    day = started.date()
-    if bucket == "week":
-        day = day - timedelta(days=day.weekday())
-        start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-        return day.isoformat(), f"wk of {start:%b %-d}", start
-    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    return day.isoformat(), f"{start:%b %-d}", start
+    return bucket_of(result.run_id, result.started_at, bucket)
 
 
 Metric = Callable[[UsageEvent], float | None]
@@ -774,7 +766,7 @@ class FileAnalytics(UsageFold):
             tasks=[],
             languages=sorted(languages),
             dialects=sorted(dialects),
-            server_only=list(SERVER_ONLY_FILTERS),
+            server_only=[f for f in SERVER_ONLY_FILTERS if f not in NOT_RECORDED_FILTERS],
             not_recorded=list(NOT_RECORDED_FILTERS),
         )
 
@@ -844,8 +836,10 @@ class FileAnalytics(UsageFold):
 
 
 def _check(filters: UsageFilter, question: str, *refused: str) -> None:
-    """Refuse what a folder cannot filter by (server-only), then what does not apply."""
-    server_only = filters.server_only()
+    """Refuse what no store records (a label), then what a folder cannot filter by
+    (server-only), then what does not apply."""
+    filters.refuse_not_recorded()
+    server_only = [n for n in filters.server_only() if n not in NOT_RECORDED_FILTERS]
     if server_only:
         raise UnsupportedFilter(
             f"filter by {', '.join(server_only)} needs server mode: local run folders have "

@@ -277,7 +277,7 @@ class TestCost:
         assert [b.key for b in runs] == ["A", "B", "C"]
         assert analytics.cost(UsageFilter()).options.suites == ["other", "smoke"]
 
-    @pytest.mark.parametrize("name", ["org", "project", "task", "label"])
+    @pytest.mark.parametrize("name", ["org", "project", "task"])
     def test_a_server_only_filter_is_refused_never_ignored(
         self, store: FileStore, name: str
     ) -> None:

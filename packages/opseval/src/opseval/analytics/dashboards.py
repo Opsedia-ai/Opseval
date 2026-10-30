@@ -84,7 +84,7 @@ def rate(passed: int, failed: int, other: int) -> Rate:
 
 
 def bucket_of(run_id: str, started_at: datetime, bucket: str) -> tuple[str, str, datetime]:
-    """A run's bucket: (key, label, start). The same rule as the Cost dashboard's (D1)."""
+    """A run's bucket: (key, label, start), for every dashboard (Cost and Tokens included)."""
     started = started_at.astimezone(UTC)
     if bucket == "run":
         return run_id, started.strftime("%b %-d %H:%M"), started
@@ -245,15 +245,15 @@ def flaky_and_matrix(
     flaky = []
     for sid in sorted(names):
         judged = [(suite, st) for suite, st in history[sid] if st in JUDGED]
-        flips = _flips(judged)
-        if flips or flaky_runs[sid]:
+        changed = flips(judged)
+        if changed or flaky_runs[sid]:
             flaky.append(
                 FlakyScenario(
                     scenario=sid,
                     name=names[sid],
                     judged_runs=len(judged),
                     flaky_runs=flaky_runs[sid],
-                    flips=flips,
+                    flips=changed,
                 )
             )
     flaky.sort(key=lambda f: (-(f.flips + f.flaky_runs), f.scenario))
@@ -276,7 +276,7 @@ def flaky_and_matrix(
             )
             if found is not None and found.status in JUDGED:
                 judged.append((run.suite, found.status))
-        rows.append(MatrixRow(id=sid, name=shown[sid], cells=cells, flips=_flips(judged)))
+        rows.append(MatrixRow(id=sid, name=shown[sid], cells=cells, flips=flips(judged)))
     matrix = VerdictMatrix(
         runs=[
             MatrixRun(run=r.run_id, label=label_of(r.started_at), suite=r.suite) for r, _ in chosen
@@ -286,7 +286,11 @@ def flaky_and_matrix(
     return flaky, matrix
 
 
-def _flips(judged: list[tuple[str, str]]) -> int:
+def flips(judged: list[tuple[str, str]]) -> int:
+    """Changes between consecutive judged verdicts, ``(suite, status)`` oldest first, counted
+    within each suite only: two suites can run a scenario differently (repeats, thresholds),
+    so alternating between them is not the scenario changing. The one rule the Quality
+    dashboard and ``views.scenario_trend`` both count by."""
     per_suite: dict[str, list[str]] = defaultdict(list)
     for suite, status in judged:
         per_suite[suite].append(status)
@@ -476,10 +480,6 @@ def fold_usage(
     )
 
 
-def _task_key(kv: tuple[tuple[str | None, str | None], object]) -> tuple[str, str]:
-    return (kv[0][0] or "", kv[0][1] or "")
-
-
 NOT_CALIBRATED = (
     "not measured: `opseval calibrate` writes its agreement beside a run folder, and no store "
     "reads calibrations yet"
@@ -497,6 +497,7 @@ __all__ = [
     "bucket_of",
     "checks",
     "flaky_and_matrix",
+    "flips",
     "minutes",
     "nearest_rank",
     "percentiles",
