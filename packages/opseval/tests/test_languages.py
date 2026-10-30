@@ -134,6 +134,11 @@ def test_a_declared_fallback_names_what_it_stands_in_for(
 
 def test_an_exact_name_beside_a_fallback_tag_is_exact() -> None:
     assert lookup("ar-QA", "gulf").fallback_from is None
+    # ar-SA has a pack of its own now; the pair keeps the Gulf pack it named before.
+    assert (lookup("ar-SA", "gulf").pack.tag, lookup("ar-SA", "gulf").fallback_from) == (
+        "ar-x-gulf",
+        None,
+    )
 
 
 def _system(**persona: Any) -> str:
@@ -326,7 +331,12 @@ def registry() -> Iterator[None]:
 @pytest.mark.usefixtures("registry")
 def test_a_regional_pack_needs_no_base_pack() -> None:
     canadian = LanguagePack(
-        tag="fr-CA", code="fr", dialect="canadian", instruction="i", aliases=("quebecois",)
+        tag="fr-CA",
+        code="fr",
+        dialect="canadian",
+        instruction="i",
+        aliases=("quebecois",),
+        scripts=("latin",),
     )
     register(canadian)
     for language, dialect in [("fr-CA", None), ("FR_ca", None), ("fr", "canadian"), ("fr", "CA")]:
@@ -341,6 +351,7 @@ def test_a_regional_pack_needs_no_base_pack() -> None:
 
 
 def _new(**kw: Any) -> LanguagePack:
+    kw.setdefault("scripts", ("arabic",))
     return LanguagePack(tag="ar-x-new", code="ar", dialect="newish", instruction="i", **kw)
 
 

@@ -152,6 +152,7 @@ def test_settings_are_read_from_the_checks_own_params_model() -> None:
     assert script["script"].choices == [
         *("arabic", "latin", "han", "kana", "hangul"),
         *("cyrillic", "devanagari", "hebrew", "greek", "thai"),
+        "japanese",  # han and kana together
     ]
     assert script["script"].default is None  # the persona's language pack decides
     assert (script["min_fraction"].minimum, script["min_fraction"].maximum) == (0.0, 1.0)

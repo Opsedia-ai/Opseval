@@ -50,6 +50,22 @@
   from `OPSEVAL_TTS_VOICE_MAP`, now looked up by the pack's tag (`langpacks.voice_language`:
   `ar` + `ksa` is spoken as `ar-SA`), with a recommended mapping in the guide. `stt_language`
   is not built: STT is asked for the primary subtag, as before.
+- **Review of the MENA step (2026-10-30).** A `language` + `dialect` pair that loaded before and
+  now names two packs (`ar-SA` + `gulf`, `ar-LB` + `levantine`) keeps the pack it resolved to
+  then, from frozen copies of the step-1 tables (`langpacks.legacy_lookup`), with a warning
+  naming the packs it now also names; no pair that loaded is refused. Each attempt records the
+  pack it resolved to (`RunRecord.persona["pack"]`, no layout change), and judges grade against
+  it (`langpacks.graded_language`); a record without it is graded with the step-1 resolution,
+  so `rescore` keeps its rubric (this replaces "`rescore` re-grades such runs" above).
+  `LanguagePack.scripts` is required; a code-switching pack declares `primary_script` and
+  `primary_share` (`ar-x-codeswitch`: half Arabic), and a pack with a private-use tag may
+  declare `provider_language`: providers are given BCP-47 only (`ar-x-*` becomes `ar`), the
+  voice map is still keyed by the pack tag, and preflight speaks the language attempts speak.
+  `output.language_script` takes `script` (one, or `japanese` = `han` + `kana`) or `scripts`
+  (a list) and `min_primary_share`; with neither, the scripts come from the pack, a declared
+  fallback or the base pack (with a warning), and with none of those the scenario does not
+  load. A code-switching pack and a different `voice.code_switching` do not load either. One
+  Unicode script table (`langpacks.SCRIPT_PREFIXES`) serves the scorer and the voice bridge.
 
 ## Context
 

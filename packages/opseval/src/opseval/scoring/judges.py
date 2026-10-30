@@ -28,11 +28,11 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from opseval.errors import HarnessError
-from opseval.langpacks import Spoken, effective_language
+from opseval.langpacks import Spoken
 from opseval.llm import ChatClient, model_family
 from opseval.models.record import VOICE_KEY, FrameRecord, RunRecord
 from opseval.models.results import Axis, ScoreResult, ScoreStatus
-from opseval.models.scenario import Scenario, ScorerSpec
+from opseval.models.scenario import ScorerSpec
 from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
 from opseval.scoring.tools import gather
 
@@ -468,27 +468,30 @@ class GoalAchievement(Judge):
         return (*super().rubric(ctx), *refusal)
 
 
-def _switching(scenario: Scenario) -> list[str]:
+def _switching(ctx: ScoringContext) -> list[str]:
     """The languages the caller mixes within a sentence: ``voice.code_switching`` (ADR-0055),
-    else those of a code-switching pack (``ar-x-codeswitch``, ADR-0059), or none."""
+    else those of a code-switching pack (``ar-x-codeswitch``, ADR-0059), or none. The loader
+    refuses the two when they disagree."""
+    scenario = ctx.scenario
     if scenario.voice is not None and scenario.voice.code_switching:
         return list(scenario.voice.code_switching)
-    pack = _spoken(scenario).pack
+    pack = _spoken(ctx).pack
     return list(pack.mixes) if pack is not None else []
 
 
-def _switching_rubric(scenario: Scenario) -> tuple[str, ...]:
+def _switching_rubric(ctx: ScoringContext) -> tuple[str, ...]:
     # Only a code-switching scenario adds to the rubric, so every other scenario's digest,
     # and the scores graded against it, are unchanged.
-    mixed = _switching(scenario)
+    mixed = _switching(ctx)
     return (f"code_switching={','.join(mixed)}",) if mixed else ()
 
 
-def _spoken(scenario: Scenario) -> Spoken:
-    """The language the customer writes, resolved once (ADR-0059): the pack an LLM persona is
-    told to write (a declared fallback included), or the declared language of scripted turns.
-    Every spelling of one pack gives the same label, so the same rubric digest."""
-    return effective_language(scenario.persona, scripted=not scenario.conversation.llm_persona)
+def _spoken(ctx: ScoringContext) -> Spoken:
+    """The language the customer writes, resolved once (ADR-0059): the pack an LLM persona was
+    told to write (a declared fallback included), as recorded with the attempt, or the
+    declared language of scripted turns. Every spelling of one pack gives the same label, so
+    the same rubric digest."""
+    return ctx.spoken()
 
 
 @register
@@ -525,11 +528,11 @@ class LanguageConsistency(Judge):
     )
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
-        return (*_spoken(ctx.scenario).rubric, *_switching_rubric(ctx.scenario))
+        return (*_spoken(ctx).rubric, *_switching_rubric(ctx))
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
-        lines = [f"Expected customer language: {_spoken(ctx.scenario).label}"]
-        mixed = _switching(ctx.scenario)
+        lines = [f"Expected customer language: {_spoken(ctx).label}"]
+        mixed = _switching(ctx)
         if mixed:
             lines.append(
                 "The customer CODE-SWITCHES on purpose between these languages within a "
@@ -585,13 +588,13 @@ class PersonaConsistency(Judge):
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
         s = ctx.scenario
-        spoken = _spoken(s)
+        spoken = _spoken(ctx)
         return (
             s.persona.role,
             s.goal,
             s.conversation.flow,
             *spoken.rubric,
-            *_switching_rubric(s),
+            *_switching_rubric(ctx),
         )
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
@@ -600,9 +603,9 @@ class PersonaConsistency(Judge):
             f"Customer persona: {s.persona.role}",
             f"Customer goal: {s.goal}",
             f"Planned flow: {s.conversation.flow or '(pursue the goal)'}",
-            f"Persona language: {_spoken(s).label}",
+            f"Persona language: {_spoken(ctx).label}",
         ]
-        mixed = _switching(s)
+        mixed = _switching(ctx)
         if mixed:
             lines.append(
                 "The persona was told to CODE-SWITCH between these languages within its "
@@ -928,10 +931,10 @@ class PronunciationDialectFit(Judge):
     )
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
-        return _spoken(ctx.scenario).rubric
+        return _spoken(ctx).rubric
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
-        return [f"Caller's language and dialect: {_spoken(ctx.scenario).label}"]
+        return [f"Caller's language and dialect: {_spoken(ctx).label}"]
 
     def digest(self, record: RunRecord, ctx: ScoringContext) -> str:
         """The fenced conversation, with each agent turn's unsure words on its own line: the

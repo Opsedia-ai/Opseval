@@ -443,6 +443,9 @@ class RunRecord(Frozen):
     interrupts: tuple[InterruptRecord, ...] = ()
     user_turns: int = 0
     persona: dict[str, Any] = Field(default_factory=dict)
+    """The persona as run, plus ``pack``: the tag of the language pack it resolved to (``null``
+    when none was used, ADR-0059). Judges grade against it; a record without ``pack`` predates
+    it and is graded with the resolution of its time."""
     trace_coverage: Literal["full", "frames_only"] = "frames_only"
     probes: tuple[ProbeResult, ...] = ()
     """Protocol probe outcomes, graded by ``protocol.probes_passed``."""

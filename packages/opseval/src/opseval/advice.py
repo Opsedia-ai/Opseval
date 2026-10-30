@@ -20,9 +20,9 @@ from dataclasses import dataclass
 
 from opseval.catalogue import LoadProblem
 from opseval.datasets import Expansion
-from opseval.langpacks import UnknownLanguage, lookup, narrower
+from opseval.langpacks import UnknownLanguage, lookup, narrower, script_expectation
 from opseval.models.profile import SutProfile
-from opseval.models.scenario import Scenario
+from opseval.models.scenario import Scenario, ScorerSpec
 from opseval.scoring import REGISTRY, effective_specs
 
 
@@ -57,6 +57,7 @@ def scenario_warnings(
                 "model), so a typo in them is not caught here",
             )
     _language(scenario, warn)
+    _script_default(scenario, specs, warn)
     if scenario.execution.repeats == 1:
         warn(
             "execution.repeats",
@@ -121,6 +122,15 @@ def _language(scenario: Scenario, warn: Callable[[str, str], None]) -> None:
                 "would be refused",
             )
         return  # for an LLM persona, a load error the loader reports
+    if found.kept_pair and scenario.conversation.llm_persona:
+        warn(
+            "persona.dialect",
+            f"language {persona.language!r} and dialect {persona.dialect!r} now name "
+            f"different packs ({', '.join(found.kept_pair)}); the pair keeps the "
+            f"{found.pack.tag} pack it had before, so saved scenarios keep their meaning. "
+            f"Give only the tag of the pack you want ({found.kept_pair[0]})",
+        )
+        return
     if found.fallback_from is not None and scenario.conversation.llm_persona:
         field = "persona.dialect" if found.fallback_from == persona.dialect else "persona.language"
         warn(
@@ -135,6 +145,29 @@ def _language(scenario: Scenario, warn: Callable[[str, str], None]) -> None:
                 f"{alias!r} still names the {found.pack.tag} pack, as it did before, so saved "
                 f"scenarios keep their meaning; the {tag} pack is more specific (preview) and "
                 f"is used only when named ({tag})",
+            )
+
+
+def _script_default(
+    scenario: Scenario, specs: list[ScorerSpec], warn: Callable[[str, str], None]
+) -> None:
+    """``output.language_script`` with no ``script`` takes the scripts of a pack that only
+    stands in for the persona's language: the default may not be how that language is typed."""
+    for index, spec in enumerate(specs):
+        if spec.id != "output.language_script":
+            continue
+        if spec.params.get("script") or spec.params.get("scripts"):
+            continue
+        expected = script_expectation(
+            scenario.persona, scripted=not scenario.conversation.llm_persona
+        )
+        if expected is not None and expected.source == "stand-in":
+            warn(
+                f"scorers.{index}.params.script",
+                f"no script given: it takes {list(expected.scripts)} from the {expected.pack} "
+                f"pack, which only stands in for {scenario.persona.language!r}"
+                + (f" ({scenario.persona.dialect!r})" if scenario.persona.dialect else "")
+                + "; give params.script if that is not how it is typed",
             )
 
 

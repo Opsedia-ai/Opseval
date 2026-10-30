@@ -55,9 +55,11 @@ scores it produces are as trustworthy as the pack's wording. Every Arabic pack i
 - **Code-switching** (`ar-x-codeswitch`): everyday Gulf Arabic in Arabic script with English
   words and short phrases in Latin letters, as bilingual customers in the Gulf type ("أبي
   refund لو سمحت"). The judges are told the customer mixes `ar` and `en` on purpose, and
-  `output.language_script` accepts Arabic and Latin. For a *spoken* caller who switches,
+  `output.language_script` accepts Arabic and Latin, as long as at least half of each reply's
+  letters are Arabic (an all-English reply is not code-switching). For a *spoken* caller,
   `voice.code_switching` ([ADR-0055](../adr/0055-full-duplex-voice-driver-and-metrics.md))
-  still applies and, when set, wins over the pack's list.
+  may be set too, but only to the same languages (`[ar, en]`, in any order): a different list
+  is a load error, because the simulator and the judges would be told different mixes.
 
 ### Script: Arabic letters, not Arabizi
 
@@ -74,12 +76,23 @@ changes meaning and no rubric digest moves: `saudi` and `emirati` are still the 
 `opseval validate` and the editor name the narrower pack (`ar-SA`, `ar-AE`) in a warning; use its
 tag to switch.
 
+The same holds for a **pair** of fields that loaded before: `language: ar-SA` with
+`dialect: gulf` (or `saudi`), `ar-KW` + `gulf`, `ar-LB` + `levantine`, `ar-MA` + `maghrebi`, and
+so on. The two fields now name different packs, but the pair keeps the pack it resolved to then
+(the Gulf pack, or MSA) and loads with a warning naming the packs it now also names. Give only
+the tag to use the new pack. A pair that never loaded (`ar-SA` + `egyptian`) is still refused.
+
 What did move are **declared fallbacks**, which loaded with a "no pack for this dialect yet"
 warning: `ar-SA`, `ar-AE`, `ar-KW` and `kuwaiti` were written as Gulf Arabic, and `levantine`,
 `lebanese`, `jordanian`, `iraqi`, `moroccan`, `algerian`, `tunisian` (and their tags) as MSA.
 They now resolve to their own packs, as the warning promised; `syrian` and `palestinian` moved
-from MSA to the Levantine pack and still warn. A saved run of such a scenario re-scored with
-`opseval rescore` is re-graded, because the judges' rubric now names the new pack.
+from MSA to the Levantine pack and still warn.
+
+A **saved run** keeps the language it was graded against. Each attempt records the pack it
+resolved to (`pack` in the record's persona), and judges grade a re-scored attempt against that
+pack. A run recorded before this was written is graded with the resolution of its time (so
+`ar` + `lebanese` stays MSA), and `opseval rescore` keeps its rubric digest and its grades. A
+new run of the same scenario uses the new pack.
 
 ## What the judges are told
 
@@ -100,20 +113,36 @@ an answer in the script.
 scorers:
   - {id: output.language_script}                      # the persona's pack decides
   - {id: output.language_script, params: {script: han, min_fraction: 0.9}}
+  - {id: output.language_script, params: {script: japanese}}       # han and kana together
+  - {id: output.language_script, params: {scripts: [cyrillic, latin]}}
 ```
 
-Left out, `script` comes from the persona's pack (`arabic` for the Arabic packs, `arabic` and
-`latin` for `ar-x-codeswitch`, `latin` for English). With no pack (scripted turns in a
-language Opseval has no pack for) and no `script`, the check is *not measured*
-(`BAD_PARAMS`), never a guess. `script: arabic` and `script: latin` work as before.
+`script` is one script, or `japanese` (kanji and kana, written together in one sentence);
+`scripts` is a list counted together. Give one of them, not both.
+
+Left out, the scripts come from the persona's pack (`arabic` for the Arabic packs, `arabic` and
+`latin` for `ar-x-codeswitch`, `latin` for English). For scripted turns in a dialect or region
+with no pack of its own, they come from the pack that stands in for it, else from the
+language's base pack (`ar-OM` and `ar` + `hassaniya` take `arabic`), and `validate` warns that
+the default is a stand-in's. When nothing gives one (`fr`, with no French pack), leaving
+`script` out is a **load error**: the check could never be measured. `script: arabic` and
+`script: latin` work as before.
+
+`min_primary_share` is the share of a reply's letters the first expected script must have.
+Left out, it is the pack's own (`ar-x-codeswitch`: 0.5, so a reply must be at least half
+Arabic), and none when `script` or `scripts` is given. `0` turns it off.
 
 ## Voices for a voice run
 
 A voice run speaks and hears the pack's tag: a persona written `ar` + `ksa` is spoken as `ar-SA`.
 Opseval does not ship vendor voice ids. The voice comes from `OPSEVAL_TTS_VOICE_MAP`
 ([ADR-0054](../adr/0054-speech-providers.md)), looked up by the persona's `voice.caller_voice`,
-then the pack tag, then the primary language (`ar`), then `default`. STT is asked for the
-primary language (`ar`), which is what OpenAI-compatible transcription takes.
+then the pack tag, then the primary language (`ar`), then `default`. A speech provider (a
+plugin included) is only ever given a BCP-47 tag: a private-use tag (`ar-x-gulf`,
+`ar-x-codeswitch`) becomes its base language (`ar`) unless the pack declares a
+`provider_language`. The built-in STT asks for the primary language (`ar`), which is what
+OpenAI-compatible transcription takes. The preflight canary is spoken in the same language an
+attempt speaks (the profile's `audio.language`, else the first scenario's pack tag).
 
 OpenAI-compatible TTS voices (`alloy`, `nova`, …) are not tied to a language: they read Arabic
 text with whatever accent the model has, usually not a regional one. For a dialect check, use a
@@ -134,6 +163,15 @@ export OPSEVAL_TTS_VOICE_MAP='{"ar-SA": "<your ar-SA voice>", "ar-EG": "<your ar
 ```
 
 Check each mapping by ear before trusting a dialect score, and run the STT check below.
+
+## Adding a pack
+
+A pack is a `LanguagePack` passed to `opseval.langpacks.register` (community packs need the
+native-speaker review below before they are stable). `scripts` is **required**: `register`
+refuses a pack without it, because a guessed default (Latin) would fail every reply of a correct
+agent that writes another script. A code-switching pack also sets `primary_script` and
+`primary_share`, and `mixes`. A pack with a private-use tag may set `provider_language` (a
+plain BCP-47 tag) for speech providers.
 
 ## Promoting a pack to stable
 

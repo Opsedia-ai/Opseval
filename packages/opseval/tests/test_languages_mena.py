@@ -16,6 +16,8 @@ from opseval.langpacks import (
     PACKS,
     by_tag,
     effective_language,
+    in_scripts,
+    letter_scripts,
     lookup,
     resolve,
     voice_language,
@@ -25,7 +27,7 @@ from opseval.models.record import FrameRecord, RunRecord
 from opseval.models.results import ScoreStatus
 from opseval.models.scenario import Scenario, ScorerSpec
 from opseval.scoring import ScoringContext
-from opseval.scoring.deterministic import LanguageScript, in_scripts, letter_scripts
+from opseval.scoring.deterministic import LanguageScript
 from opseval.scoring.judges import LanguageConsistency, PersonaConsistency
 from opseval.simulator import LLMSimulator
 
@@ -285,12 +287,14 @@ def test_the_codeswitch_pack_tells_the_judges_the_mix(profile: SutProfile) -> No
 
 
 def test_voice_code_switching_still_wins_over_the_pack(profile: SutProfile) -> None:
+    """The same languages, as the loader requires (a different mix does not load: see
+    test_languages_review): the scenario's own order is what the judges are told."""
     sc = make_scenario(
         persona={"role": "c", "language": "ar-x-codeswitch"},
         conversation=LLM,
-        voice={"code_switching": ["ar", "fr"], "caller_voice": "v"},
+        voice={"code_switching": ["en", "ar"], "caller_voice": "v"},
     )
-    assert "ar, fr" in _told(sc, profile)[0][1]
+    assert "en, ar" in _told(sc, profile)[0][1]
 
 
 # --- voice --------------------------------------------------------------------------------
@@ -368,8 +372,7 @@ async def test_each_script_is_counted(script: str, text: str) -> None:
 def test_every_script_a_pack_can_name_is_counted() -> None:
     from typing import get_args
 
-    from opseval.langpacks import Script
-    from opseval.scoring.deterministic import SCRIPT_PREFIXES
+    from opseval.langpacks import SCRIPT_PREFIXES, Script
 
     assert set(SCRIPT_PREFIXES) == set(get_args(Script))
 
@@ -390,8 +393,11 @@ async def test_the_default_script_comes_from_the_pack(profile: SutProfile) -> No
     reply = "الطلب ديالك غادي يوصل غدا"
     assert (await _score(arabic, reply)).status is ScoreStatus.PASSED
     assert (await _score(english, reply)).status is ScoreStatus.FAILED
-    out = await _score(mixed, reply, "Your refund is approved", "الـ refund تمام")
+    out = await _score(mixed, reply, "الـ refund حقك approved، بيوصلك خلال يومين")
     assert out.status is ScoreStatus.PASSED and out.details["scripts"] == ["arabic", "latin"]
+    # Mostly Arabic is the pack's rule: an all-English reply is not code-switching.
+    out = await _score(mixed, reply, "Your refund is approved")
+    assert out.status is ScoreStatus.FAILED and out.details["in_script"] == 1
     assert (await _score(mixed, "您的订单")).status is ScoreStatus.FAILED
 
 

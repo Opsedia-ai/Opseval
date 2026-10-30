@@ -3,13 +3,11 @@
 
 from __future__ import annotations
 
-import unicodedata
-from collections import Counter
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from opseval.langpacks import Script, effective_language
+from opseval.langpacks import Script, in_scripts, script_expectation
 from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import (
     SCRIPT_EXHAUSTED,
@@ -57,12 +55,42 @@ class RequiredFieldsParams(NoParams):
     """Dotted paths that must be present and not empty."""
 
 
+ScriptChoice = Literal[
+    "arabic",
+    "latin",
+    "han",
+    "kana",
+    "hangul",
+    "cyrillic",
+    "devanagari",
+    "hebrew",
+    "greek",
+    "thai",
+    "japanese",
+]
+"""A :data:`opseval.langpacks.Script`, or a group of them (``japanese`` = ``han`` + ``kana``)."""
+
+
 class LanguageScriptParams(NoParams):
-    script: Script | None = None
-    """The script the agent should write in; left out, the persona's language pack decides
-    (``ar-x-codeswitch`` accepts Arabic and Latin)."""
+    script: ScriptChoice | None = None
+    """The script the agent should write in (``japanese``: kanji and kana together); left
+    out, with ``scripts`` left out too, the persona's language pack decides
+    (``ar-x-codeswitch`` accepts Arabic and Latin, mostly Arabic)."""
+    scripts: list[Script] | None = Field(default=None, min_length=1)
+    """Several scripts a reply may mix, counted together (``[han, kana]``); not with
+    ``script``."""
     min_fraction: float | None = Field(default=None, ge=0, le=1)
     """Share of agent messages that must be in the script; the threshold when unset."""
+    min_primary_share: float | None = Field(default=None, ge=0, le=1)
+    """The share of a reply's letters the first expected script must have (the pack's
+    primary script when the pack decides). Unset: the pack's own floor (``ar-x-codeswitch``:
+    0.5), none when ``script``/``scripts`` is given."""
+
+    @model_validator(mode="after")
+    def _one_way(self) -> LanguageScriptParams:
+        if self.script is not None and self.scripts:
+            raise ValueError("give script or scripts, not both")
+        return self
 
 
 def _spoken_unheard(frame: FrameRecord) -> bool:
@@ -413,43 +441,6 @@ class RequiredFields(Scorer):
         )
 
 
-SCRIPT_PREFIXES: dict[str, tuple[str, ...]] = {
-    "arabic": ("ARABIC",),
-    "latin": ("LATIN", "FULLWIDTH LATIN"),
-    "han": ("CJK",),
-    "kana": ("HIRAGANA", "KATAKANA", "HALFWIDTH KATAKANA"),
-    "hangul": ("HANGUL", "HALFWIDTH HANGUL"),
-    "cyrillic": ("CYRILLIC",),
-    "devanagari": ("DEVANAGARI",),
-    "hebrew": ("HEBREW",),
-    "greek": ("GREEK",),
-    "thai": ("THAI",),
-}
-"""Each script ``output.language_script`` counts, by the start of a letter's Unicode name."""
-
-
-def letter_scripts(text: str) -> Counter[str]:
-    """How many letters of each script ``text`` has (``other`` for scripts not listed).
-    Digits, punctuation, marks and spaces are not letters, so they never count."""
-    counts: Counter[str] = Counter()
-    for ch in text:
-        if unicodedata.category(ch)[0] != "L":
-            continue
-        name = unicodedata.name(ch, "")
-        script = next((k for k, p in SCRIPT_PREFIXES.items() if name.startswith(p)), "other")
-        counts[script] += 1
-    return counts
-
-
-def in_scripts(text: str, scripts: tuple[str, ...]) -> bool:
-    """Whether the expected scripts, together, have more letters than any other script. A
-    message with no letters is not in the script: a blank reply is not an answer in it."""
-    counts = letter_scripts(text)
-    want = sum(counts[s] for s in scripts)
-    other = max((n for s, n in counts.items() if s not in scripts), default=0)
-    return want > other
-
-
 @register
 class LanguageScript(Scorer):
     id = "output.language_script"
@@ -460,33 +451,31 @@ class LanguageScript(Scorer):
     axis = Axis.OUTPUT
     description = (
         "Share of agent messages written mainly in the expected script (arabic, latin, han, "
-        "kana, hangul, cyrillic, devanagari, hebrew, greek or thai); the persona's language "
-        "pack gives it when the scenario does not."
+        "kana, hangul, cyrillic, devanagari, hebrew, greek or thai; japanese = han + kana, or a "
+        "list as scripts); the persona's language pack gives it when the scenario does not."
     )
 
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
-        script = spec.params.get("script")
-        minimum = spec.params.get("min_fraction")
-        if minimum is None:  # left out or null: the threshold, as Params documents
-            minimum = spec.threshold
-        if not isinstance(minimum, int | float):
-            return self.infra(spec, "BAD_PARAMS: min_fraction must be a number")
-        if script is None:
-            spoken = effective_language(
-                ctx.scenario.persona, scripted=not ctx.scenario.conversation.llm_persona
+        try:
+            params = LanguageScriptParams.model_validate(spec.params)
+        except ValidationError as exc:
+            return self.infra(spec, f"BAD_PARAMS: {exc.errors()[0]['msg']}")
+        minimum = spec.threshold if params.min_fraction is None else params.min_fraction
+        scenario = ctx.scenario if ctx is not None else None
+        expected = script_expectation(
+            scenario.persona if scenario is not None else None,
+            scripted=scenario is None or not scenario.conversation.llm_persona,
+            script=params.script,
+            scripts=params.scripts,
+            min_primary_share=params.min_primary_share,
+            spoken=ctx.spoken() if scenario is not None else None,
+        )
+        if expected is None:
+            # The loader refuses this (catalogue.check_references); a record re-scored
+            # against an older scenario may still reach it: not measured, never a guess.
+            return self.infra(
+                spec, "BAD_PARAMS: no language pack gives a default script; give params.script"
             )
-            pack = spoken.pack
-            if pack is None:
-                return self.infra(
-                    spec,
-                    f"BAD_PARAMS: no language pack for {spoken.label!r}, so no default "
-                    "script; give params.script",
-                )
-            scripts: tuple[str, ...] = pack.scripts
-        elif script in SCRIPT_PREFIXES:
-            scripts = (script,)
-        else:
-            return self.infra(spec, f"BAD_PARAMS: script must be one of {sorted(SCRIPT_PREFIXES)}")
         # Markers are stripped because they are the harness's own edit and they are Latin
         # script (FR-REC-03): left in, a redaction inside an Arabic reply could push it
         # under the threshold and mark the agent down for something the harness did to the
@@ -496,11 +485,26 @@ class LanguageScript(Scorer):
         texts = [strip_markers(f.text) for f in record.received() if f.text]
         if not texts:
             return self.infra(spec, "NOT_MEASURABLE: the agent sent no text")
-        ok = [in_scripts(t, scripts) for t in texts]
+        ok = [
+            in_scripts(
+                t, expected.scripts, primary=expected.primary, primary_share=expected.primary_share
+            )
+            for t in texts
+        ]
         fraction = sum(ok) / len(ok)
         spec_eff = spec.model_copy(update={"threshold": float(minimum)})
+        extra: dict[str, Any] = {}
+        if expected.primary is not None:
+            extra["primary"] = {"script": expected.primary, "min_share": expected.primary_share}
+        if expected.source != "params":
+            extra["scripts_from"] = {"pack": expected.pack, "stand_in": expected.source != "pack"}
         return self.result(
-            spec_eff, fraction, messages=len(texts), in_script=sum(ok), scripts=list(scripts)
+            spec_eff,
+            fraction,
+            messages=len(texts),
+            in_script=sum(ok),
+            scripts=list(expected.scripts),
+            **extra,
         )
 
 

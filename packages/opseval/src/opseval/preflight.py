@@ -36,6 +36,7 @@ from opseval.errors import (
     SttRequestError,
     TtsRequestError,
 )
+from opseval.langpacks import primary_subtag
 from opseval.models.preflight import CheckStatus, HealthCheck, PreflightReport
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario
@@ -324,7 +325,7 @@ class Canary:
 def canary_phrase(language: str) -> tuple[str, str]:
     """The canary phrase for a scenario language and the language it is in: the pack's own
     phrase (``ar-EG`` uses ``ar``), else English with ``en``."""
-    primary = language.split("-")[0].split("_")[0].lower()
+    primary = primary_subtag(language)
     if primary in CANARY_PHRASES:
         return CANARY_PHRASES[primary], primary
     return CANARY_PHRASES["en"], "en"
@@ -368,6 +369,10 @@ async def _speak_canary(
         )
         return check, _operator_canary(settings)
     phrase, spoken_in = canary_phrase(language)
+    # In the scenario's own voice language (the pack tag, as an attempt speaks it) when the
+    # phrase is in that language, so the voice map is checked as the run will use it.
+    if primary_subtag(language) == spoken_in:
+        spoken_in = language
     try:
         audio = await tts.synthesize(phrase, voice=None, language=spoken_in)
     except TtsRequestError as exc:
