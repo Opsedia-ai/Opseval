@@ -1128,31 +1128,113 @@ def serve(
         ),
     ] = None,
     task: TaskRunOpt = "default",
+    public_url: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(
+            "--public-url",
+            help="Accounts mode (ADR-0050): the https address people reach this server at. "
+            "Default: OPSEVAL_PUBLIC_URL.",
+        ),
+    ] = None,
+    trusted_proxy: Annotated[
+        Optional[list[str]],  # noqa: UP045
+        typer.Option(
+            "--trusted-proxy",
+            help="Address or CIDR of a reverse proxy whose forwarded headers are believed "
+            "(repeatable). Default: OPSEVAL_TRUSTED_PROXIES.",
+        ),
+    ] = None,
+    tls_cert: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option("--tls-cert", help="TLS certificate (PEM) to serve https directly."),
+    ] = None,
+    tls_key: Annotated[
+        Optional[Path],  # noqa: UP045
+        typer.Option("--tls-key", help="The certificate's private key (PEM)."),
+    ] = None,
 ) -> None:
-    """Serve the HTTP API the web console talks to (loopback only, token required)."""
+    """Serve the HTTP API the web console talks to.
+
+    Shared-token mode (no database, no public URL): loopback only, one token (ADR-0031).
+    Accounts mode (a database or --public-url): users, roles and API keys (ADR-0050).
+    """
     try:
         import uvicorn
 
         from opseval.server import create_app
-        from opseval.server.app import LOOPBACK_NAMES, host_name
+        from opseval.server.access import PublicUrl, check_bind, host_name
+        from opseval.server.access import parse_proxies as _proxies
     except ImportError as exc:  # pragma: no cover - depends on the extra
         typer.secho("the API needs the extra: pip install 'opseval[serve]'", fg="red", err=True)
         raise typer.Exit(EXIT_HARNESS) from exc
     from opseval.demo import catalogue_dir
 
-    if host_name(host) not in LOOPBACK_NAMES:
-        typer.secho(
-            f"configuration error: opseval serve binds to loopback only, not {host!r}. It can "
-            "start runs with your agent token and LLM keys; to reach it from elsewhere, use "
-            "an SSH tunnel (ADR-0031).",
-            fg="red",
-            err=True,
+    settings = Settings()
+    url = public_url or settings.public_url
+    accounts_mode = bool(database_url or settings.database_url or url)
+
+    def refuse(message: str) -> typer.Exit:
+        typer.secho(f"configuration error: {message}", fg="red", err=True)
+        return typer.Exit(EXIT_HARNESS)
+
+    if (tls_cert is None) != (tls_key is None):
+        raise refuse("--tls-cert and --tls-key go together")
+    try:
+        parsed = PublicUrl.parse(url) if url else None
+        proxies = _proxies(trusted_proxy or settings.trusted_proxies)
+        check_bind(
+            host,
+            accounts=accounts_mode,
+            public_url=parsed,
+            tls=tls_cert is not None,
+            proxies=proxies,
         )
-        raise typer.Exit(EXIT_HARNESS)
+    except ConfigError as exc:
+        raise refuse(str(exc)) from exc
+    if accounts_mode and not (database_url or settings.database_url):
+        raise refuse(
+            "accounts mode (--public-url) keeps users, roles and keys in the database: set "
+            "OPSEVAL_DATABASE_URL and --project org/project"
+        )
+    if accounts_mode and project is None:
+        raise refuse(
+            "a database is configured, so opseval serve runs in accounts mode (ADR-0050), and "
+            "users and roles belong to a project: add --project org/project (and --task)"
+        )
     root = catalogue or catalogue_dir()
     prof = profile or str(root / "profile.yaml")
-    settings = Settings()
-    store = _server_store(settings, database_url, project, task)
+    access = None
+    store: DbRunStore | None
+    if accounts_mode:
+        assert project is not None
+        try:
+            store = open_run_store(
+                server_settings(settings, database_url),
+                project=project,
+                task=task,
+                task_reads=True,
+            )
+        except ConfigError as exc:
+            raise refuse(str(exc)) from exc
+        try:
+            from opseval.accounts.setup import access_config
+
+            access = access_config(
+                settings,
+                store,
+                project=project,
+                task=task or "default",
+                public_url=url,
+                trusted_proxies=trusted_proxy,
+            )
+        except ImportError as exc:  # pragma: no cover - depends on the extra
+            store.close()
+            raise refuse("accounts mode needs the extra: pip install 'opseval[server]'") from exc
+        except ConfigError as exc:
+            store.close()
+            raise refuse(str(exc)) from exc
+    else:
+        store = _server_store(settings, database_url, project, task)
     try:
         api = create_app(
             store=store,
@@ -1163,22 +1245,27 @@ def serve(
             target=target,
             read_only=catalogue is None,
             allow_commit=allow_commit,
+            access=access,
         )
     except ConfigError as exc:
-        typer.secho(f"configuration error: {exc}", fg="red", err=True)
-        raise typer.Exit(EXIT_HARNESS) from exc
-    here = f"http://{'[::1]' if host_name(host) == '::1' else host}:{port}"
+        raise refuse(str(exc)) from exc
+    scheme = "https" if tls_cert is not None else "http"
+    here = f"{scheme}://{'[::1]' if host_name(host) == '::1' else host}:{port}"
     typer.echo(f"Opseval API on {here}/api/v1")
     if console_url is None:
         if api.state.console is not None:
-            console_url = here
+            console_url = parsed.origin if parsed is not None else here
         else:
             console_url = "http://localhost:5173"
             typer.echo(
                 "No built console found: run `cd packages/console && npm ci && npm run build` "
                 "(or set OPSEVAL_CONSOLE_DIR) to have it served here; meanwhile use `npm run dev`."
             )
-    if settings.serve_token is not None:
+    if access is not None:
+        served = access.accounts.served
+        typer.echo(f"Accounts: {served.project_ref} task {served.task_slug} (ADR-0050)")
+        typer.echo(f"Console:  {console_url}/login   (no shared token: sign in, or use an API key)")
+    elif settings.serve_token is not None:
         # A configured token is long-lived: never echo it into logs or scrollback.
         typer.echo(f"Console:  {console_url}/#token=<OPSEVAL_SERVE_TOKEN>")
     else:
@@ -1190,7 +1277,17 @@ def serve(
     if allow_commit:
         typer.secho("Runs may perform the irreversible outcome (--allow-commit).", fg="yellow")
     try:
-        uvicorn.run(api, host=host, port=port, log_level="info")
+        uvicorn.run(
+            api,
+            host=host,
+            port=port,
+            log_level="info",
+            # Forwarded headers are read by the app, from trusted proxies only (ADR-0050):
+            # uvicorn's own handling would believe them from loopback.
+            proxy_headers=False,
+            ssl_certfile=str(tls_cert) if tls_cert else None,
+            ssl_keyfile=str(tls_key) if tls_key else None,
+        )
     finally:
         close = getattr(store, "close", None)
         if callable(close):

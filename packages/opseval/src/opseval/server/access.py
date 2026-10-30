@@ -171,12 +171,46 @@ def view(request: Request, config: AccessConfig | None) -> View | Denial:
     return View(address, public.origin, https)
 
 
+def check_bind(
+    host: str,
+    *,
+    accounts: bool,
+    public_url: PublicUrl | None,
+    tls: bool,
+    proxies: list[Network],
+) -> None:
+    """Refuse (``ConfigError``, exit 3) a way of serving that would put plain HTTP, or a
+    shared token, on a network (ADR-0050): the bind rule makes it impossible, not merely
+    discouraged."""
+    loopback = host_name(host) in LOOPBACK_NAMES
+    if not accounts and not loopback:
+        raise ConfigError(
+            f"opseval serve binds to loopback only, not {host!r}, without accounts: it can "
+            "start runs with your agent token and LLM keys. To reach it from elsewhere, use "
+            "an SSH tunnel (ADR-0031), or serve with a database and --public-url https://… "
+            "(ADR-0050)."
+        )
+    if proxies and public_url is None:
+        raise ConfigError("--trusted-proxy needs --public-url: the host the proxy serves")
+    if public_url is not None and public_url.scheme == "https" and not (tls or proxies):
+        raise ConfigError(
+            f"--public-url {public_url.origin} is https: give --tls-cert and --tls-key, or "
+            "--trusted-proxy for the proxy that terminates TLS"
+        )
+    if not loopback and (public_url is None or public_url.scheme != "https"):
+        raise ConfigError(
+            f"binding {host!r} serves beyond this machine: it needs --public-url https://… "
+            "and either --tls-cert/--tls-key or --trusted-proxy"
+        )
+
+
 __all__ = [
     "HSTS",
     "LOOPBACK_NAMES",
     "AccessConfig",
     "PublicUrl",
     "View",
+    "check_bind",
     "host_name",
     "parse_proxies",
     "view",
