@@ -407,7 +407,7 @@ ProjectRunOpt = Annotated[
     typer.Option(
         "--project",
         help="Server mode: org/project. Runs go to the database (OPSEVAL_DATABASE_URL) and "
-        "the blob store, not to a folder (ADR-0051).",
+        "the blob store, not to a folder (ADR-0051). With --server: the server's project.",
     ),
 ]
 TaskRunOpt = Annotated[str, typer.Option("--task", help="Server mode: the project's task.")]
@@ -553,7 +553,7 @@ def run(
     if server is not None:
         if database_url:
             _config_error("--server and --database-url: report to a server, or write to a database")
-        if project is None:
+        if not project:
             _config_error("--server needs --project org/project (and --task, default 'default')")
         raise typer.Exit(
             _execute_remote(

@@ -8,6 +8,7 @@ import type { Gate, RunDetail as Detail, RunProgress, TestResult } from "../lib/
 import Transcript from "../components/Transcript";
 import { UsageLine } from "../components/UsageFigures";
 import { ProgressLine, ProgressTable } from "../components/Progress";
+import { CiOrigin } from "../components/CiOrigin";
 import { AreaPill, Callout, Card, Data, GatePill, Mono, NotMeasured, Page, PageHeader, Pill, ResultBar, Stat, cx } from "../components/ui";
 
 const tone = (s: TestResult["status"]) => (s === "passed" ? "pass" : s === "failed" ? "fail" : "mute");
@@ -103,7 +104,7 @@ export default function RunDetail() {
   const flight = pending ? (res.error?.detail as { progress?: RunProgress | null } | undefined)?.progress ?? undefined : undefined;
   return (
     <>
-      <PageHeader title="Run" sub={<Mono>{id}</Mono>} aside={res.data && <GatePill gate={gate} />} />
+      <PageHeader title="Run" sub={<><Mono>{id}</Mono>{res.data && <> <CiOrigin run={res.data.summary} detail /></>}</>} aside={res.data && <GatePill gate={gate} />} />
       <Page>
         {pending ? (<>
           <Callout>This run is still in progress. Verdicts appear when it ends; this page refreshes on its own.</Callout>
