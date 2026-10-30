@@ -25,7 +25,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -129,39 +131,124 @@ def load_result_at(folder: Path) -> SuiteResult:
     return SuiteResult.model_validate_json((folder / "result.json").read_text("utf-8"))
 
 
+AUDIO_MARKER = "PRUNED.json"
+"""``audio/PRUNED.json``: written by retention before it removes a run's audio (ADR-0053).
+The one name every reader uses; retention does not import the voice package."""
+
+
+@dataclass(frozen=True)
+class PrunedMarker:
+    """What retention left in place of a run's audio."""
+
+    pruned_at: datetime | None
+    readable: bool = True
+    """``False``: the marker is there but cannot be read. The audio still counts as pruned
+    (a reader never plays around a marker, and never calls a pruned run's audio missing)."""
+
+    @property
+    def note(self) -> str:
+        """In words, the same in the player, the CLI and the report."""
+        if not self.readable:
+            return "audio pruned (marker unreadable)"
+        if self.pruned_at is not None:
+            return f"audio pruned on {self.pruned_at.date().isoformat()}"
+        return "audio pruned by retention"
+
+
+def read_pruned_marker(run_dir: Path) -> PrunedMarker | None:
+    """The run folder's audio prune marker, or ``None`` when there is none. The one parser
+    the player, the CLI and the report share, so they never disagree on a run."""
+    path = run_dir / "audio" / AUDIO_MARKER
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (FileNotFoundError, NotADirectoryError):
+        return PrunedMarker(None, readable=False) if os.path.lexists(path) else None
+    except (OSError, ValueError):
+        return PrunedMarker(None, readable=False)
+    if not isinstance(data, dict):
+        return PrunedMarker(None, readable=False)
+    at = data.get("pruned_at")
+    if isinstance(at, str):
+        try:
+            return PrunedMarker(datetime.fromisoformat(at))
+        except ValueError:
+            pass
+    return PrunedMarker(None)
+
+
+class AudioPathRefused(ValueError):
+    """An audio path that leaves the run's ``audio/`` (a tampered record, or a hostile id)."""
+
+
+@runtime_checkable
+class RunAudio(Protocol):
+    """One run's recorded audio (ADR-0053), addressed by the relative path an
+    :class:`~opseval.models.record.AudioRef` names (``audio/<test>/attempt<N>/...``).
+
+    A path outside ``audio/`` raises :class:`AudioPathRefused`; nothing is ever read or
+    written there. A missing file is ``None`` from :meth:`size` and ``FileNotFoundError``
+    from :meth:`read`."""
+
+    run_id: str
+
+    def write(self, relative: str, data: bytes) -> None: ...
+    def size(self, relative: str) -> int | None: ...
+    def read(self, relative: str) -> bytes: ...
+    def pruned(self) -> PrunedMarker | None: ...
+    def count(self) -> int | None: ...
+    def prune(self, *, at: datetime, older_than_days: int) -> int: ...
+    def location(self) -> str: ...
+
+
 @runtime_checkable
 class RunStore(Protocol):
-    """What the runner, rescore, calibrate, prune and the console need from storage (ADR-0005).
+    """What the runner, rescore, calibrate, prune and the console need from storage (ADR-0005,
+    ADR-0051).
 
-    :class:`FileStore` (run folders on disk) is the one implementation today. A server-mode
-    store (a database plus an object store) implements the same contract, so nothing above
-    it changes. Every method names a run by id; a reader refuses a layout it does not know.
+    Path-free: every method names a run by id, writes return nothing (or an opaque ref), and
+    reads return models, text or bytes. :class:`FileStore` (run folders on disk) and the
+    server-mode database store implement it, so nothing above it knows which one it has. A
+    reader refuses a layout it does not know (:class:`UnknownLayout`).
     """
 
+    def where(self) -> str: ...
+    def run_ids(self) -> list[str]: ...
+    def exists(self, run_id: str) -> bool: ...
+    def has_result(self, run_id: str) -> bool: ...
+    def has_error(self, run_id: str) -> bool: ...
+    def deletable(self, run_id: str) -> bool: ...
+    def delete_run(self, run_id: str) -> bool: ...
     def layout(self, run_id: str) -> str: ...
     def layout_known(self, run_id: str) -> bool: ...
     def check_layout(self, run_id: str) -> None: ...
-    def write_manifest(self, run_id: str, manifest: dict[str, Any]) -> Path: ...
+    def write_manifest(self, run_id: str, manifest: dict[str, Any]) -> None: ...
     def load_manifest(self, run_id: str) -> dict[str, Any]: ...
-    def save_profile(self, run_id: str, profile: SutProfile) -> Path: ...
-    def save_scenario(self, run_id: str, scenario: Scenario) -> Path: ...
+    def save_profile(self, run_id: str, profile: SutProfile) -> None: ...
+    def save_scenario(self, run_id: str, scenario: Scenario) -> None: ...
     def load_snapshot(self, run_id: str) -> tuple[SutProfile, dict[str, Scenario]] | None: ...
-    def save_record(self, record: RunRecord) -> Path: ...
+    def save_record(self, record: RunRecord) -> str: ...
     def load_record(self, run_id: str, test_id: str, attempt: int) -> RunRecord | None: ...
     def load_records(self, run_id: str) -> list[RunRecord]: ...
-    def save_progress(self, run_id: str, progress: RunProgress) -> Path: ...
+    def save_progress(self, run_id: str, progress: RunProgress) -> None: ...
     def load_progress(self, run_id: str) -> RunProgress | None: ...
     def request_cancel(self, run_id: str, *, by: str) -> bool: ...
     def cancel_requested(self, run_id: str) -> bool: ...
-    def save_error(self, run_id: str, error: dict[str, Any]) -> Path: ...
+    def save_error(self, run_id: str, error: dict[str, Any]) -> None: ...
     def load_error(self, run_id: str) -> dict[str, Any] | None: ...
-    def save_result(self, result: SuiteResult) -> Path: ...
+    def save_result(self, result: SuiteResult) -> None: ...
     def load_result(self, run_id: str) -> SuiteResult: ...
-    def save_report(self, run_id: str, html: str) -> Path: ...
-    def save_junit(self, run_id: str, xml: str) -> Path: ...
+    def finished_results(self) -> list[SuiteResult]: ...
+    def changed_at(self, run_id: str, rescore: str | None = None) -> float | None: ...
+    def save_report(self, run_id: str, html: str) -> None: ...
+    def load_report(self, run_id: str) -> str | None: ...
+    def save_junit(self, run_id: str, xml: str) -> None: ...
+    def load_junit(self, run_id: str) -> str | None: ...
     def save_rescore(
         self, run_id: str, stamp: str, result: SuiteResult, html: str, xml: str
-    ) -> Path: ...
+    ) -> str: ...
+    def rescores(self, run_id: str) -> list[str]: ...
+    def load_rescore(self, run_id: str, stamp: str) -> SuiteResult: ...
+    def audio(self, run_id: str) -> RunAudio: ...
 
 
 def process_gone(manifest: dict[str, Any]) -> bool:
@@ -183,7 +270,125 @@ def process_gone(manifest: dict[str, Any]) -> bool:
     return False
 
 
+RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+"""The run ids a store deletes: the same names the console accepts as run ids."""
+RESCORE_PREFIX = "rescore-"
+
+
+def _audio_files(folder: Path) -> list[Path] | None:
+    """The files under a run's ``audio/``, marker aside; ``None`` when ``audio/`` is not a
+    plain folder of ours (absent, or a link: never followed)."""
+    audio = folder / "audio"
+    if audio.is_symlink() or not audio.is_dir():
+        return None
+    found: list[Path] = []
+    for root, dirs, names in os.walk(audio, followlinks=False):
+        here = Path(root)
+        found.extend(here / n for n in names if not (here == audio and n == AUDIO_MARKER))
+        dirs[:] = [d for d in dirs if not (here / d).is_symlink()]
+    return found
+
+
+class FileRunAudio:
+    """A run folder's ``audio/`` (ADR-0053). Nothing is read or written outside it, links
+    included."""
+
+    def __init__(self, folder: Path, run_id: str | None = None) -> None:
+        self.folder = folder
+        self.run_id = run_id if run_id is not None else folder.name
+
+    def _path(self, relative: str) -> Path:
+        path = self.folder / relative
+        root = (self.folder / "audio").resolve()
+        if root not in path.resolve().parents:
+            raise AudioPathRefused(f"{relative} leaves the run folder's audio/")
+        return path
+
+    def write(self, relative: str, data: bytes) -> None:
+        path = self._path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+
+    def size(self, relative: str) -> int | None:
+        path = self._path(relative)
+        try:
+            return path.stat().st_size if path.is_file() else None
+        except OSError:
+            return None
+
+    def read(self, relative: str) -> bytes:
+        return self._path(relative).read_bytes()
+
+    def pruned(self) -> PrunedMarker | None:
+        return read_pruned_marker(self.folder)
+
+    def count(self) -> int | None:
+        """How many audio files the run keeps (the marker aside); ``None`` when there is no
+        plain ``audio/`` folder."""
+        files = _audio_files(self.folder)
+        return None if files is None else len(files)
+
+    def prune(self, *, at: datetime, older_than_days: int) -> int:
+        """Empty ``audio/``: the marker first, then the files, so a prune stopped part-way
+        still reads as pruned. Returns how many files went; raises ``OSError``."""
+        files = _audio_files(self.folder)
+        if not files:
+            return 0
+        audio = self.folder / "audio"
+        marker = audio / AUDIO_MARKER
+        earlier: list[object] = []
+        try:
+            previous = json.loads(marker.read_text("utf-8"))
+            if isinstance(previous, dict) and isinstance(previous.get("history"), list):
+                earlier = previous["history"]
+        except (OSError, ValueError):
+            pass
+        body = {
+            "pruned_at": at.isoformat(),
+            "older_than_days": older_than_days,
+            "files": len(files),
+            "history": [*earlier, {"pruned_at": at.isoformat(), "files": len(files)}],
+        }
+        tmp = marker.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(body, indent=2), encoding="utf-8")
+        os.replace(tmp, marker)
+        for path in files:
+            path.unlink(missing_ok=True)
+        for sub in sorted((p for p in audio.rglob("*") if p.is_dir()), reverse=True):
+            if not sub.is_symlink() and not any(sub.iterdir()):
+                sub.rmdir()
+        return len(files)
+
+    def location(self) -> str:
+        return str(self.folder)
+
+
+def _remove_run(folder: Path) -> None:
+    """Delete one run folder in an order that is safe to stop at any point.
+
+    Everything else goes first, then the manifest, then the result or error file. If it
+    stops part-way, the folder still reads as a finished run, or no longer as a run at
+    all; never as one that is still going.
+    """
+    markers = ("manifest.json", "result.json", "error.json")
+    for child in folder.iterdir():
+        if child.name in markers:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    for name in markers:
+        (folder / name).unlink(missing_ok=True)
+    folder.rmdir()
+
+
 class FileStore:
+    """Run folders on disk (ADR-0005). The only class that knows a run is a folder: nothing
+    outside this module builds a path into it (``tests/test_store_contract.py``)."""
+
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
@@ -194,7 +399,46 @@ class FileStore:
             raise ValueError(f"not a run id: {run_id!r}")
         return self.root / name
 
-    def save_error(self, run_id: str, error: dict[str, Any]) -> Path:
+    def where(self) -> str:
+        return str(self.root)
+
+    def run_ids(self) -> list[str]:
+        """Every folder in the reports folder, sorted: a reader decides which are runs."""
+        if not self.root.is_dir():
+            return []
+        return sorted(f.name for f in self.root.iterdir() if f.is_dir())
+
+    def exists(self, run_id: str) -> bool:
+        """A run folder: it has a manifest."""
+        return (self.run_dir(run_id) / "manifest.json").is_file()
+
+    def has_result(self, run_id: str) -> bool:
+        return (self.run_dir(run_id) / "result.json").is_file()
+
+    def has_error(self, run_id: str) -> bool:
+        return (self.run_dir(run_id) / "error.json").is_file()
+
+    def deletable(self, run_id: str) -> bool:
+        """A plain folder directly inside the reports folder, named as a run: never a link,
+        never anything a prune would have to guess about."""
+        if not RUN_NAME.match(run_id):
+            return False
+        folder = self.root / run_id
+        return (
+            not folder.is_symlink()
+            and folder.is_dir()
+            and folder.resolve().parent == self.root.resolve()
+        )
+
+    def delete_run(self, run_id: str) -> bool:
+        """Delete a run's folder; ``False`` when it is not :meth:`deletable`. Raises
+        ``OSError`` when it could not be (fully) removed."""
+        if not self.deletable(run_id):
+            return False
+        _remove_run(self.root / run_id)
+        return True
+
+    def save_error(self, run_id: str, error: dict[str, Any]) -> None:
         """Record that a run could not be carried out (a harness or configuration error).
 
         It takes the place of ``result.json``, so a run that failed to start or crashed is
@@ -203,7 +447,6 @@ class FileStore:
         """
         path = self.run_dir(run_id) / "error.json"
         _atomic_write(path, json.dumps(error, indent=2, ensure_ascii=False, default=str))
-        return path
 
     def load_error(self, run_id: str) -> dict[str, Any] | None:
         try:
@@ -229,11 +472,10 @@ class FileStore:
                 "upgrade Opseval to read it"
             )
 
-    def write_manifest(self, run_id: str, manifest: dict[str, Any]) -> Path:
+    def write_manifest(self, run_id: str, manifest: dict[str, Any]) -> None:
         path = self.run_dir(run_id) / "manifest.json"
         body = {"layout": LAYOUT, **manifest}
         _atomic_write(path, json.dumps(body, indent=2, ensure_ascii=False, default=str))
-        return path
 
     def load_manifest(self, run_id: str) -> dict[str, Any]:
         """The run's manifest, or ``{}`` if it is missing or unreadable.
@@ -246,15 +488,12 @@ class FileStore:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def save_profile(self, run_id: str, profile: SutProfile) -> Path:
-        path = self.run_dir(run_id) / "profile.json"
-        _atomic_write(path, profile.model_dump_json(indent=2))
-        return path
+    def save_profile(self, run_id: str, profile: SutProfile) -> None:
+        _atomic_write(self.run_dir(run_id) / "profile.json", profile.model_dump_json(indent=2))
 
-    def save_scenario(self, run_id: str, scenario: Scenario) -> Path:
+    def save_scenario(self, run_id: str, scenario: Scenario) -> None:
         path = self.run_dir(run_id) / "scenarios" / f"{SAFE_ID.sub('_', scenario.id)}.json"
         _atomic_write(path, scenario.model_dump_json(indent=2, by_alias=True))
-        return path
 
     def load_snapshot(self, run_id: str) -> tuple[SutProfile, dict[str, Scenario]] | None:
         """The profile and scenarios exactly as run, or ``None`` for runs without one.
@@ -270,17 +509,16 @@ class FileStore:
             return None
         current = profile_path
         try:
-            profile = SutProfile.model_validate_json(profile_path.read_text("utf-8"))
-            scenarios = []
+            texts = [(profile_path.name, profile_path.read_text("utf-8"))]
             for current in sorted((folder / "scenarios").glob("*.json")):
-                scenarios.append(Scenario.model_validate_json(current.read_text("utf-8")))
-        except (OSError, ValidationError) as exc:
+                texts.append((current.name, current.read_text("utf-8")))
+        except OSError as exc:
             raise ConfigError(
                 f"the scenarios and profile saved with run {run_id!r} no longer load "
                 f"({current.name}: {_first_error(exc)}); pass --catalogue and --profile to "
                 "score it against the current files"
             ) from exc
-        return profile, {s.id: s for s in scenarios}
+        return parse_snapshot(run_id, texts)
 
     def load_result(self, run_id: str) -> SuiteResult:
         return load_result_at(self.run_dir(run_id))
@@ -299,11 +537,23 @@ class FileStore:
                 continue  # a half-written or foreign folder is not a run
         return sorted(out, key=lambda r: r.started_at, reverse=True)
 
-    def save_record(self, record: RunRecord) -> Path:
+    def changed_at(self, run_id: str, rescore: str | None = None) -> float | None:
+        """When the run's result (or one re-score of it) was last written; ``None`` when there
+        is none. A cache keyed on it sees every rewrite."""
+        folder = self.run_dir(run_id)
+        if rescore is not None:
+            folder = folder / f"{RESCORE_PREFIX}{rescore}"
+        try:
+            return (folder / "result.json").stat().st_mtime
+        except OSError:
+            return None
+
+    def save_record(self, record: RunRecord) -> str:
+        """Write one attempt's record; returns its ref (here, the file's path as text)."""
         name = f"{SAFE_ID.sub('_', record.test_id)}__attempt{record.attempt_index}.json"
         path = self.run_dir(record.run_id) / "records" / name
         _atomic_write(path, record.model_dump_json(indent=2))
-        return path
+        return str(path)
 
     def request_cancel(self, run_id: str, *, by: str) -> bool:
         """Ask a running run to stop (ADR-0035). ``False`` if it was already asked.
@@ -322,10 +572,8 @@ class FileStore:
     def cancel_requested(self, run_id: str) -> bool:
         return (self.run_dir(run_id) / "cancel.json").is_file()
 
-    def save_progress(self, run_id: str, progress: RunProgress) -> Path:
-        path = self.run_dir(run_id) / "progress.json"
-        _atomic_write(path, progress.model_dump_json(indent=2))
-        return path
+    def save_progress(self, run_id: str, progress: RunProgress) -> None:
+        _atomic_write(self.run_dir(run_id) / "progress.json", progress.model_dump_json(indent=2))
 
     def load_progress(self, run_id: str) -> RunProgress | None:
         """The runner's progress, or ``None`` if it wrote none (or it cannot be read)."""
@@ -355,29 +603,68 @@ class FileStore:
         ]
         return sorted(records, key=lambda r: (r.test_id, r.attempt_index))
 
-    def save_result(self, result: SuiteResult) -> Path:
-        path = self.run_dir(result.run_id) / "result.json"
-        _atomic_write(path, result.model_dump_json(indent=2))
-        return path
+    def save_result(self, result: SuiteResult) -> None:
+        _atomic_write(self.run_dir(result.run_id) / "result.json", result.model_dump_json(indent=2))
 
-    def save_report(self, run_id: str, html: str) -> Path:
-        path = self.run_dir(run_id) / "report.html"
-        _atomic_write(path, html)
-        return path
+    def _text(self, run_id: str, name: str) -> str | None:
+        try:
+            return (self.run_dir(run_id) / name).read_text("utf-8")
+        except OSError:
+            return None
+
+    def save_report(self, run_id: str, html: str) -> None:
+        _atomic_write(self.run_dir(run_id) / "report.html", html)
+
+    def load_report(self, run_id: str) -> str | None:
+        return self._text(run_id, "report.html")
+
+    def save_junit(self, run_id: str, xml: str) -> None:
+        _atomic_write(self.run_dir(run_id) / "junit.xml", xml)
+
+    def load_junit(self, run_id: str) -> str | None:
+        return self._text(run_id, "junit.xml")
 
     def save_rescore(
         self, run_id: str, stamp: str, result: SuiteResult, html: str, xml: str
-    ) -> Path:
-        """Write a re-scored result next to the original run; never over it."""
-        folder = self.run_dir(run_id) / f"rescore-{stamp}"
+    ) -> str:
+        """Write a re-scored result next to the original run; never over it. Returns the
+        re-score's stamp, its name in :meth:`rescores`."""
+        folder = self.run_dir(run_id) / f"{RESCORE_PREFIX}{stamp}"
         if folder.exists():
             raise FileExistsError(folder)
         _atomic_write(folder / "report.html", html)
         _atomic_write(folder / "junit.xml", xml)
         _atomic_write(folder / "result.json", result.model_dump_json(indent=2))  # last
-        return folder
+        return stamp
 
-    def save_junit(self, run_id: str, xml: str) -> Path:
-        path = self.run_dir(run_id) / "junit.xml"
-        _atomic_write(path, xml)
-        return path
+    def rescores(self, run_id: str) -> list[str]:
+        """The stamps of the run's finished re-scores, oldest first."""
+        found = sorted(self.run_dir(run_id).glob(f"{RESCORE_PREFIX}*/result.json"))
+        return [p.parent.name[len(RESCORE_PREFIX) :] for p in found]
+
+    def load_rescore(self, run_id: str, stamp: str) -> SuiteResult:
+        return load_result_at(self.run_dir(run_id) / f"{RESCORE_PREFIX}{stamp}")
+
+    def audio(self, run_id: str) -> FileRunAudio:
+        return FileRunAudio(self.run_dir(run_id), run_id)
+
+
+def parse_snapshot(
+    run_id: str, texts: list[tuple[str, str]]
+) -> tuple[SutProfile, dict[str, Scenario]]:
+    """A run's snapshot from its texts: the profile first, then each scenario, each with the
+    name an error names. Raises :class:`ConfigError` when one no longer loads."""
+    current = texts[0][0]
+    try:
+        profile = SutProfile.model_validate_json(texts[0][1])
+        scenarios = []
+        for name, text in texts[1:]:
+            current = name
+            scenarios.append(Scenario.model_validate_json(text))
+    except ValidationError as exc:
+        raise ConfigError(
+            f"the scenarios and profile saved with run {run_id!r} no longer load "
+            f"({current}: {_first_error(exc)}); pass --catalogue and --profile to "
+            "score it against the current files"
+        ) from exc
+    return profile, {s.id: s for s in scenarios}

@@ -290,7 +290,7 @@ def create_app(
         return s.Health(
             status="ok",
             version=__version__,
-            reports_dir=str(ctx.store.root),
+            reports_dir=ctx.store.where(),
             catalogue=str(catalogue) if catalogue else None,
             profile=ctx.profile.name if ctx.profile else None,
             read_only=read_only,

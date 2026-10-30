@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pure read functions: files on disk in, API shapes out. No HTTP in here."""
+"""Pure read functions: the run store in, API shapes out. No HTTP in here, and no path: a run
+is read through :class:`~opseval.storage.RunStore` only, whichever store it is (ADR-0051)."""
 
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import PRE_USAGE_LAYOUTS, FileStore, process_gone
+from opseval.storage import PRE_USAGE_LAYOUTS, RunStore, process_gone
 from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
 
@@ -80,22 +81,22 @@ def summarise(result: SuiteResult) -> s.RunSummary:
     )
 
 
-def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
-    """A run folder without result.json: still running, or it could not be carried out."""
-    m = store.load_manifest(folder.name)
-    error = store.load_error(folder.name)
+def _unfinished(store: RunStore, run_id: str) -> s.RunSummary | None:
+    """A run without a result: still running, or it could not be carried out."""
+    m = store.load_manifest(run_id)
+    error = store.load_error(run_id)
     if not m and error is None:
         return None  # not a run folder
-    if not store.layout_known(folder.name):
+    if not store.layout_known(run_id):
         # Written by a newer Opseval: shown as an error the reader can act on (upgrade),
         # never read with rules that may not apply to it, and never silently dropped.
         error = {
             "code": "UNKNOWN_LAYOUT",
-            "message": f"layout {store.layout(folder.name)!r} "
+            "message": f"layout {store.layout(run_id)!r} "
             "was written by a newer Opseval; upgrade to read this run",
         }
     common = {
-        "id": str(m.get("run_id", folder.name)),
+        "id": str(m.get("run_id", run_id)),
         "suite": str(m.get("suite", "")),
         "started_at": m.get("started_at") or (error or {}).get("at"),
         "passed": None,  # not measured: never draw an unfinished run as zeros
@@ -115,12 +116,10 @@ def _unfinished(store: FileStore, folder: Path) -> s.RunSummary | None:
             gate="harness_error",
             error=f"{error.get('code', 'HARNESS_ERROR')}: {error.get('message', '')}",
         )
-    return s.RunSummary(
-        **common, state="running", gate=None, progress=_progress(store, folder.name)
-    )
+    return s.RunSummary(**common, state="running", gate=None, progress=_progress(store, run_id))
 
 
-def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
+def _progress(store: RunStore, run_id: str) -> s.RunProgress | None:
     """The runner's own account of how far it got (progress.json), or ``None``."""
     p = store.load_progress(run_id)
     if p is None:
@@ -140,27 +139,23 @@ def _progress(store: FileStore, run_id: str) -> s.RunProgress | None:
     )
 
 
-def load_results(store: FileStore) -> list[SuiteResult]:
+def load_results(store: RunStore) -> list[SuiteResult]:
     """Every finished run, newest first. A run without result.json is still in flight."""
     return store.finished_results()
 
 
-def _in_flight(store: FileStore) -> list[s.RunSummary]:
+def _in_flight(store: RunStore) -> list[s.RunSummary]:
     out: list[s.RunSummary] = []
-    if not store.root.is_dir():
-        return out
-    for folder in store.root.iterdir():
-        if not folder.is_dir():
+    for run_id in store.run_ids():
+        if store.has_result(run_id) and store.layout_known(run_id):
             continue
-        if (folder / "result.json").is_file() and store.layout_known(folder.name):
-            continue
-        summary = _unfinished(store, folder)
+        summary = _unfinished(store, run_id)
         if summary is not None:
             out.append(summary)
     return sorted(out, key=lambda r: r.started_at or "", reverse=True)
 
 
-def list_runs(store: FileStore) -> list[s.RunSummary]:
+def list_runs(store: RunStore) -> list[s.RunSummary]:
     return _in_flight(store) + [summarise(r) for r in load_results(store)]
 
 
@@ -172,9 +167,8 @@ class RunInProgress(Exception):
         self.progress = progress
 
 
-def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
-    folder = store.run_dir(run_id)
-    summary = _unfinished(store, folder) if folder.is_dir() else None
+def _error_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
+    summary = _unfinished(store, run_id)
     if summary is None:
         return None  # no such run
     if summary.state == "running":
@@ -199,14 +193,13 @@ def _error_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
     )
 
 
-def run_detail(store: FileStore, run_id: str) -> s.RunDetail | None:
+def run_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
     """A finished run, or one that could not be carried out; ``None`` if there is no such run.
 
     Raises :class:`RunInProgress` while it is still running, so a caller can tell "wait"
     from "not found" (a console that waits on a typo waits for ever).
     """
-    path = store.run_dir(run_id) / "result.json"
-    if not path.is_file() or not store.layout_known(run_id):
+    if not store.has_result(run_id) or not store.layout_known(run_id):
         return _error_detail(store, run_id)
     r = store.load_result(run_id)
     tests = [
@@ -305,7 +298,7 @@ def _count(values: list[int | None]) -> int | None:
     return sum(known) if known else None
 
 
-def usage(store: FileStore) -> list[s.RunUsage]:
+def usage(store: RunStore) -> list[s.RunUsage]:
     """Per run: tokens per LLM role, speech audio and characters, and the cost. The cost is
     what the priced models cost, with ``cost_complete`` saying whether every model was priced:
     one unpriced model makes the total a floor, never hides the part that is known. Token
@@ -359,7 +352,7 @@ def tokens_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.Token
     return s.TokensDashboard.model_validate(analytics.tokens(filters).model_dump(mode="json"))
 
 
-def trend(store: FileStore) -> list[s.TrendPoint]:
+def trend(store: RunStore) -> list[s.TrendPoint]:
     points = []
     for r in reversed(load_results(store)):
         passed, failed, _, _ = _counts(r.tests)
@@ -376,7 +369,7 @@ def trend(store: FileStore) -> list[s.TrendPoint]:
     return points
 
 
-def scenario_trend(store: FileStore, *, suite: str | None, limit: int) -> s.ScenarioTrend:
+def scenario_trend(store: RunStore, *, suite: str | None, limit: int) -> s.ScenarioTrend:
     """Every scenario's verdict across the last ``limit`` finished runs (of one suite).
 
     Computed here, never in the browser (ADR-0029). A scenario that was not in a run has an
@@ -431,9 +424,9 @@ def _area_scores(r: SuiteResult) -> dict[str, float | None]:
     return {k: (fmean(v) if v else None) for k, v in buckets.items()}
 
 
-def compare(store: FileStore, base_id: str, cand_id: str) -> s.Comparison | None:
+def compare(store: RunStore, base_id: str, cand_id: str) -> s.Comparison | None:
     for rid in (base_id, cand_id):
-        if not (store.run_dir(rid) / "result.json").is_file() or not store.layout_known(rid):
+        if not store.has_result(rid) or not store.layout_known(rid):
             return None
     base, cand = store.load_result(base_id), store.load_result(cand_id)
     before = {t.test_id: t for t in base.tests}
@@ -698,7 +691,7 @@ def _redacted(text: str | None) -> str | None:
 
 
 def attempt_record(
-    store: FileStore, run_id: str, test_id: str, index: int, *, record: RunRecord | None = None
+    store: RunStore, run_id: str, test_id: str, index: int, *, record: RunRecord | None = None
 ) -> s.AttemptRecordOut | None:
     """One attempt's conversation; ``None`` if that attempt has no record (yet). ``record``
     is the attempt's record when the caller has read it already: it is not read again."""

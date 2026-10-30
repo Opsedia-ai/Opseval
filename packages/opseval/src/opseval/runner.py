@@ -59,7 +59,7 @@ from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
 from opseval.scoring.base import check_judge_independence
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
 from opseval.sinks import build_sinks, publish_all
-from opseval.storage import FileStore
+from opseval.storage import FileStore, RunStore
 from opseval.telemetry import report as report_telemetry
 from opseval.tenants import (
     Lease,
@@ -135,6 +135,10 @@ class RunOptions:
     synthetic_voices: bool = False
     """The voices are the demo's own synthetic ones (``opseval demo --voice``): exempt from
     the rule that recorded audio must be encrypted (ADR-0053). Never set for a real agent."""
+    store: RunStore | None = None
+    """Where the run is written: run folders under ``OPSEVAL_REPORTS_DIR`` by default, or a
+    server-mode store (``opseval run --database-url``, ADR-0051). The runner never knows
+    which."""
 
 
 class _TransportCtor(Protocol):
@@ -478,7 +482,7 @@ class _RunControl:
     def __init__(
         self,
         stop: StopPolicy,
-        store: FileStore,
+        store: RunStore,
         run_id: str,
         policy: ResolvedGatePolicy,
         declared: bool,
@@ -671,7 +675,7 @@ async def _launch(
         simulator_model=sim_client.model if sim_client else None,
         judge_independence=settings.judge_independence,
     )
-    store = FileStore(settings.reports_dir)
+    store: RunStore = options.store or FileStore(settings.reports_dir)
 
     default_where = make_transport(profile, None).target
     health = PreflightReport()
@@ -853,10 +857,10 @@ async def _launch(
             )
         if trace_source is not None:
             record = await enrich(record, trace_source, profile)
-        path = store.save_record(record)
+        ref = store.save_record(record)
         tracker.attempt(scenario.id)
         scores = await engine.score(record, scenario, profile)
-        verdict = attempt_verdict(record, scores, str(path))
+        verdict = attempt_verdict(record, scores, ref)
         # Saved again with the calls the attempt paid for, judges included (ADR-0066). The
         # record was on disk before scoring, so a crash while judging still leaves it.
         record = record.model_copy(update={"usage_events": meter.events_for(scenario.id, i)})
@@ -884,7 +888,7 @@ async def _launch(
             transport = make_transport(profile, tenant)
             if isinstance(transport, VoiceTransport):
                 recorder = AudioRecorder(
-                    store.run_dir(run_id),
+                    store.audio(run_id),
                     scenario.id,
                     i,
                     audio_plan.mode,
@@ -1001,7 +1005,7 @@ async def _launch(
     result = result.model_copy(update={"sinks": await publish_all(sinks, result, log=log)})
     store.save_report(
         run_id,
-        render_html(result, store.load_records(run_id), profile, run_dir=store.run_dir(run_id)),
+        render_html(result, store.load_records(run_id), profile, run_dir=store.audio(run_id)),
     )
     store.save_junit(run_id, render_junit(result))
     store.save_result(result)  # written last: marks the run as complete

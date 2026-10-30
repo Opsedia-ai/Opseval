@@ -44,7 +44,7 @@ from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import forms
 from opseval.server import schemas as s
 from opseval.simulator import LLMSimulator, ScriptedSimulator, Simulator, attempt_seed
-from opseval.storage import FileStore
+from opseval.storage import RunStore
 from opseval.verdicts import EXIT_HARNESS
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -65,7 +65,7 @@ class ServerContext:
     """What one ``opseval serve`` process was started with."""
 
     settings: Settings
-    store: FileStore
+    store: RunStore
     catalogue: Path | None = None
     profile: SutProfile | None = None
     profile_path: str | Path | None = None
@@ -191,7 +191,7 @@ async def rehearse(ctx: ServerContext, body: s.RehearseIn) -> s.RehearseOut:
     )
 
 
-def record_failure(store: FileStore, run_id: str, exc: BaseException) -> None:
+def record_failure(store: RunStore, run_id: str, exc: BaseException) -> None:
     """A run that could not be carried out is a harness error, recorded where the run is."""
     store.save_error(
         run_id,

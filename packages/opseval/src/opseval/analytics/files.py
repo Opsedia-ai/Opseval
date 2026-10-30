@@ -40,7 +40,7 @@ from opseval.analytics.models import (
 )
 from opseval.models.results import ModelUsage, SuiteResult, VerdictStatus
 from opseval.models.usage import UsageEvent, has_tokens
-from opseval.storage import PRE_USAGE_LAYOUTS, FileStore, load_result_at
+from opseval.storage import PRE_USAGE_LAYOUTS, RunStore
 
 AttemptKey = tuple[str, int]
 RESCORE = " (rescore)"
@@ -200,35 +200,33 @@ def _ratio(num: Measured, measured: int, of: int) -> Ratio:
 
 
 class FileAnalytics:
-    """The analytics store over a :class:`FileStore` (local mode)."""
+    """The analytics store over a :class:`~opseval.storage.RunStore`: run folders in local
+    mode, and the run store in server mode until analytics has tables of its own (ADR-0052).
+    It reads through the store's contract only."""
 
-    def __init__(self, store: FileStore) -> None:
+    def __init__(self, store: RunStore) -> None:
         self.store = store
         self._cache: dict[str, tuple[Stamp, RunUsage]] = {}
 
     # --- reading ------------------------------------------------------------------------
 
     def _latest_rescore(self, run_id: str) -> tuple[str, float]:
-        found = sorted(self.store.run_dir(run_id).glob("rescore-*/result.json"))
+        found = self.store.rescores(run_id)
         if not found:
             return "", -1.0
-        try:
-            return found[-1].parent.name, found[-1].stat().st_mtime
-        except OSError:
-            return found[-1].parent.name, -1.0
+        at = self.store.changed_at(run_id, found[-1])
+        return found[-1], -1.0 if at is None else at
 
     def _finished(self) -> list[RunUsage]:
         """Every finished run, newest first, each parsed once and then reused until its
         ``result.json`` (or its latest re-score) changes. One request reads them once and
         shares them between the filter options and the answer."""
         runs: list[RunUsage] = []
-        for path in self.store.root.glob("*/result.json"):
-            run_id = path.parent.name
-            if not self.store.layout_known(run_id):
+        for run_id in self.store.run_ids():
+            if not self.store.has_result(run_id) or not self.store.layout_known(run_id):
                 continue  # listed by the console as an error row: shown, never misread
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
+            mtime = self.store.changed_at(run_id)
+            if mtime is None:
                 continue
             stamp: Stamp = (mtime, *self._latest_rescore(run_id))
             hit = self._cache.get(run_id)
@@ -259,7 +257,7 @@ class FileAnalytics:
         rescore_unreadable = False
         if rescore:
             try:
-                again = load_result_at(self.store.run_dir(run_id) / rescore)
+                again = self.store.load_rescore(run_id, rescore)
                 rescore_events = (
                     *(e for a in again.attempt_usage for e in a.events),
                     *again.usage_events,

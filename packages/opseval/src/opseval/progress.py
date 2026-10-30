@@ -5,13 +5,13 @@ from __future__ import annotations
 
 from opseval.models.progress import RunProgress, ScenarioProgress
 from opseval.models.results import TestVerdict, VerdictStatus
-from opseval.storage import FileStore
+from opseval.storage import RunStore
 
 SKIPS = (VerdictStatus.SKIPPED_PRECONDITION, VerdictStatus.BLOCKED)
 
 
 class ProgressLog:
-    def __init__(self, store: FileStore, run_id: str, planned: list[str]) -> None:
+    def __init__(self, store: RunStore, run_id: str, planned: list[str]) -> None:
         self._store, self._run_id = store, run_id
         self._rows = {sid: ScenarioProgress(id=sid) for sid in planned}
         self._order = list(planned)

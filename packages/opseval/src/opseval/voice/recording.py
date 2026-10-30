@@ -20,7 +20,6 @@ written as plain WAV unless a key is set.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +29,7 @@ from opseval.audio import Codec, duration_ms, to_wav
 from opseval.config import Settings
 from opseval.errors import ConfigError
 from opseval.models.record import AudioRef
-from opseval.storage import SAFE_ID
+from opseval.storage import SAFE_ID, FileRunAudio, RunAudio
 from opseval.voice.crypto import SUFFIX, AudioKey, FilePlace, load_key, parse_key
 
 SAFE = re.compile(r"[^A-Za-z0-9_.-]")
@@ -77,10 +76,11 @@ def check_audio_privacy(settings: Settings, *, synthetic: bool = False) -> Audio
 
 @dataclass
 class AudioRecorder:
-    """Keeps one attempt's audio. ``run_dir`` is the run folder; ``None`` keeps hashes only
-    (a run with no folder, such as a test)."""
+    """Keeps one attempt's audio. ``run_dir`` is where the run keeps it: the store's
+    :class:`~opseval.storage.RunAudio`, or a run folder; ``None`` keeps hashes only (a run
+    with nowhere to write, such as a test)."""
 
-    run_dir: Path | None
+    run_dir: RunAudio | Path | None
     test_id: str
     attempt: int
     mode: Mode = "hashes"
@@ -109,18 +109,12 @@ class AudioRecorder:
     ) -> str | None:
         if self.mode != "files" or self.run_dir is None:
             return None
+        audio = FileRunAudio(self.run_dir) if isinstance(self.run_dir, Path) else self.run_dir
         if self.key is not None:
-            run_id = self.run_id if self.run_id is not None else self.run_dir.name
+            run_id = self.run_id if self.run_id is not None else audio.run_id
             place = FilePlace(run_id, self.test_id, self.attempt, turn, speaker)
             data = self.key.seal(data, place)
-        path = self.run_dir / relative
-        root = (self.run_dir / "audio").resolve()
-        if root not in path.resolve().parents:  # never outside audio/, whatever the id
-            raise ValueError(f"audio path {relative!r} leaves the run folder's audio/")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
+        audio.write(relative, data)  # never outside audio/, whatever the id (ValueError)
         return relative
 
     def keep(

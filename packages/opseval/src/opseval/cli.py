@@ -540,13 +540,14 @@ def rescore(
         )
     typer.echo("")
     typer.echo(console_summary(outcome.result))
-    typer.echo(f"Report: {(outcome.out_dir / 'report.html').resolve()}")
+    out_dir = outcome.out_dir or run_dir / f"rescore-{outcome.stamp}"
+    typer.echo(f"Report: {(out_dir / 'report.html').resolve()}")
     if junit is not None:
         junit.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(outcome.out_dir / "junit.xml", junit)
+        shutil.copyfile(out_dir / "junit.xml", junit)
         typer.echo(f"JUnit:  {junit.resolve()}")
     if open_report:
-        webbrowser.open((outcome.out_dir / "report.html").resolve().as_uri())
+        webbrowser.open((out_dir / "report.html").resolve().as_uri())
     raise typer.Exit(outcome.result.exit_code)
 
 

@@ -43,7 +43,7 @@ from opseval.reporting import render_html
 from opseval.reporting.junit import render_junit
 from opseval.scoring import INVARIANTS, REGISTRY, ScoringEngine, effective_specs
 from opseval.scoring.base import Scorer, check_judge_independence, infra_error
-from opseval.storage import FileStore
+from opseval.storage import FileStore, RunStore
 from opseval.verdicts import (
     attempt_verdict,
     exit_code,
@@ -57,11 +57,14 @@ from opseval.verdicts import (
 class RescoreOutcome:
     result: SuiteResult
     info: RescoreInfo
-    out_dir: Path
+    stamp: str
+    """The re-score's name in the store (``RunStore.rescores``)."""
+    out_dir: Path | None = None
+    """The re-score's folder, when it was a run folder named on the command line."""
 
 
 def _scenarios(
-    store: FileStore,
+    store: RunStore,
     run_id: str,
     catalogue: str | Path | None,
     profile_path: str | Path | None,
@@ -207,11 +210,36 @@ async def rescore_run(
     The new result is gated with the run's own policy (ADR-0032), or with ``gate``, a
     preset, to see what a stricter or looser gate would have said about the same run.
     """
-    settings = settings or Settings()
     folder = Path(run_dir)
     if not (folder / "result.json").is_file():
         raise ConfigError(f"{folder}: not a finished run (no result.json)")
-    store, run_id = FileStore(folder.parent), folder.name
+    outcome = await rescore_stored(
+        FileStore(folder.parent),
+        folder.name,
+        settings,
+        catalogue=catalogue,
+        profile=profile,
+        gate=gate,
+        log=log,
+    )
+    outcome.out_dir = folder / f"rescore-{outcome.stamp}"
+    return outcome
+
+
+async def rescore_stored(
+    store: RunStore,
+    run_id: str,
+    settings: Settings | None = None,
+    *,
+    catalogue: str | Path | None = None,
+    profile: str | Path | None = None,
+    gate: Preset | None = None,
+    log: Callable[[str], None] = lambda _msg: None,
+) -> RescoreOutcome:
+    """Re-score a finished run in any store and save the result next to it (never over it)."""
+    settings = settings or Settings()
+    if not store.has_result(run_id):
+        raise ConfigError(f"run {run_id!r} is not a finished run (no result)")
     original = store.load_result(run_id)
     prof, scenarios, source = _scenarios(store, run_id, catalogue, profile)
     records = {(r.test_id, r.attempt_index): r for r in store.load_records(run_id)}
@@ -327,14 +355,14 @@ async def rescore_run(
         stop=original.stop,
         stopped=original.stopped,
     )
-    out = store.save_rescore(
+    stamp = store.save_rescore(
         run_id,
         f"{now:%Y%m%dT%H%M%S%fZ}",
         result,
-        render_html(result, list(records.values()), prof, run_dir=store.run_dir(run_id)),
+        render_html(result, list(records.values()), prof, run_dir=store.audio(run_id)),
         render_junit(result),
     )
-    return RescoreOutcome(result=result, info=info, out_dir=out)
+    return RescoreOutcome(result=result, info=info, stamp=stamp)
 
 
-__all__ = ["RescoreOutcome", "rescore_run"]
+__all__ = ["RescoreOutcome", "rescore_run", "rescore_stored"]

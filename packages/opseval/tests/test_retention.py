@@ -166,7 +166,7 @@ class TestDeleting:
                 raise PermissionError(13, "Permission denied", str(path))
             real(path, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr("opseval.retention.shutil.rmtree", stubborn)
+        monkeypatch.setattr("opseval.storage.shutil.rmtree", stubborn)
         store = FileStore(reports)
         outcome = apply(store, plan(store, older_than_days=90, now=NOW))
         assert sorted(outcome.deleted) == ["old-finished", "old-interrupted"]
@@ -202,7 +202,7 @@ class TestCommand:
         def denied(path: object, *args: object, **kwargs: object) -> None:
             raise PermissionError(13, "Permission denied", str(path))
 
-        monkeypatch.setattr("opseval.retention.shutil.rmtree", denied)
+        monkeypatch.setattr("opseval.storage.shutil.rmtree", denied)
         res = self.runner.invoke(
             app, ["prune", "--reports-dir", str(reports), "--older-than", "1", "--yes"]
         )
