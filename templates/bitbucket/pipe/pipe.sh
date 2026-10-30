@@ -26,10 +26,11 @@ if [ "$(id -u)" = 0 ]; then
   exec setpriv --reuid=10001 --regid=10001 --clear-groups env OE_PIPE_DROPPED=1 HOME=/home/opseval bash "$0" "$@"
 fi
 # Secret variables are mapped to Opseval's own names here, so a pipeline passes them as
-# SIMULATOR_API_KEY / JUDGE_API_KEY / AGENT_TOKEN from secured repository variables. Other
-# secret settings are passed under their own names and listed in SECRET_ENV_NAMES.
+# SIMULATOR_API_KEY / JUDGE_API_KEY / AGENT_TOKEN (and the server key as PUBLIC_KEY /
+# SECRET_KEY) from secured repository variables. Other secret settings are passed under their
+# own names and listed in SECRET_ENV_NAMES.
 for oe_pair in OPSEVAL_SIMULATOR_API_KEY:SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY:JUDGE_API_KEY \
-  OPSEVAL_STATIC_TOKEN:AGENT_TOKEN; do
+  OPSEVAL_STATIC_TOKEN:AGENT_TOKEN OPSEVAL_PUBLIC_KEY:PUBLIC_KEY OPSEVAL_SECRET_KEY:SECRET_KEY; do
   oe_to="${oe_pair%%:*}"
   oe_from="${oe_pair#*:}"
   if [ -n "${!oe_from:-}" ]; then export "$oe_to=${!oe_from}"; else unset "$oe_to"; fi
@@ -47,18 +48,33 @@ case "$oe_mode" in
   local | docker) ;;
   *) oe_fail "MODE must be local or docker, not '$oe_mode'" ;;
 esac
-for oe_name in SUITE PROFILE TARGET; do
+for oe_name in SUITE TARGET; do
   if [ -z "${!oe_name:-}" ]; then oe_fail "$oe_name is required"; fi
 done
+if [ -z "${PROFILE:-}" ] && [ -z "${SERVER_URL:-}" ]; then oe_fail "PROFILE is required"; fi
+# Reporting to a server (ADR-0058 E2). A project without a server would report nothing while
+# the pipeline's owner believes it did.
+for oe_name in SERVER_URL PROJECT TASK LABEL; do
+  case "${!oe_name:-}" in
+    *$'\n'* | *$'\r'*) oe_fail "the value for $oe_name has more than one line" ;;
+  esac
+done
+oe_server=()
+if [ -n "${SERVER_URL:-}" ]; then
+  if [ -z "${PROJECT:-}" ]; then oe_fail "SERVER_URL needs PROJECT (org/project)"; fi
+  oe_server=(--server "$SERVER_URL" --project "$PROJECT" --task "${TASK:-default}" --label "${LABEL:-production}")
+elif [ -n "${PROJECT:-}" ]; then
+  oe_fail "PROJECT needs SERVER_URL: without a server nothing would be reported"
+fi
 case "${READ_DOTENV:-false}" in
   true) oe_dotenv=true ;;
   false | "") oe_dotenv=false ;;
   *) oe_fail "READ_DOTENV must be true or false" ;;
 esac
 # Secret settings (config.SECRET_FIELDS): only ever from the CI system's secret store.
-oe_secret=" OPSEVAL_STATIC_TOKEN OPSEVAL_TOKEN_SIGNING_KEY OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_TTS_KEY OPSEVAL_STT_KEY OPSEVAL_STT_SECOND_KEY OPSEVAL_AUDIO_ENCRYPTION_KEY OPSEVAL_LANGFUSE_SECRET_KEY OPSEVAL_SERVE_TOKEN OPSEVAL_OIDC_CLIENT_SECRET OPSEVAL_WEBHOOK_URL OPSEVAL_GITHUB_TOKEN OPSEVAL_JIRA_TOKEN OPSEVAL_DATABASE_URL OPSEVAL_S3_ACCESS_KEY_ID OPSEVAL_S3_SECRET_ACCESS_KEY "
+oe_secret=" OPSEVAL_STATIC_TOKEN OPSEVAL_TOKEN_SIGNING_KEY OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_TTS_KEY OPSEVAL_STT_KEY OPSEVAL_STT_SECOND_KEY OPSEVAL_AUDIO_ENCRYPTION_KEY OPSEVAL_LANGFUSE_SECRET_KEY OPSEVAL_SERVE_TOKEN OPSEVAL_OIDC_CLIENT_SECRET OPSEVAL_WEBHOOK_URL OPSEVAL_GITHUB_TOKEN OPSEVAL_JIRA_TOKEN OPSEVAL_DATABASE_URL OPSEVAL_S3_ACCESS_KEY_ID OPSEVAL_S3_SECRET_ACCESS_KEY OPSEVAL_SECRET_KEY "
 # Settings with their own input.
-oe_own=" OPSEVAL_ALLOWED_HOSTS OPSEVAL_SIMULATOR_BASE_URL OPSEVAL_SIMULATOR_MODEL OPSEVAL_JUDGE_BASE_URL OPSEVAL_JUDGE_MODEL OPSEVAL_DOTENV "
+oe_own=" OPSEVAL_ALLOWED_HOSTS OPSEVAL_SIMULATOR_BASE_URL OPSEVAL_SIMULATOR_MODEL OPSEVAL_JUDGE_BASE_URL OPSEVAL_JUDGE_MODEL OPSEVAL_DOTENV OPSEVAL_PUBLIC_KEY "
 oe_settings=("OPSEVAL_DOTENV=$oe_dotenv")
 for oe_pair in "OPSEVAL_ALLOWED_HOSTS=${ALLOWED_HOSTS:-}" \
   "OPSEVAL_SIMULATOR_BASE_URL=${SIMULATOR_BASE_URL:-}" "OPSEVAL_SIMULATOR_MODEL=${SIMULATOR_MODEL:-}" \
@@ -91,9 +107,9 @@ while IFS= read -r oe_line || [ -n "$oe_line" ]; do
   done
   oe_settings+=("$oe_line")
 done < <(printf '%s' "${OPSEVAL_ENV:-}")
-# The secrets passed on: the three with their own input, and the others named (never valued).
-oe_fixed=" OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_STATIC_TOKEN "
-oe_forward=(OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_STATIC_TOKEN)
+# The secrets passed on: those with their own input, and the others named (never valued).
+oe_fixed=" OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_STATIC_TOKEN OPSEVAL_PUBLIC_KEY OPSEVAL_SECRET_KEY "
+oe_forward=(OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_STATIC_TOKEN OPSEVAL_PUBLIC_KEY OPSEVAL_SECRET_KEY)
 oe_named_line="${SECRET_ENV_NAMES:-}"
 oe_named_line="${oe_named_line//$'\n'/ }"
 oe_named_line="${oe_named_line//$'\r'/ }"
@@ -132,7 +148,9 @@ for oe_role in SIMULATOR JUDGE; do
     fi
   fi
 done
-oe_args=(run "$SUITE" --profile "$PROFILE" --target "$TARGET" --transport "${TRANSPORT:-websocket}")
+oe_args=(run "$SUITE")
+if [ -n "${PROFILE:-}" ]; then oe_args+=(--profile "$PROFILE"); fi
+oe_args+=(--target "$TARGET" --transport "${TRANSPORT:-websocket}" ${oe_server[@]+"${oe_server[@]}"})
 if [ -n "${REPEATS:-}" ]; then oe_args+=(--repeats "$REPEATS"); fi
 while IFS= read -r oe_f || [ -n "$oe_f" ]; do
   if [ -n "$oe_f" ]; then oe_args+=(--filter "$oe_f"); fi
@@ -183,7 +201,9 @@ if [ "$oe_mode" = docker ]; then
   for oe_name in SUITE PROFILE REPORTS_DIR; do
     oe_p="${!oe_name:-}"
     if [ "$oe_name" = REPORTS_DIR ]; then oe_p="$oe_reports"; fi
-    case "$oe_p" in builtin:*) continue ;; esac
+    # With a server, SUITE is a path inside the catalogue Opseval pulls into the container.
+    if [ "$oe_name" = SUITE ] && [ -n "${SERVER_URL:-}" ]; then continue; fi
+    case "$oe_p" in "" | builtin:*) continue ;; esac
     if ! oe_inside "$oe_p"; then
       oe_fail "$oe_name '$oe_p' is outside the workspace ($PWD), the only folder the container sees"
     fi

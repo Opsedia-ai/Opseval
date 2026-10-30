@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Evaluate what the Opseval server's `production` label holds, and report the run back to it
+# (ADR-0058 E2). Drop this file in .github/workflows/.
+#
+# The catalogue (suite, scenarios, profile) comes from the server, not from this repository:
+# the step pulls the label, runs it here against the agent, then uploads the run, which shows
+# in the console's run list as a CI run linking back to this job.
+#
+# Exit codes: the local verdict's, always.
+#   0  pass                                 -> the job passes
+#   1  the agent failed                     -> the job fails
+#   2  not judged (nothing was measured)    -> the job fails: "not judged", not a failure
+#   3  harness or configuration error       -> the job fails: a harness error. A pull that
+#                                              failed (no key, a wrong label) is 3: nothing ran.
+# A failed upload never changes the code: it is named in the log, the job summary and the
+# JUnit file, and the run folder is kept in the artifact.
+#
+# The key: a project API key with runs:read (pull) and runs:start (upload), from
+# `opseval admin create-key` or the console's Keys page, stored as two repository secrets.
+# The server's host goes in OPSEVAL_ALLOWED_HOSTS, with https.
+#
+# opsedia-ai/opseval-action is published at go-public (Gate 0); until then use
+# Opsedia-ai/Opseval@<full commit SHA>. Pin a full SHA instead of @v1 in production.
+name: Opseval (server)
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: opsedia-ai/opseval-action@v1
+        with:
+          server-url: https://opseval.example.com
+          project: acme/support-bot
+          task: default
+          label: production
+          suite: suites/smoke.yaml # inside the pulled catalogue
+          target: wss://agent.staging.example.com/ws
+          comment: "false"
+          opseval-public-key: ${{ secrets.OPSEVAL_PUBLIC_KEY }}
+          opseval-secret-key: ${{ secrets.OPSEVAL_SECRET_KEY }}
+        env:
+          OPSEVAL_ALLOWED_HOSTS: opseval.example.com,agent.staging.example.com

@@ -23,7 +23,7 @@ tags:
 # The variables the pipe reads (Bitbucket passes them as environment variables).
 variables:
   - { name: SUITE, required: true, description: "Scenario file, directory or suite file to run." }
-  - { name: PROFILE, required: true, description: "SUT profile YAML, or builtin:<name>." }
+  - { name: PROFILE, default: "", description: "SUT profile YAML, or builtin:<name>. Empty with SERVER_URL (the label's own)." }
   - { name: TARGET, required: true, description: "Agent URL. Its host must be in ALLOWED_HOSTS." }
   - { name: TRANSPORT, default: websocket, description: "websocket | http-json | openai-chat | sse | ..." }
   - { name: REPEATS, default: "", description: "Override the scenarios' repeats (1-20)." }
@@ -40,3 +40,9 @@ variables:
   - { name: SIMULATOR_API_KEY, secret: true, description: "From a secured variable: $OPSEVAL_SIMULATOR_API_KEY." }
   - { name: JUDGE_API_KEY, secret: true, description: "From a secured variable: $OPSEVAL_JUDGE_API_KEY." }
   - { name: AGENT_TOKEN, secret: true, description: "From a secured variable: $OPSEVAL_STATIC_TOKEN." }
+  - { name: SERVER_URL, default: "", description: "Report the run to an Opseval server (ADR-0058 E2): pull LABEL, run it, upload the run. SUITE is then a path inside the pulled catalogue." }
+  - { name: PROJECT, default: "", description: "With SERVER_URL, the server's project (org/project)." }
+  - { name: TASK, default: default, description: "With SERVER_URL, the project's task." }
+  - { name: LABEL, default: production, description: "With SERVER_URL, the catalogue label to run." }
+  - { name: PUBLIC_KEY, secret: true, description: "With SERVER_URL, from a secured variable: $OPSEVAL_PUBLIC_KEY." }
+  - { name: SECRET_KEY, secret: true, description: "With SERVER_URL, from a secured variable: $OPSEVAL_SECRET_KEY." }

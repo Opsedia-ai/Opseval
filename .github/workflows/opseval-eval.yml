@@ -17,6 +17,10 @@
 #       secrets:
 #         judge-api-key: ${{ secrets.OPSEVAL_JUDGE_API_KEY }}
 #
+# To report the run to an Opseval server (ADR-0058 E2), add `server-url`, `project` (and
+# `task`, `label`) to `with:`, its host to allowed-hosts, and the project key to `secrets:`
+# (`opseval-public-key`, `opseval-secret-key`). `suite` is then a path inside the pulled label.
+#
 # A caller's `env:` does not reach a called workflow, so every setting comes in as an input:
 # the four LLM endpoint inputs, and `opseval-env` for any other non-secret OPSEVAL_* setting.
 # Secrets come only through `secrets:`; `opseval-env` refuses a secret setting (exit 3).
@@ -37,9 +41,11 @@ on:
         type: string
         required: true
       profile:
-        description: SUT profile YAML, or builtin:<name>.
+        description: >-
+          SUT profile YAML, or builtin:<name>. Required, except with server-url: the label's
+          own profile is used then.
         type: string
-        required: true
+        default: ""
       target:
         description: Agent URL (ws://, wss://, http(s)://). Its host must be in allowed-hosts.
         type: string
@@ -119,6 +125,25 @@ on:
           a line of another shape is refused with exit 3.
         type: string
         default: ""
+      server-url:
+        description: >-
+          Report the run to an Opseval server (ADR-0058): pull the catalogue under `label` for
+          `project`/`task`, run it, upload the run. `suite` is then a path inside the pulled
+          catalogue. Its host must be in allowed-hosts. The key comes through secrets.
+        type: string
+        default: ""
+      project:
+        description: With server-url, the server's project (org/project).
+        type: string
+        default: ""
+      task:
+        description: With server-url, the project's task.
+        type: string
+        default: default
+      label:
+        description: With server-url, the catalogue label to run.
+        type: string
+        default: production
       start-demo-agent:
         description: >-
           For testing this workflow: start Opseval's bundled demo refund agent on
@@ -134,6 +159,12 @@ on:
         required: false
       agent-token:
         description: OPSEVAL_STATIC_TOKEN, a bearer token sent to the agent.
+        required: false
+      opseval-public-key:
+        description: OPSEVAL_PUBLIC_KEY, the project API key's public half (with server-url).
+        required: false
+      opseval-secret-key:
+        description: OPSEVAL_SECRET_KEY, the project API key's secret half (with server-url).
         required: false
     outputs:
       exit-code:
@@ -188,9 +219,9 @@ jobs:
         run: |
           set -euo pipefail
           # Secret settings (config.SECRET_FIELDS): they come only through `secrets:`.
-          secret=" OPSEVAL_STATIC_TOKEN OPSEVAL_TOKEN_SIGNING_KEY OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_LANGFUSE_SECRET_KEY OPSEVAL_SERVE_TOKEN OPSEVAL_OIDC_CLIENT_SECRET OPSEVAL_WEBHOOK_URL OPSEVAL_GITHUB_TOKEN OPSEVAL_JIRA_TOKEN OPSEVAL_DATABASE_URL OPSEVAL_S3_ACCESS_KEY_ID OPSEVAL_S3_SECRET_ACCESS_KEY OPSEVAL_TTS_KEY OPSEVAL_STT_KEY OPSEVAL_STT_SECOND_KEY OPSEVAL_AUDIO_ENCRYPTION_KEY "
+          secret=" OPSEVAL_STATIC_TOKEN OPSEVAL_TOKEN_SIGNING_KEY OPSEVAL_SIMULATOR_API_KEY OPSEVAL_JUDGE_API_KEY OPSEVAL_LANGFUSE_SECRET_KEY OPSEVAL_SERVE_TOKEN OPSEVAL_OIDC_CLIENT_SECRET OPSEVAL_WEBHOOK_URL OPSEVAL_GITHUB_TOKEN OPSEVAL_JIRA_TOKEN OPSEVAL_DATABASE_URL OPSEVAL_S3_ACCESS_KEY_ID OPSEVAL_S3_SECRET_ACCESS_KEY OPSEVAL_TTS_KEY OPSEVAL_STT_KEY OPSEVAL_STT_SECOND_KEY OPSEVAL_AUDIO_ENCRYPTION_KEY OPSEVAL_SECRET_KEY "
           # Settings with their own input.
-          own=" OPSEVAL_ALLOWED_HOSTS OPSEVAL_SIMULATOR_BASE_URL OPSEVAL_SIMULATOR_MODEL OPSEVAL_JUDGE_BASE_URL OPSEVAL_JUDGE_MODEL OPSEVAL_DOTENV "
+          own=" OPSEVAL_ALLOWED_HOSTS OPSEVAL_SIMULATOR_BASE_URL OPSEVAL_SIMULATOR_MODEL OPSEVAL_JUDGE_BASE_URL OPSEVAL_JUDGE_MODEL OPSEVAL_DOTENV OPSEVAL_PUBLIC_KEY "
           lines=()
           for pair in "OPSEVAL_SIMULATOR_BASE_URL=$SIMULATOR_BASE_URL" "OPSEVAL_SIMULATOR_MODEL=$SIMULATOR_MODEL" \
                       "OPSEVAL_JUDGE_BASE_URL=$JUDGE_BASE_URL" "OPSEVAL_JUDGE_MODEL=$JUDGE_MODEL"; do
@@ -287,6 +318,8 @@ jobs:
           OPSEVAL_SIMULATOR_API_KEY: ${{ secrets.simulator-api-key }}
           OPSEVAL_JUDGE_API_KEY: ${{ secrets.judge-api-key }}
           OPSEVAL_STATIC_TOKEN: ${{ secrets.agent-token }}
+          OPSEVAL_PUBLIC_KEY: ${{ secrets.opseval-public-key }}
+          OPSEVAL_SECRET_KEY: ${{ secrets.opseval-secret-key }}
         with:
           suite: ${{ inputs.suite }}
           profile: ${{ inputs.profile }}
@@ -300,6 +333,10 @@ jobs:
           comment: ${{ inputs.comment }}
           artifact-name: ${{ inputs.artifact-name }}
           read-dotenv: ${{ inputs.read-dotenv }}
+          server-url: ${{ inputs.server-url }}
+          project: ${{ inputs.project }}
+          task: ${{ inputs.task }}
+          label: ${{ inputs.label }}
       # Inside Opseval's own repository (opseval-ref empty): the workspace's action, no clone.
       - name: Opseval (this repository)
         id: gate-self
@@ -309,6 +346,8 @@ jobs:
           OPSEVAL_SIMULATOR_API_KEY: ${{ secrets.simulator-api-key }}
           OPSEVAL_JUDGE_API_KEY: ${{ secrets.judge-api-key }}
           OPSEVAL_STATIC_TOKEN: ${{ secrets.agent-token }}
+          OPSEVAL_PUBLIC_KEY: ${{ secrets.opseval-public-key }}
+          OPSEVAL_SECRET_KEY: ${{ secrets.opseval-secret-key }}
         with:
           suite: ${{ inputs.suite }}
           profile: ${{ inputs.profile }}
@@ -322,6 +361,10 @@ jobs:
           comment: ${{ inputs.comment }}
           artifact-name: ${{ inputs.artifact-name }}
           read-dotenv: ${{ inputs.read-dotenv }}
+          server-url: ${{ inputs.server-url }}
+          project: ${{ inputs.project }}
+          task: ${{ inputs.task }}
+          label: ${{ inputs.label }}
       - name: Result
         id: result
         if: always()
