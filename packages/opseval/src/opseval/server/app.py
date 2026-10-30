@@ -412,7 +412,9 @@ def create_app(
 
     @app.exception_handler(actions.ApiError)
     def _api_error(_: Request, exc: actions.ApiError) -> JSONResponse:
-        return _deny(exc.status, exc.code, exc.message)
+        response = _deny(exc.status, exc.code, exc.message)
+        response.headers.update(exc.headers)
+        return response
 
     @app.exception_handler(StorageError)
     def _storage_error(_: Request, exc: StorageError) -> JSONResponse:

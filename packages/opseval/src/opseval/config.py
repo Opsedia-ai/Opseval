@@ -343,8 +343,9 @@ class Settings(BaseSettings):
     server_timeout_seconds: float = Field(default=60.0, gt=0, le=3600)
     """How long one request to the server (the pull, each upload try) may take."""
     server_upload_retries: int = Field(default=3, ge=0, le=10)
-    """How many more times a failed upload is tried (a connection error, a timeout, 429 or a
-    5xx), waiting longer each time. A refusal (401, 403, 404, 409, 413, 422) is not retried. A
+    """How many more times a failed upload is tried (a connection error, a timeout, 408, 425,
+    429, any 5xx, or 409 ``RUN_IMPORTING`` while another try of the run is still being stored),
+    waiting longer each time. Any other refusal (401, 403, 404, 409, 413, 422) is not retried. A
     failed upload never changes the exit code; it is named in every output."""
     upload_max_mb: int = Field(default=256, ge=1, le=16384)
     """The largest run upload ``opseval serve`` accepts, in MB (the request body, audio

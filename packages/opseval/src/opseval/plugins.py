@@ -164,6 +164,12 @@ def check_sink_contract(obj: Any, *, source: str) -> type[Any]:
         raise ConfigError(
             f"{source}: sink {obj.__name__} needs its own 'name' (not the default 'sink')"
         )
+    from opseval.models.upload import RESERVED_SINK_PREFIX
+
+    if name.startswith(RESERVED_SINK_PREFIX):
+        raise ConfigError(
+            f"{source}: sink name {name!r} is reserved ({RESERVED_SINK_PREFIX}… is Opseval's own)"
+        )
     publish = getattr(obj, "publish", None)
     if not callable(publish) or not inspect.iscoroutinefunction(publish):
         raise ConfigError(f"{source}: sink {name!r} must define 'async def publish(result)'")

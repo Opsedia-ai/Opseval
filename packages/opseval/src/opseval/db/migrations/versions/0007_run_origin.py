@@ -44,7 +44,7 @@ def upgrade() -> None:
     try:
         op.add_column("runs", sa.Column("origin", sa.String(16), nullable=True))
         op.add_column("runs", sa.Column("ci", postgresql.JSONB(), nullable=True))
-        op.create_check_constraint("ck_runs_origin", "runs", ORIGIN_RULE)
+        op.create_check_constraint(op.f("ck_runs_origin"), "runs", ORIGIN_RULE)
     except DBAPIError as exc:
         if getattr(exc.orig, "sqlstate", None) != LOCK_NOT_AVAILABLE:
             raise
@@ -57,6 +57,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_runs_origin", "runs", type_="check")
+    op.drop_constraint(op.f("ck_runs_origin"), "runs", type_="check")
     op.drop_column("runs", "ci")
     op.drop_column("runs", "origin")

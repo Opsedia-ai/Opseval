@@ -14,15 +14,24 @@ another task gets (ADR-0050): neither learns what exists.
 The upload is checked in this order, and nothing is written until every check passed: the
 size (413), the layout (409 ``UNKNOWN_LAYOUT`` for one newer than this server's, before the
 rest is parsed by models that may not know its fields), the models (``extra="forbid"``, 422),
-each audio file's sha256 (422 ``CHECKSUM_MISMATCH``), then the store: a run id another project
-holds or a different run under this id is 409; the same run again is 200 ``unchanged``.
+each audio file's sha256 (422 ``CHECKSUM_MISMATCH``), then the store, through
+``db.run_import.import_from``, whose typed refusal is mapped to its answer in :data:`REFUSALS`:
+a run id another project holds, a different run under this id, or an import of this id in
+flight (``RUN_IMPORTING``, with ``Retry-After``) is 409; the same run again is 200
+``unchanged``.
+
+Parsing and checking the body run in the threadpool, off the event loop, and the raw body is
+dropped once it is parsed; audio is decoded per file when it is checked and again when it is
+written, never held decoded all at once.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
+import logging
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from fastapi import FastAPI, Query, Request, Response
@@ -36,11 +45,11 @@ from opseval.models.record import RunRecord
 from opseval.models.results import SuiteResult
 from opseval.models.scenario import Scenario
 from opseval.models.upload import (
+    AudioUpload,
     CatalogueExport,
     ExportedFile,
     RunUpload,
     UploadOut,
-    same_result,
 )
 from opseval.server.actions import ApiError, ServerContext
 from opseval.server.lookup import safe_id
@@ -62,25 +71,29 @@ if TYPE_CHECKING:
     from opseval.server.access import AccessConfig
 
 UPLOAD_AUDIT = "run.upload"
+RETRY_AFTER_SECONDS = 5
+"""What a ``RUN_IMPORTING`` answer asks the uploader to wait before trying again."""
+log = logging.getLogger("opseval.server")
 CHUNK_LIMIT_NOTE = "the run stays in the CI job's folder; `opseval runs import` can send it"
 
 
 class _Audio:
-    """An uploaded run's audio, checked, in memory: what an import reads from a folder."""
+    """An uploaded run's audio, as an import reads it from a folder: each file decoded when it
+    is read, and its sha256 checked again then, so no decoded copy of the whole run is held."""
 
-    def __init__(self, files: dict[str, bytes], marker: str | None) -> None:
+    def __init__(self, files: dict[str, AudioUpload], marker: str | None) -> None:
         self.files = files
         self.marker = marker
 
     def size(self, relative: str) -> int | None:
-        data = self.files.get(relative)
-        return None if data is None else len(data)
+        item = self.files.get(relative)
+        return None if item is None else len(_decoded(item))
 
     def read(self, relative: str) -> bytes:
-        try:
-            return self.files[relative]
-        except KeyError:
-            raise FileNotFoundError(relative) from None
+        item = self.files.get(relative)
+        if item is None:
+            raise FileNotFoundError(relative)
+        return _decoded(item)
 
     def pruned(self) -> PrunedMarker | None:
         return parse_pruned_marker(self.marker) if self.marker is not None else None
@@ -90,9 +103,9 @@ class UploadedRun:
     """A run a CI job uploaded, as :func:`opseval.db.run_import.import_from` reads a run:
     the same reads a run folder answers, from the checked upload."""
 
-    def __init__(self, upload: RunUpload, audio: dict[str, bytes]) -> None:
+    def __init__(self, upload: RunUpload) -> None:
         self.upload = upload
-        self._audio = _Audio(audio, upload.audio_marker)
+        self._audio = _Audio({a.path: a for a in upload.audio}, upload.audio_marker)
 
     def exists(self, run_id: str) -> bool:
         return run_id == self.upload.run_id
@@ -164,30 +177,35 @@ def _first_problem(exc: ValidationError) -> str:
     return f"{where}: {first.get('msg', 'invalid')}".lstrip(": ")
 
 
-def decode_audio(upload: RunUpload) -> dict[str, bytes]:
-    """Each audio file's bytes, with its path and sha256 checked; 422 otherwise."""
-    import hashlib
+def _decoded(item: AudioUpload) -> bytes:
+    """One audio file's bytes, its sha256 checked; :class:`ApiError` 422 otherwise."""
+    try:
+        data = base64.b64decode(item.data, validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError(422, "BAD_AUDIO", f"{item.path}: not base64") from None
+    if hashlib.sha256(data).hexdigest() != item.sha256:
+        raise ApiError(
+            422,
+            "CHECKSUM_MISMATCH",
+            f"{item.path}: its sha256 is not the one sent; nothing was stored",
+        )
+    return data
 
-    out: dict[str, bytes] = {}
+
+def decode_audio(upload: RunUpload) -> int:
+    """Check every audio file before anything is written: its path, once each, and its sha256
+    (each decoded, hashed and let go). Returns how many there are; 422 otherwise."""
+    seen: set[str] = set()
     for item in upload.audio:
         try:
             check_audio_path(item.path)
         except AudioPathRefused as exc:
             raise ApiError(422, "BAD_AUDIO_PATH", str(exc)) from None
-        if item.path in out:
+        if item.path in seen:
             raise ApiError(422, "BAD_AUDIO_PATH", f"{item.path} is sent twice")
-        try:
-            data = base64.b64decode(item.data, validate=True)
-        except (binascii.Error, ValueError):
-            raise ApiError(422, "BAD_AUDIO", f"{item.path}: not base64") from None
-        if hashlib.sha256(data).hexdigest() != item.sha256:
-            raise ApiError(
-                422,
-                "CHECKSUM_MISMATCH",
-                f"{item.path}: its sha256 is not the one sent; nothing was stored",
-            )
-        out[item.path] = data
-    return out
+        seen.add(item.path)
+        _decoded(item)
+    return len(seen)
 
 
 def parse_upload(body: bytes, run_id: str) -> RunUpload:
@@ -216,44 +234,41 @@ def parse_upload(body: bytes, run_id: str) -> RunUpload:
     return upload
 
 
-def store_upload(store: DbRunStore, upload: RunUpload, audio: dict[str, bytes]) -> UploadOut:
+REFUSALS: dict[str, tuple[int, str]] = {
+    "run_id_taken": (409, "RUN_ID_TAKEN"),
+    "run_exists": (409, "RUN_EXISTS"),
+    "importing": (409, "RUN_IMPORTING"),
+    "unknown_layout": (409, "UNKNOWN_LAYOUT"),
+    "not_a_run": (422, "UPLOAD_REFUSED"),
+    "running": (422, "UPLOAD_REFUSED"),
+    "invalid": (422, "UPLOAD_REFUSED"),
+}
+"""Each import refusal's answer (keyed by ``db.run_import.Refusal``, whose values these are;
+a test keeps them equal): the one place an upload's refusals are decided. Keyed by value so
+this module imports nothing of the database in shared-token mode."""
+
+
+def store_upload(store: DbRunStore, upload: RunUpload) -> UploadOut:
     """Write the run through the store (as ``runs import`` does) and its CI origin. Raises
     :class:`ApiError` for a refusal; a storage outage stays a ``StorageError`` (503)."""
-    from opseval.db.run_import import import_from
+    from opseval.db.run_import import Imported, Refusal, import_from
 
     run_id = upload.run_id
-    if store.foreign(run_id):
-        raise ApiError(409, "RUN_ID_TAKEN", f"run id {run_id!r} is taken; not changed")
-    if store.exists(run_id) and not store.importing(run_id):
-        held_result = store.load_result(run_id) if store.has_result(run_id) else None
-        if upload.result is not None and held_result is not None:
-            same = same_result(held_result, upload.result)
-        else:
-            same = upload.result is None and store.load_error(run_id) == upload.error
-        if not same:
-            raise ApiError(
-                409,
-                "RUN_EXISTS",
-                f"the server holds a different run under {run_id!r}; not changed",
-            )
-        outcome = UploadOut(run_id=run_id, outcome="unchanged", detail="already stored")
-    else:
-        try:
-            done = import_from(UploadedRun(upload, audio), run_id, store)
-        except UnknownLayout as exc:  # pragma: no cover - parse_upload refused it first
-            raise ApiError(409, "UNKNOWN_LAYOUT", str(exc)) from None
-        except (ConfigError, ValidationError, ValueError) as exc:
-            detail = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
-            raise ApiError(422, "UPLOAD_REFUSED", detail) from None
-        if done.outcome == "refused":
-            raise ApiError(422, "UPLOAD_REFUSED", done.detail)
-        outcome = UploadOut(run_id=run_id, outcome=done.outcome, detail=done.detail)
+    try:
+        done = import_from(UploadedRun(upload), run_id, store)
+    except (ConfigError, ValidationError, ValueError) as exc:
+        detail = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+        done = Imported(run_id, "refused", detail, Refusal.INVALID)
+    if done.outcome == "refused":
+        status, code = REFUSALS[done.reason or Refusal.INVALID]
+        headers = {"Retry-After": str(RETRY_AFTER_SECONDS)} if code == "RUN_IMPORTING" else None
+        raise ApiError(status, code, f"run {run_id!r}: {done.detail}; not changed", headers)
     if upload.ci is not None:
         body: dict[str, Any] = upload.ci.model_dump(mode="json", exclude_none=True)
         if upload.catalogue is not None:
             body["catalogue"] = upload.catalogue.model_dump(mode="json")
         store.set_origin(run_id, "ci", body)
-    return outcome
+    return UploadOut(run_id=run_id, outcome=done.outcome, detail=done.detail)
 
 
 def register(app: FastAPI, ctx: ServerContext, access: AccessConfig | None, api: str) -> None:
@@ -355,24 +370,30 @@ def register(app: FastAPI, ctx: ServerContext, access: AccessConfig | None, api:
             body.extend(chunk)
             if len(body) > limit:
                 raise too_big
-        upload = parse_upload(bytes(body), run_id)
-        audio = decode_audio(upload)
+        size = len(body)
+        raw, body = bytes(body), bytearray()  # one copy of the body while it is parsed
+        upload = await run_in_threadpool(parse_upload, raw, run_id)
+        del raw
+        await run_in_threadpool(decode_audio, upload)
         store = db_store()
-        out = await run_in_threadpool(store_upload, store, upload, audio)
+        out = await run_in_threadpool(store_upload, store, upload)
         principal = cast("Principal | None", getattr(request.state, "principal", None))
-        await run_in_threadpool(
-            acc.audit,
-            principal,
-            UPLOAD_AUDIT,
-            target=f"/runs/{run_id}",
-            address=str(getattr(request.state, "address", "")),
-            detail={
-                "run_id": run_id,
-                "outcome": out.outcome,
-                "bytes": len(body),
-                "ci": upload.ci.provider if upload.ci is not None else None,
-            },
-        )
+        try:
+            await run_in_threadpool(
+                acc.audit,
+                principal,
+                UPLOAD_AUDIT,
+                target=f"/runs/{run_id}",
+                address=str(getattr(request.state, "address", "")),
+                detail={
+                    "run_id": run_id,
+                    "outcome": out.outcome,
+                    "bytes": size,
+                    "ci": upload.ci.provider if upload.ci is not None else None,
+                },
+            )
+        except Exception:  # the run is stored; say loudly that its trail is not
+            log.exception("audit event %s for run %s was not written", UPLOAD_AUDIT, run_id)
         return Response(
             content=out.model_dump_json(),
             status_code=201 if out.outcome == "imported" else 200,

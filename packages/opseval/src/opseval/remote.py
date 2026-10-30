@@ -13,9 +13,10 @@ The rules, in the order a run meets them:
   (:mod:`opseval.catalogue_files`). Any failure is a :class:`~opseval.errors.ConfigError`
   (exit 3): nothing could be evaluated.
 - **Upload** sends the finished run folder. It is retried on what may pass (a connection
-  error, a timeout, 429, a 5xx), never on a refusal, and it never raises: the outcome is a
-  ``result.sinks`` entry named :data:`~opseval.models.upload.SERVER_SINK`, written to the
-  run's ``result.json`` and JUnit, and the exit code stays the local verdict's.
+  error, a timeout, 408, 425, 429, any 5xx, 409 ``RUN_IMPORTING``), never on a refusal, and
+  it never raises: the outcome is a ``result.sinks`` entry named
+  :data:`~opseval.models.upload.SERVER_SINK`, written to the run's ``result.json`` and JUnit,
+  and the exit code stays the local verdict's.
 
 The key is sent only in the ``Authorization`` header and never appears in an error, a log
 line or a file.
@@ -51,9 +52,27 @@ from opseval.reporting.junit import render_junit
 from opseval.storage import LEGACY_LAYOUT, FileStore
 
 API = "/api/v1"
-RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
-"""Answers an upload is tried again on. A refusal (401, 403, 404, 409, 413, 422) is final:
-trying again would only send the same run to be refused the same way."""
+RETRY_STATUSES = frozenset({408, 425, 429})
+"""Answers below 500 an upload is tried again on; every 5xx is tried again too, and a 409
+``RUN_IMPORTING`` (another try of this run is still being stored). Any other refusal (401,
+403, 404, 409, 413, 422) is final: trying again would only be refused the same way."""
+RETRY_CODES = frozenset({"RUN_IMPORTING"})
+
+
+def retryable(response: httpx.Response) -> bool:
+    """Whether an answer may pass on another try."""
+    status = response.status_code
+    if 500 <= status < 600 or status in RETRY_STATUSES:
+        return True
+    if status == 409:
+        try:
+            body = response.json()
+        except ValueError:
+            return False
+        return isinstance(body, dict) and body.get("code") in RETRY_CODES
+    return False
+
+
 BACKOFF_SECONDS = 2.0
 """The first wait between upload tries; each later one doubles, capped at :data:`MAX_WAIT`."""
 MAX_WAIT = 30.0
@@ -406,7 +425,7 @@ def upload(
                     f"({server.project}/{server.task}): {said}",
                 )
             last = _refusal(response)
-            if response.status_code not in RETRY_STATUSES:
+            if not retryable(response):
                 break
         if attempt + 1 < tries:
             wait = _wait(response, attempt)
@@ -467,6 +486,7 @@ def report_run(
 __all__ = [
     "API",
     "RETRY_STATUSES",
+    "retryable",
     "Server",
     "bundle",
     "ci_metadata",

@@ -27,9 +27,12 @@ from opseval.models.scenario import Scenario
 RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
 """A run id that names a run folder (``storage.RUN_NAME``)."""
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
-SERVER_SINK = "server"
+SERVER_SINK = "opseval:server"
 """The ``result.sinks`` entry that says whether the run reached the server. It is added after
-the upload, so two copies of one run differ only in it (see :func:`same_result`)."""
+the upload, so two copies of one run differ only in it (see :func:`same_result`). Reserved:
+the ``opseval:`` prefix is refused for a plugin sink (``plugins.check_sink_contract``), so a
+plugin sink named ``server`` keeps its own outcome."""
+RESERVED_SINK_PREFIX = "opseval:"
 
 CiProvider = Literal["github", "gitlab", "jenkins", "azure", "circleci", "bitbucket"]
 Short = Annotated[str, Field(min_length=1, max_length=300)]
@@ -180,6 +183,7 @@ def same_result(a: SuiteResult, b: SuiteResult) -> bool:
 
 __all__ = [
     "RUN_ID_PATTERN",
+    "RESERVED_SINK_PREFIX",
     "SERVER_SINK",
     "AudioUpload",
     "CatalogueExport",

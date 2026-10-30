@@ -526,6 +526,37 @@ class TestUploadRetries:
         assert self.upload(FakeServer(answer), sleeps).published
         assert sleeps == [remote.MAX_WAIT]
 
+    @pytest.mark.parametrize("code", [500, 501, 505, 520, 599])
+    def test_every_5xx_is_tried_again(self, code: int) -> None:
+        answers = iter([code, 201])
+
+        def answer(r: httpx.Request) -> httpx.Response:
+            if next(answers) == code:
+                return httpx.Response(code, json={"code": "X"})
+            return httpx.Response(
+                201, json={"run_id": "run-1", "outcome": "imported", "detail": "ok"}
+            )
+
+        assert self.upload(FakeServer(answer), []).published
+
+    def test_a_run_being_imported_is_waited_for(self) -> None:
+        answers = iter(["busy", "done"])
+
+        def answer(r: httpx.Request) -> httpx.Response:
+            if next(answers) == "busy":
+                return httpx.Response(
+                    409,
+                    json={"code": "RUN_IMPORTING", "message": "m"},
+                    headers={"Retry-After": "5"},
+                )
+            return httpx.Response(
+                200, json={"run_id": "run-1", "outcome": "unchanged", "detail": "ok"}
+            )
+
+        sleeps: list[float] = []
+        assert self.upload(FakeServer(answer), sleeps).published
+        assert sleeps == [5.0]
+
     @pytest.mark.parametrize("code", [401, 403, 404, 409, 413, 422])
     def test_a_refusal_is_final(self, code: int) -> None:
         fake = FakeServer(lambda r: httpx.Response(code, json={"code": "NO", "message": "m"}))
@@ -578,7 +609,7 @@ class TestRunServerCli:
         caplog.set_level(logging.DEBUG)
         res = run_cli(agent(None))
         assert res.exit_code == 0, res.output
-        assert "Pulled" in res.output and "published     server" in res.output
+        assert "Pulled" in res.output and "published     opseval:server" in res.output
         [request] = fake.uploads
         sent = RunUpload.model_validate_json(request.content)
         assert sent.result is not None and sent.result.exit_code == 0
@@ -619,18 +650,18 @@ class TestRunServerCli:
         self.fake(monkeypatch, FakeServer(answer))
         res = run_cli(agent(bug))
         assert res.exit_code == code, res.output
-        assert "NOT PUBLISHED server" in res.output
+        assert "NOT PUBLISHED opseval:server" in res.output
         result = saved_result(env / "reports")
         assert result.exit_code == code
         outcome = server_sink(result)
         assert not outcome.published and "runs import" in outcome.detail
         # Named in the gate summary and in JUnit (the copy and the run's own).
-        assert "**Not published** · `server`" in markdown_summary(result)
+        assert "**Not published** · `opseval:server`" in markdown_summary(result)
         for xml in (env / "junit.xml", next((env / "reports").iterdir()) / "junit.xml"):
             props = {
                 p.get("name"): p.get("value") for p in ET.parse(xml).getroot().iter("property")
             }
-            assert props["failed_sinks"] == "server"
+            assert props["failed_sinks"] == SERVER_SINK
             assert props["exit_code"] == str(code)
         assert SECRET not in res.output and SECRET not in everything_written(env)
 
@@ -757,6 +788,61 @@ def test_the_server_sink_is_not_part_of_the_run(tmp_path: Path) -> None:
     )
     assert same_result(base, told) and not same_result(base, other)
     assert not same_result(base, base.model_copy(update={"exit_code": 1}))
+
+
+def test_a_plugin_sink_named_server_keeps_its_outcome(tmp_path: Path) -> None:
+    from opseval.models.results import Gate
+    from opseval.plugins import check_sink_contract
+    from opseval.sinks import Sink
+
+    class Server(Sink):
+        name = "server"
+
+        async def publish(self, result: SuiteResult) -> str:
+            return "sent"
+
+    class Reserved(Sink):
+        name = SERVER_SINK
+
+        async def publish(self, result: SuiteResult) -> str:
+            return "sent"
+
+    assert check_sink_contract(Server, source="plugin 'server'") is Server
+    with pytest.raises(ConfigError, match="reserved"):
+        check_sink_contract(Reserved, source="plugin 'evil'")
+    plugin = SinkOutcome(sink="server", published=False, detail="the plugin failed")
+    result = SuiteResult(
+        opseval_version="0",
+        run_id="r",
+        suite="s",
+        target="t",
+        profile="p",
+        started_at="2026-10-30T00:00:00Z",  # type: ignore[arg-type]
+        ended_at="2026-10-30T00:00:01Z",  # type: ignore[arg-type]
+        tests=[],
+        gate=Gate(status="pass", summary="ok"),
+        exit_code=0,
+        sinks=[plugin],
+    )
+    store = FileStore(tmp_path)
+    ours = SinkOutcome(sink=SERVER_SINK, published=True, detail="reported")
+    recorded = remote.record(store, result, ours)
+    assert recorded.sinks == [plugin, ours]
+    again = remote.record(store, recorded, ours)
+    assert again.sinks == [plugin, ours], "only the reserved entry is replaced"
+    # Comparing two copies drops only the reserved entry, never the plugin's.
+    assert same_result(result, recorded)
+    assert not same_result(result, result.model_copy(update={"sinks": []}))
+
+
+def test_every_import_refusal_has_one_answer() -> None:
+    from opseval.db.run_import import Refusal
+    from opseval.server.ci_api import REFUSALS
+
+    assert set(REFUSALS) == {r.value for r in Refusal}
+    assert REFUSALS[Refusal.IMPORTING.value] == (409, "RUN_IMPORTING")
+    assert REFUSALS[Refusal.RUN_EXISTS.value] == (409, "RUN_EXISTS")
+    assert REFUSALS[Refusal.RUN_ID_TAKEN.value] == (409, "RUN_ID_TAKEN")
 
 
 # --- against a real server on Postgres --------------------------------------------------------
@@ -924,7 +1010,7 @@ class TestAgainstARealServer:
         self.use(monkeypatch, world, world.key("member@acme.test", ["runs:read"]))
         res = await self.cli()
         assert res.exit_code == 0, res.output
-        assert "403 FORBIDDEN" in res.output and "NOT PUBLISHED server" in res.output
+        assert "403 FORBIDDEN" in res.output and "NOT PUBLISHED opseval:server" in res.output
         assert world.store.run_ids() == []
 
     async def test_a_key_scoped_to_another_task_cannot_upload_here(
@@ -1057,6 +1143,145 @@ class TestAgainstARealServer:
             )
             assert sha == hashlib.sha256(data).hexdigest()
         assert world.store.load_error("r-ci-voice") == {"code": "X", "message": "a voice run"}
+
+    async def local_run(self, env: Path) -> tuple[FileStore, str]:
+        from opseval.runner import RunOptions, launch
+
+        local = FileStore(env / "reports")
+        cat = catalogue_dir()
+        settings = Settings(_env_file=None, allowed_hosts="127.0.0.1", reports_dir=str(local.root))
+        async with run_agent() as url:
+            options = RunOptions(target=url, profile=cat / "profile.yaml", store=local, repeats=1)
+            result = await launch(cat / "suites" / "smoke.yaml", options, settings)
+        return local, result.run_id
+
+    def sender(self, world: Any, run_id: str, body: bytes) -> Callable[[], httpx.Response]:
+        from fastapi.testclient import TestClient
+
+        public, secret = _split(world.key("member@acme.test", ["runs:read", "runs:start"]))
+        headers = {"Authorization": f"Bearer {public}:{secret}", "Content-Type": "application/json"}
+
+        def send() -> httpx.Response:
+            return TestClient(world.app, base_url=SERVER).put(
+                f"/api/v1/runs/{run_id}/upload",
+                params={"project": PROJECT, "task": "default"},
+                content=body,
+                headers=headers,
+            )
+
+        return send
+
+    async def test_two_concurrent_uploads_never_remove_the_one_in_flight(
+        self, world: Any, env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import concurrent.futures
+
+        local, run_id = await self.local_run(env)
+        send = self.sender(
+            world, run_id, remote.encode(remote.bundle(local, run_id, ci=None, catalogue=None))
+        )
+        store = world.store
+        entered, release = threading.Event(), threading.Event()
+        original = store.save_record
+
+        def slow(record: Any) -> str:
+            entered.set()
+            assert release.wait(60)
+            return original(record)
+
+        monkeypatch.setattr(store, "save_record", slow)
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            first = pool.submit(send)
+            assert await asyncio.to_thread(entered.wait, 60), "the first import is under way"
+            second = await asyncio.to_thread(send)
+            assert second.status_code == 409, second.text
+            assert second.json()["code"] == "RUN_IMPORTING"
+            assert second.headers["retry-after"] == "5"
+            assert store.importing(run_id), "the import in flight is untouched"
+            release.set()
+            done = await asyncio.to_thread(first.result, 60)
+        assert done.status_code == 201, done.text
+        assert not store.importing(run_id) and store.has_result(run_id)
+        again = await asyncio.to_thread(send)
+        assert again.status_code == 200 and again.json()["outcome"] == "unchanged"
+
+    async def test_an_import_cut_short_is_replaced(self, world: Any, env: Path) -> None:
+        local, run_id = await self.local_run(env)
+        # An importer that died after its manifest: the row is importing, nobody holds the lock.
+        world.store.import_manifest(run_id, local.load_manifest(run_id))
+        assert world.store.importing(run_id)
+        body = remote.encode(remote.bundle(local, run_id, ci=None, catalogue=None))
+        r = await asyncio.to_thread(self.sender(world, run_id, body))
+        assert r.status_code == 201, r.text
+        assert "cut short" in r.json()["detail"]
+        assert world.store.has_result(run_id) and not world.store.importing(run_id)
+
+    async def test_the_body_is_parsed_off_the_event_loop(
+        self, world: Any, env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.server import ci_api
+
+        local, run_id = await self.local_run(env)
+        body = remote.encode(remote.bundle(local, run_id, ci=None, catalogue=None))
+        seen: dict[str, bool] = {}
+        for name in ("parse_upload", "decode_audio"):
+            real = getattr(ci_api, name)
+
+            def spy(*a: Any, _real: Any = real, _name: str = name) -> Any:
+                try:
+                    asyncio.get_running_loop()
+                    seen[_name] = False  # on the event loop
+                except RuntimeError:
+                    seen[_name] = True
+                return _real(*a)
+
+            monkeypatch.setattr(ci_api, name, spy)
+        r = await asyncio.to_thread(self.sender(world, run_id, body))
+        assert r.status_code == 201, r.text
+        assert seen == {"parse_upload": True, "decode_audio": True}
+
+    async def test_an_audit_write_that_fails_is_logged_not_a_failure(
+        self,
+        world: Any,
+        env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        local, run_id = await self.local_run(env)
+        body = remote.encode(remote.bundle(local, run_id, ci=None, catalogue=None))
+        send = self.sender(world, run_id, body)
+
+        def broken(*a: Any, **k: Any) -> None:
+            raise RuntimeError("the audit table is gone")
+
+        monkeypatch.setattr(world.accounts, "audit", broken)
+        with caplog.at_level(logging.ERROR, logger="opseval.server"):
+            r = await asyncio.to_thread(send)
+        assert r.status_code == 201, r.text
+        assert world.store.has_result(run_id)
+        assert "audit event run.upload" in caplog.text and "was not written" in caplog.text
+
+    async def test_the_check_constraint_names_are_the_models(self, world: Any) -> None:
+        import re
+
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.schema import CreateTable
+
+        from opseval.db.schema import Run
+
+        ddl = str(CreateTable(Run.__table__).compile(dialect=postgresql.dialect()))  # type: ignore[arg-type]
+        model = set(re.findall(r"CONSTRAINT (ck_\w+) CHECK", ddl))
+        held = {
+            row[0]
+            for row in world.sql(
+                "SELECT conname FROM pg_constraint WHERE conrelid = 'runs'::regclass "
+                "AND contype = 'c'"
+            )
+        }
+        # 0007's own constraint, named as the model names it (op.f: no second prefix). The
+        # released 0005's ck_runs_status is left as it shipped (see the report).
+        assert "ck_runs_origin" in model and "ck_runs_origin" in held
+        assert "ck_runs_ck_runs_origin" not in held
 
     async def test_migration_0007_goes_down_and_up(self, pg_url: str, tmp_path: Path) -> None:
         from alembic import command

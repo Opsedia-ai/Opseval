@@ -27,16 +27,16 @@ import json
 import shlex
 import threading
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
 
 import asyncpg  # type: ignore[import-untyped]
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import defer
 
 from opseval.blobs import BlobStore
@@ -295,6 +295,12 @@ class DbRunAudio:
         """What ``opseval audio export`` takes to find this run: its id and project."""
         project = self.store.project_ref or "<org/project>"
         return f"{shlex.quote(self.run_id)} --project {shlex.quote(project)}"
+
+
+def import_lock_key(run_id: str) -> int:
+    """The advisory-lock key of a run id's import: 64 bits of a namespaced sha256."""
+    digest = hashlib.sha256(f"opseval-run-import\0{run_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
 
 
 def _origin(kind: str | None, ci: Any) -> RunOrigin | None:
@@ -1013,6 +1019,51 @@ class DbRunStore:
             return int(getattr(done, "rowcount", 0) or 0)
 
         return self._run(go, write=True) == 1
+
+    @contextlib.contextmanager
+    def import_lock(self, run_id: str) -> Iterator[bool]:
+        """Hold the run id's import lock for the block: ``True`` when it was free and is now
+        ours, ``False`` when another import holds it (nothing is waited for).
+
+        A session-level ``pg_try_advisory_lock`` on a connection of its own, kept for the
+        whole import (which spans many transactions). Postgres releases it when that session
+        ends, so a crashed importer never leaves it held: a run row still ``importing`` while
+        the lock is free was cut short, and may be removed."""
+        key = import_lock_key(run_id)
+        lock = text("SELECT pg_try_advisory_lock(:k)")
+
+        async def acquire() -> tuple[AsyncConnection, bool]:
+            conn = await self.engine.connect()
+            try:
+                got = bool(await conn.scalar(lock, {"k": key}))
+                await conn.commit()  # the lock is the session's: no transaction stays open
+            except BaseException:
+                await conn.close()
+                raise
+            return conn, got
+
+        try:
+            conn, held = self._loop.run(acquire())
+        except (ConfigError, StorageError):
+            raise
+        except _DB_ERRORS as exc:
+            raise StorageError(
+                f"the import lock could not be taken ({type(exc).__name__})"
+            ) from exc
+
+        async def release() -> None:
+            try:
+                if held:
+                    await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+                    await conn.commit()
+            finally:
+                await conn.close()  # closing the session releases the lock in any case
+
+        try:
+            yield held
+        finally:
+            with contextlib.suppress(StorageError, *_DB_ERRORS):
+                self._loop.run(release())
 
     def set_origin(self, run_id: str, kind: str, ci: dict[str, Any]) -> None:
         """Record where the run came from (ADR-0058 E2): ``ci`` and what the CI system said.
