@@ -203,6 +203,27 @@ class TestGrading:
         result = await score(judge, rubric_scenario(axis="security"), profile)
         assert result.axis is Axis.SECURITY
 
+    async def test_every_engine_made_score_is_on_the_rubrics_axis(
+        self, profile: SutProfile, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review of #94: a crash turned into infra_error by the engine kept the class's axis."""
+
+        async def crash(*_args: Any) -> ScoreResult:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(RubricJudge, "_score", crash)
+        result = await score(StubJudge(), rubric_scenario(axis="security"), profile)
+        assert result.status is ScoreStatus.INFRA_ERROR and result.axis is Axis.SECURITY
+        assert (result.reason or "").startswith("SCORER_ERROR")
+
+    def test_axis_for(self) -> None:
+        spec = ScorerSpec(id="judge.rubric", params={"criteria": CRITERIA, "axis": "flow"})
+        assert RubricJudge.axis_for(spec) is Axis.FLOW
+        assert RubricJudge.axis_for(ScorerSpec(id="judge.rubric")) is Axis.OUTPUT
+        harness = ScorerSpec(id="judge.rubric", params={"axis": "harness"})
+        assert RubricJudge.axis_for(harness) is Axis.OUTPUT  # never harness, even unchecked
+        assert GoalAchievement.axis_for(spec) is Axis.OUTPUT
+
     async def test_no_agent_text_is_not_measured(self, profile: SutProfile) -> None:
         result = await score(StubJudge(), rubric_scenario(), profile, rec(CONVERSATION[:1]))
         assert result.status is ScoreStatus.INFRA_ERROR
@@ -709,7 +730,11 @@ class TestCalibrationPerCriterion:
         run = rubric_run(tmp_path, [{"window": "passed"}, None])
         loaded = FileStore(run.parent).load_result(run.name)
         text = label_template(loaded, "judge.rubric:window")
-        assert text.count("judge.rubric:window") >= 3  # header + one row per attempt
+        rows = yaml.safe_load(text)["labels"]
+        # Only the attempt whose rubric graded the criterion: attempt 1 was never graded.
+        assert [r["attempt_index"] for r in rows] == [0]
+        with pytest.raises(ConfigError):
+            label_template(loaded, "judge.rubric:other")
 
 
 # --- datasets (ADR-0060) -----------------------------------------------------------------------

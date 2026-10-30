@@ -175,3 +175,17 @@ def test_a_rubric_with_no_must_under_a_threshold_below_one(profile: SutProfile) 
     assert rubric(1.0, criteria) == set()
     assert rubric(0.5, [criteria[0], {**criteria[1], "must": True}]) == set()
     assert rubric(0.5, criteria[:1]) == set()  # one criterion: the threshold is the rule
+
+
+def test_a_rubric_warning_names_its_index_in_the_scenario(profile: SutProfile) -> None:
+    """Review of #94: the field was the index in effective_specs, which removes duplicates."""
+    criteria = [
+        {"name": "a", "question": "Did the agent answer?"},
+        {"name": "b", "question": "Did it state the window?"},
+    ]
+    scorers = [
+        {"id": "output.terminal_state"},
+        {"id": "output.terminal_state"},
+        {"id": "judge.rubric", "threshold": 0.5, "params": {"criteria": criteria}},
+    ]
+    assert "scorers.2.params.criteria" in fields(profile, scorers=scorers)

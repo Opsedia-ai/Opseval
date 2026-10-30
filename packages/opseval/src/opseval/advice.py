@@ -59,7 +59,7 @@ def scenario_warnings(
             )
     _language(scenario, warn)
     _script_default(scenario, specs, warn)
-    _rubrics(specs, warn)
+    _rubrics(scenario, warn)
     if scenario.execution.repeats == 1:
         warn(
             "execution.repeats",
@@ -173,10 +173,13 @@ def _script_default(
             )
 
 
-def _rubrics(specs: list[ScorerSpec], warn: Callable[[str, str], None]) -> None:
+def _rubrics(scenario: Scenario, warn: Callable[[str, str], None]) -> None:
     """A ``judge.rubric`` with no ``must`` criterion and a threshold under 1 passes with some
-    criteria failed, whichever they are (ADR-0061): a serious one can be averaged away."""
-    for index, spec in enumerate(specs):
+    criteria failed, whichever they are (ADR-0061): a serious one can be averaged away. Only
+    an explicit list can name one, and the field is its index in that list."""
+    if not isinstance(scenario.scorers, list):
+        return
+    for index, spec in enumerate(scenario.scorers):
         if spec.id != "judge.rubric" or spec.threshold >= 1:
             continue
         criteria = spec.params.get("criteria")

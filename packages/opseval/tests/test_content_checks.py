@@ -21,13 +21,15 @@ from opseval.models.profile import FrameKind, SutProfile
 from opseval.models.record import FrameRecord, InterruptRecord, RunRecord, TerminalState
 from opseval.models.results import ScoreResult, ScoreStatus
 from opseval.models.scenario import ScorerSpec
-from opseval.scoring import REGISTRY
+from opseval.scoring import REGISTRY, content
 from opseval.scoring.base import ScoringContext
 from opseval.scoring.content import (
     MAX_REGEX_INPUT,
+    RegexTimeout,
     guard_pattern,
     json_equal,
     normalise,
+    search_turns,
 )
 
 from .conftest import make_scenario
@@ -141,6 +143,35 @@ class TestNotContains:
         assert not passed(await run("content.not_contains", CHAT, profile, any_of=["thursday"]))
         assert passed(await run("content.not_contains", CHAT, profile, any_of=["competitor"]))
 
+    @pytest.mark.parametrize("scope", ["any_turn", "every_turn"])
+    @pytest.mark.parametrize("field", ["any_of", "all_of"])
+    async def test_one_forbidden_string_in_one_turn_fails_whatever_the_scope(
+        self, profile: SutProfile, scope: str, field: str
+    ) -> None:
+        """Review of #94: with every_turn or all_of, a negated contains passed when only turn 2
+        of 3 broke the rule. Forbidden means forbidden in every examined turn."""
+        three = rec(
+            frame(0, "customer", "Anything cheaper?"),
+            frame(1, "agent", "Our price is fair."),
+            frame(2, "customer", "Really?"),
+            frame(3, "agent", "Try CompetitorShop, they are cheaper."),
+            frame(4, "customer", "Ok."),
+            frame(5, "agent", "Anything else?"),
+        )
+        params = {field: ["CompetitorShop", "never-said"], "scope": scope}
+        result = await run("content.not_contains", three, profile, **params)
+        assert not passed(result)
+        assert result.details["found"] == {"CompetitorShop": [4]}
+        # The same rule as content.regex with must_match: false.
+        regex = await run(
+            "content.regex", three, profile, pattern="CompetitorShop", must_match=False, scope=scope
+        )
+        assert not passed(regex)
+
+    async def test_last_turn_examines_only_the_last(self, profile: SutProfile) -> None:
+        params = {"any_of": ["10482"], "scope": "last_turn"}
+        assert passed(await run("content.not_contains", CHAT, profile, **params))
+
     async def test_silence_is_a_named_vacuous_pass(self, profile: SutProfile) -> None:
         silent = rec(frame(0, "customer", "hello?"))
         result = await run("content.not_contains", silent, profile, any_of=["x"])
@@ -173,7 +204,7 @@ class TestRegex:
 
     async def test_arabic(self, profile: SutProfile) -> None:
         arabic = rec(frame(0, "customer", "?"), frame(1, "agent", "سيصلك الطلب خلال ٣ أيام"))
-        assert passed(await run("content.regex", arabic, profile, pattern=r"خلال\s+\d+\s+أيام"))
+        assert passed(await run("content.regex", arabic, profile, pattern=r"خلال \d+ أيام"))
 
     async def test_silence(self, profile: SutProfile) -> None:
         silent = rec(frame(0, "customer", "hello?"))
@@ -189,9 +220,81 @@ class TestRegex:
         assert result.status is ScoreStatus.INFRA_ERROR
         assert (result.reason or "").startswith("REGEX_INPUT_TOO_LONG")
 
+    async def test_a_slow_search_is_killed_at_the_deadline(self) -> None:
+        """The guard is structural, so the search also runs in a child process that is killed:
+        a thread cannot be, and CPython's re holds the GIL until the search ends."""
+        import time
+
+        start = time.perf_counter()
+        with pytest.raises(RegexTimeout):
+            await search_turns(r"(a+)+$", 0, ["a" * 40 + "b"], timeout=0.5)
+        assert time.perf_counter() - start < 3
+
+    async def test_the_search_finds_the_turns(self) -> None:
+        assert await search_turns(r"\d", 0, ["no", "a 1", "two 2"]) == [1, 2]
+
+    async def test_a_timeout_is_not_measured_never_the_agents(
+        self, profile: SutProfile, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def slow(*_args: Any, **_kwargs: Any) -> list[int]:
+            raise RegexTimeout
+
+        monkeypatch.setattr(content, "search_turns", slow)
+        result = await run("content.regex", CHAT, profile, pattern="x")
+        assert result.status is ScoreStatus.INFRA_ERROR
+        assert (result.reason or "").startswith("REGEX_TIMEOUT")
+
+    async def test_a_worker_that_cannot_run_is_a_harness_error(
+        self, profile: SutProfile, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def broken(*_args: Any, **_kwargs: Any) -> list[int]:
+            raise OSError("no python")
+
+        monkeypatch.setattr(content, "search_turns", broken)
+        result = await run("content.regex", CHAT, profile, pattern="x")
+        assert (result.reason or "").startswith("REGEX_ERROR")
+
+    async def test_ignore_diacritics_strips_marks_only(self, profile: SutProfile) -> None:
+        arabic = rec(frame(0, "customer", "?"), frame(1, "agent", "مَرْحَبًا\nبك"))
+        params = {"ignore_diacritics": True}
+        assert passed(await run("content.regex", arabic, profile, pattern="مرحبا", **params))
+        # Whitespace is not collapsed, so a newline escape means what it says.
+        assert passed(await run("content.regex", arabic, profile, pattern=r"مرحبا\nبك", **params))
+        assert not passed(await run("content.regex", arabic, profile, pattern="مرحبا"))
+
+    def test_a_pattern_naming_a_mark_is_refused_with_ignore_diacritics(
+        self, profile: SutProfile
+    ) -> None:
+        for pattern in ["مَرحبا", "café", r"\u064e", "[\u064b-\u0652]", "مـرحبا"]:
+            errors = load_errors("content.regex", profile, pattern=pattern, ignore_diacritics=True)
+            assert errors and "could never match" in errors[0], pattern
+        assert load_errors("content.regex", profile, pattern="café") == []
+
+    async def test_the_cap_applies_after_normalisation(self, profile: SutProfile) -> None:
+        marked = "مَ" * 6000  # 12,000 characters as sent, 6,000 once the marks are stripped
+        long = rec(frame(0, "customer", "?"), frame(1, "agent", marked))
+        result = await run("content.regex", long, profile, pattern="م", ignore_diacritics=True)
+        assert passed(result)
+        raw = await run("content.regex", long, profile, pattern="م")
+        assert (raw.reason or "").startswith("REGEX_INPUT_TOO_LONG")
+
     @pytest.mark.parametrize(
         "pattern",
-        [r"(a+)+$", r"(\w*)*x", r"(x+){2,}", r"((ab)*c)+", r"(?:a|b+)*z", r"a*b*c*d*", "a" * 501],
+        [
+            r"(a+)+$",
+            r"(\w*)*x",
+            r"(x+){2,}",
+            r"((ab)*c)+",
+            r"(?:a|b+)*z",
+            r"(a|a)*b",
+            r"(?:a|ab)*c",
+            r"(?:foo|bar)+",
+            r".*.*.*x",
+            r"\s+\w+",
+            r"(?:\d+)?\d+",
+            r"a+-b+-c+-d+",
+            "a" * 501,
+        ],
     )
     def test_the_guard_refuses_dangerous_patterns(self, pattern: str) -> None:
         with pytest.raises(ValueError):
@@ -199,7 +302,15 @@ class TestRegex:
 
     @pytest.mark.parametrize(
         "pattern",
-        [r"\d+-\d+-\d+", r"(?:foo|bar)+", r"(ab){1,3}", r"^order \d{5}$", r"[a-z]+@[a-z]+\.com"],
+        [
+            r"\d+-\d+-\d+",
+            r"(?:foo|bar) \d+",
+            r"[xy]+z",
+            r"(ab){1,3}",
+            r"^order \d{5}$",
+            r"[a-z]+@[a-z]+\.com",
+            r".*refund.*",
+        ],
     )
     def test_the_guard_accepts_ordinary_patterns(self, pattern: str) -> None:
         guard_pattern(pattern)
@@ -219,6 +330,23 @@ class TestLoad:
     def test_a_nested_quantifier_is_a_load_error(self, profile: SutProfile) -> None:
         errors = load_errors("content.regex", profile, pattern="(a+)+")
         assert errors and "quantifier inside a quantified group" in errors[0]
+
+    def test_a_scorer_listed_twice_is_a_load_error_never_dropped(self, profile: SutProfile) -> None:
+        """Review of #94: one spec per id runs, so the second was silently never checked."""
+        scenario = make_scenario(
+            scorers=[
+                {"id": "content.json_path_equals", "params": {"path": "a", "equals": 1}},
+                {"id": "output.terminal_state"},
+                {"id": "content.json_path_equals", "params": {"path": "b", "equals": 2}},
+            ]
+        )
+        errors = check_references(scenario, profile, known_scorers=REGISTRY, known_invariants=set())
+        assert errors == [
+            "scorers.2: 'content.json_path_equals' is already listed at scorers.0; a scorer "
+            "runs once per scenario, so combine them (all_of/any_of for content.contains and "
+            "not_contains, more criteria for judge.rubric) or put the second check in its own "
+            "scenario"
+        ]
 
     def test_typos_fail(self, profile: SutProfile) -> None:
         assert load_errors("content.contains", profile, any_of=["x"], scop="last_turn")

@@ -19,8 +19,8 @@ Name a scorer in a scenario's `scorers:` list, for example
 |---|---|---|---|---|
 | `content.contains` | frames | 1 | `case_sensitive, ignore_diacritics, scope, speaker, all_of, any_of` | What was said contains the given text (params: all_of / any_of, case_sensitive, ignore_diacritics, scope any_turn\|last_turn\|every_turn, speaker agent\|customer). |
 | `content.json_path_equals` | frames | 1 | `path*, equals*, source, checkpoint, scope` | A value in the agent's JSON equals the expected one (params: path, equals, source message\|result\|checkpoint, checkpoint, scope). A message that is not JSON fails. |
-| `content.not_contains` | frames | 1 | `case_sensitive, ignore_diacritics, scope, speaker, all_of, any_of` | Fails exactly when content.contains with the same params would pass: any_of names text that must not appear. No text at all is a vacuous pass, named as one. |
-| `content.regex` | frames | 1 | `case_sensitive, ignore_diacritics, scope, speaker, pattern*, must_match` | A regular expression is found (must_match: true) or not found (false) in what was said (params: pattern, scope, speaker, case_sensitive, ignore_diacritics). |
+| `content.not_contains` | frames | 1 | `case_sensitive, ignore_diacritics, scope, speaker, all_of, any_of` | None of the listed text appears (all_of and any_of are both forbidden strings): one of them in one examined turn fails it, whatever the scope. No text at all is a vacuous pass, named as one. |
+| `content.regex` | frames | 1 | `case_sensitive, ignore_diacritics, scope, speaker, pattern*, must_match` | A regular expression is found (must_match: true) or not found in any examined turn (false) in what was said (params: pattern, scope, speaker, case_sensitive, ignore_diacritics). Searched in a separate process with a deadline. |
 | `judge.content_quality` | llm | 2 | none | LLM judge: was the agent's writing clear, grounded and appropriate? (quoted) |
 | `judge.goal_achievement` | llm | 3 | none | LLM judge: did the conversation achieve the customer's goal? (quoted, weighted) |
 | `judge.language_consistency` | llm | 4 | none | LLM judge: did the agent answer in the customer's language and dialect? (quoted) |

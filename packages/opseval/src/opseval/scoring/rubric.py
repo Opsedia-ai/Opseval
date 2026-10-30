@@ -29,7 +29,7 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass, field
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, get_args
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -44,6 +44,9 @@ from opseval.scoring.judges import TRANSCRIPT_FORMAT, Judge, _quoted, rotate
 CRITERIA_FORMAT = "json-lines-nonce-1"
 """How the criteria are put in front of the judge. In the ``prompt_hash``, so ``opseval
 rescore`` never reuses a grade given to criteria presented another way."""
+
+RubricAxis = Literal["output", "flow", "tools", "security"]
+RUBRIC_AXES = get_args(RubricAxis)
 
 MAX_CRITERIA = 20
 MAX_QUESTION = 500
@@ -83,7 +86,7 @@ class RubricParams(NoParams):
     """The criteria, at most 20: each a ``name``, a yes/no ``question``, and optionally
     ``weight`` (1), ``votes`` (1, 3 or 5), ``must`` (false) and ``quotes`` (always |
     on_fail)."""
-    axis: Literal["output", "flow", "tools", "security"] = "output"
+    axis: RubricAxis = "output"
     """Where a failure counts. Never ``harness``: a team's rubric fails the agent, it cannot
     invalidate an attempt."""
 
@@ -202,6 +205,13 @@ class RubricJudge(Judge):
 
     def __init__(self) -> None:
         self._params: RubricParams | None = None
+
+    @classmethod
+    def axis_for(cls, spec: ScorerSpec) -> Axis:
+        chosen = spec.params.get("axis", cls.axis.value)
+        if chosen in RUBRIC_AXES:
+            return Axis(str(chosen))
+        return cls.axis  # bad params: the loader refuses them; the default is never harness
 
     @classmethod
     def prompt_hash(cls) -> str:
@@ -344,10 +354,11 @@ class RubricJudge(Judge):
 
     # --- the score ------------------------------------------------------------------------
 
-    def _on_axis(self, result: ScoreResult, axis: str) -> ScoreResult:
-        return result.model_copy(update={"axis": Axis(axis)})
-
     async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        result = await self._score(record, spec, ctx)
+        return result.model_copy(update={"axis": self.axis_for(spec)})
+
+    async def _score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
         try:
             params = RubricParams.model_validate(spec.params)
         except ValidationError as exc:
@@ -358,10 +369,10 @@ class RubricJudge(Judge):
         note: dict[str, Any] = {"rubric_hash": self.rubric_hash(ctx)}
         if ctx.judge is None:
             why = "JUDGE_UNAVAILABLE: configure OPSEVAL_JUDGE_BASE_URL/MODEL/API_KEY"
-            return self._on_axis(self.infra(spec, why, **note), params.axis)
+            return self.infra(spec, why, **note)
         reason = self.not_measurable(record, ctx)
         if reason:
-            return self._on_axis(self.infra(spec, f"NOT_MEASURABLE: {reason}", **note), params.axis)
+            return self.infra(spec, f"NOT_MEASURABLE: {reason}", **note)
         conflict = self.shared_family(ctx)  # degraded here; refused at launch (ADR-0016)
         if conflict is not None:
             note.update(conflict[1])
@@ -399,7 +410,7 @@ class RubricJudge(Judge):
         result = self._decide_rubric(
             spec, list(outcomes.values()), ctx.judge.model, degraded=conflict is not None, **note
         )
-        return self._on_axis(result, params.axis)
+        return result
 
     def _decide_rubric(
         self,

@@ -11,7 +11,10 @@ security. Two kinds of check let a team say what *good* means for its own agent
   reply contains the order id", "the JSON answer has `status: approved`". They cost nothing and
   never vary, so prefer them whenever they can decide the question.
 
-Both go in a scenario's `scorers:` list, like any other check.
+Both go in a scenario's `scorers:` list, like any other check. **Each scorer id runs once per
+scenario**, so listing one twice is a load error rather than a check that never runs: put several
+strings in one `content.contains` (`all_of`, `any_of`), several criteria in one `judge.rubric`, or
+the second check in a scenario of its own.
 
 ## A rubric
 
@@ -160,7 +163,10 @@ not like.
   same as `10482`: name the form the agent writes.
 - `any_turn`: each `all_of` string somewhere, and one `any_of` string somewhere. `every_turn`:
   in each of the speaker's turns. `last_turn`: in the speaker's last turn.
-- `content.not_contains` fails exactly when `content.contains` with the same params would pass.
+- `content.not_contains`: every string in `all_of` and `any_of` is forbidden, and one of them
+  in one examined turn fails it, whatever the scope (`last_turn` examines only the last turn;
+  `any_turn` and `every_turn` examine them all). It is the same rule as `content.regex` with
+  `must_match: false`.
 - An agent that said nothing fails `contains` and is a *vacuous* pass of `not_contains`, named as
   one; `conversation.agent_replied` is the check that fails the silence.
 
@@ -169,20 +175,31 @@ not like.
 ```yaml
 - id: content.regex
   params:
-    pattern: "خلال\\s+\\d+\\s+(يوم|أيام)"   # "within N days", Arabic
-    must_match: true          # false: it must not be found
+    pattern: "خلال \\d+ (يوم|أيام)"   # "within N days", Arabic
+    must_match: true          # false: it must not be found in any examined turn
     scope: any_turn
 ```
 
 - Python's `re` syntax (`\d` matches Arabic-Indic digits too). Case-sensitive by default:
   `case_sensitive: false` or `(?i)` relaxes it.
 - The pattern is compiled when the scenario loads, so a bad one is an error at its field.
-- **The guard.** Python's `re` can take exponential time on some patterns, so a pattern over 500
-  characters, a quantifier inside a quantified group (`(a+)+`, `(\w*)*`, `(?:a|b+)*`), or more
-  than three unbounded quantifiers (`*`, `+`, `{n,}`) is refused at load: bound one (`{1,40}`)
-  or split the check. A turn longer than 10,000 characters is *not measured*
-  (`REGEX_INPUT_TOO_LONG`) rather than cut, since a match past the cut would be a false fail. The
-  guard is for local runs; protection for a shared server worker is still to decide (ADR-0061).
+- `ignore_diacritics: true` strips combining marks and the Arabic tatweel from the text, and
+  nothing else (whitespace and escapes mean what they say). A pattern that names a mark, or a
+  letter that carries one (`é`), is refused at load, since it could never match.
+- **The guard.** Python's `re` can take exponential or polynomial time on some patterns, so these
+  are refused at load:
+    - a pattern over 500 characters;
+    - a quantifier inside a quantified group: `(a+)+`, `(\w*)*`;
+    - alternation inside a quantified group: `(a|ab)*`, `(?:foo|bar)+` (use a character class,
+      `[xy]+`, where you can);
+    - two unbounded quantifiers (`*`, `+`, `{n,}`) with no literal character between them:
+      `.*.*`, `\s+\w+` (put a literal between them, as in `\d+-\d+`, or bound one, `{1,40}`);
+    - more than three unbounded quantifiers.
+- The search runs in a separate Python process, killed after 5 seconds: a timeout is *not
+  measured* (`REGEX_TIMEOUT`), since a slow pattern is the author's problem, not the agent's. A
+  turn longer than 10,000 characters, counted after `ignore_diacritics`, is *not measured*
+  (`REGEX_INPUT_TOO_LONG`) rather than cut, since a match past the cut would be a false fail.
+  How to run team patterns on a shared server worker is still to decide (ADR-0061).
 
 ### `content.json_path_equals`
 
@@ -192,6 +209,11 @@ not like.
     source: result            # result | message | checkpoint
     path: data.refunds.0.status
     equals: approved
+```
+
+or, in another scenario (one `content.json_path_equals` per scenario):
+
+```yaml
 - id: content.json_path_equals
   params:
     source: checkpoint

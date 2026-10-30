@@ -160,8 +160,16 @@ Built as decided; the ADR stays *Proposed* until the regex question below is set
   `JUDGE_CRITERIA_UNMEASURED`, naming each criterion and why.
 - **Axis.** `output` (default), `flow`, `tools` or `security`. `tools` is accepted beside the
   three the ADR names, for criteria about tool use read from the conversation. `harness` is a load
-  error with the reason. The result carries the spec's axis; the vendor-family guard reads it as
-  the agent's axis, which every allowed value is.
+  error with the reason. Every score carries the spec's axis, the ones the engine makes itself
+  too (a crash, a contract violation, speech it could not hear): `Scorer.axis_for(spec)`, the
+  class's axis by default. The vendor-family guard reads it as the agent's axis, which every
+  allowed value is.
+- **One spec per scorer id** (review of #94). `effective_specs` keeps the first spec of each id,
+  because a score is keyed by its scorer id in the record, the verdict, rescore and calibration.
+  So a scenario that lists an id twice is now a **load error** naming both positions, instead of a
+  second check that silently never runs. Two different checks of one kind are combined
+  (`all_of`/`any_of`, more criteria) or go in separate scenarios. Keying scores by spec would
+  change the result layout and was not needed for L2.
 - **No agent text** is *not measured*, as for the other judges that read the agent:
   `conversation.agent_replied` fails the silence.
 - **Calibration.** Labels name a criterion as `judge.rubric:<name>`; `calibrate` reads each
@@ -181,14 +189,28 @@ Built as decided; the ADR stays *Proposed* until the regex question below is set
   case-folded unless `case_sensitive`; `ignore_diacritics` also drops combining marks (Arabic
   harakat, accents) and the tatweel on both sides. `any_turn` asks that each `all_of` string
   appears in some turn and one `any_of` string in some turn; `every_turn` asks it of each turn;
-  `last_turn` of the speaker's last turn. `not_contains` is exactly the negation of `contains`
-  with the same params. An agent that sent no text fails `contains` (it did not say what was
+  `last_turn` of the speaker's last turn. `not_contains` is defined on its own, not as the
+  negation of `contains` (review of #94: negated, `every_turn` or `all_of` passed when one turn
+  of three broke the rule): every string in `all_of` and `any_of` is forbidden, and one of them in
+  one examined turn fails it, whatever the scope, as `content.regex` with `must_match: false`
+  does. An agent that sent no text fails `contains` (it did not say what was
   required) and is a vacuous pass for `not_contains`; a customer with no text is *not measured*.
-- **`content.regex`.** `pattern` is compiled when the scenario loads. The guard, for local runs:
-  at most 500 characters; a quantifier inside a quantified group (`(a+)+`, `(\w*)*`,
-  `(?:a|b+)*`) is refused, and so are more than three unbounded quantifiers; a turn longer than
-  10,000 characters is *not measured* (`REGEX_INPUT_TOO_LONG`), never cut, since a match past
-  the cut would be a false fail. `case_sensitive` defaults to **true** here: a pattern says what
+- **`content.regex`.** `pattern` is compiled when the scenario loads. Two layers protect a run
+  from a slow pattern (tightened in the review of #94):
+  - *At load*, refused: more than 500 characters; a quantifier inside a quantified group
+    (`(a+)+`, `(\w*)*`); alternation inside a quantified group (`(a|ab)*`, `(?:foo|bar)+`); two
+    unbounded quantifiers with no literal character between them (`.*.*`, `\s+\w+`); more than
+    three unbounded quantifiers.
+  - *At run time*, the search runs in a fresh child Python process (`-I`), killed after 5 seconds
+    (`REGEX_TIMEOUT`, not measured: the author's pattern, not the agent). A thread was tried and
+    rejected: CPython's `re` holds the GIL for the whole search, so a thread can be neither stopped
+    nor even let `asyncio.timeout` fire before the search ends. A child that cannot run is
+    `REGEX_ERROR`, a harness error.
+  - A turn longer than 10,000 characters, counted after normalisation, is *not measured*
+    (`REGEX_INPUT_TOO_LONG`), never cut, since a match past the cut would be a false fail.
+  - `ignore_diacritics` strips only combining marks and the tatweel from the text (no NFKC, no
+    whitespace folding, so escapes mean what they say); a pattern that names a mark, or a letter
+    that carries one, is refused at load, since it could never match. `case_sensitive` defaults to **true** here: a pattern says what
   it means, and `(?i)` or `case_sensitive: false` relaxes it.
 - **`content.json_path_equals`.** `source: result` (default; the received result frames),
   `message` (the agent's text as JSON, the whole text or one fenced code block) or `checkpoint`

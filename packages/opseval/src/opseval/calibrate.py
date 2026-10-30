@@ -249,12 +249,11 @@ def calibrate_run(
     scored_ids = {scorer for _t, _a, scorer in scores}
     # A criterion of a rubric that was never graded anywhere in the run (no judge) is not a
     # misspelling: its labels are counted as not measured.
-    ungraded = {
-        sid
-        for sid in scored_ids
-        if CRITERION not in sid
-        and all(st is ScoreStatus.INFRA_ERROR for (_t, _a, o), st in scores.items() if o == sid)
-    }
+    graded: dict[str, bool] = {}  # scorer id -> measured at least once in the run
+    for (_t, _a, sid), status in scores.items():
+        if CRITERION not in sid:
+            graded[sid] = graded.get(sid, False) or status is not ScoreStatus.INFRA_ERROR
+    ungraded = {sid for sid, measured in graded.items() if not measured}
     misspelled = sorted(
         sid
         for sid in {i.scorer_id for i in label_set.labels} - scored_ids
@@ -360,6 +359,15 @@ def calibration_summary(result: CalibrationResult) -> str:
     return "\n".join(lines)
 
 
+def _labels(score: ScoreResult, scorer_id: str) -> bool:
+    """Whether a label for ``scorer_id`` would be about ``score``: the scorer itself, or, for
+    ``scorer:criterion``, a score of that scorer that graded that criterion."""
+    if CRITERION not in scorer_id:
+        return score.scorer_id == scorer_id
+    base, name = scorer_id.split(CRITERION, 1)
+    return score.scorer_id == base and name in _criteria(score)
+
+
 def label_template(result: SuiteResult, scorer_id: str) -> str:
     """A ready-to-fill label file for one scorer across every attempt in a run."""
     rows = [
@@ -373,7 +381,7 @@ def label_template(result: SuiteResult, scorer_id: str) -> str:
         }
         for test in result.tests
         for attempt in test.attempts
-        if any(s.scorer_id == scorer_id.split(CRITERION, 1)[0] for s in attempt.scores)
+        if any(_labels(score, scorer_id) for score in attempt.scores)
     ]
     if not rows:
         raise ConfigError(
