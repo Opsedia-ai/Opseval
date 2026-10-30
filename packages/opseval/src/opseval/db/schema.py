@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The server-mode schema (ADR-0047): tenancy and the versioned catalogue.
+"""The server-mode schema (ADR-0047): tenancy, the versioned catalogue, and runs (ADR-0051).
 
 Organisation → project → task. Organisation and project are Langfuse's; every project-scoped
 row carries ``project_id``. A task (ADR-0049) is one evaluation target inside a project: one
@@ -22,13 +22,17 @@ in one statement.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     CheckConstraint,
     Connection,
+    Date,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
@@ -296,3 +300,280 @@ class CatalogueLabel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+# --- runs and blobs (ADR-0051) ---------------------------------------------------------------
+
+RUN_STATUSES = ("running", "finished", "harness_error", "interrupted")
+SCORE_STATUSES = ("passed", "failed", "infra_error")
+VERDICT_STATUSES = ("passed", "failed", "inconclusive", "skipped_precondition", "blocked")
+BLOB_KINDS = ("record", "result", "report", "junit", "audio", "transcript", "other")
+BLOB_STATES = ("pending", "committed")
+RUN_ID_MAX = 128
+TEST_ID_MAX = 200
+
+
+class Run(Base):
+    """One run (ADR-0051): the id ``FileStore`` mints, its task, and what queries need. The
+    run's own files (result, report, JUnit, records) are blobs; the result blob is the truth
+    a reader sees, the columns exist for queries. Counts are null until it finished: an
+    unfinished run is never drawn as zeros."""
+
+    __tablename__ = "runs"
+    __table_args__ = (
+        CheckConstraint(_one_of("status", RUN_STATUSES), name="status"),
+        # A run is in its task's project: (task, project) must be a task of that project.
+        ForeignKeyConstraint(["task_id", "project_id"], ["tasks.id", "tasks.project_id"]),
+        # The target of the child tables' (run, project, task) keys.
+        UniqueConstraint("id", "project_id", "task_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(RUN_ID_MAX), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    suite: Mapped[str] = mapped_column(String(ITEM_NAME_MAX), nullable=False, default="")
+    layout: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gate_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    passed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unjudged: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    flaky: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    progress: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    """The runner's progress log (``progress.json`` in a folder)."""
+    cancel: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    """A request to stop (``cancel.json``): who asked and when."""
+    error: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    """Why the run could not be carried out (``error.json``)."""
+    profile_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The SUT profile as run, as written (offline re-scoring)."""
+    result_blob_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("blobs.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    report_blob_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("blobs.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    junit_blob_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("blobs.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class RunScenario(Base):
+    """A scenario exactly as it ran (the snapshot ``opseval rescore`` reads)."""
+
+    __tablename__ = "run_scenarios"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True)
+    scenario_id: Mapped[str] = mapped_column(String(TEST_ID_MAX), primary_key=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class Blob(Base):
+    """A stored object (ADR-0051). Written behind a ``pending`` row: the row first, then the
+    object, then ``committed`` in the transaction that writes the row referring to it, so a
+    crash leaves a pending row retention finds, never a row pointing at nothing."""
+
+    __tablename__ = "blobs"
+    __table_args__ = (
+        CheckConstraint(_one_of("kind", BLOB_KINDS), name="kind"),
+        CheckConstraint(_one_of("state", BLOB_STATES), name="state"),
+        CheckConstraint("bytes >= 0", name="bytes"),
+        ForeignKeyConstraint(
+            ["run_id", "project_id", "task_id"],
+            ["runs.id", "runs.project_id", "runs.task_id"],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("store", "key"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(RUN_ID_MAX), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(ITEM_PATH_MAX), nullable=False)
+    """What the object is to its run, as a run folder would name it (``result.json``,
+    ``records/a__attempt0.json``, ``audio/a/attempt0/001-agent.wav.enc``)."""
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    store: Mapped[str] = mapped_column(String(16), nullable=False)
+    """``file`` or ``s3``: which blob store holds it."""
+    key: Mapped[str] = mapped_column(String(ITEM_PATH_MAX), nullable=False)
+    region: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    encryption: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    """``aes-256-gcm`` (sealed by Opseval: audio, always), ``sse:AES256`` (by the store), or
+    ``none``."""
+    key_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    retention_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    legal_hold: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = _created()
+
+
+class Attempt(Base):
+    """One attempt's record (ADR-0051): the record itself is a blob, the row what queries
+    need. ``passed`` is the attempt verdict: null until scored, or when not judged."""
+
+    __tablename__ = "attempts"
+    __table_args__ = (
+        UniqueConstraint("run_id", "test_id", "attempt_index"),
+        ForeignKeyConstraint(
+            ["run_id", "project_id", "task_id"],
+            ["runs.id", "runs.project_id", "runs.task_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("attempt_index >= 0", name="attempt_index"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    run_id: Mapped[str] = mapped_column(String(RUN_ID_MAX), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    test_id: Mapped[str] = mapped_column(String(TEST_ID_MAX), nullable=False)
+    attempt_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    terminal_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trace_coverage: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    redaction_applied: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    invalid_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    record_blob_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("blobs.id", ondelete="RESTRICT"), nullable=False
+    )
+
+
+class ScoreRow(Base):
+    """One ``ScoreResult``. The check repeats the model's rule: a score is null exactly when
+    the status is ``infra_error``, so a harness problem can never be stored as a 0."""
+
+    __tablename__ = "scores"
+    __table_args__ = (
+        CheckConstraint(_one_of("status", SCORE_STATUSES), name="status"),
+        CheckConstraint("(score IS NULL) = (status = 'infra_error')", name="infra_error_score"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    attempt_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("attempts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    scorer_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    scorer_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    axis: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    vacuous: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class VerdictRow(Base):
+    """One ``TestVerdict``: a scenario's folded verdict in a run."""
+
+    __tablename__ = "verdicts"
+    __table_args__ = (
+        UniqueConstraint("run_id", "test_id"),
+        CheckConstraint(_one_of("status", VERDICT_STATUSES), name="status"),
+        ForeignKeyConstraint(
+            ["run_id", "project_id", "task_id"],
+            ["runs.id", "runs.project_id", "runs.task_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    run_id: Mapped[str] = mapped_column(String(RUN_ID_MAX), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    test_id: Mapped[str] = mapped_column(String(TEST_ID_MAX), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    skip_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    flaky: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    cut_short_of: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    criticality: Mapped[str] = mapped_column(String(16), nullable=False)
+    pass_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class AttemptMetric(Base):
+    """A raw measurement (ADR-0051, ADR-0055): one row per turn for a per-turn metric
+    (``turn`` set), one per attempt otherwise. Not measured is ``value`` null with a
+    ``reason``, never 0; percentiles are computed from these rows, never stored."""
+
+    __tablename__ = "attempt_metrics"
+    __table_args__ = (
+        CheckConstraint("value IS NOT NULL OR reason IS NOT NULL", name="unmeasured_reason"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    attempt_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("attempts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class UsageEventRow(Base):
+    """One LLM, TTS or STT call (ADR-0066): an attempt's (``attempt_id`` set) or the run's,
+    outside any attempt. A count the provider did not report is null, never 0, and a cost is
+    null exactly when its source is ``unknown``."""
+
+    __tablename__ = "usage_events"
+    __table_args__ = (
+        CheckConstraint("(cost_usd IS NULL) = (cost_source = 'unknown')", name="cost_source"),
+        ForeignKeyConstraint(
+            ["run_id", "project_id", "task_id"],
+            ["runs.id", "runs.project_id", "runs.task_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    run_id: Mapped[str] = mapped_column(String(RUN_ID_MAX), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("attempts.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    answered: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cached_input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    audio_in_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audio_out_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    characters: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rate_limited: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    price_from: Mapped[date | None] = mapped_column(Date, nullable=True)

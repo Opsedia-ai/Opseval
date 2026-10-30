@@ -1089,7 +1089,7 @@ class TestCatalogueStore:
             with pytest.raises(RuntimeError, match="1 dataset item"):
                 async with engine.begin() as conn:
                     await conn.run_sync(down)
-            assert await migrate.current(engine) == "0004"
+            assert await migrate.current(engine) == migrate.head()
             async with engine.begin() as conn:
                 await conn.execute(text("DELETE FROM catalogue_items WHERE kind = 'dataset'"))
                 await conn.run_sync(down)
@@ -1103,7 +1103,7 @@ class TestCatalogueStore:
                 )
                 assert list(names) == ["ck_catalogue_items_ck_catalogue_items_kind"]
             await migrate.upgrade(engine)
-            assert await migrate.current(engine) == "0004"
+            assert await migrate.current(engine) == migrate.head()
         finally:
             await engine.dispose()
 
