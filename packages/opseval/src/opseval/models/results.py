@@ -18,7 +18,7 @@ from opseval.models.preflight import PreflightReport
 from opseval.models.record import TerminalState
 from opseval.models.scenario import Criticality
 from opseval.models.stop import StopPolicy
-from opseval.models.usage import AttemptUsage, UsageEvent, UsageReported
+from opseval.models.usage import AttemptUsage, CostParts, UsageEvent, UsageReported
 
 
 class ScoreStatus(StrEnum):
@@ -235,6 +235,44 @@ class ModelUsage(BaseModel):
     characters: int | None = None
     """Characters a text-to-speech role synthesised. Audio seconds and characters count only
     calls that succeeded: a failed call produced nothing to count."""
+    cost_known_usd: float | None = None
+    """The cost of the answered calls that had a price (layout 9): the known part, beside
+    ``unpriced_calls``. ``cost_usd`` is this figure only when no call was left unpriced, so a
+    run with some unpriced calls shows what is known and how much is missing, never one total
+    that pretends to be complete (ADR-0066). ``None``: no call was priced."""
+    unpriced_calls: int | None = None
+    """Answered calls with no price (no row in force, or a priced count not reported).
+    ``None`` on a row written before layout 9 whose split cannot be told from the row (some
+    calls priced, some not): not recorded."""
+
+    @model_validator(mode="after")
+    def _split_cost(self) -> ModelUsage:
+        """Fill the split for rows written before layout 9 where the row itself tells it: a
+        total means every answered call was priced; no total and no per-count tally (written
+        before per-call usage) means none was. Otherwise it stays not recorded."""
+        if self.unpriced_calls is None:
+            answered = self.calls - self.failed_calls
+            if self.cost_usd is not None:
+                self.cost_known_usd, self.unpriced_calls = self.cost_usd, 0
+            elif self.reported is None or self.reported.cost == 0:
+                self.unpriced_calls = (
+                    self.reported.answered if self.reported is not None else answered
+                )
+        return self
+
+    def cost_parts(self) -> CostParts | None:
+        """The row's cost split (:class:`~opseval.models.usage.CostParts`), or ``None`` when it
+        was not recorded."""
+        if self.unpriced_calls is None:
+            return None
+        answered = self.reported.answered if self.reported is not None else (
+            self.calls - self.failed_calls
+        )
+        return CostParts(
+            known_usd=self.cost_known_usd,
+            priced=max(answered - self.unpriced_calls, 0),
+            unpriced=self.unpriced_calls,
+        )
 
 
 class Gate(BaseModel):

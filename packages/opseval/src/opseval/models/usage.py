@@ -9,7 +9,10 @@ force when the call was made and an old run keeps its price.
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal, Self
 
@@ -174,3 +177,57 @@ class UsageReported(BaseModel):
     reasoning_tokens: int = 0
     cached_input_tokens: int = 0
     cost: int = 0
+
+
+@dataclass(frozen=True)
+class CostParts:
+    """What a set of answered calls cost, split into the part that is known and the calls that
+    had no price (ADR-0066, the D1 follow-up).
+
+    The one arithmetic for a cost that covers several calls, used by the run's usage rows
+    (``ModelUsage``), the run detail, the Usage page and every analytics store, so they can
+    never disagree. ``known_usd`` is the sum over the priced calls (``None`` when none was
+    priced, never $0); ``total_usd`` is that sum only when no call was left unpriced, so a
+    figure that misses calls is never shown as the whole bill. Sums use :func:`math.fsum`,
+    which is exact whatever the order, so a database and a folder add the same rows to the
+    same number."""
+
+    known_usd: float | None = None
+    priced: int = 0
+    unpriced: int = 0
+
+    @property
+    def calls(self) -> int:
+        return self.priced + self.unpriced
+
+    @property
+    def complete(self) -> bool:
+        """Every call was priced (and there was at least one)."""
+        return self.priced > 0 and self.unpriced == 0
+
+    @property
+    def total_usd(self) -> float | None:
+        return self.known_usd if self.complete else None
+
+    def __add__(self, other: CostParts) -> CostParts:
+        known = [v for v in (self.known_usd, other.known_usd) if v is not None]
+        return CostParts(
+            known_usd=math.fsum(known) if known else None,
+            priced=self.priced + other.priced,
+            unpriced=self.unpriced + other.unpriced,
+        )
+
+
+def cost_parts(costs: Iterable[float | None]) -> CostParts:
+    """The known part of ``costs`` (one per answered call; ``None`` is a call with no price)
+    and how many calls were priced and unpriced."""
+    known: list[float] = []
+    unpriced = 0
+    for cost in costs:
+        if cost is None:
+            unpriced += 1
+        else:
+            known.append(cost)
+    return CostParts(
+        known_usd=math.fsum(known) if known else None, priced=len(known), unpriced=unpriced
+    )

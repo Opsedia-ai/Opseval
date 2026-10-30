@@ -70,7 +70,7 @@ def _first_error(exc: Exception) -> str:
 
 LEGACY_LAYOUT = "opseval-runs/1"
 """A folder whose manifest has no layout field predates versioning: layout 1."""
-LAYOUT = "opseval-runs/8"
+LAYOUT = "opseval-runs/9"
 """The layout this version writes. Bump it (and keep reading the old) on any change a reader
 of an older folder, or an older reader of a new folder, could misread or reject. 2: run
 records may carry created_artifacts. 3: frames may carry spoken audio and its transcript,
@@ -87,7 +87,11 @@ totals ``null`` when a call did not report them. 7: a voice timeline may carry i
 (ADR-0055); an older reader (``extra="forbid"``) would reject them. 8: a voice timeline may
 carry the metric inputs (``inputs``: caller texts and times, the agent's transcripts with their
 arrival, barge-in outcomes), the STT confidence bound, and harness spans say whether they held
-the line (``holds_line``), so ``opseval rescore`` can recompute the metrics (review of #91)."""
+the line (``holds_line``), so ``opseval rescore`` can recompute the metrics (review of #91). 9: a
+usage row carries its cost split, ``cost_known_usd`` and ``unpriced_calls`` (ADR-0066, D2), so
+a run with some unpriced calls shows the known part and what is missing; an older reader
+(``extra="forbid"``) would reject them. Rows of layouts 1 to 8 read with the split filled
+where the row tells it, else "not recorded"."""
 KNOWN_LAYOUTS = frozenset(
     {
         LEGACY_LAYOUT,
@@ -97,6 +101,7 @@ KNOWN_LAYOUTS = frozenset(
         "opseval-runs/5",
         "opseval-runs/6",
         "opseval-runs/7",
+        "opseval-runs/8",
         LAYOUT,
     }
 )

@@ -259,7 +259,7 @@ class TestCost:
         assert {r.run: r for r in run_usage(store)} == page
         # Fully priced, the run's own rows and the dashboard give the same figure.
         runs = {r.run: r for r in after.runs}
-        assert page["D"].cost_usd == round(runs["D"].cost_usd.value or 0, 4) == 0.0021
+        assert page["D"].cost_usd == runs["D"].cost_usd.value == 0.00209
         assert page["D"].cost_complete is runs["D"].cost_usd.complete is True
 
     def test_filters(self, store: FileStore) -> None:

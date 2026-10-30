@@ -258,6 +258,19 @@ class UsageOut(Api):
     cached_input_tokens: int | None = None  # part of the input served from cache
     failed_calls: int = 0  # calls with no usable answer: nothing to count
     reported: UsageReportedOut | None = None  # None: written before per-call usage
+    cost_known_usd: float | None = None  # the priced calls' cost; None: none was priced
+    unpriced_calls: int | None = None  # answered calls with no price; None: not recorded
+
+
+class CostSplitOut(Api):
+    """What a run cost (ADR-0066 D2), the same arithmetic as the dashboards: the known part
+    and how many calls had no price. ``totalUsd`` is set only when every call was priced."""
+
+    known_usd: float | None  # None: no call was priced (never $0)
+    priced_calls: int
+    unpriced_calls: int
+    total_usd: float | None  # None unless every answered call had a price
+    recorded: bool = True  # false: written before the split and its records are unreadable
 
 
 class SinkOut(Api):
@@ -281,6 +294,7 @@ class RunDetail(Api):
     ignored: list[str] = []
     tests: list[TestOut]
     usage: list[UsageOut]
+    cost: CostSplitOut | None = None  # None: the run made no call it paid for
     load_errors: list[str]
     degraded_scorers: list[str] = []
     vacuous_scorers: list[str] = []
@@ -363,6 +377,7 @@ class RunUsage(Api):
     judge_tokens_complete: bool = False
     cost_usd: float | None  # the known cost; None when no model in the run has a price
     cost_complete: bool = False  # True only when every model in the run has a price
+    unpriced_calls: int | None = None  # calls with no price; None: not recorded
     audio_in_seconds: float | None = None  # STT audio heard in the run; None = not measured
     audio_out_seconds: float | None = None  # TTS audio spoken
     characters: int | None = None  # TTS characters spoken

@@ -471,6 +471,30 @@ class RunRecord(Frozen):
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]
 
+    def turn_latencies(self) -> list[float | None]:
+        """The agent's reply time per turn (ADR-0066, the Latency dashboard): for each frame
+        sent that something answered, the ``latency_ms`` of the first frame back. ``None`` is a
+        reply the clocks could not time (a voice barge-in): not measured, never 0. A frame
+        sent that nothing answered has no reply to time and is not counted."""
+        out: list[float | None] = []
+        waiting = False
+        for f in self.frames:
+            if f.direction == "sent":
+                waiting = True
+            elif waiting:
+                out.append(f.latency_ms)
+                waiting = False
+        return out
+
+    def language(self) -> tuple[str | None, str | None]:
+        """The persona's language and dialect as the scenario declared them."""
+        language = self.persona.get("language")
+        dialect = self.persona.get("dialect")
+        return (
+            language if isinstance(language, str) else None,
+            dialect if isinstance(dialect, str) and dialect else None,
+        )
+
     def transcript(self) -> list[tuple[str, str]]:
         """(speaker, text) pairs; speaker is ``customer`` or ``agent``."""
         return [

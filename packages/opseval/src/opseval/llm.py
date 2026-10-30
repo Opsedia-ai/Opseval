@@ -32,6 +32,7 @@ from opseval.models.usage import (
     UsageEvent,
     UsageReported,
     UsageRole,
+    cost_parts,
     has_tokens,
 )
 from opseval.pricing import priced
@@ -114,7 +115,7 @@ def fold_usage(
     def reported(name: str) -> int:
         return sum(1 for e in answered if getattr(e, name) is not None)
 
-    costs = [e.cost_usd for e in answered]
+    cost = cost_parts(e.cost_usd for e in answered)
     return ModelUsage(
         role=role,
         model=model,
@@ -125,7 +126,9 @@ def fold_usage(
         output_tokens=tokens("output_tokens"),
         reasoning_tokens=tokens("reasoning_tokens"),
         cached_input_tokens=tokens("cached_input_tokens"),
-        cost_usd=_sum_if_all(costs),
+        cost_usd=cost.total_usd,
+        cost_known_usd=cost.known_usd,
+        unpriced_calls=cost.unpriced,
         audio_in_seconds=_sum_known([e.audio_in_seconds for e in answered]),
         audio_out_seconds=_sum_known([e.audio_out_seconds for e in answered]),
         characters=_sum_known([e.characters for e in answered]),

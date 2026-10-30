@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from opseval.analytics import AnalyticsStore, UsageFilter
+from opseval.analytics.costs import events_cost, rows_cost
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, check_url_allowed, config_digest
 from opseval.errors import ConfigError, StorageError
@@ -371,9 +372,12 @@ def run_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
                 reported=s.UsageReportedOut.model_validate(u.reported.model_dump())
                 if u.reported
                 else None,
+                cost_known_usd=u.cost_known_usd,
+                unpriced_calls=u.unpriced_calls,
             )
             for u in r.usage
         ],
+        cost=run_cost(store, r),
         load_errors=r.load_errors,
         degraded_scorers=r.degraded_scorers,
         vacuous_scorers=r.vacuous_scorers,
@@ -385,6 +389,43 @@ def run_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
             if r.stopped
             else None
         ),
+    )
+
+
+COST_DIGITS = 6
+"""Every cost the API says is rounded to this many digits, as the dashboards round them."""
+
+
+def run_cost(store: RunStore, r: SuiteResult) -> s.CostSplitOut | None:
+    """What the run cost: the known part and the unpriced calls, by the dashboards' own
+    arithmetic (:mod:`opseval.analytics.costs`). A row written before layout 9 whose split it
+    cannot tell is split from the run's records; if they cannot be read, the split is said to
+    be not recorded. ``None``: the run made no call it paid for."""
+    parts = rows_cost(r.usage)
+    if parts is None and store.layout(r.run_id) not in PRE_USAGE_LAYOUTS:
+        try:
+            events = [e for rec in store.load_records(r.run_id) for e in rec.usage_events or ()]
+            parts = events_cost([*events, *r.usage_events])
+        except (ValueError, OSError):
+            parts = None
+    if parts is None:
+        reported = [u.reported for u in r.usage if u.reported is not None]
+        priced = sum(x.cost for x in reported)
+        return s.CostSplitOut(
+            known_usd=None,
+            priced_calls=priced,
+            unpriced_calls=sum(x.answered for x in reported) - priced,
+            total_usd=None,
+            recorded=False,
+        )
+    if parts.calls == 0:
+        return None
+    known = None if parts.known_usd is None else round(parts.known_usd, COST_DIGITS)
+    return s.CostSplitOut(
+        known_usd=known,
+        priced_calls=parts.priced,
+        unpriced_calls=parts.unpriced,
+        total_usd=known if parts.complete else None,
     )
 
 
@@ -414,8 +455,7 @@ def usage(store: RunStore) -> list[s.RunUsage]:
             counts = [_tokens(u) for u in r.usage if u.role == role]
             return _count(counts), bool(counts) and None not in counts
 
-        costs = [u.cost_usd for u in r.usage]
-        known = _total(costs)
+        cost = run_cost(store, r)
         simulator, judge = tokens("simulator"), tokens("judge")
         rows.append(
             s.RunUsage(
@@ -424,8 +464,10 @@ def usage(store: RunStore) -> list[s.RunUsage]:
                 simulator_tokens_complete=simulator[1],
                 judge_tokens=judge[0],
                 judge_tokens_complete=judge[1],
-                cost_usd=round(known, 4) if known is not None else None,
-                cost_complete=bool(costs) and all(c is not None for c in costs),
+                # The same split as the run detail and the dashboards (ADR-0066 D2).
+                cost_usd=cost.known_usd if cost is not None else None,
+                cost_complete=cost is not None and cost.total_usd is not None,
+                unpriced_calls=cost.unpriced_calls if cost is not None and cost.recorded else None,
                 audio_in_seconds=_total([u.audio_in_seconds for u in r.usage]),
                 audio_out_seconds=_total([u.audio_out_seconds for u in r.usage]),
                 characters=_count([u.characters for u in r.usage]),
