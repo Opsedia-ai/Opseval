@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Optional
 import typer
 
 from opseval import __version__
+from opseval.accounts.cli import admin_app
 from opseval.catalogue import builtin_profiles, load_catalogue, load_profile
 from opseval.config import Settings
 from opseval.db.cli import (
@@ -677,6 +678,7 @@ app.add_typer(db_app, name="db")
 app.add_typer(catalogue_app, name="catalogue")
 app.add_typer(task_app, name="task")
 app.add_typer(runs_app, name="runs")
+app.add_typer(admin_app, name="admin")
 app.add_typer(audio_app, name="audio")
 
 

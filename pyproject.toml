@@ -145,7 +145,7 @@ source_modules = [
   "opseval.analytics.files",
   "opseval.pricing",
 ]
-forbidden_modules = ["opseval.db", "sqlalchemy", "asyncpg", "alembic"]
+forbidden_modules = ["opseval.db", "opseval.accounts", "sqlalchemy", "asyncpg", "alembic", "argon2", "jwt"]
 
 [[tool.importlinter.contracts]]
 name = "Analytics answers the API, never depends on it, and never touches a conversation (ADR-0052)"
