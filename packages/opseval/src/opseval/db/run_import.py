@@ -12,13 +12,50 @@ reported and skipped, never half-imported: a failure part-way removes what was w
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
 from opseval.db.run_store import DbRunStore
 from opseval.errors import ConfigError, StorageError
-from opseval.storage import FileStore
+from opseval.models.profile import SutProfile
+from opseval.models.progress import RunProgress
+from opseval.models.record import RunRecord
+from opseval.models.results import SuiteResult
+from opseval.models.scenario import Scenario
+from opseval.models.upload import same_result
+from opseval.storage import PrunedMarker
+
+
+class SourceAudio(Protocol):
+    def size(self, relative: str) -> int | None: ...
+    def read(self, relative: str) -> bytes: ...
+    def pruned(self) -> PrunedMarker | None: ...
+
+
+class RunSource(Protocol):
+    """What an import reads from a run: a run folder (:class:`~opseval.storage.FileStore`), or
+    a run a CI job uploaded (``server.ci_api``)."""
+
+    def exists(self, run_id: str) -> bool: ...
+    def check_layout(self, run_id: str) -> None: ...
+    def has_result(self, run_id: str) -> bool: ...
+    def has_error(self, run_id: str) -> bool: ...
+    def load_result(self, run_id: str) -> SuiteResult: ...
+    def load_error(self, run_id: str) -> dict[str, Any] | None: ...
+    def load_records(self, run_id: str) -> list[RunRecord]: ...
+    def load_snapshot(self, run_id: str) -> tuple[SutProfile, dict[str, Scenario]] | None: ...
+    def load_manifest(self, run_id: str) -> dict[str, Any]: ...
+    def load_progress(self, run_id: str) -> RunProgress | None: ...
+    def cancel_requested(self, run_id: str) -> bool: ...
+    def audio(self, run_id: str) -> SourceAudio: ...
+    def audio_marker_text(self, run_id: str) -> str | None: ...
+    def rescores(self, run_id: str) -> list[str]: ...
+    def load_rescore(self, run_id: str, stamp: str) -> SuiteResult: ...
+    def rescore_files(self, run_id: str, stamp: str) -> tuple[str | None, str | None]: ...
+    def load_report(self, run_id: str) -> str | None: ...
+    def load_junit(self, run_id: str) -> str | None: ...
+
 
 Outcome = Literal["imported", "unchanged", "refused"]
 
@@ -30,7 +67,7 @@ class Imported:
     detail: str
 
 
-def _sealed_audio(src: FileStore, run_id: str) -> list[tuple[str, bytes]]:
+def _sealed_audio(src: RunSource, run_id: str) -> list[tuple[str, bytes]]:
     """Every audio file the run's records name, read and checked sealed before anything is
     written. A pruned run carries its marker instead."""
     from opseval.voice.crypto import MAGIC
@@ -54,17 +91,19 @@ def _sealed_audio(src: FileStore, run_id: str) -> list[tuple[str, bytes]]:
     return out
 
 
-def import_run(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
+def import_run(src: RunSource, run_id: str, dst: DbRunStore) -> Imported:
     """One run folder into the database; never raises for a run it cannot take."""
     try:
-        return _import(src, run_id, dst)
+        return import_from(src, run_id, dst)
     except (ConfigError, ValidationError, ValueError, OSError, StorageError) as exc:
         detail = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
         notes = getattr(exc, "__notes__", ())
         return Imported(run_id, "refused", "; ".join([detail, *notes]))
 
 
-def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
+def import_from(src: RunSource, run_id: str, dst: DbRunStore) -> Imported:
+    """One run into the database, raising what :func:`import_run` reports: a
+    :class:`StorageError` stays one (the server answers 503 and the uploader tries again)."""
     if dst.foreign(run_id):
         # Checked before anything is read or written: another project's run is never
         # compared with, replaced or removed (review of #93).
@@ -84,7 +123,7 @@ def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
         replaced = "; replaced an import that had been cut short"
     elif dst.exists(run_id):
         same = (
-            dst.load_result(run_id).model_dump() == result.model_dump()
+            same_result(dst.load_result(run_id), result)
             if result is not None and dst.has_result(run_id)
             else result is None and dst.load_error(run_id) == error
         )
@@ -152,4 +191,4 @@ def _roll_back(dst: DbRunStore, run_id: str, exc: BaseException) -> None:
         )
 
 
-__all__ = ["Imported", "import_run"]
+__all__ = ["Imported", "RunSource", "import_from", "import_run"]

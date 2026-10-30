@@ -144,6 +144,8 @@ source_modules = [
   "opseval.calibrate",
   "opseval.analytics.files",
   "opseval.pricing",
+  "opseval.remote",
+  "opseval.catalogue_files",
 ]
 forbidden_modules = ["opseval.db", "opseval.accounts", "sqlalchemy", "asyncpg", "alembic", "argon2", "jwt"]
 

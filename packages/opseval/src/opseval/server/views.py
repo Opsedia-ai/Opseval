@@ -30,10 +30,18 @@ from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import ModelUsage, SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.stop import StopPolicy
+from opseval.models.upload import http_url
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import KNOWN_LAYOUTS, PRE_USAGE_LAYOUTS, RunStore, StoredRun, process_gone
+from opseval.storage import (
+    KNOWN_LAYOUTS,
+    PRE_USAGE_LAYOUTS,
+    RunOrigin,
+    RunStore,
+    StoredRun,
+    process_gone,
+)
 from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS, gate_state
 
@@ -162,7 +170,8 @@ def list_runs(store: RunStore) -> list[s.RunSummary]:
     with an index (the database) answers from it without reading any result."""
     errors: list[s.RunSummary] = []
     finished: list[tuple[str, s.RunSummary]] = []
-    for run in store.listing():
+    listed = store.listing()
+    for run in listed:
         if not run.finished or run.layout not in KNOWN_LAYOUTS:
             summary = _unfinished(run)
             if summary is not None:
@@ -191,7 +200,40 @@ def list_runs(store: RunStore) -> list[s.RunSummary]:
         finished.append((result.started_at.isoformat(), summarise(result)))
     errors.sort(key=lambda r: r.started_at or "", reverse=True)
     finished.sort(key=lambda f: f[0], reverse=True)
-    return errors + [f[1] for f in finished]
+    origins = {run.run_id: run.origin for run in listed}
+    return [with_origin(r, origins.get(r.id)) for r in errors + [f[1] for f in finished]]
+
+
+def with_origin(summary: s.RunSummary, origin: RunOrigin | None) -> s.RunSummary:
+    """The row with where the run came from (ADR-0058 E2): ``ci`` and its job, when a CI job
+    reported it. A link that is not http(s) is left out, never drawn."""
+    if origin is None or origin.kind != "ci":
+        return summary
+    ci = origin.ci
+    url = ci.get("run_url")
+    try:
+        url = http_url(url) if isinstance(url, str) else None
+    except ValueError:
+        url = None
+    catalogue = ci.get("catalogue")
+
+    def text(name: str) -> str | None:
+        value = ci.get(name)
+        return value[:300] if isinstance(value, str) else None
+
+    return summary.model_copy(
+        update={
+            "origin": "ci",
+            "ci": s.CiOut(
+                provider=text("provider") or "unknown",
+                repository=text("repository"),
+                ref=text("ref"),
+                sha=text("sha"),
+                run_url=url,
+                label=str(catalogue.get("label"))[:64] if isinstance(catalogue, dict) else None,
+            ),
+        }
+    )
 
 
 def _failed_row(run_id: str, error: dict[str, Any]) -> s.RunSummary:
@@ -269,6 +311,7 @@ def _error_detail(
         return None  # no such run
     if summary.state == "running":
         raise RunInProgress(run_id, summary.progress)
+    summary = with_origin(summary, store.origin(run_id))
     m = store.load_manifest(run_id)
     return s.RunDetail(
         summary=summary,
@@ -341,7 +384,7 @@ def run_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
         for t in r.tests
     ]
     return s.RunDetail(
-        summary=summarise(r),
+        summary=with_origin(summarise(r), store.origin(run_id)),
         target=r.target,
         profile=r.profile,
         gate_status=r.gate.status,

@@ -71,6 +71,7 @@ from opseval.storage import (
     FinishedRuns,
     PrunedMarker,
     RunCounts,
+    RunOrigin,
     StoredRun,
     UnknownLayout,
     UnreadableRun,
@@ -294,6 +295,10 @@ class DbRunAudio:
         """What ``opseval audio export`` takes to find this run: its id and project."""
         project = self.store.project_ref or "<org/project>"
         return f"{shlex.quote(self.run_id)} --project {shlex.quote(project)}"
+
+
+def _origin(kind: str | None, ci: Any) -> RunOrigin | None:
+    return RunOrigin(kind, dict(ci)) if kind is not None and isinstance(ci, dict) else None
 
 
 class DbRunStore:
@@ -1009,6 +1014,32 @@ class DbRunStore:
 
         return self._run(go, write=True) == 1
 
+    def set_origin(self, run_id: str, kind: str, ci: dict[str, Any]) -> None:
+        """Record where the run came from (ADR-0058 E2): ``ci`` and what the CI system said.
+        Written on every upload of the run, so a lost first answer leaves nothing missing."""
+        project_id, task_id = self._owner(run_id)
+        body = _json(ci)
+
+        async def go(s: AsyncSession) -> int:
+            done = await s.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.project_id == project_id, Run.task_id == task_id)
+                .values(origin=kind, ci=body)
+            )
+            return int(getattr(done, "rowcount", 0) or 0)
+
+        if self._run(go, write=True) != 1:
+            raise ConfigError(f"no run {run_id!r} in {self.label}: origin not written")
+
+    def origin(self, run_id: str) -> RunOrigin | None:
+        async def go(s: AsyncSession) -> tuple[str | None, Any] | None:
+            q = self._live(select(Run.origin, Run.ci).where(Run.id == run_id))
+            found = (await s.execute(q)).one_or_none()
+            return None if found is None else (found[0], found[1])
+
+        found = self._run(go)
+        return _origin(found[0], found[1]) if found is not None else None
+
     def cancel_requested(self, run_id: str) -> bool:
         async def go(s: AsyncSession) -> bool:
             q = self._live(select(Run.cancel.is_not(None)).where(Run.id == run_id))
@@ -1227,6 +1258,7 @@ class DbRunStore:
                     cancel_requested=row.cancel is not None,
                     changed_at=row.updated_at.timestamp() if finished else None,
                     counts=counts,
+                    origin=_origin(row.origin, row.ci),
                 )
             )
         return out

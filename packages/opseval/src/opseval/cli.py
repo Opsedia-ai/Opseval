@@ -12,7 +12,7 @@ import sys
 import traceback
 import webbrowser
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, NoReturn, Optional
 
 import typer
 
@@ -314,6 +314,94 @@ def _server_store(
         raise typer.Exit(EXIT_HARNESS) from exc
 
 
+def _config_error(message: str) -> NoReturn:
+    typer.secho(f"configuration error: {message}", fg="red", err=True)
+    raise typer.Exit(EXIT_HARNESS)
+
+
+def _inside(folder: Path, path: Path) -> Path:
+    """``path`` inside the pulled catalogue, or exit 3: a run with --server evaluates the
+    label, never a file from elsewhere."""
+    if path.is_absolute() or ".." in path.parts:
+        _config_error(f"{path}: with --server, give a path inside the pulled catalogue")
+    found = (folder / path).resolve()
+    if not found.is_relative_to(folder) or not found.exists():
+        _config_error(f"{path}: not in the pulled catalogue")
+    return found
+
+
+def _execute_remote(
+    path: Path,
+    options: RunOptions,
+    settings: Settings,
+    open_report: bool,
+    junit: Path | None,
+    url: str,
+    project: str,
+    task: str,
+    label: str | None,
+) -> int:
+    """``run --server`` (ADR-0058 E2): pull, run locally, upload. Exit 3 when the pull fails
+    (nothing could be evaluated); a failed upload never changes the code."""
+    import tempfile
+
+    from opseval import remote
+
+    try:
+        server = remote.server_from(settings, url, project, task, label or "production")
+    except ConfigError as exc:
+        _config_error(str(exc))
+    pulled_into = Path(tempfile.mkdtemp(prefix="opseval-pull-"))
+    try:
+        with remote.make_client(server, settings) as client:
+            folder = pulled_into / "catalogue"
+            try:
+                pulled = remote.pull(client, server, folder)
+            except ConfigError as exc:
+                _config_error(str(exc))
+            folder = folder.resolve()
+            typer.echo(
+                f"Pulled {len(pulled.items)} item(s) of {server.project}/{server.task} under "
+                f"{server.label!r} from {server.origin}."
+            )
+            stored_profile = folder / "profile.yaml"
+            if options.profile and stored_profile.is_file():
+                _config_error(
+                    f"--profile with --server: the label {server.label!r} has its own profile; "
+                    "leave --profile out so the label decides what runs"
+                )
+            if not options.profile:
+                if not stored_profile.is_file():
+                    _config_error(f"the label {server.label!r} has no profile.yaml: give --profile")
+                options.profile = str(stored_profile)
+            target = _inside(folder, path)
+            store = FileStore(settings.reports_dir)
+            options.store = store
+            try:
+                result = asyncio.run(launch(target, options, settings, log=typer.echo))
+            except ConfigError as exc:
+                typer.secho(f"configuration error: {exc}", fg="red", err=True)
+                typer.secho(
+                    f"Nothing was reported to {server.origin}: the run could not be carried out.",
+                    fg="yellow",
+                    err=True,
+                )
+                return EXIT_HARNESS
+            result = remote.report_run(
+                client,
+                server,
+                store,
+                result,
+                ci=remote.ci_metadata(),
+                catalogue=pulled,
+                retries=settings.server_upload_retries,
+                log=typer.echo,
+            )
+    finally:
+        shutil.rmtree(pulled_into, ignore_errors=True)
+    return _finish(result, settings, open_report, junit, store)
+
+
 ProjectRunOpt = Annotated[
     Optional[str],  # noqa: UP045
     typer.Option(
@@ -327,8 +415,22 @@ TaskRunOpt = Annotated[str, typer.Option("--task", help="Server mode: the projec
 
 @app.command()
 def run(
-    path: Annotated[Path, typer.Argument(help="Scenario file, directory or suite file.")],
-    profile: ProfileOpt,
+    path: Annotated[
+        Path,
+        typer.Argument(
+            help="Scenario file, directory or suite file. With --server, a path inside the "
+            "pulled catalogue (suites/smoke.yaml)."
+        ),
+    ],
+    profile: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(
+            "--profile",
+            "-p",
+            help="SUT profile YAML, or builtin:<name>. With --server, the label's profile.yaml.",
+        ),
+    ] = None,
+    *,
     target: Annotated[
         str, typer.Option("--target", "-t", help="Agent URL (ws://, wss://, http(s)://).")
     ],
@@ -405,6 +507,21 @@ def run(
     database_url: DatabaseUrlOpt = None,
     project: ProjectRunOpt = None,
     task: TaskRunOpt = "default",
+    server: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(
+            "--server",
+            help="Report to an Opseval server (ADR-0058): pull the catalogue under --label for "
+            "--project/--task, run here, upload the run. Key: OPSEVAL_PUBLIC_KEY and "
+            "OPSEVAL_SECRET_KEY. The exit code is always the local verdict's.",
+        ),
+    ] = None,
+    label: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option(
+            "--label", help="With --server: the catalogue label to run.", show_default="production"
+        ),
+    ] = None,
 ) -> None:
     """Run scenarios against a deployed agent and gate the release."""
     settings = Settings()
@@ -433,6 +550,20 @@ def run(
         verify_llm=verify_llm,
         gate=gate,
     )
+    if server is not None:
+        if database_url:
+            _config_error("--server and --database-url: report to a server, or write to a database")
+        if project is None:
+            _config_error("--server needs --project org/project (and --task, default 'default')")
+        raise typer.Exit(
+            _execute_remote(
+                path, options, settings, open_report, junit, server, project, task, label
+            )
+        )
+    if label is not None:
+        _config_error("--label needs --server (or use `opseval catalogue pull --label`)")
+    if profile is None:
+        _config_error("--profile is required (a SUT profile YAML, or builtin:<name>)")
     store = _server_store(settings, database_url, project, task)
     options.store = store
     try:

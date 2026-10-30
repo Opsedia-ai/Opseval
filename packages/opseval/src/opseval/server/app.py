@@ -57,7 +57,7 @@ from opseval.config import Settings
 from opseval.errors import ConfigError, StorageError
 from opseval.plugins import load_scorers
 from opseval.server import access as access_mod
-from opseval.server import accounts_api, actions, lookup, views
+from opseval.server import accounts_api, actions, ci_api, lookup, views
 from opseval.server import audio as audio_api
 from opseval.server import schemas as s
 from opseval.server.access import HSTS, LOOPBACK_NAMES, AccessConfig, host_name
@@ -118,12 +118,15 @@ ROUTE_NEEDS: dict[tuple[str, str], Need] = {
     ("GET", "/catalogue/labels"): Need.READ,
     ("PUT", "/catalogue/labels"): Need.LABEL,
     ("PUT", "/catalogue/labels/protection"): Need.MANAGE,
+    # Reporting CI runs (ADR-0058 E2): `opseval run --server` pulls a label, then uploads.
+    ("GET", "/catalogue/export"): Need.READ,  # runs:read covers the catalogue (ADR-0050)
+    ("PUT", _RUN + "/upload"): Need.START,  # runs:start: "report a CI run" (ADR-0050)
 }
 """What every ``/api/v1`` route needs (method, path below ``/api/v1``). The one table
 authorization reads; a route not in it fails the start (deny by default)."""
 SELF_AUDITED = frozenset(
     path for (_m, path) in ROUTE_NEEDS if path.startswith(("/auth/", "/catalogue/labels"))
-)
+) | {_RUN + "/upload"}
 """Writes that record their own, more specific audit event."""
 
 
@@ -677,6 +680,7 @@ def create_app(
         return out
 
     accounts_api.register(app, access, API)
+    ci_api.register(app, ctx, access, API)
     check_policies(app)
     return app
 

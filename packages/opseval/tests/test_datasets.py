@@ -994,7 +994,7 @@ class TestCatalogueStore:
     def test_pull_writes_datasets_only_under_datasets(
         self, tmp_path: Path, path: str, ok: bool
     ) -> None:
-        from opseval.db.catalogue_store import _safe_target
+        from opseval.catalogue_files import safe_target as _safe_target
         from opseval.errors import ConfigError
 
         if ok:

@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -38,6 +38,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from opseval.catalogue import KnownScorers, load_catalogue, load_profile, suite_files
+from opseval.catalogue_files import StoredFile, write_label
 from opseval.datasets import DatasetError, Limits, parse_dataset
 from opseval.db.schema import (
     ITEM_NAME_MAX,
@@ -902,47 +903,20 @@ async def resolve(
     return [(item, version) for item, version in rows]
 
 
-def _safe_target(dest: Path, path: str) -> Path:
-    rel = PurePosixPath(path)
-    nested = len(rel.parts) > 1
-    allowed = (
-        rel == PurePosixPath("profile.yaml")
-        or (nested and rel.parts[0] in ("suites", "scenarios") and rel.suffix == ".yaml")
-        # Datasets (ADR-0060): only their two formats, and only where scenarios look for them.
-        or (nested and rel.parts[0] == DATASET_FOLDER and rel.suffix in DATASET_SUFFIXES)
-    )
-    if rel.is_absolute() or ".." in rel.parts or not allowed:
-        raise ConfigError(f"stored path {path!r} is not a catalogue file path; refusing to write")
-    target = (dest / Path(*rel.parts)).resolve()
-    if not target.is_relative_to(dest):  # pragma: no cover - the checks above rule it out
-        raise ConfigError(f"stored path {path!r} leaves the folder; refusing to write")
-    return target
-
-
 async def materialize(
     session: AsyncSession, task: Task, label: str, dest: Path
 ) -> list[tuple[CatalogueItem, CatalogueVersion]]:
     """Write the catalogue under ``label`` to ``dest``, a folder that must be empty or new:
-    a file left over from something else would run as if it were part of the label."""
+    a file left over from something else would run as if it were part of the label. The
+    rules are :func:`opseval.catalogue_files.write_label`'s, shared with ``run --server``."""
     chosen = await resolve(session, task, label)
-    if not chosen:
-        raise ConfigError(f"nothing in task {task.slug!r} carries the label {label!r}")
-    dest = dest.resolve()
-    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
-        raise ConfigError(f"{dest}: not an empty folder; pull into a new or empty one")
-    targets: dict[Path, str] = {}
-    for item, version in chosen:
-        target = _safe_target(dest, version.path)
-        if target in targets:
-            raise ConfigError(
-                f"{version.path}: both {targets[target]} and {item.kind} {item.name!r} under "
-                f"{label!r} write it; label only one of them"
-            )
-        targets[target] = f"{item.kind} {item.name!r}"
-    for _item, version in chosen:
-        target = _safe_target(dest, version.path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # A dataset is written back exactly as pushed (its digest is in every run's snapshot).
-        newline = "" if PurePosixPath(version.path).parts[0] == DATASET_FOLDER else None
-        target.write_text(version.source, encoding="utf-8", newline=newline)
+    write_label(
+        dest,
+        [
+            StoredFile(item.kind, item.name, version.path, version.source)
+            for item, version in chosen
+        ],
+        label,
+        f"task {task.slug!r}",
+    )
     return chosen
