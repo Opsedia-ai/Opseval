@@ -55,7 +55,7 @@ DEFAULT_PROTECTED: frozenset[str] = frozenset({"production"})
 def check_role(value: str) -> Role:
     if value not in ROLES:
         raise ValueError(f"role {value!r}: one of {', '.join(ROLES)}")
-    return cast(Role, value)
+    return value
 
 
 def check_scopes(values: list[str] | tuple[str, ...]) -> list[Scope]:

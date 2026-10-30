@@ -189,7 +189,11 @@ class OidcClient:
         if not tokens.same(state, flow.state):
             raise OidcError("the state does not match this sign-in")
         doc = self.discovery()
-        auth = (self.client_id, self._secret) if self._secret else None
+        auth = (
+            httpx.BasicAuth(self.client_id, self._secret)
+            if self._secret
+            else httpx.USE_CLIENT_DEFAULT
+        )
         form = {
             "grant_type": "authorization_code",
             "code": code,
