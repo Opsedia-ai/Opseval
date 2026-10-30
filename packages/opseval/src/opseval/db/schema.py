@@ -304,7 +304,7 @@ class CatalogueLabel(Base):
 
 # --- runs and blobs (ADR-0051) ---------------------------------------------------------------
 
-RUN_STATUSES = ("running", "finished", "harness_error", "interrupted")
+RUN_STATUSES = ("running", "finished", "harness_error", "interrupted", "deleting")
 SCORE_STATUSES = ("passed", "failed", "infra_error")
 VERDICT_STATUSES = ("passed", "failed", "inconclusive", "skipped_precondition", "blocked")
 BLOB_KINDS = ("record", "result", "report", "junit", "audio", "transcript", "other")
@@ -353,6 +353,11 @@ class Run(Base):
     """Why the run could not be carried out (``error.json``)."""
     profile_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     """The SUT profile as run, as written (offline re-scoring)."""
+    importing: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    """Set while ``opseval runs import`` writes the run, cleared in the transaction that
+    finishes it: a run left ``importing`` was interrupted, and the next import replaces it."""
     result_blob_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("blobs.id", use_alter=True, ondelete="RESTRICT"), nullable=True
     )
@@ -411,6 +416,9 @@ class Blob(Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     store: Mapped[str] = mapped_column(String(16), nullable=False)
     """``file`` or ``s3``: which blob store holds it."""
+    location: Mapped[str] = mapped_column(String(ITEM_PATH_MAX), nullable=False)
+    """Where that store kept it (an absolute folder, or ``host/bucket/prefix``): a reader on
+    another location reports the mismatch, never the object as simply missing."""
     key: Mapped[str] = mapped_column(String(ITEM_PATH_MAX), nullable=False)
     region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     encryption: Mapped[str] = mapped_column(String(32), nullable=False, default="none")

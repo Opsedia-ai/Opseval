@@ -28,7 +28,7 @@ depends_on = None
 
 UUID = postgresql.UUID(as_uuid=True)
 JSONB = postgresql.JSONB()
-RUN_STATUSES = ("running", "finished", "harness_error", "interrupted")
+RUN_STATUSES = ("running", "finished", "harness_error", "interrupted", "deleting")
 SCORE_STATUSES = ("passed", "failed", "infra_error")
 VERDICT_STATUSES = ("passed", "failed", "inconclusive", "skipped_precondition", "blocked")
 BLOB_KINDS = ("record", "result", "report", "junit", "audio", "transcript", "other")
@@ -69,6 +69,7 @@ def upgrade() -> None:
         sa.Column("cancel", JSONB, nullable=True),
         sa.Column("error", JSONB, nullable=True),
         sa.Column("profile_snapshot", sa.Text(), nullable=True),
+        sa.Column("importing", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("result_blob_id", UUID, nullable=True),
         sa.Column("report_blob_id", UUID, nullable=True),
         sa.Column("junit_blob_id", UUID, nullable=True),
@@ -112,6 +113,7 @@ def upgrade() -> None:
         sa.Column("bytes", sa.BigInteger(), nullable=False),
         sa.Column("sha256", sa.String(64), nullable=False),
         sa.Column("store", sa.String(16), nullable=False),
+        sa.Column("location", sa.String(500), nullable=False),
         sa.Column("key", sa.String(500), nullable=False),
         sa.Column("region", sa.String(64), nullable=True),
         sa.Column("encryption", sa.String(32), nullable=False),

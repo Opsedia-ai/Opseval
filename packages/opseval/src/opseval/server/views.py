@@ -13,7 +13,7 @@ import yaml
 from opseval.analytics import AnalyticsStore, UsageFilter
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, check_url_allowed, config_digest
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, StorageError
 from opseval.models.gate import (
     PRESETS,
     SETTINGS,
@@ -33,7 +33,7 @@ from opseval.models.stop import StopPolicy
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
-from opseval.storage import PRE_USAGE_LAYOUTS, RunStore, process_gone
+from opseval.storage import KNOWN_LAYOUTS, PRE_USAGE_LAYOUTS, RunStore, StoredRun, process_gone
 from opseval.transcript import connection, short, transcript
 from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS, gate_state
 
@@ -61,22 +61,36 @@ def summarise(result: SuiteResult) -> s.RunSummary:
     )
 
 
-def _unfinished(store: RunStore, run_id: str) -> s.RunSummary | None:
+def _stored(store: RunStore, run_id: str) -> StoredRun:
+    """One run as a listing sees it, through the store's single-run reads."""
+    finished = store.has_result(run_id)
+    return StoredRun(
+        run_id=run_id,
+        layout=store.layout(run_id),
+        manifest=store.load_manifest(run_id),
+        finished=finished,
+        error=store.load_error(run_id),
+        progress=store.load_progress(run_id),
+        cancel_requested=store.cancel_requested(run_id),
+        changed_at=None,
+    )
+
+
+def _unfinished(run: StoredRun) -> s.RunSummary | None:
     """A run without a result: still running, or it could not be carried out."""
-    m = store.load_manifest(run_id)
-    error = store.load_error(run_id)
+    m, error = run.manifest, run.error
     if not m and error is None:
         return None  # not a run folder
-    if not store.layout_known(run_id):
+    if run.layout not in KNOWN_LAYOUTS:
         # Written by a newer Opseval: shown as an error the reader can act on (upgrade),
         # never read with rules that may not apply to it, and never silently dropped.
         error = {
             "code": "UNKNOWN_LAYOUT",
-            "message": f"layout {store.layout(run_id)!r} "
+            "message": f"layout {run.layout!r} "
             "was written by a newer Opseval; upgrade to read this run",
         }
     common = {
-        "id": str(m.get("run_id", run_id)),
+        "id": str(m.get("run_id", run.run_id)),
         "suite": str(m.get("suite", "")),
         "started_at": m.get("started_at") or (error or {}).get("at"),
         "passed": None,  # not measured: never draw an unfinished run as zeros
@@ -96,12 +110,29 @@ def _unfinished(store: RunStore, run_id: str) -> s.RunSummary | None:
             gate="harness_error",
             error=f"{error.get('code', 'HARNESS_ERROR')}: {error.get('message', '')}",
         )
-    return s.RunSummary(**common, state="running", gate=None, progress=_progress(store, run_id))
+    return s.RunSummary(**common, state="running", gate=None, progress=_progress(run))
 
 
-def _progress(store: RunStore, run_id: str) -> s.RunProgress | None:
+def _unreadable(run: StoredRun, reason: str) -> s.RunSummary:
+    """A finished run whose result cannot be read: listed as an error row, never dropped."""
+    m = run.manifest
+    return s.RunSummary(
+        id=run.run_id,
+        suite=str(m.get("suite", "")),
+        started_at=m.get("started_at"),
+        state="harness_error",
+        gate="harness_error",
+        passed=None,
+        failed=None,
+        unjudged=None,
+        flaky=None,
+        error=f"RUN_UNREADABLE: {reason}",
+    )
+
+
+def _progress(run: StoredRun) -> s.RunProgress | None:
     """The runner's own account of how far it got (progress.json), or ``None``."""
-    p = store.load_progress(run_id)
+    p = run.progress
     if p is None:
         return None
     rows = [
@@ -115,28 +146,110 @@ def _progress(store: RunStore, run_id: str) -> s.RunProgress | None:
         attempts_recorded=sum(r.attempts for r in rows),
         current=p.current,
         scenarios=rows,
-        cancel_requested=store.cancel_requested(run_id),
+        cancel_requested=run.cancel_requested,
     )
 
 
 def load_results(store: RunStore) -> list[SuiteResult]:
-    """Every finished run, newest first. A run without result.json is still in flight."""
-    return store.finished_results()
-
-
-def _in_flight(store: RunStore) -> list[s.RunSummary]:
-    out: list[s.RunSummary] = []
-    for run_id in store.run_ids():
-        if store.has_result(run_id) and store.layout_known(run_id):
-            continue
-        summary = _unfinished(store, run_id)
-        if summary is not None:
-            out.append(summary)
-    return sorted(out, key=lambda r: r.started_at or "", reverse=True)
+    """Every finished run that can be read, newest first. A run without result.json is still
+    in flight; one whose result cannot be read is an error row of :func:`list_runs`."""
+    return store.read_finished().results
 
 
 def list_runs(store: RunStore) -> list[s.RunSummary]:
-    return _in_flight(store) + [summarise(r) for r in load_results(store)]
+    """Runs in flight (and runs that are errors: could not be carried out, a newer layout, a
+    result that cannot be read), newest first, then the finished runs, newest first. A store
+    with an index (the database) answers from it without reading any result."""
+    errors: list[s.RunSummary] = []
+    finished: list[tuple[str, s.RunSummary]] = []
+    for run in store.listing():
+        if not run.finished or run.layout not in KNOWN_LAYOUTS:
+            summary = _unfinished(run)
+            if summary is not None:
+                errors.append(summary)
+            continue
+        if run.counts is not None:
+            c = run.counts
+            summary = s.RunSummary(
+                id=run.run_id,
+                suite=c.suite,
+                started_at=c.started_at.isoformat(),
+                state="finished",
+                gate=c.gate,
+                passed=c.passed,
+                failed=c.failed,
+                unjudged=c.unjudged,
+                flaky=c.flaky,
+            )
+            finished.append((c.started_at.isoformat(), summary))
+            continue
+        try:
+            result = store.load_result(run.run_id)
+        except (ValueError, OSError, StorageError) as exc:
+            errors.append(_unreadable(run, _reason(exc)))
+            continue
+        finished.append((result.started_at.isoformat(), summarise(result)))
+    errors.sort(key=lambda r: r.started_at or "", reverse=True)
+    finished.sort(key=lambda f: f[0], reverse=True)
+    return errors + [f[1] for f in finished]
+
+
+def _failed_row(run_id: str, error: dict[str, Any]) -> s.RunSummary:
+    return s.RunSummary(
+        id=run_id,
+        suite="",
+        started_at=error.get("at"),
+        state="harness_error",
+        gate="harness_error",
+        passed=None,
+        failed=None,
+        unjudged=None,
+        flaky=None,
+        error=f"{error.get('code', 'HARNESS_ERROR')}: {error.get('message', '')} "
+        "(not yet recorded in the store, which could not be written)",
+    )
+
+
+def with_unrecorded(
+    rows: list[s.RunSummary], failures: dict[str, dict[str, Any]]
+) -> list[s.RunSummary]:
+    """The listing with the runs whose failure this process holds because the store could not
+    take it: shown as the harness errors they are, never left "running"."""
+    if not failures:
+        return rows
+    out = [
+        _failed_row(r.id, failures[r.id]) if r.id in failures and r.state == "running" else r
+        for r in rows
+    ]
+    listed = {r.id for r in rows}
+    extra = [_failed_row(i, e) for i, e in failures.items() if i not in listed]
+    return extra + out
+
+
+def unrecorded_detail(run_id: str, error: dict[str, Any]) -> s.RunDetail:
+    summary = _failed_row(run_id, error)
+    return s.RunDetail(
+        summary=summary,
+        target="",
+        profile="",
+        gate_status="block",
+        gate_summary=(
+            "Not judged: Opseval could not carry out this run, and the store could not record "
+            f"why. This is a harness problem, not an agent failure. {summary.error}"
+        ),
+        blocking=[],
+        warnings=[],
+        exit_code=EXIT_HARNESS,
+        safe_to_release=False,
+        tests=[],
+        usage=[],
+        load_errors=[],
+    )
+
+
+def _reason(exc: BaseException) -> str:
+    text = str(exc).splitlines()[0] if str(exc) else ""
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 class RunInProgress(Exception):
@@ -147,8 +260,11 @@ class RunInProgress(Exception):
         self.progress = progress
 
 
-def _error_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
-    summary = _unfinished(store, run_id)
+def _error_detail(
+    store: RunStore, run_id: str, unreadable: str | None = None
+) -> s.RunDetail | None:
+    run = _stored(store, run_id)
+    summary = _unreadable(run, unreadable) if unreadable is not None else _unfinished(run)
     if summary is None:
         return None  # no such run
     if summary.state == "running":
@@ -181,7 +297,12 @@ def run_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
     """
     if not store.has_result(run_id) or not store.layout_known(run_id):
         return _error_detail(store, run_id)
-    r = store.load_result(run_id)
+    try:
+        r = store.load_result(run_id)
+    except (ValueError, OSError) as exc:
+        # A result that cannot be read is said, never a 500 nor "no such run". A storage
+        # outage (StorageError) is not this: the console answers 503 STORAGE_UNAVAILABLE.
+        return _error_detail(store, run_id, _reason(exc))
     tests = [
         s.TestOut(
             id=t.test_id,

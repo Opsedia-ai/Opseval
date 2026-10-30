@@ -57,7 +57,6 @@ def audio_note(record: RunRecord, run_dir: RunAudio | str | Path | None) -> Audi
         audio: RunAudio = FileRunAudio(path, record.run_id)
     else:
         audio = run_dir
-    folder = audio.location()
     marker = audio.pruned()  # the player's own parser: they never disagree
     files = [r for r in refs if r.path is not None]
     if marker is not None or any(r.pruned for r in refs):
@@ -70,9 +69,7 @@ def audio_note(record: RunRecord, run_dir: RunAudio | str | Path | None) -> Audi
     if 0 < sealed < len(files):
         state = f"{sealed} of {len(files)} encrypted"
     test, n = record.test_id, record.attempt_index
-    base = (
-        f"opseval audio export {shlex.quote(str(folder))} --test {shlex.quote(test)} --attempt {n}"
-    )
+    base = f"opseval audio export {audio.export_args()} --test {shlex.quote(test)} --attempt {n}"
     raw = {
         f.seq: f"{base} --turn {f.seq} --raw --out "
         + shlex.quote(f"{test}-attempt{n}-turn{f.seq}.raw")

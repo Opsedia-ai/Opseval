@@ -215,9 +215,56 @@ mode by definition.
   run detail, attempts, list, usage, trend, report, JUnit, progress) between the two stores.
 
 Not built yet: the `audio_assets` table, `retention_until` per blob, `runs export`, run
-partitioning, the console's own project and task scoping (ADR-0047 step 1: `serve --project`
-serves one project), and the report's audio export command for a database run (it names a
-folder; play such a run in the console).
+partitioning, and the console's own project and task scoping (ADR-0047 step 1: `serve
+--project` serves one project).
+
+### Review of #93 (2026-10-30)
+
+- **Storage is off the event loop and off the agent's clock.** The runner calls every store
+  method on a worker thread (`asyncio.to_thread`), so a database round trip or an S3 upload
+  never blocks the agent's turns, another lane, or the console. Audio recorded during a call is
+  handed to a per-attempt background writer (`voice.recording.AudioWriter`, bounded by
+  `OPSEVAL_AUDIO_WRITE_QUEUE_MB`, default 256) and flushed after the conversation, before the
+  record is saved: storage time is never inside a turn or an attempt deadline, and never in a
+  latency. Audio that could not be stored makes the attempt a harness failure (its stop reason
+  keeps how the call itself ended); a record that could not be stored stops the run (exit 3).
+  Tested with a store that takes 1.5 s per file against a 1 s turn timeout, with two runs on one
+  loop, and with a store that fails.
+- **`StorageError`** (a `HarnessError`, the parent of `BlobStoreError`) is what leaves the
+  store: SQLAlchemy, asyncpg and OS errors are wrapped at the boundary. The store's loop has a
+  per-call timeout (`OPSEVAL_STORAGE_TIMEOUT_SECONDS`, 60; also each connection's
+  `statement_timeout` and the connect timeout), fails at once once closed, and `close()` is
+  idempotent and closes the loop; `serve` closes its store on shutdown. The console answers
+  `503 STORAGE_UNAVAILABLE`. A console-started run whose failure the store cannot take is kept in
+  the process, shown as a harness error, and written as soon as the store answers.
+- **Tenancy.** Every write names the project in its `WHERE` and checks it changed one row
+  (`ConfigError`: "belongs to another project"); a manifest whose id another project or task
+  holds is refused (`ON CONFLICT … RETURNING`); `runs import` checks for a foreign id before
+  reading or writing anything.
+- **Deleting a run is crash-safe.** One transaction marks the run `deleting` (no longer
+  listed), removes its attempts, verdicts, scores, metrics and usage, and sends every blob back
+  to `pending`; then each object goes, then its row; the run row goes with its last blob. What a
+  failure leaves is an orphan at once (no grace period), swept by the next `prune`, never a row
+  pointing at a missing object. A legal hold refuses the delete before anything changes. Retention
+  records a failing run and goes on, and `prune --project` sweeps orphans after the runs.
+- **An interrupted import is retried.** `runs.importing` is set by the import's manifest and
+  cleared by its result (or error); a run left `importing` is deleted and imported again. A
+  rollback that fails is noted on the original error, never raised instead of it.
+- **No silent loss in reads.** `RunStore.read_finished()` returns the results and the finished
+  runs that could not be read; the console lists those as `RUN_UNREADABLE` error rows (and the
+  run detail says so), analytics names them in `scope.unreadable_runs`. Each blob row records
+  its store's `location` (the absolute folder, or `host/bucket/prefix`); an object missing from a
+  store at another location is `BLOB_STORE_MISMATCH`, not a missing run. `OPSEVAL_BLOB_DIR` must
+  be absolute (default `.blobs` inside the reports folder, resolved once).
+- **Listing** comes from the `runs` rows (`RunStore.listing()`: status, gate state, counts, start,
+  suite, progress, cancel) in one query, with no result downloaded; finished results are cached
+  per run by `updated_at`; a run's project and task are looked up once.
+- **S3.** The `Host` header is computed once (lower-cased, default port dropped, others kept),
+  signed and sent explicitly; an endpoint with a user or password is refused; a store that
+  refuses server-side encryption (MinIO without a KMS) is named with
+  `OPSEVAL_S3_SERVER_SIDE_ENCRYPTION`; `OPSEVAL_S3_TIMEOUT_SECONDS`.
+- **The report's audio command** works for a database run: `opseval audio export <run id>
+  --project org/p …` (and `audio list`) read the run from the database and the blob store.
 
 ## Not decided here
 

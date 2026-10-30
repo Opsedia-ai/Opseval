@@ -17,7 +17,7 @@ from typing import Literal
 from pydantic import ValidationError
 
 from opseval.db.run_store import DbRunStore
-from opseval.errors import BlobStoreError, ConfigError
+from opseval.errors import ConfigError, StorageError
 from opseval.storage import FileStore
 
 Outcome = Literal["imported", "unchanged", "refused"]
@@ -58,12 +58,17 @@ def import_run(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
     """One run folder into the database; never raises for a run it cannot take."""
     try:
         return _import(src, run_id, dst)
-    except (ConfigError, ValidationError, ValueError, OSError, BlobStoreError) as exc:
+    except (ConfigError, ValidationError, ValueError, OSError, StorageError) as exc:
         detail = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
-        return Imported(run_id, "refused", detail)
+        notes = getattr(exc, "__notes__", ())
+        return Imported(run_id, "refused", "; ".join([detail, *notes]))
 
 
 def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
+    if dst.foreign(run_id):
+        # Checked before anything is read or written: another project's run is never
+        # compared with, replaced or removed (review of #93).
+        return Imported(run_id, "refused", "run id exists in another project; not changed")
     if not src.exists(run_id):
         return Imported(run_id, "refused", "not a run folder (no manifest.json)")
     src.check_layout(run_id)
@@ -71,7 +76,13 @@ def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
         return Imported(run_id, "refused", "still running (no result): import it once it ends")
     result = src.load_result(run_id) if src.has_result(run_id) else None
     error = src.load_error(run_id) if result is None else None
-    if dst.exists(run_id):
+    replaced = ""
+    if dst.importing(run_id):
+        # An earlier import of this run was cut short (a crash, a lost connection): what it
+        # wrote is removed, then the run is imported whole.
+        dst.delete_run(run_id)
+        replaced = "; replaced an import that had been cut short"
+    elif dst.exists(run_id):
         same = (
             dst.load_result(run_id).model_dump() == result.model_dump()
             if result is not None and dst.has_result(run_id)
@@ -86,8 +97,10 @@ def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
     snapshot = src.load_snapshot(run_id)
     audio = _sealed_audio(src, run_id)
     marker = src.audio(run_id).pruned()
+    created = False
     try:
         dst.import_manifest(run_id, src.load_manifest(run_id))
+        created = True
         progress = src.load_progress(run_id)
         if progress is not None:
             dst.save_progress(run_id, progress)
@@ -106,7 +119,7 @@ def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
             dst.import_pruned_marker(run_id, src.audio_marker_text(run_id))
         if result is None:
             dst.save_error(run_id, error or {"code": "HARNESS_ERROR", "message": ""})
-            return Imported(run_id, "imported", "could not be carried out (error.json)")
+            return Imported(run_id, "imported", f"could not be carried out (error.json){replaced}")
         for stamp in src.rescores(run_id):
             html, xml = src.rescore_files(run_id, stamp)
             dst.save_rescore(run_id, stamp, src.load_rescore(run_id, stamp), html or "", xml or "")
@@ -116,10 +129,27 @@ def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
         if junit is not None:
             dst.save_junit(run_id, junit)
         dst.save_result(result)
-    except BaseException:
-        dst.delete_run(run_id)  # never half-imported
+    except BaseException as exc:
+        if created:
+            _roll_back(dst, run_id, exc)
         raise
-    return Imported(run_id, "imported", f"{len(records)} record(s), {len(audio)} audio file(s)")
+    return Imported(
+        run_id, "imported", f"{len(records)} record(s), {len(audio)} audio file(s){replaced}"
+    )
+
+
+def _roll_back(dst: DbRunStore, run_id: str, exc: BaseException) -> None:
+    """Remove what a failed import wrote. If that fails too, the original error is still the
+    one raised, with the clean-up's failure noted on it: the run stays marked ``importing``,
+    so the next import replaces it."""
+    try:
+        dst.delete_run(run_id)  # never half-imported
+    except Exception as cleanup:  # noqa: BLE001 - noted on the original, never raised instead
+        exc.add_note(
+            f"what was written for run {run_id} could not be removed "
+            f"({type(cleanup).__name__}: {cleanup}); it stays marked as importing, and the "
+            "next import replaces it"
+        )
 
 
 __all__ = ["Imported", "import_run"]

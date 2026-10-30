@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 from dataclasses import dataclass
@@ -45,6 +46,12 @@ SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 SAFE_ID = re.compile(r"[^A-Za-z0-9_.@-]")
 """What a file name keeps of a scenario id. ``@`` stays: ``a@1a2b3c4d`` (an expansion,
 ADR-0060) must never share a file with an authored ``a_1a2b3c4d``."""
+
+
+def _unreadable(exc: BaseException) -> str:
+    """Why a run's result could not be read, in one line."""
+    text = str(exc).splitlines()[0] if str(exc) else ""
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -233,6 +240,53 @@ class RunAudio(Protocol):
     def count(self) -> int | None: ...
     def prune(self, *, at: datetime, older_than_days: int) -> int: ...
     def location(self) -> str: ...
+    def export_args(self) -> str: ...
+
+
+@dataclass(frozen=True)
+class RunCounts:
+    """A finished run's headline as an index holds it (the database's ``runs`` row), so a
+    listing need not read every result."""
+
+    suite: str
+    started_at: datetime
+    gate: str
+    passed: int
+    failed: int
+    unjudged: int
+    flaky: int
+
+
+@dataclass(frozen=True)
+class StoredRun:
+    """One run as a listing needs it. ``counts`` is ``None`` when the store keeps no index
+    (run folders): the reader then reads the result, and names a run it cannot read."""
+
+    run_id: str
+    layout: str
+    manifest: dict[str, Any]
+    finished: bool
+    error: dict[str, Any] | None
+    progress: RunProgress | None
+    cancel_requested: bool
+    changed_at: float | None
+    counts: RunCounts | None = None
+
+
+@dataclass(frozen=True)
+class UnreadableRun:
+    """A finished run whose result could not be read: named, never silently left out."""
+
+    run_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class FinishedRuns:
+    results: list[SuiteResult]
+    """Every finished run this version can read, newest first."""
+    unreadable: list[UnreadableRun]
+    """Finished runs that could not be read (a broken result, a storage failure)."""
 
 
 @runtime_checkable
@@ -272,7 +326,8 @@ class RunStore(Protocol):
     def load_error(self, run_id: str) -> dict[str, Any] | None: ...
     def save_result(self, result: SuiteResult) -> None: ...
     def load_result(self, run_id: str) -> SuiteResult: ...
-    def finished_results(self) -> list[SuiteResult]: ...
+    def read_finished(self) -> FinishedRuns: ...
+    def listing(self) -> list[StoredRun]: ...
     def changed_at(self, run_id: str, rescore: str | None = None) -> float | None: ...
     def save_report(self, run_id: str, html: str) -> None: ...
     def load_report(self, run_id: str) -> str | None: ...
@@ -390,6 +445,10 @@ class FileRunAudio:
 
     def location(self) -> str:
         return str(self.folder)
+
+    def export_args(self) -> str:
+        """What ``opseval audio export`` takes to find this run: its folder."""
+        return shlex.quote(str(self.folder))
 
 
 def _remove_run(folder: Path) -> None:
@@ -550,19 +609,43 @@ class FileStore:
     def load_result(self, run_id: str) -> SuiteResult:
         return load_result_at(self.run_dir(run_id))
 
-    def finished_results(self) -> list[SuiteResult]:
-        """Every finished run this version can read, newest first. A run without
-        ``result.json`` is still in flight; a re-score lives inside its run's folder and is
-        not a run of its own."""
+    def read_finished(self) -> FinishedRuns:
+        """Every finished run this version can read, newest first, and those it cannot (named,
+        never dropped). A run without ``result.json`` is still in flight; a re-score lives
+        inside its run's folder and is not a run of its own; a run in a newer layout is listed
+        by the console as an error row of its own."""
         out: list[SuiteResult] = []
+        unreadable: list[UnreadableRun] = []
         for folder in self.root.glob("*/result.json"):
             if not self.layout_known(folder.parent.name):
                 continue  # listed by the console as an error row: shown, never misread
             try:
                 out.append(self.load_result(folder.parent.name))
-            except (ValueError, OSError):
-                continue  # a half-written or foreign folder is not a run
-        return sorted(out, key=lambda r: r.started_at, reverse=True)
+            except (ValueError, OSError) as exc:
+                unreadable.append(UnreadableRun(folder.parent.name, _unreadable(exc)))
+        return FinishedRuns(
+            sorted(out, key=lambda r: r.started_at, reverse=True),
+            sorted(unreadable, key=lambda u: u.run_id),
+        )
+
+    def listing(self) -> list[StoredRun]:
+        """Every run folder, as a listing needs it (no index: ``counts`` is ``None``)."""
+        out: list[StoredRun] = []
+        for run_id in self.run_ids():
+            finished = self.has_result(run_id)
+            out.append(
+                StoredRun(
+                    run_id=run_id,
+                    layout=self.layout(run_id),
+                    manifest=self.load_manifest(run_id),
+                    finished=finished,
+                    error=None if finished else self.load_error(run_id),
+                    progress=None if finished else self.load_progress(run_id),
+                    cancel_requested=self.cancel_requested(run_id),
+                    changed_at=self.changed_at(run_id),
+                )
+            )
+        return out
 
     def changed_at(self, run_id: str, rescore: str | None = None) -> float | None:
         """When the run's result (or one re-score of it) was last written; ``None`` when there

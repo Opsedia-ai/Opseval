@@ -83,7 +83,13 @@ class CredentialsError(HarnessError):
     agent's: no request reached the agent without credentials."""
 
 
-class BlobStoreError(HarnessError):
+class StorageError(HarnessError):
+    """Server-mode storage (the database, or the blob store) failed, timed out or is closed
+    (ADR-0051). Never the agent's fault: a run whose evidence could not be stored ends as a
+    harness error (exit 3), and a reader answers "storage unavailable", never "no such run"."""
+
+
+class BlobStoreError(StorageError):
     """The blob store (a folder, or S3) could not keep or return an object (ADR-0051). Never
     the agent's fault: a run whose record could not be stored ends as a harness error."""
 

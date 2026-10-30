@@ -8,19 +8,22 @@ never judges anything, so it never exits 1 or 2.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 
 import typer
 
 from opseval.config import Settings
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, HarnessError
 from opseval.models.record import RunRecord
-from opseval.storage import FileStore
+from opseval.storage import FileStore, RunStore
 from opseval.voice.crypto import AudioKey, key_id, load_key, new_key, parse_key
-from opseval.voice.playback import find, read_bytes, turns, whole_call
+from opseval.voice.playback import Source, find, read_bytes, turns, whole_call
 
 EXIT_HARNESS = 3  # verdicts.EXIT_HARNESS, without importing the scoring stack
 
@@ -36,18 +39,58 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(EXIT_HARNESS)
 
 
-def _records(run_dir: Path, test: str | None, attempt: int | None) -> list[RunRecord]:
-    if not (run_dir / "manifest.json").is_file():
-        raise _fail(f"{run_dir} is not a run folder (no manifest.json)")
-    store = FileStore(run_dir.parent)
+ProjectOpt = Annotated[
+    Optional[str],  # noqa: UP045
+    typer.Option(
+        "--project",
+        help="Server mode: RUN is a run id in the database for org/project (ADR-0051), read "
+        "with OPSEVAL_DATABASE_URL and the blob store, not a folder.",
+    ),
+]
+
+
+@dataclass
+class _Run:
+    """Where the attempt's records and audio are: a run folder, or a run in the database."""
+
+    store: RunStore
+    run_id: str
+    audio: Source
+    shown: str
+
+
+@contextlib.contextmanager
+def _opened(run: Path, project: str | None) -> Iterator[_Run]:
+    if project is None:
+        if not (run / "manifest.json").is_file():
+            raise _fail(f"{run} is not a run folder (no manifest.json)")
+        yield _Run(FileStore(run.parent), run.name, run, str(run))
+        return
+    from opseval.db.cli import open_run_store
+
+    try:
+        store = open_run_store(Settings(), project=project, task=None)
+    except ConfigError as exc:
+        raise _fail(str(exc)) from exc
+    try:
+        run_id = str(run)
+        if not store.exists(run_id):
+            raise _fail(f"no run {run_id!r} in project {project}")
+        yield _Run(store, run_id, store.audio(run_id), f"run {run_id} ({project})")
+    finally:
+        store.close()
+
+
+def _records(run: _Run, test: str | None, attempt: int | None) -> list[RunRecord]:
+    store, run_dir = run.store, run.shown
     try:
         if test is not None and attempt is not None:
-            one = store.load_record(run_dir.name, test, attempt)
+            one = store.load_record(run.run_id, test, attempt)
             if one is None:
                 raise _fail(f"no record of {test} attempt {attempt} in {run_dir}")
             return [one]
-        found = store.load_records(run_dir.name)
-    except (OSError, ValueError, ConfigError) as exc:
+        found = store.load_records(run.run_id)
+    except (OSError, ValueError, ConfigError, HarnessError) as exc:
         raise _fail(f"cannot read the records in {run_dir}: {exc}") from exc
     return [
         r
@@ -70,16 +113,25 @@ def _seconds(ms: float) -> str:
 
 @audio_app.command("list")
 def list_audio(
-    run_dir: Annotated[Path, typer.Argument(help="The run folder (reports/<run id>).")],
+    run_dir: Annotated[
+        Path, typer.Argument(help="The run folder (reports/<run id>), or with --project a run id.")
+    ],
     test: Annotated[Optional[str], typer.Option("--test", help="One scenario.")] = None,  # noqa: UP045
     attempt: Annotated[Optional[int], typer.Option("--attempt", min=0)] = None,  # noqa: UP045
+    project: ProjectOpt = None,
 ) -> None:
     """Every recorded turn: speaker, start and end on the attempt's clock, duration, and
     whether it can be played (encrypted, plain, pruned, hashes only, undecodable)."""
-    records = _records(run_dir, test, attempt)
+    with _opened(run_dir, project) as run:
+        _list(run, test, attempt)
+
+
+def _list(run: _Run, test: str | None, attempt: int | None) -> None:
+    run_dir = run.shown
+    records = _records(run, test, attempt)
     shown = 0
     for record in records:
-        found = turns(run_dir, record)
+        found = turns(run.audio, record)
         if not found:
             continue
         shown += 1
@@ -141,7 +193,9 @@ def _write_private(out: Path, data: bytes | bytearray, *, force: bool) -> None:
 
 @audio_app.command("export")
 def export(
-    run_dir: Annotated[Path, typer.Argument(help="The run folder (reports/<run id>).")],
+    run_dir: Annotated[
+        Path, typer.Argument(help="The run folder (reports/<run id>), or with --project a run id.")
+    ],
     test: Annotated[str, typer.Option("--test", help="The scenario id.")],
     out: Annotated[Path, typer.Option("--out", help="Where to write the WAV.")],
     attempt: Annotated[int, typer.Option("--attempt", min=0, help="Attempt number.")] = 0,
@@ -163,6 +217,7 @@ def export(
     force: Annotated[
         bool, typer.Option("--force", help="Overwrite --out (a regular file, never a link).")
     ] = False,
+    project: ProjectOpt = None,
 ) -> None:
     """Decrypt and write a turn, or the whole call, as a WAV you can play.
 
@@ -175,18 +230,34 @@ def export(
     if speaker not in (None, "caller", "agent"):
         raise _fail("--speaker is caller or agent")
     _check_out(out, force=force)
-    (record,) = _records(run_dir, test, attempt)
+    with _opened(run_dir, project) as run:
+        data, what, record = _export(run, test, attempt, turn, speaker, mono, raw)
+    _write_private(out, data, force=force)
+    typer.echo(f"Wrote {what} of {record.test_id} attempt {record.attempt_index} to {out}.")
+
+
+def _export(
+    run: _Run,
+    test: str,
+    attempt: int,
+    turn: int | None,
+    speaker: str | None,
+    mono: bool,
+    raw: bool,
+) -> tuple[bytes | bytearray, str, RunRecord]:
+    (record,) = _records(run, test, attempt)
+    source = run.audio
     key = _key()
     try:
         if turn is not None:
-            found = find(run_dir, record, turn)
+            found = find(source, record, turn)
             if speaker is not None and found.ref.speaker != speaker:
                 raise _fail(f"turn {turn} is the {found.ref.speaker}'s, not the {speaker}'s")
-            data: bytes | bytearray = read_bytes(run_dir, record, found, key, raw=raw)
+            data: bytes | bytearray = read_bytes(source, record, found, key, raw=raw)
             what = f"turn {turn} ({found.ref.speaker}, {_seconds(found.duration_ms)})"
         else:
             side: Literal["caller", "agent"] | None = speaker  # type: ignore[assignment]
-            call = whole_call(run_dir, record, key, stereo=not mono and side is None, only=side)
+            call = whole_call(source, record, key, stereo=not mono and side is None, only=side)
             data = call.wav
             layout = "stereo: left caller, right agent" if call.channels == 2 else "mono"
             what = f"the whole call ({layout}, {call.rate} Hz)"
@@ -201,8 +272,9 @@ def export(
     except ConfigError as exc:  # AudioUnavailable included
         code = getattr(exc, "code", "AUDIO")
         raise _fail(f"{code}: {exc}") from exc
-    _write_private(out, data, force=force)
-    typer.echo(f"Wrote {what} of {record.test_id} attempt {record.attempt_index} to {out}.")
+    except HarnessError as exc:  # the database or the blob store
+        raise _fail(f"STORAGE_UNAVAILABLE: {exc}") from exc
+    return data, what, record
 
 
 @audio_app.command("keygen")

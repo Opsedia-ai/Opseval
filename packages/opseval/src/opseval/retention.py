@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+from opseval.errors import HarnessError
 from opseval.storage import (
     AUDIO_MARKER,
     RUN_NAME,
@@ -124,13 +125,15 @@ def apply(store: RunStore, items: list[PruneItem]) -> PruneOutcome:
     for item in items:
         if item.action != "delete":
             continue
-        if not store.deletable(item.run_id):
-            continue
-        if _ended(store, item.run_id) is None or not store.layout_known(item.run_id):
-            continue
         try:
+            if not store.deletable(item.run_id):
+                continue
+            if _ended(store, item.run_id) is None or not store.layout_known(item.run_id):
+                continue
             gone = store.delete_run(item.run_id)
-        except OSError as exc:
+        except (OSError, HarnessError) as exc:
+            # One run's storage failure (a legal hold, a store answering 503) is listed and
+            # the prune goes on: never a reason to keep every other expired run.
             failed.append((item.run_id, f"{type(exc).__name__}: {exc}"))
             continue
         if gone:
@@ -185,14 +188,14 @@ def apply_audio(
     done: list[str] = []
     failed: list[tuple[str, str]] = []
     for item in items:
-        if not store.deletable(item.run_id):
-            continue
-        if _ended(store, item.run_id) is None or not store.layout_known(item.run_id):
-            continue
         try:
+            if not store.deletable(item.run_id):
+                continue
+            if _ended(store, item.run_id) is None or not store.layout_known(item.run_id):
+                continue
             if not store.audio(item.run_id).prune(at=at, older_than_days=older_than_days):
                 continue
-        except OSError as exc:
+        except (OSError, HarnessError) as exc:
             failed.append((item.run_id, f"{type(exc).__name__}: {exc}"))
             continue
         done.append(item.run_id)

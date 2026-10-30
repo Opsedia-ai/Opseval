@@ -26,7 +26,7 @@ from opseval.db.run_import import import_run
 from opseval.db.run_store import DbRunStore
 from opseval.demo import catalogue_dir
 from opseval.demo.refund_agent import run_agent
-from opseval.errors import BlobStoreError, ConfigError
+from opseval.errors import BlobStoreError, ConfigError, StorageError
 from opseval.models.profile import FrameKind
 from opseval.models.record import FrameRecord, RunRecord, TerminalState, VoiceTimeline
 from opseval.models.results import SuiteResult
@@ -194,7 +194,7 @@ class TestLayouts:
             db.load_result(result.run_id)
         with pytest.raises(UnknownLayout):
             db.load_records(result.run_id)
-        assert db.finished_results() == []
+        assert db.read_finished().results == []
         (row,) = [r for r in views.list_runs(db) if r.id == result.run_id]
         assert row.error is not None and "newer Opseval" in row.error
 
@@ -720,7 +720,7 @@ class TestServeFromTheDatabase:
         assert done.exit_code == 1, done.output
         assert "Stored: run" in done.output and (tmp_path / "junit.xml").is_file()
         assert not (tmp_path / "reports").exists()
-        (stored,) = db.finished_results()
+        (stored,) = db.read_finished().results
         assert stored.exit_code == 1
 
         files = FileStore(tmp_path / "folders")
@@ -789,3 +789,339 @@ class TestOnS3:
             assert fake.objects and all(k.startswith("/runs/runs/") for k in fake.objects)
         finally:
             store.close()
+
+
+# --- review of #93 ---------------------------------------------------------------------------
+
+OTHER = "acme/other"
+
+
+async def other_store(pg_url: str, tmp_path: Path) -> DbRunStore:
+    engine = make_engine(settings_for(pg_url, tmp_path))
+    try:
+        async with sessions(engine)() as s, s.begin():
+            await ensure_project(s, OTHER)
+    finally:
+        await engine.dispose()
+    return DbRunStore.connect(
+        settings_for(pg_url, tmp_path),
+        FileBlobStore(tmp_path / "blobs"),
+        project=OTHER,
+        task="default",
+    )
+
+
+def footprint(store: DbRunStore, run_id: str) -> dict[str, Any]:
+    """Every row and object of a run, to prove nothing changed."""
+    blobs = sql(
+        store, "SELECT id, state, key, sha256 FROM blobs WHERE run_id = :r ORDER BY id", r=run_id
+    )
+    return {
+        "run": sql(
+            store,
+            "SELECT project_id, task_id, status, updated_at, manifest::text, result_blob_id, "
+            "progress::text, cancel::text FROM runs WHERE id = :r",
+            r=run_id,
+        ),
+        "attempts": sql(
+            store, "SELECT id, record_blob_id FROM attempts WHERE run_id = :r ORDER BY id", r=run_id
+        ),
+        "verdicts": sql(store, "SELECT count(*) FROM verdicts WHERE run_id = :r", r=run_id),
+        "blobs": blobs,
+        "objects": [store.blobs.get(b.key) for b in blobs],
+    }
+
+
+class TestTenancy:
+    async def test_import_never_touches_another_projects_run(
+        self, db: DbRunStore, pg_url: str, tmp_path: Path
+    ) -> None:
+        other = await other_store(pg_url, tmp_path)
+        try:
+            files = FileStore(tmp_path / "reports")
+            result = await demo(files, tmp_path)
+            run_id = result.run_id
+            assert import_run(files, run_id, other).outcome == "imported"
+            before = footprint(other, run_id)
+            out = import_run(files, run_id, db)
+            assert out.outcome == "refused" and "another project" in out.detail
+            assert footprint(other, run_id) == before, "B untouched: rows and objects"
+            assert db.run_ids() == [] and not db.exists(run_id)
+        finally:
+            other.close()
+
+    async def test_every_write_is_scoped_to_the_project(
+        self, db: DbRunStore, pg_url: str, tmp_path: Path
+    ) -> None:
+        from opseval.models.progress import RunProgress
+
+        other = await other_store(pg_url, tmp_path)
+        try:
+            result = await demo(other, tmp_path)
+            run_id = result.run_id
+            record = other.load_records(run_id)[0]
+            before = footprint(other, run_id)
+            progress = RunProgress.model_validate({"stage": "running", "scenarios": []})
+            writes = [
+                lambda: db.save_progress(run_id, progress),
+                lambda: db.save_error(run_id, {"code": "X"}),
+                lambda: db.write_manifest(run_id, {"run_id": run_id}),
+                lambda: db.save_record(record),
+                lambda: db.save_result(result),
+                lambda: db.save_report(run_id, "<p>x</p>"),
+                lambda: db.save_scenario(
+                    run_id, next(iter(other.load_snapshot(run_id)[1].values()))
+                ),  # type: ignore[index]
+            ]
+            for write in writes:
+                with pytest.raises(ConfigError, match="another project"):
+                    write()
+            assert db.request_cancel(run_id, by="x") is False
+            assert db.delete_run(run_id) is False
+            assert footprint(other, run_id) == before
+        finally:
+            other.close()
+
+
+class TestCrashSafeRetention:
+    async def test_a_held_run_and_a_503_run_never_keep_the_others(
+        self, db: DbRunStore, tmp_path: Path
+    ) -> None:
+        from opseval.retention import apply, plan
+
+        held = (await demo(db, tmp_path / "1")).run_id
+        broken = (await demo(db, tmp_path / "2")).run_id
+        normal = (await demo(db, tmp_path / "3")).run_id
+        execute(
+            db,
+            "UPDATE blobs SET legal_hold = true WHERE run_id = :r AND name = 'result.json'",
+            r=held,
+        )
+        broken_keys = {b.key for b in db._all_blobs(broken)}
+        normal_keys = {b.key for b in db._all_blobs(normal)}
+
+        class Outage(FileBlobStore):
+            def delete(self, key: str) -> None:
+                if key in broken_keys:
+                    raise BlobStoreError("the blob store at s3.example.test answered HTTP 503")
+                super().delete(key)
+
+        real, db.blobs = db.blobs, Outage(tmp_path / "blobs")
+        later = datetime.now(UTC) + timedelta(days=3)
+        outcome = apply(db, plan(db, older_than_days=1, now=later))
+        assert outcome.deleted == [normal]
+        assert {f[0] for f in outcome.failed} == {held, broken}
+        assert "legal hold" in dict(outcome.failed)[held] and "503" in dict(outcome.failed)[broken]
+        assert not any(real.exists(k) for k in normal_keys)
+        assert db.load_result(held).run_id == held, "held: whole and readable"
+        # The broken run is no longer listed, and no row points at a missing object.
+        assert sorted(db.run_ids()) == [held]
+        assert sql(db, "SELECT count(*) FROM attempts WHERE run_id = :r", r=broken) == [(0,)]
+        rows = db._all_blobs(broken)
+        assert rows and {r.state for r in rows} == {"pending"}
+        assert all(real.exists(r.key) for r in rows)
+        # The store answers again: the next sweep finishes the delete.
+        db.blobs = real
+        swept = db.delete_orphans(db.orphans())
+        assert swept.failed == [] and len(swept.deleted) == len(broken_keys)
+        assert sql(db, "SELECT count(*) FROM runs WHERE id = :r", r=broken) == [(0,)]
+        assert not any(real.exists(k) for k in broken_keys)
+
+    async def test_prune_lists_failures_and_still_sweeps_orphans(
+        self, db: DbRunStore, pg_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opseval.cli import _prune
+
+        run_id = (await demo(db, tmp_path)).run_id
+        execute(db, "UPDATE blobs SET legal_hold = true WHERE run_id = :r", r=run_id)
+        db.write_manifest(
+            "r-orphan", {"run_id": "r-orphan", "started_at": datetime.now(UTC).isoformat()}
+        )
+        db.save_report("r-orphan", "x")
+        db.save_error("r-orphan", {"code": "X", "message": ""})
+        execute(
+            db, "UPDATE blobs SET created_at = now() - interval '2 days' WHERE run_id = 'r-orphan'"
+        )
+        execute(
+            db,
+            "UPDATE runs SET started_at = now() - interval '9 days', manifest = jsonb_set("
+            "manifest, '{started_at}', to_jsonb((now() - interval '9 days')::text))",
+        )
+        import typer
+
+        with pytest.raises(typer.Exit) as found:
+            _prune(db, db, 1, 1, True)
+        assert found.value.exit_code == 3
+        assert db._all_blobs("r-orphan") == [], "the orphan was swept despite the held run"
+        assert db.exists(run_id)
+
+
+class TestImportResumes:
+    async def test_an_import_cut_short_is_replaced_by_the_next(
+        self, db: DbRunStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        files = FileStore(tmp_path / "reports")
+        result = await demo(files, tmp_path)
+
+        def power_cut(_: SuiteResult) -> None:
+            raise RuntimeError("power cut")
+
+        def database_gone(_: str) -> bool:
+            raise BlobStoreError("the database is gone too")
+
+        monkeypatch.setattr(db, "save_result", power_cut)
+        monkeypatch.setattr(db, "delete_run", database_gone)
+        with pytest.raises(RuntimeError, match="power cut") as found:
+            import_run(files, result.run_id, db)
+        notes = " ".join(getattr(found.value, "__notes__", []))
+        assert "could not be removed" in notes and "next import replaces it" in notes
+        monkeypatch.undo()
+        assert db.importing(result.run_id) and not db.has_result(result.run_id)
+        again = import_run(files, result.run_id, db)
+        assert again.outcome == "imported" and "cut short" in again.detail
+        assert db.load_result(result.run_id) == result and not db.importing(result.run_id)
+        assert db.orphans(datetime.now(UTC) + timedelta(days=2)) == []
+        assert import_run(files, result.run_id, db).outcome == "unchanged"
+
+
+class TestNoSilentLoss:
+    async def test_an_unreadable_result_is_named_not_dropped(
+        self, db: DbRunStore, pg_url: str, tmp_path: Path
+    ) -> None:
+        result = await demo(db, tmp_path)
+        run_id = result.run_id
+        row = db._blob(run_id, "result.json")
+        assert row is not None
+        db.blobs.delete(row.key)
+        db._results.clear()
+        finished = db.read_finished()
+        assert finished.results == [] and [u.run_id for u in finished.unreadable] == [run_id]
+        detail = views.run_detail(db, run_id)
+        assert detail is not None and "RUN_UNREADABLE" in (detail.summary.error or "")
+
+    async def test_another_blob_folder_is_named_as_such(
+        self, db: DbRunStore, pg_url: str, tmp_path: Path
+    ) -> None:
+        result = await demo(db, tmp_path)
+        elsewhere = DbRunStore.connect(
+            settings_for(pg_url, tmp_path),
+            FileBlobStore(tmp_path / "elsewhere"),
+            project=PROJECT,
+            task="default",
+        )
+        try:
+            with pytest.raises(StorageError, match="BLOB_STORE_MISMATCH") as found:
+                elsewhere.load_records(result.run_id)
+            assert str((tmp_path / "blobs").resolve()) in str(found.value)
+            finished = elsewhere.read_finished()
+            assert "BLOB_STORE_MISMATCH" in finished.unreadable[0].reason
+        finally:
+            elsewhere.close()
+
+
+class TestListing:
+    async def test_listing_n_runs_takes_a_bounded_number_of_queries(
+        self, db: DbRunStore, tmp_path: Path
+    ) -> None:
+        from sqlalchemy import event
+
+        for n in range(4):
+            await demo(db, tmp_path / str(n))
+        db.write_manifest(
+            "r-live", {"run_id": "r-live", "started_at": datetime.now(UTC).isoformat()}
+        )
+        statements: list[str] = []
+
+        def count(*args: Any) -> None:
+            statements.append(str(args[2]))
+
+        event.listen(db.engine.sync_engine, "before_cursor_execute", count)
+        try:
+            rows = views.list_runs(db)
+        finally:
+            event.remove(db.engine.sync_engine, "before_cursor_execute", count)
+        assert len(rows) == 5 and [r.state for r in rows].count("finished") == 4
+        assert len(statements) <= 3, statements
+        assert not any("FROM blobs" in q for q in statements), "no result downloaded"
+
+
+class TestStorageFailures:
+    async def test_a_locked_row_times_out_as_a_storage_error(
+        self, pg_url: str, tmp_path: Path
+    ) -> None:
+        import asyncpg  # type: ignore[import-untyped]
+
+        await prepare(pg_url, tmp_path)
+        settings = settings_for(pg_url, tmp_path)
+        settings.storage_timeout_seconds = 1
+        store = DbRunStore.connect(
+            settings, FileBlobStore(tmp_path / "blobs"), project=PROJECT, task="default"
+        )
+        conn = await asyncpg.connect(pg_url)
+        try:
+            store.write_manifest("r-lock", {"run_id": "r-lock"})
+            tx = conn.transaction()
+            await tx.start()
+            await conn.execute("SELECT 1 FROM runs WHERE id = 'r-lock' FOR UPDATE")
+            began = asyncio.get_running_loop().time()
+            with pytest.raises(StorageError):
+                await asyncio.to_thread(store.request_cancel, "r-lock", by="t")
+            assert asyncio.get_running_loop().time() - began < 5
+            await tx.rollback()
+            assert store.request_cancel("r-lock", by="t")
+        finally:
+            await conn.close()
+            store.close()
+        store.close()  # idempotent
+        with pytest.raises(StorageError, match="closed"):
+            store.exists("r-lock")
+
+
+class TestAudioExportFromTheDatabase:
+    async def test_export_and_list_by_run_id_and_project(
+        self, db: DbRunStore, pg_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from opseval.cli import app
+        from opseval.reporting import audio_note
+
+        record = voice_run(db, "r-exp")
+        db.save_error("r-exp", {"code": "X", "message": "a voice run"})
+        note = audio_note(record, db.audio("r-exp"))
+        assert note is not None and note.command is not None
+        assert note.command.startswith("opseval audio export r-exp --project acme/bot ")
+        for name, value in {
+            "OPSEVAL_DATABASE_URL": pg_url,
+            "OPSEVAL_ALLOWED_HOSTS": "127.0.0.1",
+            "OPSEVAL_BLOB_DIR": str(tmp_path / "blobs"),
+            "OPSEVAL_AUDIO_ENCRYPTION_KEY": KEY,
+            "OPSEVAL_DOTENV": "false",
+        }.items():
+            monkeypatch.setenv(name, value)
+        out = tmp_path / "call.wav"
+        runner = CliRunner()
+        args = [
+            "audio",
+            "export",
+            "r-exp",
+            "--project",
+            PROJECT,
+            "--test",
+            "v-001",
+            "--out",
+            str(out),
+        ]
+        done = await asyncio.to_thread(runner.invoke, app, args)
+        assert done.exit_code == 0, done.output
+        assert (
+            out.read_bytes() == whole_call(db.audio("r-exp"), record, AudioKey.from_text(KEY)).wav
+        )
+        listed = await asyncio.to_thread(
+            runner.invoke, app, ["audio", "list", "r-exp", "--project", PROJECT]
+        )
+        assert listed.exit_code == 0 and "v-001  attempt 0" in listed.output
+        missing = await asyncio.to_thread(
+            runner.invoke, app, ["audio", "list", "r-nope", "--project", PROJECT]
+        )
+        assert missing.exit_code == 3 and "no run" in missing.output

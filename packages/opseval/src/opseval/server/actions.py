@@ -16,7 +16,7 @@ import re
 import shutil
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,7 +33,7 @@ from opseval.catalogue import (
 )
 from opseval.config import Settings
 from opseval.datasets import Limits
-from opseval.errors import ConfigError, OpsevalError
+from opseval.errors import ConfigError, OpsevalError, StorageError
 from opseval.llm import UsageMeter, client_for_role
 from opseval.models.gate import GatePolicy, from_flat, to_yaml_block
 from opseval.models.profile import SutProfile
@@ -76,6 +76,25 @@ class ServerContext:
     allow_commit: bool = False
     """Started with ``--allow-commit``: the operator's half of the ADR-0008 double opt-in.
     A request body can never supply it."""
+    failures: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Runs that failed while the store could not record it (a storage outage): kept here,
+    shown as harness errors, and written to the store as soon as it answers again."""
+    failures_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def unrecorded(self) -> dict[str, dict[str, Any]]:
+        """The failures the store has not taken yet, after trying once more to write them."""
+        with self.failures_lock:
+            pending = dict(self.failures)
+        for run_id, error in pending.items():
+            try:
+                self.store.save_error(run_id, error)
+            except Exception:  # noqa: BLE001 - still down: kept, and shown from here
+                log.debug("run %s: the store still cannot take its failure", run_id)
+            else:
+                with self.failures_lock:
+                    self.failures.pop(run_id, None)
+        with self.failures_lock:
+            return dict(self.failures)
 
     def need_catalogue(self) -> tuple[Path, SutProfile]:
         if self.catalogue is None or self.profile is None:
@@ -191,18 +210,29 @@ async def rehearse(ctx: ServerContext, body: s.RehearseIn) -> s.RehearseOut:
     )
 
 
-def record_failure(store: RunStore, run_id: str, exc: BaseException) -> None:
-    """A run that could not be carried out is a harness error, recorded where the run is."""
-    store.save_error(
-        run_id,
-        {
-            "run_id": run_id,
-            "code": "CONFIG_ERROR" if isinstance(exc, ConfigError) else "HARNESS_ERROR",
-            "message": str(exc) or type(exc).__name__,
-            "exit_code": EXIT_HARNESS,
-            "at": datetime.now(UTC).isoformat(),
-        },
-    )
+def record_failure(ctx: ServerContext, run_id: str, exc: BaseException) -> None:
+    """A run that could not be carried out is a harness error, recorded where the run is.
+    When the store itself is down, the failure is kept in this process (and shown from there)
+    and written once the store answers again: never a run left "running" for ever."""
+    if isinstance(exc, StorageError):
+        code = "STORAGE_UNAVAILABLE"
+    elif isinstance(exc, ConfigError):
+        code = "CONFIG_ERROR"
+    else:
+        code = "HARNESS_ERROR"
+    error = {
+        "run_id": run_id,
+        "code": code,
+        "message": str(exc) or type(exc).__name__,
+        "exit_code": EXIT_HARNESS,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    try:
+        ctx.store.save_error(run_id, error)
+    except Exception:  # the store is down too: kept here, retried on every read
+        log.exception("run %s: its failure could not be recorded in the store", run_id)
+        with ctx.failures_lock:
+            ctx.failures[run_id] = error
 
 
 def start_run(ctx: ServerContext, body: s.LaunchIn) -> s.LaunchOut:
@@ -251,7 +281,7 @@ def start_run(ctx: ServerContext, body: s.LaunchIn) -> s.LaunchOut:
             asyncio.run(launch(suite_path, options, ctx.settings))
         except Exception as exc:  # the run boundary: every failure must leave a record
             log.exception("run %s could not be carried out", run_id)
-            record_failure(ctx.store, run_id, exc)
+            record_failure(ctx, run_id, exc)
 
     threading.Thread(target=work, name=f"opseval-run-{run_id}", daemon=True).start()
     return s.LaunchOut(

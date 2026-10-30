@@ -38,10 +38,13 @@ EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 @runtime_checkable
 class BlobStore(Protocol):
     """Opaque objects by key. ``put`` returns the encryption the store applied at rest
-    (``none`` or ``sse:AES256``), recorded on the blob's row."""
+    (``none`` or ``sse:AES256``), recorded on the blob's row. ``location`` names where the
+    objects are (an absolute folder, or ``host/bucket/prefix``): recorded on each row, so a
+    reader started on another location says so instead of reporting the object missing."""
 
     name: str
     region: str | None
+    location: str
 
     def put(self, key: str, data: bytes, *, media_type: str) -> str: ...
     def get(self, key: str) -> bytes: ...
@@ -61,9 +64,11 @@ class FileBlobStore:
 
     name = "file"
     region: str | None = None
+    at_rest = "none"
 
     def __init__(self, root: str | Path) -> None:
-        self.root = Path(root)
+        self.root = Path(root).expanduser().resolve()
+        self.location = str(self.root)
 
     def _path(self, key: str) -> Path:
         path = self.root / _check_key(key)
@@ -198,14 +203,22 @@ class S3BlobStore:
         check_url_allowed(endpoint, allowlist, secure_schemes=("https",))
         if not bucket or "/" in bucket:
             raise ConfigError("OPSEVAL_S3_BUCKET must be a bucket name")
+        parsed = urlparse(endpoint)
+        if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+            raise ConfigError(
+                "OPSEVAL_S3_ENDPOINT must not carry a user or password; the keys go in "
+                "OPSEVAL_S3_ACCESS_KEY_ID and OPSEVAL_S3_SECRET_ACCESS_KEY"
+            )
         self.endpoint = endpoint.rstrip("/")
-        self.host = urlparse(endpoint).netloc
+        self.host = host_header(endpoint)
+        self.location = f"{self.host}/{bucket}/{prefix}"
         self.bucket = bucket
         self.region: str | None = region
         self._region = region
         self._access, self._secret = access_key, secret_key
         self.prefix = prefix
         self.sse = server_side_encryption
+        self.at_rest = "sse:AES256" if server_side_encryption else "none"
         self._client = client or httpx.Client(timeout=timeout, follow_redirects=False)
 
     def _url(self, key: str) -> str:
@@ -234,7 +247,10 @@ class S3BlobStore:
             service="s3",
             amz_date=amz_date,
         )
-        sent = {k: v for k, v in headers.items() if k != "host"}
+        # The Host header is sent exactly as signed: httpx would otherwise derive its own, and
+        # a default port (":443") kept by one side and dropped by the other breaks the
+        # signature (review of #93).
+        sent = dict(headers)
         sent["authorization"] = signed.authorization
         # The URL as signed: httpx must not re-encode the path differently.
         raw = urlparse(url)
@@ -259,6 +275,13 @@ class S3BlobStore:
         if self.sse:
             extra["x-amz-server-side-encryption"] = "AES256"
         response = self._request("PUT", key, data, extra)
+        if response.status_code != 200 and self.sse and _refuses_sse(response):
+            raise BlobStoreError(
+                f"the blob store at {self.host} does not support server-side encryption "
+                f"(HTTP {response.status_code}): enable it on the store (MinIO needs a KMS), "
+                "or set OPSEVAL_S3_SERVER_SIDE_ENCRYPTION=false (audio stays sealed by "
+                "Opseval either way)"
+            )
         if response.status_code != 200:
             raise self._fail("store", response)
         return "sse:AES256" if self.sse else "none"
@@ -285,10 +308,51 @@ class S3BlobStore:
         return True
 
 
+def _refuses_sse(response: httpx.Response) -> bool:
+    """The store turned down the ``x-amz-server-side-encryption`` header (MinIO without a KMS
+    answers ``NotImplemented``; others name the header)."""
+    if response.status_code == 501:
+        return True
+    body = response.text[:2000] if response.content else ""
+    return response.status_code == 400 and (
+        "NotImplemented" in body or "ServerSideEncryption" in body or "x-amz-server-side" in body
+    )
+
+
+def host_header(endpoint: str) -> str:
+    """The ``Host`` header for ``endpoint``, as it is signed and sent: the host lower-cased,
+    the port kept unless it is the scheme's default (``:443`` for https, ``:80`` for http)."""
+    parsed = urlparse(endpoint)
+    host = (parsed.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"  # IPv6
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError("OPSEVAL_S3_ENDPOINT has an invalid port") from exc
+    default = {"https": 443, "http": 80}.get(parsed.scheme)
+    return host if port is None or port == default else f"{host}:{port}"
+
+
+def blob_dir(settings: Settings) -> Path:
+    """The folder ``OPSEVAL_BLOB_STORE=file`` uses, absolute. An explicit relative folder is
+    refused: it would move with the working directory, and a server started elsewhere would
+    find the run's files "missing"."""
+    if settings.blob_dir is None:
+        return Path(settings.reports_dir).expanduser().resolve() / ".blobs"
+    folder = Path(settings.blob_dir).expanduser()
+    if not folder.is_absolute():
+        raise ConfigError(
+            f"OPSEVAL_BLOB_DIR must be an absolute path (got {settings.blob_dir!r}): a "
+            "relative folder would move with the working directory"
+        )
+    return folder.resolve()
+
+
 def blob_store(settings: Settings) -> BlobStore:
     """The blob store the settings name, checked before anything is written."""
     if settings.blob_store == "file":
-        return FileBlobStore(settings.blob_dir)
+        return FileBlobStore(blob_dir(settings))
     missing = [
         name
         for name, value in (
@@ -310,6 +374,7 @@ def blob_store(settings: Settings) -> BlobStore:
         allowlist=settings.allowlist(),
         prefix=settings.s3_prefix,
         server_side_encryption=settings.s3_server_side_encryption,
+        timeout=settings.s3_timeout_seconds,
     )
 
 
@@ -319,6 +384,8 @@ __all__ = [
     "FileBlobStore",
     "S3BlobStore",
     "Signed",
+    "blob_dir",
     "blob_store",
+    "host_header",
     "sign_v4",
 ]

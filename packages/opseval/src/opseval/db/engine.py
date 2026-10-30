@@ -90,9 +90,14 @@ def make_engine(settings: Settings) -> AsyncEngine:
         url, tls = checked_url(settings.database_url.get_secret_value(), settings.allowlist())
     except FileNotFoundError as exc:
         raise ConfigError(f"sslrootcert: no such file: {exc.filename}") from exc
-    return create_async_engine(
-        url, pool_pre_ping=True, connect_args={} if tls is None else {"ssl": tls}
-    )
+    args: dict[str, object] = {} if tls is None else {"ssl": tls}
+    # Every statement has a limit: a lock or a stuck query fails as a harness error instead
+    # of hanging a run or the console (review of #93).
+    args["server_settings"] = {
+        "statement_timeout": str(int(settings.storage_timeout_seconds * 1000))
+    }
+    args["timeout"] = settings.storage_timeout_seconds  # connecting, too
+    return create_async_engine(url, pool_pre_ping=True, connect_args=args)
 
 
 def sessions(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

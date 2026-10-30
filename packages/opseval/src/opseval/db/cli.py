@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Annotated, Optional, TypeVar
 import typer
 
 from opseval.config import Settings
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, StorageError
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -427,6 +427,8 @@ def open_run_store(settings: Settings, *, project: str | None, task: str | None)
         raise ConfigError(f"the database refused: {reason}") from exc
     except SQLAlchemyError as exc:
         raise ConfigError(f"database error ({type(exc).__name__}): {exc}") from exc
+    except StorageError as exc:
+        raise ConfigError(f"storage unavailable: {exc}") from exc
 
 
 def server_settings(settings: Settings, database_url: str | None) -> Settings:

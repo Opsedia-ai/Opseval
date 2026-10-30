@@ -28,7 +28,7 @@ from opseval.db.cli import (
     server_settings,
     task_app,
 )
-from opseval.errors import ConfigError
+from opseval.errors import ConfigError, HarnessError
 from opseval.models.gate import Preset
 from opseval.models.results import SuiteResult
 from opseval.models.stop import StopPolicy
@@ -535,10 +535,17 @@ def _prune(store: RunStore, db: DbRunStore | None, days: int, audio_days: int, y
         return
     heard = apply_audio(store, sounds, older_than_days=audio_days)
     outcome = apply(store, items)
-    if db is not None and orphans:
-        cleaned = db.delete_orphans(orphans)
-        typer.echo(f"Deleted {len(cleaned.deleted)} orphaned blob(s).")
-        outcome.failed.extend(cleaned.failed)
+    if db is not None:
+        # Listed again: a run whose delete failed part-way left its blobs pending, and they
+        # are swept now, whatever happened to the other runs (review of #93).
+        try:
+            cleaned = db.delete_orphans(db.orphans())
+        except HarnessError as exc:
+            outcome.failed.append(("orphaned blobs", f"{type(exc).__name__}: {exc}"))
+        else:
+            if cleaned.deleted:
+                typer.echo(f"Deleted {len(cleaned.deleted)} orphaned blob(s).")
+            outcome.failed.extend(cleaned.failed)
     typer.echo(
         f"Deleted {len(outcome.deleted)} run(s) and the audio of {len(heard.deleted)} run(s) "
         f"from {root}."
@@ -548,7 +555,10 @@ def _prune(store: RunStore, db: DbRunStore | None, days: int, audio_days: int, y
         typer.secho(f"  could not delete {run_id}: {why}", fg="red", err=True)
     if failed:
         typer.secho(
-            f"{len(failed)} run(s) could not be fully pruned; remove them by hand.",
+            f"{len(failed)} run(s) could not be fully pruned; "
+            + (
+                "the next prune retries what is left." if db is not None else "remove them by hand."
+            ),
             fg="red",
             err=True,
         )
@@ -1146,6 +1156,7 @@ def serve(
     try:
         api = create_app(
             store=store,
+            close_store=True,
             settings=settings,
             catalogue=root,
             profile=prof,
@@ -1178,7 +1189,12 @@ def serve(
         typer.echo("Catalogue: the built-in demo (read-only). Use --catalogue to edit your own.")
     if allow_commit:
         typer.secho("Runs may perform the irreversible outcome (--allow-commit).", fg="yellow")
-    uvicorn.run(api, host=host, port=port, log_level="info")
+    try:
+        uvicorn.run(api, host=host, port=port, log_level="info")
+    finally:
+        close = getattr(store, "close", None)
+        if callable(close):
+            close()  # idempotent: the app's lifespan closed it already on a clean stop
 
 
 def entrypoint() -> None:
