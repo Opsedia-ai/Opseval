@@ -131,6 +131,97 @@ All content checks:
 - `judge.rubric` and the `content.*` checks go into the scorer reference
   (`scripts/reference_docs.py`) and the JSON Schemas.
 
+## Implementation (2026-10-30)
+
+Built as decided; the ADR stays *Proposed* until the regex question below is settled
+(ATTENTION D20). Where the implementation had to choose, it chose as follows.
+
+- **Code.** `scoring/rubric.py` (`judge.rubric`, `RubricParams`, `RubricCriterion`) and
+  `scoring/content.py` (the four `content.*` checks). The judge reuses the shared parts of
+  `scoring/judges.py`: the fenced transcript, `harness_facts`, the quote check, the vendor-family
+  guard and the ballot rotation (now `judges.rotate`, unchanged for the built-in judges).
+- **Answers.** Each criterion is answered `"yes"` (a pass) or `"no"`, so a question is phrased
+  with "yes" as the good answer. A bad answer, a missing entry or an invalid quote spoils that
+  criterion's vote in that ballot only, never its siblings'. A whole ballot lost (judge error,
+  no `criteria` object) spoils every criterion it asked.
+- **Order and whitespace.** The criteria are hashed and presented in **name order**, so moving a
+  criterion in the YAML changes neither the prompt nor the rubric digest. A question is stripped
+  of outer whitespace when it loads; every other change to it, inner whitespace included,
+  changes the digest. The axis is in the digest too. Ballot *k* rotates the criteria it asks by
+  *k* (a seeded shuffle after a full turn), as `judges.rotate` does for the built-in judges.
+- **`quotes: on_fail`.** The names of the criteria allowed an unquoted pass are listed outside the
+  criteria fence: they are slugs Opseval validated, never free text. A pass with a quote still
+  has the quote checked.
+- **The score.** A criterion is *passed*, *failed* or *unmeasured* (split vote, too few valid
+  votes). The status is decided in code from these, as the ADR says; the number reported is the
+  weighted share passed, and with unmeasured criteria it is the bound that decided the status:
+  the most it could be for a fail, the least it could be for a degraded pass (`details.score_is`).
+  A failed `must` fails the score even when its share clears the threshold. The undecided case is
+  `JUDGE_CRITERIA_UNMEASURED`, naming each criterion and why.
+- **Axis.** `output` (default), `flow`, `tools` or `security`. `tools` is accepted beside the
+  three the ADR names, for criteria about tool use read from the conversation. `harness` is a load
+  error with the reason. Every score carries the spec's axis, the ones the engine makes itself
+  too (a crash, a contract violation, speech it could not hear): `Scorer.axis_for(spec)`, the
+  class's axis by default. The vendor-family guard reads it as the agent's axis, which every
+  allowed value is.
+- **One spec per scorer id** (review of #94). `effective_specs` keeps the first spec of each id,
+  because a score is keyed by its scorer id in the record, the verdict, rescore and calibration.
+  So a scenario that lists an id twice is now a **load error** naming both positions, instead of a
+  second check that silently never runs. Two different checks of one kind are combined
+  (`all_of`/`any_of`, more criteria) or go in separate scenarios. Keying scores by spec would
+  change the result layout and was not needed for L2.
+- **No agent text** is *not measured*, as for the other judges that read the agent:
+  `conversation.agent_replied` fails the silence.
+- **Calibration.** Labels name a criterion as `judge.rubric:<name>`; `calibrate` reads each
+  criterion's own result from `details.criteria`, so agreement and the false-pass rate are per
+  criterion. An unmeasured criterion is excluded like any `infra_error`. A criterion label on a
+  run whose rubric was never graded (no judge) is *not measured*, not a misspelling; a name the
+  run graded nowhere is refused. `--template-for judge.rubric:<name>` writes the blank file. The
+  label format is unchanged.
+- **Datasets.** Placeholders (ADR-0060) already reach every string under `scorers.*.params`, so a
+  criterion's question is filled per row before the params are validated and hashed; each row
+  gets its own digest. A placeholder in a `name` must still produce a slug.
+- **Advice.** A rubric with two or more criteria, none a `must`, under a threshold below 1 is a
+  warning (`opseval validate`, the editor's check).
+- **The guided form** offers `judge.rubric` with its params read from the model: `criteria` is a
+  JSON field (a list of objects), `axis` a choice. No form change was needed.
+- **`content.contains` / `not_contains`.** Text is compared after NFKC and collapsing whitespace,
+  case-folded unless `case_sensitive`; `ignore_diacritics` also drops combining marks (Arabic
+  harakat, accents) and the tatweel on both sides. `any_turn` asks that each `all_of` string
+  appears in some turn and one `any_of` string in some turn; `every_turn` asks it of each turn;
+  `last_turn` of the speaker's last turn. `not_contains` is defined on its own, not as the
+  negation of `contains` (review of #94: negated, `every_turn` or `all_of` passed when one turn
+  of three broke the rule): every string in `all_of` and `any_of` is forbidden, and one of them in
+  one examined turn fails it, whatever the scope, as `content.regex` with `must_match: false`
+  does. An agent that sent no text fails `contains` (it did not say what was
+  required) and is a vacuous pass for `not_contains`; a customer with no text is *not measured*.
+- **`content.regex`.** `pattern` is compiled when the scenario loads. Two layers protect a run
+  from a slow pattern (tightened in the review of #94):
+  - *At load*, refused: more than 500 characters; a quantifier inside a quantified group
+    (`(a+)+`, `(\w*)*`); alternation inside a quantified group (`(a|ab)*`, `(?:foo|bar)+`); two
+    unbounded quantifiers with no literal character between them (`.*.*`, `\s+\w+`); more than
+    three unbounded quantifiers.
+  - *At run time*, the search runs in a fresh child Python process (`-I`), killed after 5 seconds
+    (`REGEX_TIMEOUT`, not measured: the author's pattern, not the agent). A thread was tried and
+    rejected: CPython's `re` holds the GIL for the whole search, so a thread can be neither stopped
+    nor even let `asyncio.timeout` fire before the search ends. A child that cannot run is
+    `REGEX_ERROR`, a harness error.
+  - A turn longer than 10,000 characters, counted after normalisation, is *not measured*
+    (`REGEX_INPUT_TOO_LONG`), never cut, since a match past the cut would be a false fail.
+  - `ignore_diacritics` strips only combining marks and the tatweel from the text (no NFKC, no
+    whitespace folding, so escapes mean what they say); a pattern that names a mark, or a letter
+    that carries one, is refused at load, since it could never match. `case_sensitive` defaults to **true** here: a pattern says what
+  it means, and `(?i)` or `case_sensitive: false` relaxes it.
+- **`content.json_path_equals`.** `source: result` (default; the received result frames),
+  `message` (the agent's text as JSON, the whole text or one fenced code block) or `checkpoint`
+  (with `checkpoint:`; the approved occurrence, else the last, as `output.payload_equals`). The
+  checkpoint name is checked against the profile at load. `scope` picks the last (default), any
+  or every message or result. Equality is JSON equality: `true` is not `1`, `1` is `1.0`. No
+  result or message at all fails.
+- **Reading text on a voice attempt.** All four `content.*` checks declare `reads_text`, the
+  conservative direction, so they are *not measured* when Opseval's own STT was proven broken
+  (ADR-0053), `json_path_equals` on a result payload included.
+
 ## Not decided here
 
 - How `content.regex` is protected against catastrophic backtracking in server mode, where one

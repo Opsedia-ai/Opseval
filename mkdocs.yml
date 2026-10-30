@@ -24,6 +24,7 @@ nav:
       - Concepts: guide/concepts.md
       - SUT profile guide: guide/profile.md
       - Cookbook: guide/cookbook.md
+      - Your own criteria: guide/rubrics.md
       - Gate releases in CI: guide/ci.md
       - Server mode (preview): guide/server-mode.md
       - Accounts and access (preview): guide/accounts.md

@@ -25,7 +25,9 @@ import random
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
+
+from pydantic import BaseModel
 
 from opseval.errors import HarnessError
 from opseval.langpacks import Spoken
@@ -39,6 +41,8 @@ from opseval.scoring.tools import gather
 TRANSCRIPT_FORMAT = "json-lines-nonce-1"
 """How the conversation is put in front of a judge. Part of every judge's ``prompt_hash``, so
 ``opseval rescore`` never reuses a grade given to a transcript in another format."""
+
+_T = TypeVar("_T")
 
 RUBRIC_FORMAT = "1"
 """Rubric digest format. Bump when the digest formula changes, so a refusal to
@@ -68,6 +72,21 @@ def _quoted(quote: str, haystack: str) -> bool:
     return isinstance(unescaped, str) and bool(unescaped.strip()) and _norm(unescaped) in haystack
 
 
+def rotate(declared: list[_T], vote: int, key: str) -> list[_T]:
+    """``declared`` rotated by ``vote``; past one full turn, a shuffle seeded by ``key``.
+    Ballot 0 always sees the declared order (see :meth:`Judge._criteria_order`)."""
+    count = len(declared)
+    if vote == 0 or count < 2:
+        return list(declared)
+    index = vote % count
+    rotated = declared[index:] + declared[:index]
+    if vote < count:
+        return rotated
+    rng = random.Random(key)  # noqa: S311  # nosec B311
+    rng.shuffle(rotated)
+    return rotated
+
+
 @dataclass
 class _Ballot:
     score: float | None = None
@@ -77,7 +96,7 @@ class _Ballot:
 
 class Judge(Scorer):
     requires = "llm"
-    Params = NoParams
+    Params: ClassVar[type[BaseModel] | None] = NoParams
     version: ClassVar[str] = "2"
     """2: the fenced JSON-lines transcript (ADR-0036)."""
     criteria: ClassVar[tuple[Criterion, ...]]
@@ -246,17 +265,7 @@ class Judge(Scorer):
         the tie. The score always comes from the declared order, whatever the
         presentation (see :meth:`_tally`).
         """
-        declared = list(self.criteria)
-        count = len(declared)
-        if vote == 0 or count < 2:
-            return declared
-        index = vote % count
-        rotated = declared[index:] + declared[:index]
-        if vote < count:
-            return rotated
-        rng = random.Random(f"{self.id}|{seed}|{vote}")  # noqa: S311  # nosec B311
-        rng.shuffle(rotated)
-        return rotated
+        return rotate(list(self.criteria), vote, f"{self.id}|{seed}|{vote}")
 
     async def _ballot(
         self,

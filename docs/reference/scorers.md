@@ -17,10 +17,15 @@ Name a scorer in a scenario's `scorers:` list, for example
 
 | Scorer | Needs | Version | Params | What it checks |
 |---|---|---|---|---|
+| `content.contains` | frames | 1 | `case_sensitive, ignore_diacritics, scope, speaker, all_of, any_of` | What was said contains the given text (params: all_of / any_of, case_sensitive, ignore_diacritics, scope any_turn\|last_turn\|every_turn, speaker agent\|customer). |
+| `content.json_path_equals` | frames | 1 | `path*, equals*, source, checkpoint, scope` | A value in the agent's JSON equals the expected one (params: path, equals, source message\|result\|checkpoint, checkpoint, scope). A message that is not JSON fails. |
+| `content.not_contains` | frames | 1 | `case_sensitive, ignore_diacritics, scope, speaker, all_of, any_of` | None of the listed text appears (all_of and any_of are both forbidden strings): one of them in one examined turn fails it, whatever the scope. No text at all is a vacuous pass, named as one. |
+| `content.regex` | frames | 1 | `case_sensitive, ignore_diacritics, scope, speaker, pattern*, must_match` | A regular expression is found (must_match: true) or not found in any examined turn (false) in what was said (params: pattern, scope, speaker, case_sensitive, ignore_diacritics). Searched in a separate process with a deadline. |
 | `judge.content_quality` | llm | 2 | none | LLM judge: was the agent's writing clear, grounded and appropriate? (quoted) |
 | `judge.goal_achievement` | llm | 3 | none | LLM judge: did the conversation achieve the customer's goal? (quoted, weighted) |
 | `judge.language_consistency` | llm | 4 | none | LLM judge: did the agent answer in the customer's language and dialect? (quoted) |
 | `judge.pronunciation_dialect_fit` | llm | 2 | none | LLM judge (voice): did the agent speak in a register and dialect that fit the caller's? Quoted; the STT's unsure words are named, and low confidence degrades it. |
+| `judge.rubric` | llm | 1 | `criteria*, axis` | LLM judge on your own yes/no criteria (params.criteria: name, question, weight, votes, must, quotes). Quoted; a failed must fails it; unmeasured criteria are never dropped from the score. |
 | `output.language_script` | frames | 2 | `script, scripts, min_fraction, min_primary_share` | Share of agent messages written mainly in the expected script (arabic, latin, han, kana, hangul, cyrillic, devanagari, hebrew, greek or thai; japanese = han + kana, or a list as scripts); the persona's language pack gives it when the scenario does not. |
 | `output.payload_equals` | frames | 3 | `checkpoint*, path*, equals*` | A checkpoint payload field has the expected value (params: checkpoint, path, equals; checks the approved occurrence, else the last one). |
 | `output.required_fields` | frames | 2 | `checkpoint*, fields*` | A checkpoint payload carries every listed field, present and not empty (params: checkpoint, fields; checks the approved occurrence, else the last one). |

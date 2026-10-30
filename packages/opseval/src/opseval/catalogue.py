@@ -185,7 +185,19 @@ def check_references(
         if inv not in known_invariants:
             errors.append(f"expectations.invariants: unknown invariant {inv!r}")
     if isinstance(scenario.scorers, list):
+        first: dict[str, int] = {}
         for index, spec in enumerate(scenario.scorers):
+            if spec.id in first:
+                # effective_specs keeps one spec per id (a score is keyed by its scorer id in
+                # the record, the verdict and rescore), so a second one would never run: a
+                # check that looks written and is silently dropped (ADR-0061 review).
+                errors.append(
+                    f"scorers.{index}: {spec.id!r} is already listed at scorers.{first[spec.id]}; "
+                    "a scorer runs once per scenario, so combine them (all_of/any_of for "
+                    "content.contains and not_contains, more criteria for judge.rubric) or put "
+                    "the second check in its own scenario"
+                )
+            first.setdefault(spec.id, index)
             if spec.id not in known:
                 errors.append(
                     f"scorers: unknown scorer id {spec.id!r} (see `opseval list-scorers`)"
