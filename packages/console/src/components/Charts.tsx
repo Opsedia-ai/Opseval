@@ -6,7 +6,7 @@
 //   many calls it covers. A bucket where any series was not measured (null with calls to count)
 //   is a floor as a whole: every segment of it is hatched and said "partial".
 import { Fragment, useState } from "react";
-import type { Measured, Ratio, UsageBucket, UsageSeries } from "../lib/types";
+import type { Measured, Percentiles, Rate, Ratio, UsageBucket, UsageSeries } from "../lib/types";
 import { NotMeasured } from "./ui";
 
 /** The reference categorical order (dataviz skill palette.md, light surface), never cycled. */
@@ -157,5 +157,135 @@ export function SeriesTable({ buckets, series, fmt, title }: { buckets: UsageBuc
         </table>
       </div>
     </details>
+  );
+}
+
+// --- D2: lines over time, percentiles and rates (ADR-0066) ---------------------------------
+
+export const ms: Format = (v) => (v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${Math.round(v)} ms`);
+export const pct: Format = (v) => `${Math.round(v * 100)}%`;
+export const num: Format = (v) => (Math.abs(v) < 10 ? v.toFixed(2) : Math.round(v).toLocaleString());
+
+/** One line: a value per bucket, null where nothing was measured (drawn as a gap). */
+export interface Line { name: string; values: (number | null)[] }
+
+/** Lines over the buckets. A null breaks the line: no point is drawn and the segment on either
+ * side ends there, so a week with nothing measured is a gap, never a dip to 0. */
+export function GapLines({ buckets, lines, fmt, title, gap = () => "no data", yMax }: {
+  buckets: UsageBucket[]; lines: Line[]; fmt: Format; title: string; gap?: (i: number) => string; yMax?: number;
+}) {
+  const [hover, setHover] = useState<string | null>(null);
+  if (buckets.length === 0) return <p className="text-sm">No finished runs match these filters.</p>;
+  const known = lines.flatMap((l) => l.values.filter((v): v is number => v !== null));
+  const max = yMax ?? (Math.max(0, ...known) || 1);
+  const plotW = W - PAD_L - 8, plotH = H - PAD_T - PAD_B;
+  const slot = plotW / buckets.length;
+  const x = (i: number) => PAD_L + slot * i + slot / 2;
+  const y = (v: number) => PAD_T + plotH - (v / max) * plotH;
+  const order = lines.map((l) => l.name);
+  return (
+    <figure className="m-0">
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={title} className="h-auto w-full">
+        {[0, max / 2, max].map((t) => (
+          <g key={t}>
+            <line x1={PAD_L} x2={W - 8} y1={y(t)} y2={y(t)} stroke="#f3d5ca" strokeWidth="1" />
+            <text x={PAD_L - 6} y={y(t) + 4} textAnchor="end" fontSize="11" fill="#3d5556">{fmt(t)}</text>
+          </g>
+        ))}
+        {lines.map((l) => {
+          // Consecutive measured points form a segment; a null ends it.
+          const segments: [number, number][][] = [];
+          let current: [number, number][] = [];
+          l.values.forEach((v, i) => {
+            if (v === null) { if (current.length) segments.push(current); current = []; }
+            else current.push([x(i), y(v)]);
+          });
+          if (current.length) segments.push(current);
+          const color = colorFor(l.name, order);
+          return (
+            <g key={l.name} opacity={hover && hover !== l.name ? 0.35 : 1} onMouseEnter={() => setHover(l.name)} onMouseLeave={() => setHover(null)}>
+              {segments.filter((seg) => seg.length > 1).map((seg, k) => (
+                <path key={k} d={seg.map(([px, py], j) => `${j ? "L" : "M"}${px},${py}`).join(" ")} fill="none" stroke={color} strokeWidth="2" data-line={l.name} />
+              ))}
+              {l.values.map((v, i) => v === null ? null : (
+                <circle key={i} cx={x(i)} cy={y(v)} r="4" fill={color} stroke="white" strokeWidth="2" data-line={l.name} data-value={v}>
+                  <title>{`${buckets[i].label} · ${l.name}: ${fmt(v)}`}</title>
+                </circle>
+              ))}
+            </g>
+          );
+        })}
+        {buckets.map((b, i) => (
+          <g key={b.key} data-bucket={b.key}>
+            {lines.every((l) => l.values[i] === null) && (
+              <text x={x(i)} y={PAD_T + plotH - 6} textAnchor="middle" fontSize="11" fill="#3d5556" data-gap="true">{gap(i)}</text>
+            )}
+            <text x={x(i)} y={H - 8} textAnchor="middle" fontSize="11" fill="#3d5556">{b.label}</text>
+          </g>
+        ))}
+      </svg>
+      {lines.length > 1 && (
+        <figcaption className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+          {lines.map((l) => (
+            <span key={l.name} className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: colorFor(l.name, order) }} />
+              <span className="text-ink">{l.name}</span>
+            </span>
+          ))}
+        </figcaption>
+      )}
+      <details className="mt-2 text-sm">
+        <summary className="cursor-pointer text-muted-ink">Table: {title}</summary>
+        <div className="overflow-x-auto">
+          <table className="mt-2 w-full text-left">
+            <thead><tr><th className="pr-3">Bucket</th>{lines.map((l) => <th key={l.name} className="pr-3">{l.name}</th>)}</tr></thead>
+            <tbody>
+              {buckets.map((b, i) => (
+                <tr key={b.key}>
+                  <td className="pr-3">{b.label}</td>
+                  {lines.map((l) => <td key={l.name} className="pr-3">{l.values[i] === null ? gap(i) : fmt(l.values[i] as number)}</td>)}
+                </tr>))}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </figure>
+  );
+}
+
+/** The three percentile lines of a series, gaps where a bucket measured nothing. */
+export function PercentileChart({ buckets, points, title, fmt = ms }: { buckets: UsageBucket[]; points: Percentiles[]; title: string; fmt?: Format }) {
+  return (
+    <GapLines title={title} buckets={buckets} fmt={fmt}
+      gap={(i) => (points[i].unmeasured > 0 ? "not measured" : "no data")}
+      lines={[
+        { name: "p50", values: points.map((p) => p.p50) },
+        { name: "p95", values: points.map((p) => p.p95) },
+        { name: "p99", values: points.map((p) => p.p99) },
+      ]} />
+  );
+}
+
+/** Percentiles in text: "p50 120 ms · p95 … (n = 40, 2 not measured)", or not measured. */
+export function PercentileStats({ p, fmt = ms }: { p: Percentiles; fmt?: Format }) {
+  if (p.n === 0 || p.p50 === null || p.p95 === null || p.p99 === null) {
+    return <NotMeasured text={p.unmeasured ? `not measured (${p.unmeasured})` : "no data"} />;
+  }
+  return (
+    <span data-n={p.n}>
+      p50 {fmt(p.p50)} · p95 {fmt(p.p95)} · p99 {fmt(p.p99)}
+      <span className="ml-1 text-xs font-normal text-muted-ink">(n = {p.n}{p.unmeasured ? `, ${p.unmeasured} not measured` : ""})</span>
+    </span>
+  );
+}
+
+/** A pass rate over judged results: "50% (2 of 4 judged)", or "nothing judged", never 0%. */
+export function RateValue({ r }: { r: Rate }) {
+  const apart = r.notJudged ? `, ${r.notJudged} not judged` : "";
+  if (r.value === null) return <NotMeasured text={r.notJudged ? `nothing judged (${r.notJudged} not judged)` : "no data"} />;
+  return (
+    <span>
+      {pct(r.value)}<span className="ml-1 text-xs font-normal text-muted-ink">({r.passed} of {r.judged} judged{apart})</span>
+    </span>
   );
 }

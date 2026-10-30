@@ -216,6 +216,7 @@ describe("usage figures", () => {
     role: "tts", model: "tts-1", calls: 2, inputTokens: null, outputTokens: null, costUsd: null,
     audioInSeconds: null, audioOutSeconds: 3.5, characters: 42,
     reasoningTokens: null, cachedInputTokens: null, failedCalls: 0, reported: null,
+    costKnownUsd: null, unpricedCalls: null,
   };
 
   it("a speech row shows audio and characters, and never tokens as 0", () => {

@@ -2,7 +2,7 @@
 // row no audio: either is drawn as "not measured", never as 0. Nothing is added up here; the
 // run totals and whether the cost covers every model come from the server.
 import { Mono, NotMeasured, Pill } from "./ui";
-import type { RunUsage, Usage } from "../lib/types";
+import type { CostSplit, RunUsage, Usage } from "../lib/types";
 
 export const Amount = ({ v, digits }: { v: number | null; digits?: number }) =>
   v === null ? <NotMeasured text="—" /> : <Mono>{digits === undefined ? v.toLocaleString() : v.toFixed(digits)}</Mono>;
@@ -41,7 +41,29 @@ export function UsageLine({ u }: { u: Usage }) {
   return (
     <span className="flex flex-wrap justify-end gap-x-2">
       {shown.length === 0 ? <NotMeasured /> : shown.map(([label, v, d]) => <span key={label}><Amount v={v} digits={d} /> {label}</span>)}
-      <span>· {u.costUsd === null ? <NotMeasured /> : <Mono>${u.costUsd.toFixed(3)}</Mono>}</span>
+      <span>· <RowCost u={u} /></span>
+    </span>
+  );
+}
+
+/** A row's cost: the total when every call had a price, else the known part and the calls with
+ * no price (ADR-0066 D2), never one figure that pretends to be complete. */
+export function RowCost({ u }: { u: Usage }) {
+  if (u.costUsd !== null) return <Mono>${u.costUsd.toFixed(3)}</Mono>;
+  const unpriced = u.unpricedCalls ? ` · ${u.unpricedCalls} call${u.unpricedCalls === 1 ? "" : "s"} with no price` : "";
+  if (u.costKnownUsd === null || u.costKnownUsd === undefined) return <NotMeasured text={u.unpricedCalls ? `no price${unpriced}` : "not measured"} />;
+  return <span data-partial="true"><Mono>≥ ${u.costKnownUsd.toFixed(3)}</Mono><span className="text-xs text-muted-ink">{unpriced}</span></span>;
+}
+
+/** What the run cost: the same split as the dashboards (the server's), named partial when any
+ * call had no price. */
+export function CostSplitLine({ c }: { c: CostSplit }) {
+  if (!c.recorded) return <span className="text-sm"><NotMeasured text="cost split not recorded" /> ({c.pricedCalls} priced, {c.unpricedCalls} not)</span>;
+  if (c.totalUsd !== null) return <span className="text-sm">Cost <Mono>${c.totalUsd.toFixed(4)}</Mono></span>;
+  if (c.knownUsd === null) return <span className="text-sm" data-testid="cost-split"><NotMeasured text="no price" /> · {c.unpricedCalls} calls with no price</span>;
+  return (
+    <span className="text-sm" data-partial="true" data-testid="cost-split">
+      Cost <Mono>≥ ${c.knownUsd.toFixed(4)}</Mono> known ({c.pricedCalls} calls) · {c.unpricedCalls} call{c.unpricedCalls === 1 ? "" : "s"} with no price
     </span>
   );
 }

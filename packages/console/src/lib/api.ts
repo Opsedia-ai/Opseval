@@ -100,7 +100,7 @@ export async function callBlob(path: string): Promise<Blob> {
 const post = <R,>(path: string, body: unknown) => call<R>(path, { method: "POST", body: JSON.stringify(body) });
 
 /** The dashboards' query string: empty filters are left out (the server reads them as "any"). */
-export function usageParams(q: T.UsageQuery): string {
+export function usageParams(q: T.UsageQuery | T.DashQuery | Record<string, string>): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(q)) if (v) p.set(k, v);
   return p.toString();
@@ -120,6 +120,14 @@ export const api = {
   usage: () => call<T.RunUsage[]>("/usage"),
   costDashboard: (q: T.UsageQuery) => call<T.CostDashboard>(`/analytics/cost?${usageParams(q)}`),
   tokensDashboard: (q: T.UsageQuery) => call<T.TokensDashboard>(`/analytics/tokens?${usageParams(q)}`),
+  latencyDashboard: (q: T.DashQuery) => call<T.LatencyDashboard>(`/analytics/latency?${usageParams(q)}`),
+  qualityDashboard: (q: T.DashQuery) => call<T.QualityDashboard>(`/analytics/quality?${usageParams(q)}`),
+  voiceDashboard: (q: T.DashQuery) => call<T.VoiceDashboard>(`/analytics/voice?${usageParams(q)}`),
+  usageDashboard: (q: T.DashQuery) => call<T.UsageDashboard>(`/analytics/usage?${usageParams(q)}`),
+  prices: () => call<T.Prices>("/prices"),
+  addPrice: (body: T.PriceBody) => post<T.Price>("/prices", body),
+  resolvePrice: (model: string, at: string) =>
+    call<T.PriceResolved>(`/prices/resolve?${usageParams({ model, at })}`),
   scenarios: () => call<T.Catalogue>("/scenarios"),
   persona: (id: string) => call<T.Persona>(`/scenarios/${encodeURIComponent(id)}/persona`),
   scenarioById: (id: string) => call<T.ScenarioSource>(`/scenarios/${encodeURIComponent(id)}/source`),
