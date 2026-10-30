@@ -40,6 +40,9 @@ from opseval.models.results import SuiteResult
 from opseval.models.scenario import Scenario
 
 SAFE = re.compile(r"[^A-Za-z0-9_.-]")
+SAFE_ID = re.compile(r"[^A-Za-z0-9_.@-]")
+"""What a file name keeps of a scenario id. ``@`` stays: ``a@1a2b3c4d`` (an expansion,
+ADR-0060) must never share a file with an authored ``a_1a2b3c4d``."""
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -242,7 +245,7 @@ class FileStore:
         return path
 
     def save_scenario(self, run_id: str, scenario: Scenario) -> Path:
-        path = self.run_dir(run_id) / "scenarios" / f"{SAFE.sub('_', scenario.id)}.json"
+        path = self.run_dir(run_id) / "scenarios" / f"{SAFE_ID.sub('_', scenario.id)}.json"
         _atomic_write(path, scenario.model_dump_json(indent=2, by_alias=True))
         return path
 
@@ -290,7 +293,7 @@ class FileStore:
         return sorted(out, key=lambda r: r.started_at, reverse=True)
 
     def save_record(self, record: RunRecord) -> Path:
-        name = f"{SAFE.sub('_', record.test_id)}__attempt{record.attempt_index}.json"
+        name = f"{SAFE_ID.sub('_', record.test_id)}__attempt{record.attempt_index}.json"
         path = self.run_dir(record.run_id) / "records" / name
         _atomic_write(path, record.model_dump_json(indent=2))
         return path
@@ -330,7 +333,7 @@ class FileStore:
         """One attempt's record, or ``None`` if it was not (or not yet) written. A record that
         exists but cannot be read raises (``ValueError``/``OSError``): that is not absence."""
         self.check_layout(run_id)
-        name = f"{SAFE.sub('_', test_id)}__attempt{attempt}.json"
+        name = f"{SAFE_ID.sub('_', test_id)}__attempt{attempt}.json"
         path = self.run_dir(run_id) / "records" / name
         try:
             return RunRecord.model_validate_json(path.read_text("utf-8"))

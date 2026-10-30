@@ -30,6 +30,7 @@ from opseval.audio import Codec, duration_ms, to_wav
 from opseval.config import Settings
 from opseval.errors import ConfigError
 from opseval.models.record import AudioRef
+from opseval.storage import SAFE_ID
 from opseval.voice.crypto import SUFFIX, AudioKey, FilePlace, load_key, parse_key
 
 SAFE = re.compile(r"[^A-Za-z0-9_.-]")
@@ -90,7 +91,9 @@ class AudioRecorder:
     """Bound into each sealed file. Default: the run folder's name."""
 
     def _relative(self, turn: int, speaker: str, suffix: str) -> str:
-        test = SAFE.sub("_", self.test_id).strip(".") or "scenario"
+        # '@' is kept (storage.SAFE_ID): an expansion's folder (ADR-0060) is never an
+        # authored id's.
+        test = SAFE_ID.sub("_", self.test_id).strip(".") or "scenario"
         if self.key is not None:
             suffix += SUFFIX
         return f"audio/{test}/attempt{self.attempt}/{turn:03d}-{speaker}{suffix}"

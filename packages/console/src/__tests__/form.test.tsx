@@ -36,7 +36,7 @@ const chatbot = (over: Partial<Form> = {}): Form => ({
 });
 const verdict = (ok: boolean, yaml = "# from the server\nid: question-001\n"): Drafted => ({
   yaml, family: "uncategorised", fileName: "question-001.yaml", defaultChecks: ["conversation.no_errors"],
-  check: { ok, id: ok ? "question-001" : null, title: ok ? "Answers" : null, problems: ok ? [] : [{ path: "(new)", field: "id", message: "bad id" }], warnings: [] },
+  check: { ok, id: ok ? "question-001" : null, title: ok ? "Answers" : null, problems: ok ? [] : [{ path: "(new)", field: "id", message: "bad id" }], warnings: [], expanded: [] },
 });
 
 function show() {

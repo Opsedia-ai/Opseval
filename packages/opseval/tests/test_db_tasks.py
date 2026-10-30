@@ -169,7 +169,7 @@ class TestTheMigration:
             ids = await _seed_0001(engine)
             assert "uq_catalogue_items_project_id" in await _constraints(engine, "catalogue_items")
             await migrate.upgrade(engine)
-            assert await migrate.current(engine) == "0003"
+            assert await migrate.current(engine) == migrate.head()
 
             async with sessions(engine)() as s:
                 tasks = {t.project_id: t for t in await s.scalars(select(Task))}
@@ -229,7 +229,7 @@ class TestTheMigration:
             with pytest.raises(RuntimeError, match="acme/one: task 'voice' and its catalogue"):
                 async with engine.begin() as conn:
                     await conn.run_sync(_downgrade, "0001")
-            assert await migrate.current(engine) == "0003"
+            assert await migrate.current(engine) == migrate.head()
         finally:
             await engine.dispose()
 
@@ -256,11 +256,12 @@ class TestTheMigration:
             assert "acme/one: the default task's kind voice, region eu, a default suite" in message
             assert "acme/two: the default task's archived, its profile link" in message
             assert "acme/empty: the default task's name 'Main'" in message
-            assert await migrate.current(engine) == "0003"
+            assert await migrate.current(engine) == migrate.head()
 
-            # One step down never is: 0003's downgrade loses nothing. 0002's refuses the rest.
+            # Down to 0002 never is: 0004's and 0003's downgrades lose nothing. 0002's refuses
+            # the rest.
             async with engine.begin() as conn:
-                await conn.run_sync(_downgrade, "-1")
+                await conn.run_sync(_downgrade, "0002")
             assert await migrate.current(engine) == "0002"
             with pytest.raises(RuntimeError, match="acme/empty: the default task's name"):
                 async with engine.begin() as conn:
@@ -303,7 +304,7 @@ class TestTheMigration:
                     await migrate.upgrade(engine)
             assert await migrate.current(engine) == "0002"
             await migrate.upgrade(engine)
-            assert await migrate.current(engine) == "0003"
+            assert await migrate.current(engine) == migrate.head()
             # The timeout was the migration's own, and is not left behind for what comes next.
             async with engine.begin() as conn:
                 assert await conn.scalar(text("SHOW lock_timeout")) == "0"
@@ -359,7 +360,7 @@ class TestTheMigration:
 
             capsys.readouterr()
             await migrate.upgrade(engine)
-            assert await migrate.current(engine) == "0003"
+            assert await migrate.current(engine) == migrate.head()
             printed = capsys.readouterr().err
             assert "cleared 1 tasks.profile_item_id link(s)" in printed
             assert "cleared 1 tasks.default_suite_item_id link(s)" in printed
@@ -410,7 +411,7 @@ class TestTheMigration:
                     f"FOREIGN KEY ({column}) REFERENCES catalogue_items(id) ON DELETE SET NULL"
                 )
             await migrate.upgrade(engine)
-            assert await migrate.current(engine) == "0003"
+            assert await migrate.current(engine) == migrate.head()
         finally:
             await engine.dispose()
 
