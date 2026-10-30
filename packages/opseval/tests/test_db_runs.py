@@ -278,9 +278,7 @@ class TestConstraints:
         async def other_project() -> tuple[uuid.UUID, uuid.UUID]:
             async with sessions(db.engine)() as s, s.begin():
                 project = await ensure_project(s, "acme/other")
-                task, _ = await ensure_task(
-                    s, "acme/other", "voice", kind="voice", modality="text"
-                )
+                task, _ = await ensure_task(s, "acme/other", "voice", kind="voice", modality="text")
                 return project.id, task.id
 
         other, other_task = db._loop.run(other_project())
