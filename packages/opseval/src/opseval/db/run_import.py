@@ -88,6 +88,11 @@ def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
     marker = src.audio(run_id).pruned()
     try:
         dst.import_manifest(run_id, src.load_manifest(run_id))
+        progress = src.load_progress(run_id)
+        if progress is not None:
+            dst.save_progress(run_id, progress)
+        if src.cancel_requested(run_id):
+            dst.request_cancel(run_id, by="import")
         if snapshot is not None:
             dst.save_profile(run_id, snapshot[0])
             for scenario in snapshot[1].values():
