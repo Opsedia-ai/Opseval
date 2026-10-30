@@ -86,6 +86,14 @@ class Scorer(ABC):
     and ``validate`` says so."""
 
     @classmethod
+    def axis_for(cls, spec: ScorerSpec) -> Axis:
+        """The axis this spec's scores are on. Default: the class's. A scorer whose params
+        choose its axis (``judge.rubric``, ADR-0061) says so here, so a score the engine makes
+        for it (a crash, a contract violation, speech it could not hear) lands on the same
+        axis as the scorer's own would."""
+        return cls.axis
+
+    @classmethod
     def check_params(cls, params: BaseModel, profile: SutProfile) -> list[str]:
         """Problems with valid ``params`` against the profile, found when a scenario loads
         (``field: message``, the field relative to ``params``). Default: none."""
@@ -417,7 +425,9 @@ class ScoringEngine:
             # (ADR-0053): what the agent said is not measured, and the reason names the
             # canary. Never run, so a judge is not paid to grade a transcript that is not
             # there.
-            return infra_error(cls.id, cls.axis, spec, voice.asr_reason, version=cls.version)
+            return infra_error(
+                cls.id, cls.axis_for(spec), spec, voice.asr_reason, version=cls.version
+            )
         if cls.reads_text and heard is not None:
             record = heard
         scorer = cls()
@@ -429,7 +439,7 @@ class ScoringEngine:
         except ValidationError as exc:
             return infra_error(
                 cls.id,
-                cls.axis,
+                cls.axis_for(spec),
                 spec,
                 f"CONTRACT_VIOLATION: {exc.errors()[0]['msg']}",
                 version=cls.version,
@@ -437,7 +447,7 @@ class ScoringEngine:
         except Exception as exc:  # noqa: BLE001 - a scorer bug is never the agent's fault
             return infra_error(
                 cls.id,
-                cls.axis,
+                cls.axis_for(spec),
                 spec,
                 f"SCORER_ERROR: {type(exc).__name__}: {exc}",
                 version=cls.version,
