@@ -306,6 +306,70 @@ exit_codes`): [ADR-0032](0032-gate-policy.md) says nothing judged blocks and exi
 
   Publishing the image, the GitLab component, the orb and the pipe waits for go-public.
 
+**E2, 2026-10-30.** Built as decided (the ADR stays Proposed), with these details:
+
+- **Scopes.** No new scope: ADR-0050 already says `runs:read` reads "runs, results and the
+  catalogue" and `runs:start` may "report a CI run". The pull is `GET
+  /api/v1/catalogue/export?project=&task=&label=` (`runs:read`), the upload `PUT
+  /api/v1/runs/{run_id}/upload?project=&task=` (`runs:start`), both in `ROUTE_NEEDS` and in
+  accounts mode only (shared-token mode answers 409 `ACCOUNTS_MODE_ONLY`). A server serves one
+  task (ADR-0050), so a request naming another project or task is 404, the answer a key scoped
+  to another task already gets.
+- **Client** (`opseval.remote`, httpx only; the "local mode never needs the database" import
+  contract covers it). `--server` is allowlisted with TLS unless loopback, refuses user-info,
+  query and fragment, and needs both `OPSEVAL_PUBLIC_KEY` and `OPSEVAL_SECRET_KEY` (a
+  `SecretStr` in `SECRET_FIELDS`) before anything is sent; redirects are not followed, since a
+  redirect would carry the key past the allowlist. Errors name the scheme and host only, and an
+  httpx exception only by its type (its text can carry the URL).
+- **Pull.** Into a fresh temporary folder, removed after the run, through
+  `opseval.catalogue_files.write_label`, now shared with `catalogue pull` (new or empty folder,
+  every stored path checked, two items writing one path refused, nothing written until all
+  pass; a backslash in a stored path is refused too). The run's path argument must be inside
+  it. The label's `profile.yaml` is the profile and `--profile` beside it is refused (the label
+  decides what runs); a label without one needs `--profile`. `--label` without `--server`, and
+  `--server` with `--database-url` or without `--project`, are exit 3.
+- **Upload.** `RunUpload` (`models/upload.py`, `extra="forbid"`): the layout, manifest, profile
+  and scenarios as run, records, progress, cancel flag, result or error, report, JUnit, sealed
+  audio (base64 with its sha256), the prune marker, `ci` and the pulled `catalogue`. Re-scores
+  are not sent (a run that has just finished has none). The server checks, in order: size
+  (`OPSEVAL_UPLOAD_MAX_MB`, 256 by default, on `Content-Length` and while reading, 413), the
+  layout (409 `UNKNOWN_LAYOUT` before the models parse fields they may not know), the models
+  (422, the value never echoed), the id against the body, each audio path and sha256 (422
+  `CHECKSUM_MISMATCH`), then the store: an id another project holds is 409 `RUN_ID_TAKEN`, a
+  different run under the id 409 `RUN_EXISTS`, the same run 200 `unchanged`. It writes through
+  `db.run_import.import_from` (the code `runs import` runs, now over a `RunSource` protocol that
+  a folder and an upload both answer), so the run is written whole or not at all and audio goes
+  through the blob store, whose rows record the sha256. A storage outage stays 503, which the
+  client retries.
+- **Idempotence.** The CLI adds the upload's outcome to its own `result.json` afterwards, so its
+  copy and the server's differ in that one `result.sinks` entry (`server`).
+  `models.upload.same_result` compares results without it, for the upload and for `runs import`,
+  so a re-upload or a later import of the folder is `unchanged`.
+- **Outcome.** Retries on a connection error, a timeout, 408, 425, 429 and 5xx
+  (`OPSEVAL_SERVER_UPLOAD_RETRIES`, 3 by default; 2 s doubling, at most 30 s or `Retry-After`).
+  The outcome is a `SinkOutcome` named `server` written into `result.json` and re-rendered JUnit
+  (a new `failed_sinks` property names any failed sink); the console summary and `opseval
+  summary` already name failed sinks. No layout change was needed. A run that could not be
+  carried out (exit 3 at launch) uploads nothing and says so.
+- **Origin.** Migration `0007` adds `runs.origin` (`ci` or null) and `runs.ci` (JSONB: provider,
+  repository, ref, sha, run URL, and the pulled catalogue items), with a check that keeps them
+  together. CI metadata is read by `config.CiEnvironment` (the CI systems' own variables, from
+  the real environment only, never `.env`) and validated field by field: a run URL must be
+  http(s) without user-info, a commit hex, and a value that fails is left out. Jenkins' `GIT_URL`
+  loses any user-info. `RunStore.origin(run_id)` (always `None` for folders) and
+  `StoredRun.origin` feed `RunSummary.origin`/`.ci`; the console shows a CI badge and a
+  `rel="noopener noreferrer"` link to the job, checked again in the browser.
+- **Audit.** `run.upload` (outcome, size, provider) instead of the generic `PUT …` event.
+- **CI integrations.** The action takes `server-url`, `project`, `task`, `label`,
+  `opseval-public-key`, `opseval-secret-key` (`profile` is no longer required); a project
+  without a server, or the reverse, is exit 3. The reusable workflow takes the same inputs and
+  the key as `secrets:`. The shared template script takes `SERVER_URL`, `PROJECT`, `TASK`,
+  `LABEL`, forwards `OPSEVAL_PUBLIC_KEY`/`OPSEVAL_SECRET_KEY` by name, and every template maps
+  them from its own secret store.
+- **Not built.** An `opseval runs upload FOLDER --server` command to resend a run whose upload
+  failed (today `runs import` with database access does it); chunked or resumable uploads (one
+  request, bounded by `OPSEVAL_UPLOAD_MAX_MB`); uploading re-scores.
+
 ## Not decided here
 
 - Where the image is published at go-public (GHCR or Docker Hub), and listing the GitLab component,
