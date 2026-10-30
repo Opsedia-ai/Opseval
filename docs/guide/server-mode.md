@@ -8,8 +8,9 @@ versions with labels, and pull a label back out as a folder that `opseval run` t
 Local mode does not change: the CLI on catalogue folders and run folders needs no database.
 
 !!! note "Preview"
-    The catalogue and the runs are built. The console's project and task views, accounts and
-    API keys, and workers follow, in the order ADR-0047 sets out.
+    The catalogue, the runs, and accounts with API keys are built. The console's project and
+    task views and workers follow, in the order ADR-0047 sets out. With a database configured,
+    `opseval serve` runs in accounts mode: see [Accounts and access](accounts.md).
 
 ## Set up
 
@@ -108,7 +109,7 @@ folder. Without `--project` nothing changes: run folders under `OPSEVAL_REPORTS_
 opseval run ./release/suites/smoke.yaml --profile ./release/profile.yaml --target wss://… \
   --project acme/support-bot --task default          # exit codes as always
 
-opseval serve --project acme/support-bot             # the console reads (and starts) runs there
+opseval serve --project acme/support-bot             # accounts mode: sign in (see below)
 opseval prune --project acme/support-bot --yes       # old runs, old audio, orphaned blobs
 
 # Move existing run folders in (any layout Opseval has written). Run it again safely.

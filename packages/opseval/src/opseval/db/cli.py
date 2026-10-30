@@ -409,7 +409,9 @@ runs_app = typer.Typer(
 )
 
 
-def open_run_store(settings: Settings, *, project: str | None, task: str | None) -> DbRunStore:
+def open_run_store(
+    settings: Settings, *, project: str | None, task: str | None, task_reads: bool = False
+) -> DbRunStore:
     """The database run store the settings name, or :class:`ConfigError` (exit 3) saying why
     not: the extra missing, the database unreachable or refusing, the schema behind."""
     _modules()
@@ -419,7 +421,9 @@ def open_run_store(settings: Settings, *, project: str | None, task: str | None)
     from opseval.db.run_store import DbRunStore
 
     try:
-        return DbRunStore.connect(settings, blob_store(settings), project=project, task=task)
+        return DbRunStore.connect(
+            settings, blob_store(settings), project=project, task=task, task_reads=task_reads
+        )
     except (ConnectionError, TimeoutError, socket.gaierror) as exc:
         raise ConfigError(f"cannot reach the database: {exc}") from exc
     except DBAPIError as exc:

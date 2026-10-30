@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Square } from "lucide-react";
 import { api, ApiError } from "../lib/api";
+import { useCan } from "../lib/session";
 import type { Stopped } from "../lib/types";
 import { Button, Callout } from "./ui";
 
@@ -17,10 +18,12 @@ export function StoppedNotice({ stopped }: { stopped: Stopped | null | undefined
 export function CancelRun({ id, requested, onDone }: { id: string; requested: boolean; onDone?: () => void }) {
   const [state, setState] = useState<"idle" | "asking" | "failed">("idle");
   const [error, setError] = useState("");
+  const canStart = useCan("runs:start");
   const cancel = async () => {
     setState("asking");
     try { await api.cancelRun(id); setState("idle"); onDone?.(); } catch (e) { setError((e as ApiError).message); setState("failed"); }
   };
+  if (!canStart && !requested) return null;
   if (requested) return <Callout><b>Cancelling.</b> The run stops before its next attempt. What it does not run is reported as cancelled, never as passed.</Callout>;
   return (
     <div className="flex flex-wrap items-center gap-3">

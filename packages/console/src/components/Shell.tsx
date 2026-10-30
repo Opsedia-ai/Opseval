@@ -1,14 +1,17 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { BarChart3, ClipboardList, Cog, Coins, DollarSign, FlaskConical, GitCompareArrows, Layers, ListChecks, MessageSquare, Play, PieChart, Upload } from "lucide-react";
+import { BarChart3, ClipboardList, Cog, Coins, DollarSign, FlaskConical, GitCompareArrows, KeyRound, Layers, ListChecks, LogOut, MessageSquare, Play, PieChart, Upload } from "lucide-react";
 import type { ReactNode } from "react";
 import { api } from "../lib/api";
+import { useSession } from "../lib/session";
+import type { Capability } from "../lib/types";
 import { useApi } from "../lib/useApi";
-import { CoralButton, cx } from "./ui";
+import { Button, Callout, CoralButton, cx } from "./ui";
 
-const nav: { heading: string; items: { to: string; label: string; icon: ReactNode; end?: boolean }[] }[] = [
+/** `needs`: shown only when the server grants it (GET /auth/session); the server refuses it anyway. */
+const nav: { heading: string; items: { to: string; label: string; icon: ReactNode; end?: boolean; needs?: Capability }[] }[] = [
   { heading: "Evaluate", items: [
     { to: "/", label: "Runs", icon: <ClipboardList size={18} />, end: true },
-    { to: "/runs/new", label: "New run", icon: <Play size={18} /> },
+    { to: "/runs/new", label: "New run", icon: <Play size={18} />, needs: "runs:start" },
   ] },
   { heading: "Results", items: [
     { to: "/compare", label: "Compare runs", icon: <GitCompareArrows size={18} /> },
@@ -18,14 +21,15 @@ const nav: { heading: string; items: { to: string; label: string; icon: ReactNod
     { to: "/usage", label: "Usage per run", icon: <PieChart size={18} /> },
   ] },
   { heading: "Author", items: [
-    { to: "/simulator", label: "Simulator", icon: <MessageSquare size={18} /> },
+    { to: "/simulator", label: "Simulator", icon: <MessageSquare size={18} />, needs: "runs:start" },
     { to: "/scenarios", label: "Test cases", icon: <ListChecks size={18} /> },
-    { to: "/import", label: "Bulk import", icon: <Upload size={18} /> },
+    { to: "/import", label: "Bulk import", icon: <Upload size={18} />, needs: "catalogue:write" },
     { to: "/suites", label: "Suites", icon: <Layers size={18} /> },
   ] },
   { heading: "Reference", items: [
     { to: "/checks", label: "Checks & judges", icon: <FlaskConical size={18} /> },
     { to: "/settings", label: "Settings", icon: <Cog size={18} /> },
+    { to: "/keys", label: "API keys", icon: <KeyRound size={18} />, needs: "manage" },
   ] },
 ];
 
@@ -37,7 +41,25 @@ const Logo = () => (
   </svg>
 );
 
+/** Who is signed in, in accounts mode (ADR-0050), and the way out. */
+function Who() {
+  const { session } = useSession();
+  if (!session || session.mode !== "accounts" || !session.user) return null;
+  const signOut = async () => {
+    try { await api.logout(); } finally { window.location.assign("/login"); }
+  };
+  return (
+    <div className="flex items-center gap-3 font-mono text-xs text-muted-ink" data-testid="who">
+      <span><b className="text-ink">{session.user.name}</b>{session.user.role && <> · {session.user.role}</>}</span>
+      <Button variant="ghost" onClick={() => void signOut()}><LogOut size={14} />Sign out</Button>
+    </div>
+  );
+}
+
 export default function Shell() {
+  const { session } = useSession();
+  const can = (c?: Capability) => !c || !session || session.capabilities.includes(c);
+  const noAccess = session?.mode === "accounts" && !session.hasAccess;
   const health = useApi(api.health, [], () => 15000);
   const up = !!health.data;
   return (
@@ -54,7 +76,7 @@ export default function Shell() {
           {nav.map((g) => (
             <div key={g.heading}>
               <div className="mb-1.5 px-3 text-[11px] font-semibold uppercase tracking-[0.1em] text-teal">{g.heading}</div>
-              {g.items.map((i) => (
+              {g.items.filter((i) => can(i.needs)).map((i) => (
                 <NavLink key={i.to} to={i.to} end={i.end}
                   className={({ isActive }) => cx(
                     "flex items-center gap-3 rounded-xl px-3 py-2 text-[15px] font-medium transition",
@@ -73,9 +95,14 @@ export default function Shell() {
             <span className={cx("inline-block h-2.5 w-2.5 rounded-full", up ? "bg-teal" : "bg-deep-coral")} />
             {up ? <>api ok <span className="ml-2">profile</span><b className="text-ink">{health.data?.profile ?? "none"}</b><span className="ml-2">v{health.data?.version}</span></> : "api offline"}
           </div>
-          <CoralButton to="/runs/new"><Play size={16} />New run</CoralButton>
+          <div className="flex items-center gap-4">
+            <Who />
+            {can("runs:start") && <CoralButton to="/runs/new"><Play size={16} />New run</CoralButton>}
+          </div>
         </div>
-        <main><Outlet /></main>
+        {noAccess
+          ? <main className="p-10"><Callout><b>No access to {session?.project}.</b> You are signed in, but have no role in this project. Ask an admin of its organisation.</Callout></main>
+          : <main><Outlet /></main>}
       </div>
     </div>
   );

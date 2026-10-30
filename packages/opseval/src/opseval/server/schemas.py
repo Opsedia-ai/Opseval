@@ -953,3 +953,128 @@ class FormOut(Api):
     default_checks: list[str]
     """``scorers: default`` for a scenario with no tool expectations."""
     read_only: bool
+
+
+# --- accounts and access (ADR-0050) ----------------------------------------------------------
+
+AccessMode = Literal["token", "accounts"]
+"""``token``: one shared bearer token, loopback only (ADR-0031). ``accounts``: users,
+sessions, roles and API keys (ADR-0050)."""
+Capability = Literal[
+    "runs:read", "runs:start", "catalogue:write", "catalogue:label", "label:protected", "manage"
+]
+"""What the caller may do here. The console shows or hides actions by these; it never works
+them out from a role."""
+RoleName = Literal["viewer", "member", "admin", "owner"]
+ScopeName = Literal[
+    "runs:read", "runs:start", "catalogue:write", "catalogue:label", "label:protected"
+]
+
+
+class SessionUser(Api):
+    kind: Literal["operator", "user", "key"]
+    name: str
+    """An email, a key's name, or ``operator`` in token mode."""
+    role: RoleName | None
+    """The role on the served project; ``None`` for the operator or no role at all."""
+
+
+class SessionOut(Api):
+    """Who the console is talking as, and what they may do. Answered to anyone in accounts
+    mode (``user`` is ``None`` until signed in)."""
+
+    mode: AccessMode
+    user: SessionUser | None
+    capabilities: list[Capability]
+    has_access: bool
+    """Signed in but without a role in this project: the console says so, rather than show
+    empty pages."""
+    csrf_token: str | None
+    """Send it as ``X-CSRF-Token`` on every write made with the session cookie."""
+    project: str | None
+    task: str | None
+    oidc: bool
+    """An OIDC sign-in is offered (``GET /auth/oidc/start``)."""
+
+
+class LoginIn(ApiIn):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class KeyIn(ApiIn):
+    name: str = Field(min_length=1, max_length=200)
+    scopes: list[ScopeName] = Field(min_length=1, max_length=5)
+    tasks: list[str] | None = Field(default=None, max_length=100)
+    """Task slugs the key may touch; ``None`` means every task of the project."""
+    system: bool = False
+    """A key for Opseval's own automation: it can never hold ``label:protected``."""
+    expires_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class KeyOut(Api):
+    public_key: str
+    name: str
+    secret_prefix: str
+    scopes: list[ScopeName]
+    tasks: list[str] | None
+    system: bool
+    created_by: str | None
+    created_at: str
+    expires_at: str | None
+    revoked_at: str | None
+    last_used_at: str | None
+
+
+class KeyCreatedOut(Api):
+    key: KeyOut
+    secret: str
+    """Shown once, never again: only its hash is stored."""
+    authorization: str
+    """The header value to send: ``Bearer <public>:<secret>``."""
+
+
+class MemberIn(ApiIn):
+    email: str = Field(min_length=3, max_length=320)
+    role: RoleName | None
+    """The organisation role; ``None`` removes the person from the organisation."""
+    project_role: RoleName | None = None
+    """A lower role on this project only; raising it is an Enterprise feature. Left out: an
+    existing project role is kept. ``null`` sent explicitly: it is cleared."""
+    password: str | None = Field(default=None, min_length=12, max_length=1024)
+    """A first password, when the email is new. Without one the user signs in with OIDC."""
+    oidc_subject: str | None = Field(default=None, min_length=1, max_length=255)
+    """Link the person's identity at the configured OIDC issuer (the ID token's ``sub``)."""
+
+
+class MemberOut(Api):
+    email: str
+    name: str | None
+    org_role: RoleName
+    project_role: RoleName | None
+    role: RoleName
+    disabled: bool
+
+
+class LabelOut(Api):
+    kind: str
+    name: str
+    label: str
+    version: int
+    protected: bool
+
+
+class LabelMoveIn(ApiIn):
+    kind: Literal["scenario", "suite", "profile", "dataset"]
+    name: str = Field(min_length=1, max_length=200)
+    version: int = Field(ge=1)
+    label: str = Field(min_length=1, max_length=36)
+
+
+class LabelMoveOut(Api):
+    protected: bool
+
+
+class LabelProtectIn(ApiIn):
+    label: str = Field(min_length=1, max_length=36)
+    protected: bool

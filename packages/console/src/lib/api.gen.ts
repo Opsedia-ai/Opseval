@@ -806,3 +806,95 @@ export interface FormOut {
   defaultChecks: string[];
   readOnly: boolean;
 }
+
+export interface SessionUser {
+  kind: "operator" | "user" | "key";
+  name: string;
+  role: "viewer" | "member" | "admin" | "owner" | null;
+}
+
+/** Who the console is talking as, and what they may do. Answered to anyone in accounts mode (``user`` is ``None`` until signed in). */
+export interface SessionOut {
+  mode: "token" | "accounts";
+  user: SessionUser | null;
+  capabilities: ("runs:read" | "runs:start" | "catalogue:write" | "catalogue:label" | "label:protected" | "manage")[];
+  hasAccess: boolean;
+  csrfToken: string | null;
+  project: string | null;
+  task: string | null;
+  oidc: boolean;
+}
+
+export interface LoginIn {
+  email: string;
+  password: string;
+}
+
+export interface KeyIn {
+  name: string;
+  scopes: ("runs:read" | "runs:start" | "catalogue:write" | "catalogue:label" | "label:protected")[];
+  tasks?: string[] | null;
+  system?: boolean;
+  expiresDays?: number | null;
+}
+
+export interface KeyOut {
+  publicKey: string;
+  name: string;
+  secretPrefix: string;
+  scopes: ("runs:read" | "runs:start" | "catalogue:write" | "catalogue:label" | "label:protected")[];
+  tasks: string[] | null;
+  system: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+}
+
+export interface KeyCreatedOut {
+  key: KeyOut;
+  secret: string;
+  authorization: string;
+}
+
+export interface MemberIn {
+  email: string;
+  role: "viewer" | "member" | "admin" | "owner" | null;
+  projectRole?: "viewer" | "member" | "admin" | "owner" | null;
+  password?: string | null;
+  oidcSubject?: string | null;
+}
+
+export interface MemberOut {
+  email: string;
+  name: string | null;
+  orgRole: "viewer" | "member" | "admin" | "owner";
+  projectRole: "viewer" | "member" | "admin" | "owner" | null;
+  role: "viewer" | "member" | "admin" | "owner";
+  disabled: boolean;
+}
+
+export interface LabelOut {
+  kind: string;
+  name: string;
+  label: string;
+  version: number;
+  protected: boolean;
+}
+
+export interface LabelMoveIn {
+  kind: "scenario" | "suite" | "profile" | "dataset";
+  name: string;
+  version: number;
+  label: string;
+}
+
+export interface LabelMoveOut {
+  protected: boolean;
+}
+
+export interface LabelProtectIn {
+  label: string;
+  protected: boolean;
+}

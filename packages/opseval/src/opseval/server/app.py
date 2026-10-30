@@ -1,15 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The FastAPI application behind ``opseval serve`` (ADR-0029, ADR-0031).
+"""The FastAPI application behind ``opseval serve`` (ADR-0029, ADR-0031, ADR-0050).
 
 The API can start runs that hold the operator's agent token and LLM keys, so every
-request has to prove it came from the operator, not from a web page they happen to have
-open:
+request has to prove who it comes from, not merely that a web page could send it.
+
+**Shared-token mode** (ADR-0031, no database and no public URL):
 
 - **Host check.** Only loopback names are served. A page that rebinds its own hostname to
   127.0.0.1 still sends its hostname in ``Host`` and is refused (DNS rebinding).
 - **Bearer token** on every ``/api`` request, minted per start unless configured.
 - **Origin check** on writes: a browser always sends ``Origin`` on a cross-site POST.
-- **No CORS.** The console is served same-origin, or through the Vite dev proxy.
+
+**Accounts mode** (ADR-0050, a database or a public URL is configured): sessions (a
+``__Host-`` cookie behind https, ``opseval-session`` on plain-http loopback) and API keys
+authenticate; the shared token is off. An ``Authorization``
+header is authoritative: a bad key is 401 even beside a valid cookie. A cookie-authenticated
+write needs a same-origin ``Origin`` and the session's ``X-CSRF-Token``. With a public URL,
+``Host`` must be its host, HSTS is sent, and forwarded headers count only from a trusted proxy.
+
+In both modes every ``/api`` route is listed in :data:`ROUTE_NEEDS` with what it needs, and
+one dependency (``authorize``) applies :func:`opseval.accounts.roles.decide` to it. A route
+missing from the table fails the start; a request reaching one anyway is refused.
+
+**No CORS.** The console is served same-origin, or through the Vite dev proxy.
 
 When a built console is found, it is served from ``/`` on the same origin as the API
 (ADR-0034): one link, one port, and no Node needed to use it.
@@ -19,42 +32,99 @@ from __future__ import annotations
 
 import contextlib
 import hmac
+import logging
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import date
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from opseval import __version__
+from opseval.accounts.roles import OPERATOR, Need, Principal, decide
+from opseval.accounts.tokens import same
 from opseval.analytics import FileAnalytics, UnsupportedFilter, UsageFilter
 from opseval.analytics.models import Bucket
 from opseval.catalogue import load_profile
 from opseval.config import Settings
 from opseval.errors import ConfigError, StorageError
 from opseval.plugins import load_scorers
-from opseval.server import actions, lookup, views
+from opseval.server import access as access_mod
+from opseval.server import accounts_api, actions, lookup, views
 from opseval.server import audio as audio_api
 from opseval.server import schemas as s
+from opseval.server.access import HSTS, LOOPBACK_NAMES, AccessConfig, host_name
 from opseval.server.lookup import safe_id
 from opseval.storage import FileStore, RunStore
 
 API = "/api/v1"
-LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+log = logging.getLogger("opseval.server")
 
-
-def host_name(header: str) -> str:
-    """The host part of a ``Host`` header: ``[::1]:8000`` -> ``::1``, ``a:80`` -> ``a``."""
-    header = header.strip().lower()
-    if header.startswith("["):
-        return header[1 : header.find("]")] if "]" in header else ""
-    return header.rsplit(":", 1)[0] if header.count(":") == 1 else header
+_RUN = "/runs/{run_id}"
+_ATTEMPT = _RUN + "/attempts/{test_id}/{index}"
+ROUTE_NEEDS: dict[tuple[str, str], Need] = {
+    ("GET", "/health"): Need.READ,
+    ("GET", "/runs"): Need.READ,
+    ("GET", _RUN): Need.READ,
+    ("GET", _ATTEMPT): Need.READ,
+    ("GET", _ATTEMPT + "/audio"): Need.READ,
+    ("GET", _ATTEMPT + "/audio/call"): Need.READ,
+    ("GET", _ATTEMPT + "/audio/{seq}"): Need.READ,
+    ("GET", "/compare"): Need.READ,
+    ("GET", "/trend"): Need.READ,
+    ("GET", "/trend/scenarios"): Need.READ,
+    ("GET", "/usage"): Need.READ,
+    ("GET", "/analytics/cost"): Need.READ,
+    ("GET", "/analytics/tokens"): Need.READ,
+    ("GET", "/scenarios"): Need.READ,
+    ("GET", "/suites"): Need.READ,
+    ("GET", "/gate"): Need.READ,
+    ("POST", "/gate/resolve"): Need.READ,  # a preview: nothing is written
+    ("GET", "/checks"): Need.READ,
+    ("GET", "/readiness"): Need.READ,
+    ("GET", "/config"): Need.READ,  # the redacted digest
+    ("GET", "/scenarios/form"): Need.READ,
+    ("POST", "/scenarios/draft"): Need.CATALOGUE,
+    ("GET", "/scenarios/source"): Need.READ,
+    ("PUT", "/scenarios/source"): Need.CATALOGUE,
+    ("GET", "/scenarios/{scenario_id}/source"): Need.READ,
+    ("POST", "/scenarios/validate"): Need.READ,  # checks text, writes nothing
+    ("GET", "/scenarios/{scenario_id}/persona"): Need.READ,
+    ("POST", "/simulator/rehearse"): Need.START,  # spends the simulator's LLM budget
+    ("POST", "/runs"): Need.START,
+    ("POST", _RUN + "/cancel"): Need.START,
+    ("PUT", "/suites"): Need.CATALOGUE,
+    ("POST", "/scenarios/import"): Need.CATALOGUE,
+    ("GET", "/openapi.json"): Need.READ,
+    # Accounts and access (ADR-0050).
+    ("GET", "/auth/session"): Need.PUBLIC,
+    ("POST", "/auth/login"): Need.PUBLIC,
+    ("POST", "/auth/logout"): Need.SIGNED_IN,
+    ("GET", "/auth/oidc/start"): Need.PUBLIC,
+    ("GET", "/auth/oidc/callback"): Need.PUBLIC,
+    ("GET", "/auth/keys"): Need.MANAGE,
+    ("POST", "/auth/keys"): Need.MANAGE,
+    ("POST", "/auth/keys/{public_key}/revoke"): Need.MANAGE,
+    ("GET", "/auth/members"): Need.MANAGE,
+    ("PUT", "/auth/members"): Need.MANAGE,
+    ("GET", "/catalogue/labels"): Need.READ,
+    ("PUT", "/catalogue/labels"): Need.LABEL,
+    ("PUT", "/catalogue/labels/protection"): Need.MANAGE,
+}
+"""What every ``/api/v1`` route needs (method, path below ``/api/v1``). The one table
+authorization reads; a route not in it fails the start (deny by default)."""
+SELF_AUDITED = frozenset(
+    path for (_m, path) in ROUTE_NEEDS if path.startswith(("/auth/", "/catalogue/labels"))
+)
+"""Writes that record their own, more specific audit event."""
 
 
 def _deny(status: int, code: str, message: str) -> JSONResponse:
@@ -155,12 +225,16 @@ def create_app(
     console_dir: Path | None = None,
     store: RunStore | None = None,
     close_store: bool = False,
+    access: AccessConfig | None = None,
 ) -> FastAPI:
+    """The API. ``access`` set is accounts mode (ADR-0050); unset, shared-token mode."""
     settings = settings or Settings()
     # A suite may name a plugin's scorer; without this the console would reject it as
     # UNKNOWN_SCORER and the checks page would hide it. A broken plugin fails the start.
     load_scorers()
-    if token is None:
+    if access is not None:
+        token = None  # accounts mode: only sessions and API keys authenticate
+    elif token is None:
         configured = settings.serve_token
         token = configured.get_secret_value() if configured else secrets.token_urlsafe(24)
     ctx = actions.ServerContext(
@@ -174,7 +248,8 @@ def create_app(
         allow_commit=allow_commit,
     )
 
-    # No unauthenticated /docs or /openapi.json: the schema lives under /api, behind the token.
+    # No unauthenticated /docs or /openapi.json: the schema lives under /api, behind the
+    # same authorization as every other route.
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
@@ -185,26 +260,69 @@ def create_app(
             if close_store and callable(close):
                 close()
 
+    async def authorize(request: Request) -> None:
+        """The one authorization check, on every route (deny by default)."""
+        route = request.scope.get("route")
+        path = getattr(route, "path", "")
+        method = "GET" if request.method == "HEAD" else request.method
+        need = ROUTE_NEEDS.get((method, path.removeprefix(API)))
+        if need is None or not path.startswith(API):
+            log.error("no authorization policy for %s %s: refused", method, path)
+            raise actions.ApiError(403, "NO_POLICY", "this route has no authorization policy")
+        principal: Principal | None = (
+            getattr(request.state, "principal", None) if access is not None else OPERATOR
+        )
+        denial = decide(principal, need)
+        if denial is not None:
+            raise actions.ApiError(denial.status, denial.code, denial.message)
+
     app = FastAPI(
         lifespan=lifespan,
         title="Opseval API",
         version=__version__,
         docs_url=None,
         redoc_url=None,
-        openapi_url=f"{API}/openapi.json",
+        openapi_url=None,
+        dependencies=[Depends(authorize)],
     )
     console_root = console_dir.resolve() if console_dir is not None else find_console(settings)
     console = _Console(console_root) if console_root is not None else None
     app.state.console = console_root
     app.state.token = token
     app.state.ctx = ctx
-    expected = f"Bearer {token}".encode()
+    app.state.access = access
+    expected = f"Bearer {token}".encode() if token is not None else None
     audio_key = audio_api.ServerKey(settings)
+
+    def finish(request: Request, response: Response) -> Response:
+        if _is_api(request.url.path):
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            if access is not None:  # sessions, CSRF tokens and key secrets are never cached
+                response.headers["Cache-Control"] = "no-store"
+        else:
+            # Every non-API response, not only index.html: any page on this origin can read
+            # what the console keeps, so none of them may be framed or run foreign scripts.
+            response.headers.update(CONSOLE_HEADERS)
+        if access is not None and access.secure:
+            response.headers["Strict-Transport-Security"] = HSTS
+        return response
+
+    async def console_or(request: Request, response: Response) -> Response:
+        if (
+            not _is_api(request.url.path)
+            and console is not None
+            and response.status_code == 404
+            and request.method in ("GET", "HEAD")
+        ):
+            response = await console.respond(request)
+        return finish(request, response)
 
     @app.middleware("http")
     async def guard(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        if access is not None:
+            return await accounts_guard(request, call_next)
         if host_name(request.headers.get("host", "")) not in allowed_hosts:
             return _deny(403, "HOST_NOT_ALLOWED", "opseval serve answers on loopback names only")
         if request.url.path.startswith("/api/"):
@@ -216,31 +334,78 @@ def create_app(
             ):
                 return _deny(403, "ORIGIN_NOT_ALLOWED", "cross-site requests are refused")
             given = request.headers.get("authorization", "").encode()
-            if not hmac.compare_digest(given, expected):
+            if expected is None or not hmac.compare_digest(given, expected):
                 return _deny(
                     401,
                     "UNAUTHORIZED",
                     "open the console from the link `opseval serve` printed (it carries the "
                     "token), or send Authorization: Bearer <token>",
                 )
+        return await console_or(request, await call_next(request))
+
+    async def accounts_guard(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if access is None:  # pragma: no cover - only called in accounts mode
+            return _deny(500, "NO_ACCESS_CONFIG", "accounts mode is not configured")
+        seen = access_mod.view(request, access)
+        if not isinstance(seen, access_mod.View):
+            return finish(request, _deny(seen.status, seen.code, seen.message))
+        request.state.address = seen.address
+        request.state.origin = seen.origin
+        request.state.principal = None
+        if not _is_api(request.url.path):
+            return await console_or(request, await call_next(request))
+        accounts = access.accounts
+        principal: Principal | None = None
+        header = request.headers.get("authorization")
+        if header is not None:
+            # Authoritative: a key that is not valid is 401, whatever cookie came with it.
+            principal = await run_in_threadpool(accounts.from_key, header)
+            if principal is None:
+                return finish(
+                    request,
+                    _deny(401, "INVALID_KEY", "the API key is unknown, expired or revoked"),
+                )
+        else:
+            cookie = request.cookies.get(access.session_cookie)
+            if cookie:
+                principal = await run_in_threadpool(accounts.from_cookie, cookie)
+        if request.method in UNSAFE_METHODS and (principal is None or principal.via_cookie):
+            # A browser's write: same origin, and (signed in) the session's CSRF token.
+            if request.headers.get("origin") != seen.origin:
+                return finish(
+                    request, _deny(403, "ORIGIN_NOT_ALLOWED", "cross-site requests are refused")
+                )
+            if principal is not None and not same(
+                request.headers.get("x-csrf-token", ""), principal.csrf or "\0"
+            ):
+                return finish(
+                    request,
+                    _deny(403, "CSRF_FAILED", "send the session's X-CSRF-Token with every write"),
+                )
+        request.state.principal = principal
         response = await call_next(request)
-        if _is_api(request.url.path):
-            response.headers["X-Content-Type-Options"] = "nosniff"
-            return response
+        route = request.scope.get("route")
+        path = getattr(route, "path", "").removeprefix(API)
         if (
-            console is not None
-            and response.status_code == 404
-            and request.method
-            in (
-                "GET",
-                "HEAD",
-            )
+            request.method in UNSAFE_METHODS
+            and response.status_code < 400
+            and principal is not None
+            and path not in SELF_AUDITED
         ):
-            response = await console.respond(request)
-        # Every non-API response, not only index.html: any page on this origin can read the
-        # token the console keeps, so none of them may be framed or run foreign scripts.
-        response.headers.update(CONSOLE_HEADERS)
-        return response
+            # Every write leaves a trail (ADR-0050); the specific routes write their own.
+            try:
+                await run_in_threadpool(
+                    accounts.audit,
+                    principal,
+                    f"{request.method} {path}"[:64],
+                    target=request.url.path,
+                    address=seen.address,
+                )
+            except Exception:  # the write happened; say loudly that its trail did not
+                log.exception("audit event for %s %s was not written", request.method, path)
+        return finish(request, response)
 
     @app.exception_handler(actions.ApiError)
     def _api_error(_: Request, exc: actions.ApiError) -> JSONResponse:
@@ -305,6 +470,10 @@ def create_app(
             "detail": exc.detail,
         }
         return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
+
+    @app.get(f"{API}/openapi.json", include_in_schema=False)
+    def openapi() -> JSONResponse:
+        return JSONResponse(app.openapi())
 
     @app.get(f"{API}/health")
     def health() -> s.Health:
@@ -507,4 +676,31 @@ def create_app(
             raise HTTPException(422, detail=[p.model_dump(by_alias=True) for p in out.problems])
         return out
 
+    accounts_api.register(app, access, API)
+    check_policies(app)
     return app
+
+
+def check_policies(app: FastAPI) -> None:
+    """Fail the start when an ``/api`` route has no entry in :data:`ROUTE_NEEDS`: a route
+    nobody decided about is a route nobody guarded (deny by default)."""
+    missing = [
+        f"{method} {route.path}"
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        for method in sorted(route.methods or ())
+        if (method, route.path.removeprefix(API)) not in ROUTE_NEEDS
+    ]
+    if missing:
+        raise RuntimeError(f"routes without an authorization policy: {', '.join(missing)}")
+
+
+__all__ = [
+    "API",
+    "LOOPBACK_NAMES",
+    "ROUTE_NEEDS",
+    "check_policies",
+    "create_app",
+    "find_console",
+    "host_name",
+]

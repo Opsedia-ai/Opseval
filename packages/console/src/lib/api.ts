@@ -27,15 +27,59 @@ function adoptToken(): string | null {
 }
 const token = adoptToken();
 
+/**
+ * Accounts mode (ADR-0050) has no shared token: the browser holds a session cookie, and every
+ * write carries the session's CSRF token. The mode is the server's answer to
+ * `GET /auth/session`, asked once before any page loads (`loadSession`). Until it is known the
+ * console behaves as before (the token, if there is one).
+ */
+let mode: T.Session["mode"] | "unknown" = "unknown";
+let csrf: string | null = null;
+const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function headersFor(method: string): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (mode !== "accounts" && token) headers.authorization = `Bearer ${token}`;
+  if (mode === "accounts" && csrf && UNSAFE.has(method)) headers["x-csrf-token"] = csrf;
+  return headers;
+}
+
+function adopt(session: T.Session): T.Session {
+  mode = session.mode;
+  csrf = session.csrfToken;
+  return session;
+}
+
+/** Who the console is talking as. Accounts mode answers it without credentials; shared-token
+ * mode needs the token, so a 401 there is retried with it. */
+export async function loadSession(): Promise<T.Session> {
+  let res: Response;
+  try {
+    res = await fetch("/api/v1/auth/session", { headers: { "content-type": "application/json" } });
+    if (res.status === 401 && token) {
+      res = await fetch("/api/v1/auth/session", { headers: { "content-type": "application/json", authorization: `Bearer ${token}` } });
+    }
+  } catch {
+    throw new ApiError(0, "OFFLINE", "Cannot reach the Opseval API. Start it with: opseval serve");
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.code ?? `HTTP_${res.status}`, body.message ?? `Request failed (${res.status})`);
+  }
+  return adopt((await res.json()) as T.Session);
+}
+
 /** One request with the token, or the ApiError that says why not: shared by JSON and binary answers. */
 async function request(path: string, init?: RequestInit): Promise<Response> {
   let res: Response;
   try {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (token) headers.authorization = `Bearer ${token}`;
-    res = await fetch(`/api/v1${path}`, { ...init, headers });
+    res = await fetch(`/api/v1${path}`, { ...init, headers: headersFor((init?.method ?? "GET").toUpperCase()) });
   } catch {
     throw new ApiError(0, "OFFLINE", "Cannot reach the Opseval API. Start it with: opseval serve");
+  }
+  if (res.status === 401 && mode === "accounts" && !path.startsWith("/auth/")) {
+    // The session ended (signed out elsewhere, idle, expired): sign in again.
+    window.location.assign("/login");
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -98,6 +142,14 @@ export const api = {
   importScenarios: (family: string, files: { name: string; text: string }[]) =>
     post<{ imported: string[] }>("/scenarios/import", { family, files }),
   saveNewScenario,
+  // Accounts and access (ADR-0050).
+  login: async (email: string, password: string) => adopt(await post<T.Session>("/auth/login", { email, password })),
+  logout: () => request("/auth/logout", { method: "POST" }).then(() => undefined),
+  keys: () => call<T.ApiKey[]>("/auth/keys"),
+  createKey: (body: T.KeyBody) => post<T.KeyCreated>("/auth/keys", body),
+  revokeKey: (publicKey: string) => request(`/auth/keys/${encodeURIComponent(publicKey)}/revoke`, { method: "POST" }).then(() => undefined),
+  members: () => call<T.Member[]>("/auth/members"),
+  setMember: (body: T.MemberBody) => call<T.Member[]>("/auth/members", { method: "PUT", body: JSON.stringify(body) }),
 };
 
 /**

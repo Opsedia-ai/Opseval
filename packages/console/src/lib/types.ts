@@ -87,3 +87,14 @@ export interface UsageQuery { suite: string; role: string; model: string; since:
 /** Recorded audio of a voice attempt (ADR-0053): what each turn can do is the server's call. */
 export type AudioTurn = G.AudioTurnOut;
 export type AttemptAudio = G.AttemptAudioOut;
+
+/** Accounts and access (ADR-0050): who the console talks as and what they may do. The
+ * capabilities are the server's; the console shows or hides by them and works out nothing. */
+export type Session = G.SessionOut;
+export type Capability = G.SessionOut["capabilities"][number];
+export type ApiKey = G.KeyOut;
+export type KeyBody = G.KeyIn;
+export type KeyCreated = G.KeyCreatedOut;
+export type KeyScope = G.KeyIn["scopes"][number];
+export type Member = G.MemberOut;
+export type MemberBody = G.MemberIn;

@@ -6,6 +6,7 @@ import type { Draft, DraftCheck, Drafted, FormCheck, FormParam, Problem, Scenari
 import { useApi } from "../lib/useApi";
 import { Warnings } from "../components/Warnings";
 import { AreaPill, Button, Callout, Card, CoralButton, Data, ErrorBox, Explainer, Mono, Page, PageHeader, Pill, cx } from "../components/ui";
+import { useCan } from "../lib/session";
 
 const field = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ink";
 const lab = "text-xs font-semibold uppercase tracking-[0.08em]";
@@ -166,6 +167,7 @@ function Problems({ items }: { items: Problem[] }) {
  * any new file. The result is an ordinary scenario file.
  */
 function Editor({ form }: { form: Form }) {
+  const canWrite = useCan("catalogue:write");
   const nav = useNavigate();
   const [template, setTemplate] = useState(form.templates[0]?.id ?? "");
   const [draft, setDraft] = useState<Draft>(() => form.templates[0].draft);
@@ -237,7 +239,7 @@ function Editor({ form }: { form: Form }) {
     <>
       <PageHeader title="New test case" sub={<>For profile <Mono>{profile.name}</Mono>. Saved as YAML in your catalogue.</>} aside={<>
         <Button to="/scenarios/new/yaml"><FileCode size={16} />Write YAML instead</Button>
-        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={form.readOnly || busy || !fresh?.check.ok || undecoded.length > 0} onClick={() => void save()}><Save size={16} />Save</CoralButton></>} />
+        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={form.readOnly || !canWrite || busy || !fresh?.check.ok || undecoded.length > 0} onClick={() => void save()}><Save size={16} />Save</CoralButton></>} />
       <Page>
         <Explainer><b>Fill in the situation; Opseval writes the YAML.</b> The choices come from your profile (its checkpoints and tools) and from the checks Opseval has. What is written is checked exactly as <Mono>opseval validate</Mono> would check it, and saved only when it is valid and does not replace a file.</Explainer>
         {form.readOnly && <Callout><b>The built-in demo catalogue is read-only.</b> You can try the form; to save, start <Mono>opseval serve --catalogue ./my-catalogue</Mono>.</Callout>}

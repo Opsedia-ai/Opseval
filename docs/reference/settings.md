@@ -83,6 +83,14 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_RETENTION_DAYS` | integer | `90` | ``opseval prune`` deletes finished runs older than this many days (FR-SAF-06). |
 | `OPSEVAL_SERVE_TOKEN` | secret | unset (secret) | The console API token. Random on every `opseval serve` start when unset (ADR-0031). |
 | `OPSEVAL_CONSOLE_DIR` | text | unset | The built web console (``packages/console/dist``) for ``opseval serve`` to serve. When unset, a source checkout's build is found on its own (ADR-0034). |
+| `OPSEVAL_PUBLIC_URL` | text | unset | Where people reach ``opseval serve`` (``https://opseval.example.com``). Setting it turns on accounts mode; ``Host`` must then be this URL's host, and HSTS is sent. Serving beyond loopback needs it, with https. |
+| `OPSEVAL_TRUSTED_PROXIES` | text | empty | Comma-separated addresses or CIDRs (``10.0.0.5,10.1.0.0/16``) of the reverse proxies whose ``Forwarded``/``X-Forwarded-*`` headers are believed. From anyone else they are ignored. |
+| `OPSEVAL_SESSION_IDLE_MINUTES` | integer | `120` | A console session not used for this long ends. |
+| `OPSEVAL_SESSION_MAX_HOURS` | integer | `24` | A console session ends this long after sign-in, used or not. |
+| `OPSEVAL_OIDC_ISSUER` | text | unset | The OIDC issuer people sign in with (``https://accounts.example.com``). Its host must be on ``OPSEVAL_ALLOWED_HOSTS``. Unset: passwords only. |
+| `OPSEVAL_OIDC_CLIENT_ID` | text | unset | The client id Opseval is registered with at the issuer. |
+| `OPSEVAL_OIDC_CLIENT_SECRET` | secret | unset (secret) | The client secret, when the issuer gave one (a confidential client). |
+| `OPSEVAL_OIDC_SCOPES` | text | `openid email profile` | The scopes asked for at sign-in. ``openid`` is required. |
 | `OPSEVAL_DATABASE_URL` | secret | unset (secret) | Postgres for server mode: ``postgresql://user:password@host:5432/opseval``. It carries a password, so it is a secret. Its host must be allowlisted, and a host other than localhost needs TLS (``?ssl=require``, ``verify-ca`` or ``verify-full``). |
 | `OPSEVAL_BLOB_STORE` | `file` \| `s3` | `file` | Where server mode keeps run files (records, results, reports, audio): ``file`` (a folder, ``OPSEVAL_BLOB_DIR``) or ``s3`` (any S3-compatible store). |
 | `OPSEVAL_BLOB_DIR` | text | unset | The folder ``OPSEVAL_BLOB_STORE=file`` keeps objects in: an absolute path (a relative one is refused, since it would move with the working directory). Unset: ``.blobs`` inside ``OPSEVAL_REPORTS_DIR``, resolved once at start. Each blob's row records the folder it was written to, so a server started on another folder says so rather than reporting the run's files as missing. |

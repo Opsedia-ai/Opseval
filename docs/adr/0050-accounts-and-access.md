@@ -35,7 +35,8 @@ roles, API keys and OIDC login are core.
 - `api_keys`: per project. A public id `pk-oe-…` and a secret `sk-oe-…` shown once and stored
   only as a hash. Scopes (below), an optional list of tasks it may touch, `system` (a key
   Opseval's own automation uses), `expires_at`, `revoked_at`, `last_used_at`.
-- `catalogue_labels.protected`: a protected label (by default `production`) moves only for
+- `catalogue_labels.protected` (built as a `protected_labels` table, see the implementation
+  note): a protected label (by default `production`) moves only for
   `admin` and `owner`, or for a key holding `label:protected`.
 - `audit_events`: who (user or key), what, on which org/project/task, when, from where.
   Written in core for every write and every sign-in. The viewer and export are `ee/`.
@@ -135,3 +136,72 @@ project role above the org role, and the audit viewer and export.
 - Multi-factor authentication beyond what an OIDC provider enforces.
 - Per-user API keys (keys are per project here, as in Langfuse).
 - Email delivery for invitations and password resets.
+
+## Implementation note (2026-10-30)
+
+Built on `feat/accounts`; the status stays **Proposed** until the maintainers accept it. Where
+the build had to choose, it chose as follows.
+
+- **One served task per process.** `opseval serve --project org/project --task t` serves one
+  task, and every principal is resolved for that project and task. In accounts mode the run
+  store's reads are scoped to the task too (`DbRunStore(task_reads=True)`), so a key scoped to
+  another task, or a person with no role in the project, gets 404 on every data route. A task
+  switcher in one process is later work (it needs the API's routes to carry the task).
+- **The mode.** A database (`OPSEVAL_DATABASE_URL` or `--database-url`) or a public URL
+  (`--public-url`, `OPSEVAL_PUBLIC_URL`) is accounts mode. Accounts mode needs both a database
+  (the users live there) and `--project`; either missing is exit 3 naming the fix. Nothing else
+  changed in shared-token mode, which imports none of the accounts code.
+- **One decision.** Every `/api` route is listed in `server.app.ROUTE_NEEDS` with what it
+  needs (`public`, `signed_in`, a scope, or `manage`), and one dependency applies
+  `accounts.roles.decide` to it. A route missing from the table fails the start, and a request
+  reaching one anyway is refused (`NO_POLICY`). A test sends an anonymous request to every
+  listed route and expects 401 from all but the sign-in ones.
+- **Keys.** `Authorization: Bearer pk-oe-…:sk-oe-…`, or HTTP basic auth with the public key as
+  user (as Langfuse's SDKs send it). The secret is 256 random bits stored as its sha256. A key's
+  scopes are cut to its creator's **current** role at every use; a key whose creator is gone or
+  disabled holds nothing. `manage` (members, keys) is never a key's. The database refuses a
+  system key with `label:protected` (`ck_api_keys_system`), as the API and CLI do.
+- **Sessions** need no signing secret: the cookie carries 256 random bits, the row only their
+  hash. The CSRF token is an HMAC of the session id under a per-session secret, so a token is
+  worthless for another session. Idle expiry `OPSEVAL_SESSION_IDLE_MINUTES` (120), absolute
+  `OPSEVAL_SESSION_MAX_HOURS` (24). `last_seen_at` is written at most once a minute.
+- **Protected labels.** `production` is always protected. An admin can protect another label
+  (`PUT /api/v1/catalogue/labels/protection`). Protection is kept per task and label name in
+  `protected_labels`, not on `catalogue_labels` rows, so a label protected before any item
+  carries it is protected at its first move (review of #95). The API gained the label routes (`GET`/`PUT /api/v1/catalogue/labels`) so the
+  rule has an endpoint; `opseval catalogue label`, run with the database's own credentials,
+  is not gated.
+- **OIDC.** One issuer (`OPSEVAL_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_SCOPES`), its
+  host and every endpoint its discovery names allowlisted and https. Sign-up is off and email is
+  never the join key, so an identity is linked with `opseval admin create-user --oidc-subject`,
+  `opseval admin link-identity` or the members API's `oidcSubject`;
+  a refused sign-in's audit event carries the issuer and subject for the admin to link. The
+  flow's state, nonce and PKCE verifier are kept in memory, bound to the browser by a
+  `__Host-opseval-oidc` cookie, for ten minutes; at most ten starts per address per minute. The
+  issuer is compared exactly as configured (OIDC Discovery 4.3), trailing slash included.
+- **Cookie names.** `__Host-` and `Secure` whenever the public URL is https; on plain-http
+  loopback `opseval-session` / `opseval-oidc` (HttpOnly, SameSite=Lax, host-only, no `Secure`),
+  because a `__Host-` name requires `Secure` and some browsers drop `Secure` cookies on http.
+- **Who made a key.** `api_keys.creator_kind` is `user` (`created_by` names them, deleted with
+  them) or `cli` (`opseval admin create-key --system` with nobody behind it, the only key with no
+  creator, a check constraint says so). A person's key whose person is disabled or without a
+  role holds nothing; it never falls back to the CLI cap.
+- **Sign-in limits** reserve the attempt before the password is checked (counted as a failure
+  until it succeeds), so a parallel burst cannot exceed the allowance. Resolving a session or
+  a key reads in a read transaction and writes only when `last_seen_at`/`last_used_at` is due
+  or a session must end.
+- **Audit.** Sign-ins (and failures), sign-outs, key creation (with `grants_label_protected`)
+  and revocation, role changes, member creation and label moves are written in the same
+  transaction as the change. Every other successful write is recorded after it as
+  `"<METHOD> <route>"`; if that write fails it is logged loudly, not undone.
+- **The bind rule.** Non-loopback needs accounts mode, `--public-url https://…`, and
+  `--tls-cert`/`--tls-key` or `--trusted-proxy`; an https public URL with neither is refused on
+  loopback too. uvicorn's own forwarded-header handling is off (`proxy_headers=False`): it would
+  believe loopback. With `--trusted-proxy`, a request that did not come through a listed proxy
+  must itself be https.
+- **Rate limiting** is per process, in memory (`accounts.ratelimit`): several processes behind
+  a load balancer each count on their own. Named in `docs/ATTENTION.md`.
+
+Not built here: invitations and password reset by email (no mail delivery), a members page in
+the console (the API and `opseval admin` exist), `opseval run --server` (ADR-0058 E2), and the
+`ee/` parts listed above.

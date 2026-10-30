@@ -262,6 +262,30 @@ class Settings(BaseSettings):
     """The built web console (``packages/console/dist``) for ``opseval serve`` to serve.
     When unset, a source checkout's build is found on its own (ADR-0034)."""
 
+    # Accounts and access (ADR-0050). Accounts mode is on when a database or a public URL is
+    # configured; the shared token above is then off.
+    public_url: str | None = None
+    """Where people reach ``opseval serve`` (``https://opseval.example.com``). Setting it turns
+    on accounts mode; ``Host`` must then be this URL's host, and HSTS is sent. Serving beyond
+    loopback needs it, with https."""
+    trusted_proxies: str = ""
+    """Comma-separated addresses or CIDRs (``10.0.0.5,10.1.0.0/16``) of the reverse proxies
+    whose ``Forwarded``/``X-Forwarded-*`` headers are believed. From anyone else they are
+    ignored."""
+    session_idle_minutes: int = Field(default=120, ge=5, le=7 * 24 * 60)
+    """A console session not used for this long ends."""
+    session_max_hours: int = Field(default=24, ge=1, le=30 * 24)
+    """A console session ends this long after sign-in, used or not."""
+    oidc_issuer: str | None = None
+    """The OIDC issuer people sign in with (``https://accounts.example.com``). Its host must be
+    on ``OPSEVAL_ALLOWED_HOSTS``. Unset: passwords only."""
+    oidc_client_id: str | None = None
+    """The client id Opseval is registered with at the issuer."""
+    oidc_client_secret: SecretStr | None = None
+    """The client secret, when the issuer gave one (a confidential client)."""
+    oidc_scopes: str = "openid email profile"
+    """The scopes asked for at sign-in. ``openid`` is required."""
+
     # Server mode on Postgres, the Langfuse model (ADR-0047).
     database_url: SecretStr | None = None
     """Postgres for server mode: ``postgresql://user:password@host:5432/opseval``. It carries
@@ -374,6 +398,7 @@ SECRET_FIELDS = (
     "audio_encryption_key",
     "langfuse_secret_key",
     "serve_token",
+    "oidc_client_secret",
     "webhook_url",
     "github_token",
     "jira_token",
