@@ -316,7 +316,11 @@ class DbRunStore:
         loop: _Loop | None = None,
         timeout: float = 60.0,
         project_ref: str | None = None,
+        task_reads: bool = False,
     ) -> None:
+        self.task_reads = task_reads
+        """Reads see only ``task_id``'s runs, not the whole project's: the store accounts mode
+        serves (ADR-0050), so a key scoped to one task can never list another's."""
         self.project_ref = project_ref
         """The project as named (``org/project``), for the commands a report prints."""
         self.engine = engine
@@ -342,6 +346,7 @@ class DbRunStore:
         *,
         project: str | None = None,
         task: str | None = None,
+        task_reads: bool = False,
     ) -> DbRunStore:
         """A store on ``OPSEVAL_DATABASE_URL``, its schema checked current, scoped to
         ``project`` (``org/project``) and its ``task`` (a slug; the project's ``default``
@@ -375,6 +380,7 @@ class DbRunStore:
             grace_hours=settings.blob_pending_grace_hours,
             loop=loop,
             project_ref=project,
+            task_reads=task_reads,
         )
 
     def close(self) -> None:
@@ -409,7 +415,17 @@ class DbRunStore:
     def _scope(self, query: Any, table: Any = Run) -> Any:
         if self.project_id is not None:
             query = query.where(table.project_id == self.project_id)
+        if self.task_reads and self.task_id is not None:
+            query = query.where(table.task_id == self.task_id)
         return query
+
+    def run_in_session(
+        self, fn: Callable[[AsyncSession], Awaitable[T]], *, write: bool = False
+    ) -> T:
+        """Run ``fn`` on the store's loop with a session of its engine (a transaction when
+        ``write``): how accounts mode reaches the database without a second pool. A database
+        failure is a :class:`StorageError`, as for every other call."""
+        return self._run(fn, write=write)
 
     def _live(self, query: Any) -> Any:
         """Runs that are not being deleted (a delete part-way is finished by the next prune)."""
@@ -440,6 +456,8 @@ class DbRunStore:
             raise ConfigError(f"no run {run_id!r} in {self.label}")
         if self.project_id is not None and found[0] != self.project_id:
             raise ConfigError(f"run {run_id!r} belongs to another project: not written")
+        if self.task_reads and self.task_id is not None and found[1] != self.task_id:
+            raise ConfigError(f"run {run_id!r} belongs to another task: not written")
         self._owners[run_id] = found
         return found
 
