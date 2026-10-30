@@ -6,6 +6,7 @@ import type { ScenarioCheck } from "../lib/types";
 import { Expansion, Warnings } from "../components/Warnings";
 import { useApi } from "../lib/useApi";
 import { Callout, Card, CoralButton, Data, Explainer, Mono, Page, PageHeader, Pill } from "../components/ui";
+import { useCan } from "../lib/session";
 
 const TEMPLATE = `id: new-001
 name: A short name for the situation
@@ -31,6 +32,7 @@ const lab = "text-xs font-semibold uppercase tracking-[0.08em]";
 
 /** Edit one scenario's YAML (or write a new one) with the loader's own checks as you type. */
 export default function ScenarioEditor() {
+  const canWrite = useCan("catalogue:write");
   const [params] = useSearchParams();
   const file = params.get("file") ?? undefined; // a catalogue-relative file; absent for a new one
   const isNew = file === undefined;
@@ -82,7 +84,7 @@ export default function ScenarioEditor() {
   return (
     <>
       <PageHeader title={isNew ? "New test case" : "Edit test case"} sub={isNew ? "Written to your catalogue when it is valid." : <Mono>{file}</Mono>}
-        aside={<CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={readOnly || !verdict?.ok} onClick={() => void save()}><Save size={16} />Save</CoralButton>} />
+        aside={<CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={readOnly || !verdict?.ok || !canWrite} onClick={() => void save()}><Save size={16} />Save</CoralButton>} />
       <Page>
         <Explainer><b>The same checks as <Mono>opseval validate</Mono>, as you type:</b> the schema, scorer and checkpoint names against your profile, and ids already used elsewhere. A file is only written when it is valid, and never over a newer version of itself.</Explainer>
         {readOnly && <Callout><b>The built-in demo catalogue is read-only.</b> Start <Mono>opseval serve --catalogue ./my-catalogue</Mono> to edit your own.</Callout>}

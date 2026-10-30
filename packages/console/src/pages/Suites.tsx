@@ -5,6 +5,7 @@ import GateEditor from "../components/GateEditor";
 import StopEditor, { NEVER, stopFields } from "../components/StopEditor";
 import type { GateBody, StopBody, StopView } from "../lib/types";
 import { Callout, Card, CoralButton, Data, Explainer, Mono, Page, PageHeader, Pill } from "../components/ui";
+import { useCan } from "../lib/session";
 
 const field = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ink";
 const lab = "text-xs font-semibold uppercase tracking-[0.08em]";
@@ -21,6 +22,7 @@ function fromView(v: StopView | null): StopBody {
 }
 
 export default function Suites() {
+  const canWrite = useCan("catalogue:write");
   const suites = useApi(api.suites);
   const health = useApi(api.health);
   const readOnly = health.data?.readOnly === true;
@@ -78,7 +80,7 @@ export default function Suites() {
       <PageHeader title="Suites" sub="Named sets of scenarios plus the settings to run them with." aside={<>
         <select value={sel} onChange={(e) => setSel(e.target.value)} className="rounded-full border border-ink/25 bg-white px-4 py-2 text-sm text-ink">
           {suites.data?.map((s) => <option key={s.file} value={s.file}>{s.displayName} ({s.scenarioCount})</option>)}</select>
-        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={readOnly} onClick={() => void save()}>Save suite</CoralButton></>} />
+        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={readOnly || !canWrite} onClick={() => void save()}>Save suite</CoralButton></>} />
       <Page>
         <Explainer><b>A suite selects cases by pattern,</b> then applies settings. It is YAML today; here it is a form and the YAML is generated. Saving validates it against your catalogue first.</Explainer>
         {readOnly && <Callout><b>This is the built-in demo catalogue, which is read-only.</b> Create your own with <Mono>opseval init ./my-catalogue</Mono> and start <Mono>opseval serve --catalogue ./my-catalogue</Mono> to edit suites.</Callout>}

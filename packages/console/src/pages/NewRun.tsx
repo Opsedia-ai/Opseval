@@ -6,11 +6,13 @@ import { useApi } from "../lib/useApi";
 import type { StopBody } from "../lib/types";
 import StopEditor, { NEVER, stopFields } from "../components/StopEditor";
 import { Callout, Card, CoralButton, Data, Explainer, Mono, NotMeasured, Page, PageHeader, Pill } from "../components/ui";
+import { useCan } from "../lib/session";
 
 const input = "mt-1 w-full rounded-xl border border-line bg-white px-3 py-2 text-ink";
 const lab = "text-xs font-semibold uppercase tracking-[0.08em]";
 
 export default function NewRun() {
+  const canStart = useCan("runs:start");
   const nav = useNavigate();
   const suites = useApi(api.suites);
   const catalogue = useApi(api.scenarios);
@@ -74,7 +76,7 @@ export default function NewRun() {
               {items.filter((r) => !r.ready).map((r) => <li key={r.id} className="text-sm"><b className="text-ink">{r.label}:</b> {r.detail}</li>)}</ul>)}</Data></Card>
             <Card title="Request preview" tone="ink"><pre className="overflow-x-auto font-mono text-[13px] leading-relaxed text-ink-text">{JSON.stringify(body, null, 2)}</pre></Card>
             {err && <Callout><b>{err.code}</b> {err.message}</Callout>}
-            <CoralButton className="w-full py-3 text-base" disabled={busy} onClick={() => void start()}><Play size={16} />Start run</CoralButton>
+            <CoralButton className="w-full py-3 text-base" disabled={busy || !canStart} onClick={() => void start()}><Play size={16} />Start run</CoralButton>
           </div>
         </div>
       </Page>

@@ -3,8 +3,10 @@ import { api, ApiError } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import type { Turn } from "../lib/types";
 import { Button, Callout, Card, CoralButton, Data, ErrorBox, Explainer, Mono, NotMeasured, Page, PageHeader, Pill, cx } from "../components/ui";
+import { useCan } from "../lib/session";
 
 export default function Simulator() {
+  const canStart = useCan("runs:start");
   const scenarios = useApi(api.scenarios);
   const [id, setId] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -66,7 +68,7 @@ export default function Simulator() {
               <div className="mt-5 flex gap-2">
                 <input value={reply} onChange={(e) => setReply(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void send()} disabled={!!err && err.status === 503}
                   placeholder="Reply as the agent and see how the persona reacts…" className="min-w-0 flex-1 rounded-full border border-line bg-white px-4 py-2" />
-                <CoralButton onClick={() => void send()} disabled={busy || ended !== null}>Send</CoralButton>
+                <CoralButton onClick={() => void send()} disabled={busy || ended !== null || !canStart}>Send</CoralButton>
                 <Button onClick={() => void restart()}>Restart</Button>
               </div>
               <p className="mt-3 text-sm">{model ? <>One model call per turn (<Mono>{model}</Mono>).</> : "Scripted persona: no model is called."}</p>

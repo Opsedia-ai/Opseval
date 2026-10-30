@@ -4,8 +4,10 @@ import { Upload } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import type { Problem } from "../lib/types";
 import { Callout, Card, CoralButton, Explainer, Mono, Page, PageHeader } from "../components/ui";
+import { useCan } from "../lib/session";
 
 export default function BulkImport() {
+  const canWrite = useCan("catalogue:write");
   const input = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [family, setFamily] = useState("uncategorised");
@@ -31,7 +33,7 @@ export default function BulkImport() {
     <>
       <PageHeader title="Bulk import" sub={<Link to="/scenarios" className="text-ink underline">← Test cases</Link>} aside={<>
         <input value={family} onChange={(e) => setFamily(e.target.value)} aria-label="Family folder" className="rounded-full border border-ink/25 bg-white px-4 py-2 text-sm text-ink" />
-        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={!files.length || busy} onClick={() => void go()}>Import {files.length} file(s)</CoralButton></>} />
+        <CoralButton className="bg-ink text-white hover:bg-ink-deep" disabled={!files.length || busy || !canWrite} onClick={() => void go()}>Import {files.length} file(s)</CoralButton></>} />
       <Page>
         <Explainer><b>Drop as many scenario files as you like.</b> Every one is validated before anything is written. The import is all-or-nothing, and a file that would replace an existing scenario is refused, never silently overwritten.</Explainer>
         <div onClick={() => input.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); setFiles([...e.dataTransfer.files]); }}
