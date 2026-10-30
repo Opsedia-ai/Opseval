@@ -1384,14 +1384,17 @@ class DbRunStore:
         priced with when its calls are made."""
         return with_project(self.project_prices())
 
-    def add_price(self, price: ModelPrice, *, by: str | None) -> ModelPrice:
-        """Add a project row (never one that reaches into the past: ``PriceBackdated``)."""
+    def add_price(
+        self, price: ModelPrice, *, by: str | None, now: datetime | None = None
+    ) -> ModelPrice:
+        """Add a project row (never one that reaches into the past: ``PriceBackdated``).
+        ``now`` is the moment the caller checked it against (the request's)."""
         if self.project_id is None:
             raise ConfigError("a price belongs to a project: open the store with --project")
         project_id = self.project_id
 
         async def go(s: AsyncSession) -> ModelPrice:
-            return await prices.add_price(s, project_id, price, by=by)
+            return await prices.add_price(s, project_id, price, by=by, now=now)
 
         return self._run(go, write=True)
 

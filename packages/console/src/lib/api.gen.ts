@@ -187,6 +187,17 @@ export interface UsageOut {
   cachedInputTokens: number | null;
   failedCalls: number;
   reported: UsageReportedOut | null;
+  costKnownUsd: number | null;
+  unpricedCalls: number | null;
+}
+
+/** What a run cost (ADR-0066 D2), the same arithmetic as the dashboards: the known part and how many calls had no price. ``totalUsd`` is set only when every call was priced. */
+export interface CostSplitOut {
+  knownUsd: number | null;
+  pricedCalls: number;
+  unpricedCalls: number;
+  totalUsd: number | null;
+  recorded: boolean;
 }
 
 export interface SinkOut {
@@ -210,6 +221,7 @@ export interface RunDetail {
   ignored: string[];
   tests: TestOut[];
   usage: UsageOut[];
+  cost: CostSplitOut | null;
   loadErrors: string[];
   degradedScorers: string[];
   vacuousScorers: string[];
@@ -289,6 +301,7 @@ export interface RunUsage {
   judgeTokensComplete: boolean;
   costUsd: number | null;
   costComplete: boolean;
+  unpricedCalls: number | null;
   audioInSeconds: number | null;
   audioOutSeconds: number | null;
   characters: number | null;
@@ -346,6 +359,9 @@ export interface UsageFiltersOut {
   since: string | null;
   until: string | null;
   bucket: "day" | "week" | "run";
+  task: string | null;
+  language: string | null;
+  dialect: string | null;
 }
 
 export interface UsageFilterOptions {
@@ -418,6 +434,193 @@ export interface TokensDashboard {
   reasoningShare: RatioOut;
   tokensPerAttempt: RatioOut;
   scenarios: ScenarioTokensOut[];
+}
+
+/** Nearest-rank percentiles of ``n`` measured values; ``unmeasured`` had none (never 0). With ``n`` 0 every figure is null: drawn as a gap. */
+export interface PercentilesOut {
+  n: number;
+  unmeasured: number;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  mean: number | null;
+}
+
+export interface PercentileSeriesOut {
+  group: string;
+  points: PercentilesOut[];
+  total: PercentilesOut;
+}
+
+/** A pass rate over judged results only; null when nothing was judged (never 0%). */
+export interface RateOut {
+  value: number | null;
+  passed: number;
+  judged: number;
+  notJudged: number;
+}
+
+export interface DashboardOptionsOut {
+  suites: string[];
+  tasks: string[];
+  languages: string[];
+  dialects: string[];
+  serverOnly: string[];
+  notRecorded: string[];
+}
+
+export interface DashboardScopeOut {
+  runs: number;
+  attempts: number;
+  unreadableRuns: string[];
+  inFlightExcluded: boolean;
+}
+
+export interface LatencyDashboard {
+  filters: UsageFiltersOut;
+  options: DashboardOptionsOut;
+  scope: DashboardScopeOut;
+  rule: string;
+  buckets: UsageBucket[];
+  turnLatency: PercentileSeriesOut;
+  voiceTurnLatency: PercentileSeriesOut;
+  timeToFirstAudio: PercentileSeriesOut;
+  llmLatency: PercentileSeriesOut[];
+}
+
+export interface GateRunOut {
+  run: string;
+  suite: string;
+  startedAt: string;
+  gate: "safe" | "gaps" | "blocked" | "not_judged" | "harness_error";
+}
+
+export interface FlakyScenarioOut {
+  scenario: string;
+  name: string;
+  judgedRuns: number;
+  flakyRuns: number;
+  flips: number;
+}
+
+export interface CheckStatsOut {
+  scorerId: string;
+  axis: Axis;
+  passRate: RateOut;
+  meanScore: number | null;
+}
+
+export interface VerdictMatrixOut {
+  runs: TrendRun[];
+  scenarios: ScenarioTrendRow[];
+}
+
+export interface QualityDashboard {
+  filters: UsageFiltersOut;
+  options: DashboardOptionsOut;
+  scope: DashboardScopeOut;
+  buckets: UsageBucket[];
+  passRate: RateOut[];
+  passRateTotal: RateOut;
+  gateHistory: GateRunOut[];
+  flaky: FlakyScenarioOut[];
+  checks: CheckStatsOut[];
+  matrix: VerdictMatrixOut;
+  judgeAgreement: null;
+  judgeAgreementNote: string;
+}
+
+export interface VoiceGroupOut {
+  language: string | null;
+  dialect: string | null;
+  stats: PercentilesOut;
+  degraded: number;
+}
+
+export interface VoiceMetricOut {
+  name: string;
+  unit: string;
+  total: PercentilesOut;
+  degraded: number;
+  byLanguage: VoiceGroupOut[];
+}
+
+export interface VoiceDashboard {
+  filters: UsageFiltersOut;
+  options: DashboardOptionsOut;
+  scope: DashboardScopeOut;
+  voiceAttempts: number;
+  rule: string;
+  metrics: VoiceMetricOut[];
+}
+
+export interface TaskUsageOut {
+  project: string | null;
+  task: string | null;
+  runs: number;
+  attempts: number;
+  voiceAttempts: number;
+  audioMinutes: MeasuredOut;
+}
+
+export interface UsageDashboard {
+  filters: UsageFiltersOut;
+  options: DashboardOptionsOut;
+  scope: DashboardScopeOut;
+  buckets: UsageBucket[];
+  attempts: number[];
+  audioMinutes: MeasuredOut[];
+  byTask: TaskUsageOut[];
+}
+
+/** One price row. USD per 1M tokens or characters, or per minute of audio. */
+export interface PriceOut {
+  id: string | null;
+  match: string;
+  matchKind: "regex" | "exact" | "glob";
+  unit: "tokens" | "characters" | "seconds";
+  effectiveFrom: string;
+  effectiveAt: string | null;
+  project: boolean;
+  input: number | null;
+  output: number | null;
+  reasoning: number | null;
+  cachedInput: number | null;
+  audioIn: number | null;
+  audioOut: number | null;
+  characters: number | null;
+  source: string;
+  createdBy: string | null;
+}
+
+export interface PricesOut {
+  builtin: PriceOut[];
+  project: PriceOut[];
+  canEdit: boolean;
+  editNote: string | null;
+}
+
+/** A new project price row. An edit is a new row; nothing is rewritten. */
+export interface PriceIn {
+  pattern: string;
+  matchKind: "exact" | "glob";
+  unit: "tokens" | "characters" | "seconds";
+  effectiveAt?: string | null;
+  input?: number | null;
+  output?: number | null;
+  reasoning?: number | null;
+  cachedInput?: number | null;
+  audioIn?: number | null;
+  audioOut?: number | null;
+  characters?: number | null;
+  source?: string;
+}
+
+export interface PriceResolveOut {
+  model: string;
+  at: string;
+  price: PriceOut | null;
+  source: "project" | "builtin" | null;
 }
 
 export interface TrendPoint {

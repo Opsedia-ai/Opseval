@@ -551,6 +551,9 @@ class TestEndpoints:
             "since": None,
             "until": None,
             "bucket": "week",
+            "task": None,
+            "language": None,
+            "dialect": None,
         }
         assert {s["group"] for s in body["byModel"]} == {"m-judge", "x"}
 

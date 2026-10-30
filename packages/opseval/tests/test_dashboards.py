@@ -607,3 +607,265 @@ async def test_file_and_database_give_identical_answers(pg_url: str, tmp_path: P
             database.cost(UsageFilter(project="other/project"))
     finally:
         db.close()
+
+
+# --- the API ------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def api(files: FileStore) -> Any:
+    from fastapi.testclient import TestClient
+
+    from opseval.config import Settings
+    from opseval.server import create_app
+
+    app = create_app(settings=Settings(_env_file=None, reports_dir=str(files.root)), token="t")
+    return TestClient(app, base_url="http://127.0.0.1:8000", headers={"Authorization": "Bearer t"})
+
+
+@pytest.fixture
+def empty_api(tmp_path: Path) -> Any:
+    from fastapi.testclient import TestClient
+
+    from opseval.config import Settings
+    from opseval.server import create_app
+
+    app = create_app(
+        settings=Settings(_env_file=None, reports_dir=str(tmp_path / "none")), token="t"
+    )
+    return TestClient(app, base_url="http://127.0.0.1:8000", headers={"Authorization": "Bearer t"})
+
+
+class TestEndpoints:
+    def test_every_dashboard_answers_null_not_0(self, api: Any) -> None:
+        latency = api.get("/api/v1/analytics/latency", params={"bucket": "week"}).json()
+        assert latency["rule"] == "nearest-rank"
+        gap = latency["voiceTurnLatency"]["points"][1]
+        assert gap == {"n": 0, "unmeasured": 0, "p50": None, "p95": None, "p99": None, "mean": None}
+        quality = api.get("/api/v1/analytics/quality").json()
+        # Mar 9: only an inconclusive verdict. Not judged is a gap, never a 0% day.
+        assert quality["passRate"][2]["value"] is None and quality["passRate"][2]["notJudged"] == 1
+        assert quality["judgeAgreement"] is None
+        assert quality["gateHistory"][2]["gate"] == "not_judged"
+        voice = api.get("/api/v1/analytics/voice").json()
+        dead = next(m for m in voice["metrics"] if m["name"] == "voice.dead_air_ms")
+        assert dead["total"]["p50"] is None and dead["total"]["unmeasured"] == 1
+        usage = api.get("/api/v1/analytics/usage", params={"bucket": "run"}).json()
+        assert usage["audioMinutes"][1]["value"] is None and usage["audioMinutes"][1]["of"] == 0
+        assert usage["byTask"][0]["project"] is None
+
+    def test_an_empty_store_measures_nothing(self, empty_api: Any) -> None:
+        for name in ("latency", "quality", "voice", "usage"):
+            body = empty_api.get(f"/api/v1/analytics/{name}").json()
+            assert body["scope"]["runs"] == 0, name
+        quality = empty_api.get("/api/v1/analytics/quality").json()
+        assert quality["passRateTotal"] == {
+            "value": None,
+            "passed": 0,
+            "judged": 0,
+            "notJudged": 0,
+        }
+        latency = empty_api.get("/api/v1/analytics/latency").json()
+        assert latency["turnLatency"]["total"]["p50"] is None and latency["buckets"] == []
+
+    def test_filters_are_applied_or_refused(self, api: Any) -> None:
+        r = api.get("/api/v1/analytics/quality", params={"model": "m-sim"})
+        assert r.status_code == 400 and r.json()["code"] == "FILTER_NOT_APPLICABLE"
+        r = api.get("/api/v1/analytics/voice", params={"task": "default"})
+        assert r.status_code == 400 and r.json()["code"] == "FILTER_NEEDS_SERVER_MODE"
+        r = api.get("/api/v1/analytics/cost", params={"language": "ar"})
+        assert r.status_code == 400 and r.json()["code"] == "FILTER_NOT_APPLICABLE"
+        body = api.get("/api/v1/analytics/quality", params={"language": "ar"}).json()
+        assert body["filters"]["language"] == "ar" and body["passRateTotal"]["judged"] == 1
+
+    def test_run_detail_and_usage_page_carry_the_split(self, api: Any) -> None:
+        detail = api.get("/api/v1/runs/A").json()
+        assert detail["cost"]["unpricedCalls"] == 3 and detail["cost"]["totalUsd"] is None
+        dash = {r["run"]: r for r in api.get("/api/v1/analytics/cost").json()["runs"]}
+        assert detail["cost"]["knownUsd"] == dash["A"]["costUsd"]["value"]
+        page = {r["run"]: r for r in api.get("/api/v1/usage").json()}
+        assert page["A"]["costUsd"] == detail["cost"]["knownUsd"]
+        assert page["A"]["unpricedCalls"] == 3 and page["A"]["costComplete"] is False
+        judge = next(u for u in detail["usage"] if u["model"] == "x-unpriced")
+        assert judge["costUsd"] is None and judge["unpricedCalls"] == 1
+
+
+class TestPricesInLocalMode:
+    def test_the_built_in_table_is_read_only(self, api: Any) -> None:
+        body = api.get("/api/v1/prices").json()
+        assert body["canEdit"] is False and "server mode" in body["editNote"]
+        assert body["project"] == [] and any(p["match"].endswith("gpt-4o") for p in body["builtin"])
+        r = api.post(
+            "/api/v1/prices",
+            json={"pattern": "m", "matchKind": "exact", "unit": "tokens", "input": 1, "output": 1},
+        )
+        assert r.status_code == 409 and r.json()["code"] == "PRICES_READ_ONLY"
+
+    def test_resolve_names_the_row_or_no_price(self, api: Any) -> None:
+        found = api.get(
+            "/api/v1/prices/resolve", params={"model": "gpt-4o-mini", "at": "2024-09-01"}
+        ).json()
+        assert found["source"] == "builtin" and found["price"]["cachedInput"] is None
+        later = api.get(
+            "/api/v1/prices/resolve", params={"model": "GPT-4o-mini", "at": "2025-01-01"}
+        ).json()
+        assert later["price"]["cachedInput"] == 0.075
+        none = api.get("/api/v1/prices/resolve", params={"model": "my-own-model"}).json()
+        assert none["price"] is None and none["source"] is None
+
+
+class TestPricePatterns:
+    @pytest.mark.parametrize(
+        "pattern",
+        ["(a+)+$", "gpt-4o?", "a|b", "[a-z]+", "*", "**", "a*b*c*d*e*f", "x" * 201, "two words"],
+    )
+    def test_a_regex_or_anything_but_a_name_or_glob_is_refused(self, pattern: str) -> None:
+        with pytest.raises(ValueError):
+            ModelPrice(
+                match=pattern,
+                match_kind="glob",
+                unit="tokens",
+                effective_from=date(2030, 1, 1),
+                effective_at=datetime(2030, 1, 1, tzinfo=UTC),
+                project=True,
+                input=1,
+                output=1,
+            )
+
+    def test_a_project_row_cannot_be_a_regex(self) -> None:
+        with pytest.raises(ValueError, match="never a regex"):
+            ModelPrice(
+                match="gpt-4o",
+                unit="tokens",
+                effective_from=date(2030, 1, 1),
+                effective_at=datetime(2030, 1, 1, tzinfo=UTC),
+                project=True,
+                input=1,
+                output=1,
+            )
+
+    def test_globs_match_in_linear_time(self) -> None:
+        from opseval.models.usage import glob_match
+
+        assert glob_match("gpt-4o*", "GPT-4o-mini-2024-07-18")
+        assert glob_match("openai/*-mini", "openai/gpt-4o-mini")
+        assert not glob_match("gpt-4o*", "my-gpt-4o")
+        # The classic catastrophic-backtracking shape, as a glob: answered at once.
+        assert not glob_match("a*a*a*a*b", "a" * 5000)
+
+
+# --- prices in server mode -----------------------------------------------------------------
+
+
+@pytest.fixture
+async def world(pg_url: str, tmp_path: Path) -> Any:
+    from tests.test_accounts_db import world as make_world
+
+    gen = make_world.__wrapped__(pg_url, tmp_path)  # type: ignore[attr-defined]
+    value = await gen.__anext__()
+    try:
+        yield value
+    finally:
+        await gen.aclose()
+
+
+NEW_PRICE = {
+    "pattern": "m-sim",
+    "matchKind": "exact",
+    "unit": "tokens",
+    "input": 100,
+    "output": 200,
+    "source": "our contract",
+}
+
+
+class TestPricesInServerMode:
+    def test_only_an_admin_adds_a_row_and_it_is_audited(self, world: Any) -> None:
+        viewer = world.login("viewer@acme.test")
+        listed = viewer.get("/api/v1/prices").json()
+        assert listed["canEdit"] is False and "admin" in listed["editNote"]
+        assert viewer.post("/api/v1/prices", json=NEW_PRICE).status_code == 403
+        member = world.login("member@acme.test")
+        assert member.post("/api/v1/prices", json=NEW_PRICE).status_code == 403
+        admin = world.login("admin@acme.test")
+        assert admin.get("/api/v1/prices").json()["canEdit"] is True
+        r = admin.post("/api/v1/prices", json=NEW_PRICE)
+        assert r.status_code == 201, r.text
+        row = r.json()
+        assert row["project"] is True and row["matchKind"] == "exact" and row["createdBy"]
+        assert [p["id"] for p in admin.get("/api/v1/prices").json()["project"]] == [row["id"]]
+        (event,) = world.events("price.create")
+        assert event.detail["pattern"] == "m-sim" and event.actor_kind == "user"
+        assert not world.events("POST /prices")  # one specific event, not the generic one
+
+    def test_a_key_never_edits_prices(self, world: Any) -> None:
+        from fastapi.testclient import TestClient
+
+        from tests.test_accounts_db import BASE
+
+        header = world.key(
+            "owner@acme.test", ["runs:read", "runs:start", "catalogue:write", "catalogue:label"]
+        )
+        c = TestClient(world.app, base_url=BASE, headers={"Authorization": header})
+        assert c.post("/api/v1/prices", json=NEW_PRICE).status_code == 403
+
+    def test_a_row_is_new_never_backdated_and_validated(self, world: Any) -> None:
+        admin = world.login("admin@acme.test")
+        r = admin.post("/api/v1/prices", json={**NEW_PRICE, "effectiveAt": "2020-01-01T00:00:00Z"})
+        assert r.status_code == 422 and r.json()["code"] == "PRICE_BACKDATED"
+        r = admin.post(
+            "/api/v1/prices", json={**NEW_PRICE, "pattern": "(a+)+$", "matchKind": "glob"}
+        )
+        assert r.status_code == 422 and r.json()["code"] == "INVALID_PRICE"
+        r = admin.post("/api/v1/prices", json={**NEW_PRICE, "matchKind": "regex"})
+        assert r.status_code == 422
+        r = admin.post("/api/v1/prices", json={**NEW_PRICE, "output": None})
+        assert r.status_code == 422 and "input and output" in r.json()["message"]
+        first = admin.post("/api/v1/prices", json=NEW_PRICE).json()
+        second = admin.post("/api/v1/prices", json={**NEW_PRICE, "input": 300}).json()
+        rows = admin.get("/api/v1/prices").json()["project"]
+        assert [p["id"] for p in rows] == [first["id"], second["id"]]  # added, never rewritten
+        assert rows[0]["input"] == 100
+
+    def test_a_price_change_does_not_alter_earlier_runs_cost(self, world: Any) -> None:
+        from opseval.llm import UsageMeter
+
+        store = world.store
+        populate(
+            store,
+            lambda st, run_id, m: st.import_manifest(run_id, {**m, "layout": "opseval-runs/5"}),
+        )
+        admin = world.login("admin@acme.test")
+        before = admin.get("/api/v1/analytics/cost").json()
+        detail = admin.get("/api/v1/runs/A").json()["cost"]
+        assert admin.post("/api/v1/prices", json=NEW_PRICE).status_code == 201
+        after = admin.get("/api/v1/analytics/cost").json()
+        assert after["totalUsd"] == before["totalUsd"] and after["runs"] == before["runs"]
+        assert admin.get("/api/v1/runs/A").json()["cost"] == detail
+        # A call made from now on is priced with the project's row, which wins over the
+        # built-in table; resolving says which row prices it.
+        meter = UsageMeter(prices=store.price_table())
+        event = meter.record(
+            "simulator", "m-sim", {"prompt_tokens": 1000, "completion_tokens": 0}, 0
+        )
+        assert event.cost_usd == pytest.approx(0.1) and event.cost_source == "price_table"
+        resolved = admin.get("/api/v1/prices/resolve", params={"model": "M-SIM"}).json()
+        assert resolved["source"] == "project" and resolved["price"]["input"] == 100
+        earlier = admin.get(
+            "/api/v1/prices/resolve", params={"model": "m-sim", "at": "2026-03-02"}
+        ).json()
+        assert earlier["price"] is None  # no row was in force then: "no price", never $0
+
+    def test_the_server_answers_dashboards_from_the_database(self, world: Any) -> None:
+        populate(
+            world.store,
+            lambda st, run_id, m: st.import_manifest(run_id, {**m, "layout": "opseval-runs/5"}),
+        )
+        admin = world.login("viewer@acme.test")
+        body = admin.get("/api/v1/analytics/usage").json()
+        assert body["byTask"][0]["project"] == "acme/bot" and body["byTask"][0]["task"] == "default"
+        assert body["options"]["tasks"] == ["default"]
+        r = admin.get("/api/v1/analytics/latency", params={"project": "rival/x"})
+        assert r.status_code == 400 and r.json()["code"] == "FILTER_OUTSIDE_SCOPE"
+        r = admin.get("/api/v1/analytics/latency", params={"label": "production"})
+        assert r.status_code == 400 and r.json()["code"] == "FILTER_NOT_RECORDED"

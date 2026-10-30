@@ -50,7 +50,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from opseval import __version__
 from opseval.accounts.roles import OPERATOR, Need, Principal, decide
 from opseval.accounts.tokens import same
-from opseval.analytics import FileAnalytics, UnsupportedFilter, UsageFilter
+from opseval.analytics import AnalyticsStore, FileAnalytics, UnsupportedFilter, UsageFilter
 from opseval.analytics.models import Bucket
 from opseval.catalogue import load_profile
 from opseval.config import Settings
@@ -59,6 +59,7 @@ from opseval.plugins import load_scorers
 from opseval.server import access as access_mod
 from opseval.server import accounts_api, actions, lookup, views
 from opseval.server import audio as audio_api
+from opseval.server import prices as prices_api
 from opseval.server import schemas as s
 from opseval.server.access import HSTS, LOOPBACK_NAMES, AccessConfig, host_name
 from opseval.server.lookup import safe_id
@@ -84,6 +85,14 @@ ROUTE_NEEDS: dict[tuple[str, str], Need] = {
     ("GET", "/usage"): Need.READ,
     ("GET", "/analytics/cost"): Need.READ,
     ("GET", "/analytics/tokens"): Need.READ,
+    # Dashboards D2 and model prices (ADR-0066). A price edit is an admin's or owner's.
+    ("GET", "/analytics/latency"): Need.READ,
+    ("GET", "/analytics/quality"): Need.READ,
+    ("GET", "/analytics/voice"): Need.READ,
+    ("GET", "/analytics/usage"): Need.READ,
+    ("GET", "/prices"): Need.READ,
+    ("POST", "/prices"): Need.MANAGE,
+    ("GET", "/prices/resolve"): Need.READ,
     ("GET", "/scenarios"): Need.READ,
     ("GET", "/suites"): Need.READ,
     ("GET", "/gate"): Need.READ,
@@ -122,7 +131,9 @@ ROUTE_NEEDS: dict[tuple[str, str], Need] = {
 """What every ``/api/v1`` route needs (method, path below ``/api/v1``). The one table
 authorization reads; a route not in it fails the start (deny by default)."""
 SELF_AUDITED = frozenset(
-    path for (_m, path) in ROUTE_NEEDS if path.startswith(("/auth/", "/catalogue/labels"))
+    path
+    for (_m, path) in ROUTE_NEEDS
+    if path.startswith(("/auth/", "/catalogue/labels")) or path == "/prices"
 )
 """Writes that record their own, more specific audit event."""
 
@@ -420,8 +431,9 @@ def create_app(
     @app.exception_handler(UnsupportedFilter)
     def _unsupported_filter(_: Request, exc: UnsupportedFilter) -> JSONResponse:
         # Refused, never ignored: a dashboard that dropped a filter would show every run as
-        # if it were the ones asked for (ADR-0052).
-        return _deny(400, "FILTER_NEEDS_SERVER_MODE", str(exc))
+        # if it were the ones asked for (ADR-0052). The code says why: server mode only, not
+        # applicable to this dashboard, not recorded by runs, or outside the served project.
+        return _deny(400, exc.code, str(exc))
 
     @app.exception_handler(views.RunInProgress)
     def _in_progress(_: Request, exc: views.RunInProgress) -> JSONResponse:
@@ -536,7 +548,7 @@ def create_app(
     def usage() -> list[s.RunUsage]:
         return views.usage(ctx.store)
 
-    analytics = FileAnalytics(ctx.store)
+    analytics = analytics_for(ctx.store)
 
     def usage_filter(
         suite: str | None,
@@ -549,6 +561,8 @@ def create_app(
         project: str | None,
         task: str | None,
         label: str | None,
+        language: str | None = None,
+        dialect: str | None = None,
     ) -> UsageFilter:
         if since is not None and until is not None and since > until:
             raise actions.ApiError(422, "BAD_RANGE", "since is after until")
@@ -563,39 +577,88 @@ def create_app(
             project=project or None,
             task=task or None,
             label=label or None,
+            language=language or None,
+            dialect=dialect or None,
         )
 
-    @app.get(f"{API}/analytics/cost")
-    def cost_dashboard(
-        suite: str | None = None,
-        model: str | None = None,
-        role: str | None = None,
+    def dashboard_filter(
+        suite: Annotated[str | None, Query(max_length=200)] = None,
+        model: Annotated[str | None, Query(max_length=200)] = None,
+        role: Annotated[str | None, Query(max_length=32)] = None,
         since: date | None = None,
         until: date | None = None,
         bucket: Bucket = "day",
-        org: str | None = None,
-        project: str | None = None,
-        task: str | None = None,
-        label: str | None = None,
-    ) -> s.CostDashboard:
-        f = usage_filter(suite, model, role, since, until, bucket, org, project, task, label)
+        org: Annotated[str | None, Query(max_length=64)] = None,
+        project: Annotated[str | None, Query(max_length=130)] = None,
+        task: Annotated[str | None, Query(max_length=64)] = None,
+        label: Annotated[str | None, Query(max_length=36)] = None,
+        language: Annotated[str | None, Query(max_length=64)] = None,
+        dialect: Annotated[str | None, Query(max_length=64)] = None,
+    ) -> UsageFilter:
+        """The D2 dashboards' filters: each is applied or refused (400), never ignored."""
+        return usage_filter(
+            suite, model, role, since, until, bucket, org, project, task, label, language, dialect
+        )
+
+    # A default, not an ``Annotated`` alias: the dependency is local to this app, and the
+    # module's postponed annotations could not name it.
+    filters_dep = Depends(dashboard_filter)
+
+    @app.get(f"{API}/analytics/cost")
+    def cost_dashboard(f: UsageFilter = filters_dep) -> s.CostDashboard:
         return views.cost_dashboard(analytics, f)
 
     @app.get(f"{API}/analytics/tokens")
-    def tokens_dashboard(
-        suite: str | None = None,
-        model: str | None = None,
-        role: str | None = None,
-        since: date | None = None,
-        until: date | None = None,
-        bucket: Bucket = "day",
-        org: str | None = None,
-        project: str | None = None,
-        task: str | None = None,
-        label: str | None = None,
-    ) -> s.TokensDashboard:
-        f = usage_filter(suite, model, role, since, until, bucket, org, project, task, label)
+    def tokens_dashboard(f: UsageFilter = filters_dep) -> s.TokensDashboard:
         return views.tokens_dashboard(analytics, f)
+
+    @app.get(f"{API}/analytics/latency")
+    def latency_dashboard(f: UsageFilter = filters_dep) -> s.LatencyDashboard:
+        return views.latency_dashboard(analytics, f)
+
+    @app.get(f"{API}/analytics/quality")
+    def quality_dashboard(
+        limit: Annotated[int, Query(ge=1, le=100)] = 20, f: UsageFilter = filters_dep
+    ) -> s.QualityDashboard:
+        return views.quality_dashboard(analytics, f, limit=limit)
+
+    @app.get(f"{API}/analytics/voice")
+    def voice_dashboard(f: UsageFilter = filters_dep) -> s.VoiceDashboard:
+        return views.voice_dashboard(analytics, f)
+
+    @app.get(f"{API}/analytics/usage")
+    def usage_dashboard(f: UsageFilter = filters_dep) -> s.UsageDashboard:
+        return views.usage_dashboard(analytics, f)
+
+    def principal_of(request: Request) -> Principal | None:
+        return getattr(request.state, "principal", None) if access is not None else OPERATOR
+
+    @app.get(f"{API}/prices")
+    def prices(request: Request) -> s.PricesOut:
+        return prices_api.list_prices(ctx.store, principal_of(request))
+
+    @app.post(f"{API}/prices", status_code=201)
+    def add_price(request: Request, body: s.PriceIn) -> s.PriceOut:
+        principal = principal_of(request)
+
+        def audit(action: str, detail: dict[str, object]) -> None:
+            if access is not None and principal is not None:
+                access.accounts.audit(
+                    principal,
+                    action,
+                    target=request.url.path,
+                    address=getattr(request.state, "address", None),
+                    detail=detail,
+                )
+
+        return prices_api.add_price(ctx.store, body, principal, audit)
+
+    @app.get(f"{API}/prices/resolve")
+    def resolve_price(
+        model: Annotated[str, Query(min_length=1, max_length=200)],
+        at: Annotated[str | None, Query(max_length=40)] = None,
+    ) -> s.PriceResolveOut:
+        return prices_api.resolve(ctx.store, model, at)
 
     @app.get(f"{API}/scenarios")
     def scenarios() -> s.CatalogueOut:
@@ -679,6 +742,17 @@ def create_app(
     accounts_api.register(app, access, API)
     check_policies(app)
     return app
+
+
+def analytics_for(store: RunStore) -> AnalyticsStore:
+    """The analytics store for the run store (ADR-0052): ``PgAnalytics`` when the runs are in
+    the database (server mode), within the store's own project and task scope, else
+    ``FileAnalytics`` over the folders."""
+    if callable(getattr(store, "run_in_session", None)):
+        from opseval.analytics.pg import PgAnalytics
+
+        return PgAnalytics(store)  # type: ignore[arg-type]
+    return FileAnalytics(store)
 
 
 def check_policies(app: FastAPI) -> None:

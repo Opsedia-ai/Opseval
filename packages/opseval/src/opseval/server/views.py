@@ -31,6 +31,7 @@ from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import ModelUsage, SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.stop import StopPolicy
+from opseval.models.usage import ModelPrice
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
@@ -418,7 +419,7 @@ def run_cost(store: RunStore, r: SuiteResult) -> s.CostSplitOut | None:
             total_usd=None,
             recorded=False,
         )
-    if parts.calls == 0:
+    if parts.calls == 0 and parts.known_usd is None:
         return None
     known = None if parts.known_usd is None else round(parts.known_usd, COST_DIGITS)
     return s.CostSplitOut(
@@ -493,6 +494,39 @@ def cost_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.CostDas
 def tokens_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.TokensDashboard:
     """The Tokens dashboard (ADR-0066)."""
     return s.TokensDashboard.model_validate(analytics.tokens(filters).model_dump(mode="json"))
+
+
+def latency_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.LatencyDashboard:
+    """The Latency dashboard (ADR-0066 D2)."""
+    return s.LatencyDashboard.model_validate(analytics.latency(filters).model_dump(mode="json"))
+
+
+def quality_dashboard(
+    analytics: AnalyticsStore, filters: UsageFilter, *, limit: int
+) -> s.QualityDashboard:
+    """The Quality dashboard (ADR-0066 D2)."""
+    answer = analytics.quality(filters, limit=limit)
+    return s.QualityDashboard.model_validate(answer.model_dump(mode="json"))
+
+
+def voice_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.VoiceDashboard:
+    """The Voice dashboard (ADR-0066 D2)."""
+    return s.VoiceDashboard.model_validate(analytics.voice(filters).model_dump(mode="json"))
+
+
+def usage_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.UsageDashboard:
+    """The Usage dashboard (ADR-0066 D2): runs, attempts and audio minutes per task."""
+    return s.UsageDashboard.model_validate(analytics.usage(filters).model_dump(mode="json"))
+
+
+def price_out(row: ModelPrice) -> s.PriceOut:
+    return s.PriceOut.model_validate(
+        {
+            **row.model_dump(mode="json", exclude={"effective_from", "effective_at"}),
+            "effective_from": row.effective_from.isoformat(),
+            "effective_at": row.effective_at.isoformat() if row.effective_at else None,
+        }
+    )
 
 
 def trend(store: RunStore) -> list[s.TrendPoint]:
