@@ -41,7 +41,7 @@ from opseval.server import actions, lookup, views
 from opseval.server import audio as audio_api
 from opseval.server import schemas as s
 from opseval.server.lookup import safe_id
-from opseval.storage import FileStore
+from opseval.storage import FileStore, RunStore
 
 API = "/api/v1"
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -152,6 +152,7 @@ def create_app(
     allow_commit: bool = False,
     allowed_hosts: frozenset[str] = LOOPBACK_NAMES,
     console_dir: Path | None = None,
+    store: RunStore | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     # A suite may name a plugin's scorer; without this the console would reject it as
@@ -162,7 +163,7 @@ def create_app(
         token = configured.get_secret_value() if configured else secrets.token_urlsafe(24)
     ctx = actions.ServerContext(
         settings=settings,
-        store=FileStore(settings.reports_dir),
+        store=store or FileStore(settings.reports_dir),
         catalogue=catalogue,
         profile=load_profile(profile) if profile else None,
         profile_path=profile,

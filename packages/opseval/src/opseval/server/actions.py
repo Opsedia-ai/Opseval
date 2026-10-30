@@ -241,6 +241,7 @@ def start_run(ctx: ServerContext, body: s.LaunchIn) -> s.LaunchOut:
         stop=stop_override(body.stop),
         run_id=run_id,
         only_ids=only_ids,
+        store=ctx.store,
     )
 
     def work() -> None:

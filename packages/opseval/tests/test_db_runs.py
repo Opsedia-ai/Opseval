@@ -620,3 +620,172 @@ class TestImport:
         out = import_run(files, "r-demo-voice", db)
         assert out.outcome == "refused" and "plain audio" in out.detail
         assert db.run_ids() == []
+
+
+# --- serve and the command line in server mode -------------------------------------------------
+
+TOKEN = "test-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+class TestServeFromTheDatabase:
+    async def test_start_a_run_read_it_back_and_play_audio(
+        self, db: DbRunStore, tmp_path: Path
+    ) -> None:
+        import httpx
+
+        from opseval.server import create_app
+
+        cat = catalogue_dir()
+        settings = Settings(
+            _env_file=None,
+            allowed_hosts="127.0.0.1",
+            reports_dir=str(tmp_path / "reports"),
+            audio_encryption_key=KEY,
+        )
+        app = create_app(
+            settings=settings,
+            catalogue=cat,
+            profile=cat / "profile.yaml",
+            token=TOKEN,
+            store=db,
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with (
+            run_agent(bug=None) as url,
+            httpx.AsyncClient(
+                transport=transport, base_url="http://127.0.0.1:8000", headers=AUTH
+            ) as http,
+        ):
+            started = await http.post(
+                "/api/v1/runs", json={"suite": "smoke", "repeats": 1, "target": url}
+            )
+            assert started.status_code == 202
+            run_id = started.json()["runId"]
+            for _ in range(400):
+                runs = {r["id"]: r for r in (await http.get("/api/v1/runs")).json()}
+                if runs.get(run_id, {}).get("state") == "finished":
+                    break
+                await asyncio.sleep(0.05)
+            assert runs[run_id]["state"] == "finished" and runs[run_id]["failed"] == 0
+            assert db.has_result(run_id) and not (tmp_path / "reports").exists()
+            detail = (await http.get(f"/api/v1/runs/{run_id}")).json()
+            test = detail["tests"][0]
+            attempt = await http.get(f"/api/v1/runs/{run_id}/attempts/{test['id']}/0")
+            assert attempt.status_code == 200 and attempt.json()["entries"]
+            health = (await http.get("/api/v1/health")).json()
+            assert health["reportsDir"].startswith("database")
+            cost = await http.get("/api/v1/analytics/cost")
+            assert cost.status_code == 200
+
+            record = voice_run(db, "r-heard")
+            db.save_error("r-heard", {"code": "X", "message": "a voice run"})
+            base = "/api/v1/runs/r-heard/attempts/v-001/0/audio"
+            listed = (await http.get(base)).json()
+            assert [t["state"] for t in listed["turns"]] == ["available", "available"]
+            call = await http.get(base + "/call")
+            assert call.status_code == 200
+            assert (
+                call.content == whole_call(db.audio("r-heard"), record, AudioKey.from_text(KEY)).wav
+            )
+
+    async def test_run_and_import_from_the_command_line(
+        self, db: DbRunStore, pg_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from opseval.cli import app
+
+        monkeypatch.setenv("OPSEVAL_DATABASE_URL", pg_url)
+        monkeypatch.setenv("OPSEVAL_ALLOWED_HOSTS", "127.0.0.1")
+        monkeypatch.setenv("OPSEVAL_BLOB_DIR", str(tmp_path / "blobs"))
+        monkeypatch.setenv("OPSEVAL_REPORTS_DIR", str(tmp_path / "reports"))
+        monkeypatch.setenv("OPSEVAL_DOTENV", "false")
+        cat = catalogue_dir()
+        runner = CliRunner()
+        async with run_agent(bug="skip-approval") as url:
+            args = [
+                "run",
+                str(cat / "suites" / "smoke.yaml"),
+                "--profile",
+                str(cat / "profile.yaml"),
+                "--target",
+                url,
+                "--project",
+                PROJECT,
+                "--junit",
+                str(tmp_path / "junit.xml"),
+            ]
+            done = await asyncio.to_thread(runner.invoke, app, args)
+        assert done.exit_code == 1, done.output
+        assert "Stored: run" in done.output and (tmp_path / "junit.xml").is_file()
+        assert not (tmp_path / "reports").exists()
+        (stored,) = db.finished_results()
+        assert stored.exit_code == 1
+
+        files = FileStore(tmp_path / "folders")
+        local = await demo(files, tmp_path)
+        folder = tmp_path / "folders" / local.run_id
+        imported = await asyncio.to_thread(
+            runner.invoke, app, ["runs", "import", str(folder), "--project", PROJECT]
+        )
+        assert imported.exit_code == 0 and "imported" in imported.output
+        again = await asyncio.to_thread(
+            runner.invoke, app, ["runs", "import", str(folder), "--project", PROJECT]
+        )
+        assert again.exit_code == 0 and "unchanged" in again.output
+        bad = await asyncio.to_thread(
+            runner.invoke,
+            app,
+            ["runs", "import", str(tmp_path / "nowhere"), "--project", PROJECT],
+        )
+        assert bad.exit_code == 3 and "refused" in bad.output
+
+        pruned = await asyncio.to_thread(
+            runner.invoke, app, ["prune", "--project", PROJECT, "--older-than", "1"]
+        )
+        assert pruned.exit_code == 0, pruned.output
+        assert "newer than 1 days" in pruned.output
+
+    def test_database_url_without_a_project_is_refused(self) -> None:
+        from typer.testing import CliRunner
+
+        from opseval.cli import app
+
+        out = CliRunner().invoke(
+            app,
+            [
+                "run",
+                "x",
+                "--profile",
+                "p",
+                "--target",
+                "ws://127.0.0.1:1",
+                "--database-url",
+                "postgresql://u:secret@127.0.0.1/db",
+            ],
+        )
+        assert out.exit_code == 3 and "needs --project" in out.output
+        assert "secret" not in out.output
+
+
+class TestOnS3:
+    async def test_a_run_through_the_s3_store(self, pg_url: str, tmp_path: Path) -> None:
+        from tests.test_blobs import FakeS3, s3
+
+        await prepare(pg_url, tmp_path)
+        fake = FakeS3()
+        store = DbRunStore.connect(
+            settings_for(pg_url, tmp_path), s3(fake), project=PROJECT, task="default"
+        )
+        try:
+            result = await demo(store, tmp_path)
+            assert store.load_result(result.run_id) == result
+            assert len(store.load_records(result.run_id)) == sum(
+                len(t.attempts) for t in result.tests
+            )
+            rows = sql(store, "SELECT DISTINCT store, encryption FROM blobs")
+            assert rows == [("s3", "sse:AES256")]
+            assert fake.objects and all(k.startswith("/runs/runs/") for k in fake.objects)
+        finally:
+            store.close()
