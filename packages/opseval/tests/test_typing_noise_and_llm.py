@@ -51,7 +51,8 @@ class TestLanguagePacks:
     def test_dialect_aliases_and_fallbacks(self) -> None:
         assert resolve("ar", "eg").dialect == "egyptian"
         assert resolve("ar", "khaleeji").dialect == "gulf"
-        assert resolve("ar", "levantine").dialect is None  # MSA, declared (ADR-0059)
+        assert resolve("ar", "yemeni").dialect is None  # MSA, declared (ADR-0059)
+        assert resolve("ar", "levantine").tag == "ar-x-levant"  # its own pack (MENA step)
         with pytest.raises(UnknownLanguage):
             resolve("xx", None)  # never English (ADR-0059)
 

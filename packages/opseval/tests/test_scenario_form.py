@@ -86,7 +86,10 @@ def test_languages_are_offered_by_their_own_names_never_their_aliases(tmp_path: 
     app, _ = app_for(tmp_path)
     langs = {x["code"]: x for x in connect(app).get(FORM).json()["languages"]}
     assert langs["en"] == {"code": "en", "dialects": [], "stable": True}
-    assert langs["ar"]["dialects"] == ["egyptian", "gulf"]  # not eg, masri, khaleeji, ...
+    # each pack's own name, not eg, masri, khaleeji, saudi, darija, ... (ADR-0059)
+    assert {"egyptian", "gulf", "ksa", "moroccan", "codeswitch"} <= set(langs["ar"]["dialects"])
+    assert not {"eg", "masri", "khaleeji", "saudi", "darija"} & set(langs["ar"]["dialects"])
+    assert langs["ar"]["stable"] is False  # shown as a preview until a native review
 
 
 def test_a_chatbot_profile_gets_no_approval_template_and_no_tool_or_phase_defaults(
@@ -145,8 +148,13 @@ def test_settings_are_read_from_the_checks_own_params_model() -> None:
     )
     assert budget.description and "max_turns" in budget.description
     script = _params("output.language_script")
-    assert script["script"].kind == "choice" and script["script"].choices == ["arabic", "latin"]
-    assert script["script"].default == "arabic"
+    assert script["script"].kind == "choice"
+    assert script["script"].choices == [
+        *("arabic", "latin", "han", "kana", "hangul"),
+        *("cyrillic", "devanagari", "hebrew", "greek", "thai"),
+        "japanese",  # han and kana together
+    ]
+    assert script["script"].default is None  # the persona's language pack decides
     assert (script["min_fraction"].minimum, script["min_fraction"].maximum) == (0.0, 1.0)
     assert _params("output.required_fields")["fields"].kind == "text_list"
     assert _params("conversation.connection_stable")["ignore_codes"].kind == "integer_list"

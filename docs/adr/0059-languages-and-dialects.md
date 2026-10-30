@@ -20,7 +20,52 @@
   language. Every spelling of one pack gives the same judge label and rubric digest; the
   canonical spellings give exactly the old ones. `judge.language_consistency` and
   `judge.persona_consistency` went to version 3. A regional pack (`fr-CA`) is reachable without
-  a base pack.
+  a base pack. *(Step 1's "not built yet" list is superseded by the MENA note below.)*
+- **MENA step implemented (2026-10-30).** All new packs are *preview* (`stable=False`) until the
+  promotion process in `docs/guide/languages.md` (a native-speaker review, then `opseval
+  calibrate` and the STT canary) is done; nothing flips `stable` automatically. New packs:
+  `ar-SA` (`ksa`), `ar-AE` (`uae`), `ar-KW` (`kuwaiti`), `ar-x-levant` (`levantine`, `shami`;
+  stands in for `ar-SY`, `ar-PS`), `ar-LB`, `ar-JO`, `ar-IQ`, `ar-MA` (`moroccan`, `darija`),
+  `ar-DZ`, `ar-TN` and `ar-x-codeswitch` (Gulf Arabic with English in Latin letters).
+  Granularity: one pack per Gulf country the roadmap names, Qatar, Bahrain and Oman kept as
+  declared fallbacks of `ar-x-gulf`; Lebanese and Jordanian packs plus a general Levantine one;
+  one pack per Maghreb country (`maghrebi`, `libyan`, `sudanese`, `yemeni` stay MSA fallbacks).
+  Every pack writes Arabic script; an Arabizi variant is not built. The aliases `saudi` and
+  `emirati` still name the Gulf pack (nothing that resolved exactly moved);
+  `LanguagePack.narrower` lets `advice` name `ar-SA` and `ar-AE` beside them. What moved are
+  the declared fallbacks, which warned "no pack yet": `ar-SA`, `ar-AE`, `ar-KW`, `kuwaiti` (were
+  Gulf) and the Levantine, Iraqi and Maghrebi names (were MSA) now resolve to their own packs;
+  `rescore` re-grades such runs because the rubric changed. A pack carries `name`
+  (human-readable), `scripts` and, for code-switching, `mixes` (the judges are told the mix as
+  for `voice.code_switching`, which still wins when set). Judges are told
+  `Arabic (Saudi), ar-SA` and the tag joins the rubric; the four older packs keep the old label
+  byte for byte (`langpacks.LEGACY_LABELS`), so the judges' versions are unchanged and
+  `test_prompt_hashes` holds. `output.language_script` is version 2: letters counted by Unicode
+  name over ten scripts (`arabic`, `latin`, `han`, `kana`, `hangul`, `cyrillic`, `devanagari`,
+  `hebrew`, `greek`, `thai`), in the script when the expected scripts together outnumber any
+  other; a `script` left out comes from the pack (no pack and no `script` is `BAD_PARAMS`, not
+  measured); `arabic` and `latin` work as before. Kana is its own script for now (give `han` or
+  `kana`); the Japanese pack will decide. `voice_map` is **not** a pack field: Opseval has no
+  vendor voice ids to ship (OpenAI-compatible voices are language-agnostic), so the voice comes
+  from `OPSEVAL_TTS_VOICE_MAP`, now looked up by the pack's tag (`langpacks.voice_language`:
+  `ar` + `ksa` is spoken as `ar-SA`), with a recommended mapping in the guide. `stt_language`
+  is not built: STT is asked for the primary subtag, as before.
+- **Review of the MENA step (2026-10-30).** A `language` + `dialect` pair that loaded before and
+  now names two packs (`ar-SA` + `gulf`, `ar-LB` + `levantine`) keeps the pack it resolved to
+  then, from frozen copies of the step-1 tables (`langpacks.legacy_lookup`), with a warning
+  naming the packs it now also names; no pair that loaded is refused. Each attempt records the
+  pack it resolved to (`RunRecord.persona["pack"]`, no layout change), and judges grade against
+  it (`langpacks.graded_language`); a record without it is graded with the step-1 resolution,
+  so `rescore` keeps its rubric (this replaces "`rescore` re-grades such runs" above).
+  `LanguagePack.scripts` is required; a code-switching pack declares `primary_script` and
+  `primary_share` (`ar-x-codeswitch`: half Arabic), and a pack with a private-use tag may
+  declare `provider_language`: providers are given BCP-47 only (`ar-x-*` becomes `ar`), the
+  voice map is still keyed by the pack tag, and preflight speaks the language attempts speak.
+  `output.language_script` takes `script` (one, or `japanese` = `han` + `kana`) or `scripts`
+  (a list) and `min_primary_share`; with neither, the scripts come from the pack, a declared
+  fallback or the base pack (with a warning), and with none of those the scenario does not
+  load. A code-switching pack and a different `voice.code_switching` do not load either. One
+  Unicode script table (`langpacks.SCRIPT_PREFIXES`) serves the scorer and the voice bridge.
 
 ## Context
 

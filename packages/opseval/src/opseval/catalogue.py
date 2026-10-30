@@ -15,7 +15,7 @@ from pydantic import BaseModel, ValidationError
 
 from opseval.datasets import Expansion, Limits, case_label, expand
 from opseval.errors import ConfigError
-from opseval.langpacks import UnknownLanguage, lookup
+from opseval.langpacks import UnknownLanguage, effective_language, lookup, script_expectation
 from opseval.models.gate import GatePolicy
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import (
@@ -157,6 +157,7 @@ def check_references(
             lookup(scenario.persona.language, scenario.persona.dialect)
         except UnknownLanguage as exc:
             errors.append(f"persona.{exc.field}: {exc}")
+    errors += _language_checks(scenario)
     tz = scenario.persona.timezone
     if tz and profile.timezones and tz not in profile.timezones:
         errors.append(
@@ -208,6 +209,43 @@ def check_references(
                     "scorers: 'security.policy_adherence' grades the agent against "
                     "expectations.policy, which is empty; list the rules it must not break, "
                     "or drop the scorer"
+                )
+    return errors
+
+
+LANGUAGE_SCRIPT = "output.language_script"
+
+
+def _language_checks(scenario: Scenario) -> list[str]:
+    """What the persona's pack decides and the scenario contradicts or leaves undecided
+    (ADR-0059): a code-switching pack and ``voice.code_switching`` naming different mixes
+    (the judges would be told one and the simulator the other), and ``output.language_script``
+    with no ``script`` when no pack gives one (it could only ever be *not measured*)."""
+    errors: list[str] = []
+    scripted = not scenario.conversation.llm_persona
+    pack = effective_language(scenario.persona, scripted=scripted).pack
+    voice = scenario.voice
+    if pack is not None and pack.mixes and voice is not None and voice.code_switching:
+        said = [lang.strip().lower() for lang in voice.code_switching]
+        if sorted(said) != sorted(m.lower() for m in pack.mixes):
+            errors.append(
+                f"voice.code_switching: {list(voice.code_switching)} disagrees with the "
+                f"{pack.tag} pack, which mixes {list(pack.mixes)}; give the same languages, "
+                "or leave voice.code_switching out to use the pack's"
+            )
+    if isinstance(scenario.scorers, list):
+        for index, spec in enumerate(scenario.scorers):
+            if (
+                spec.id != LANGUAGE_SCRIPT
+                or spec.params.get("script")
+                or spec.params.get("scripts")
+            ):
+                continue
+            if script_expectation(scenario.persona, scripted=scripted) is None:
+                errors.append(
+                    f"scorers.{index}.params.script: {LANGUAGE_SCRIPT}: no language pack for "
+                    f"{scenario.persona.language!r} gives a default script, so it could never "
+                    "be measured; give params.script (or params.scripts)"
                 )
     return errors
 
