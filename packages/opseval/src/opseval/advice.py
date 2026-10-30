@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from opseval.catalogue import LoadProblem
+from opseval.datasets import Expansion
 from opseval.langpacks import UnknownLanguage, lookup
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario
@@ -163,4 +164,36 @@ def _ungraded(
         )
 
 
-__all__ = ["Configured", "scenario_warnings"]
+NEAR_CAP = 0.8
+"""An expansion at this share of ``OPSEVAL_MAX_EXPANSION`` is named: a few more rows refuse it."""
+
+
+def expansion_warnings(expansion: Expansion) -> list[LoadProblem]:
+    """What a dataset or matrix scenario will not do as written (ADR-0060): a column no
+    placeholder reads (it changes the ids, never the conversation), or a count close to the
+    cap, where a few more rows stop the scenario loading."""
+    out: list[LoadProblem] = []
+    where = expansion.file
+    if expansion.unused_columns:
+        names = ", ".join(map(repr, expansion.unused_columns))
+        out.append(
+            LoadProblem(
+                where,
+                "dataset",
+                f"column(s) {names} of {expansion.dataset} are used by no placeholder: they "
+                "change no conversation, only the expanded ids",
+            )
+        )
+    if expansion.count >= NEAR_CAP * expansion.limit:
+        out.append(
+            LoadProblem(
+                where,
+                "dataset" if expansion.dataset else "matrix",
+                f"expands to {expansion.count} scenarios, near the limit of {expansion.limit} "
+                "(OPSEVAL_MAX_EXPANSION): over it, the scenario stops loading",
+            )
+        )
+    return out
+
+
+__all__ = ["Configured", "expansion_warnings", "scenario_warnings"]

@@ -78,6 +78,8 @@ with each run. Any host that receives a conversation or a key must also be liste
 | `OPSEVAL_TENANT_STALE_AFTER_SECONDS` | number | `300.0` | A lease whose heartbeat is older than this may be reclaimed. Generous on purpose, and at least three heartbeats (30 s each), or every live lease would look dead. |
 | `OPSEVAL_TENANT_WAIT_SECONDS` | number | `30.0` | How long to wait for a free tenant before skipping the scenario. |
 | `OPSEVAL_REPORTS_DIR` | text | `reports` | Where run folders are written. |
+| `OPSEVAL_MAX_EXPANSION` | integer | `100` | The most scenarios one scenario's ``dataset:`` and ``matrix:`` may expand to (ADR-0060). Over it is a load error naming the count, never a truncation: a truncated set would drop coverage silently. |
+| `OPSEVAL_MAX_DATASET_BYTES` | integer | `5242880` | The largest dataset file (CSV or JSONL under ``datasets/``) a load reads or a ``catalogue push`` stores. Over it is an error naming the file. |
 | `OPSEVAL_RETENTION_DAYS` | integer | `90` | ``opseval prune`` deletes finished runs older than this many days (FR-SAF-06). |
 | `OPSEVAL_SERVE_TOKEN` | secret | unset (secret) | The console API token. Random on every `opseval serve` start when unset (ADR-0031). |
 | `OPSEVAL_CONSOLE_DIR` | text | unset | The built web console (``packages/console/dist``) for ``opseval serve`` to serve. When unset, a source checkout's build is found on its own (ADR-0034). |

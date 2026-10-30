@@ -158,6 +158,29 @@
       "title": "Criticality",
       "type": "string"
     },
+    "DatasetSpec": {
+      "additionalProperties": false,
+      "description": "Rows that one scenario stands for, one expanded scenario per row (ADR-0060).",
+      "properties": {
+        "allow_blank": {
+          "items": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "type": "string"
+          },
+          "title": "Allow Blank",
+          "type": "array"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "DatasetSpec",
+      "type": "object"
+    },
     "Decision": {
       "additionalProperties": false,
       "properties": {
@@ -239,6 +262,79 @@
         }
       },
       "title": "ExecutionSpec",
+      "type": "object"
+    },
+    "ExpandedFrom": {
+      "additionalProperties": false,
+      "description": "Where an expanded scenario came from. Set by the loader, never written by hand.",
+      "properties": {
+        "base_id": {
+          "title": "Base Id",
+          "type": "string"
+        },
+        "dataset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset"
+        },
+        "dataset_digest": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset Digest"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Hash",
+          "type": "string"
+        },
+        "matrix": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "title": "Matrix",
+          "type": "object"
+        },
+        "row": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row"
+        }
+      },
+      "required": [
+        "base_id",
+        "hash"
+      ],
+      "title": "ExpandedFrom",
       "type": "object"
     },
     "Expectations": {
@@ -366,6 +462,54 @@
       "title": "Injection",
       "type": "object"
     },
+    "Matrix": {
+      "additionalProperties": false,
+      "description": "Axes a scenario runs across, one expanded scenario per cell (ADR-0060).",
+      "properties": {
+        "dialect": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Dialect",
+          "type": "array"
+        },
+        "exclude": {
+          "items": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "object"
+          },
+          "title": "Exclude",
+          "type": "array"
+        },
+        "language": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Language",
+          "type": "array"
+        },
+        "persona": {
+          "items": {
+            "$ref": "#/$defs/PersonaVariant"
+          },
+          "title": "Persona",
+          "type": "array"
+        }
+      },
+      "title": "Matrix",
+      "type": "object"
+    },
     "Noise": {
       "additionalProperties": false,
       "description": "Background noise mixed into the caller's audio at a set signal-to-noise ratio.\n\nThe noise is generated, not recorded (no speech, no licence, no size): ``white`` and\n``pink`` are what they say; ``babble`` is several amplitude-modulated, band-limited noise\nvoices, a crowd-like murmur with no words in it. The same ``seed`` gives the same noise.\nIt is mixed into what the agent hears only: the STT canary and every reference text use\nthe caller's clean audio and words.",
@@ -467,6 +611,66 @@
         "role"
       ],
       "title": "Persona",
+      "type": "object"
+    },
+    "PersonaVariant": {
+      "additionalProperties": false,
+      "description": "One value of the matrix's ``persona`` axis: fields that replace the scenario's own.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "timezone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timezone"
+        },
+        "typing_noise": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Typing Noise"
+        }
+      },
+      "title": "PersonaVariant",
       "type": "object"
     },
     "PolicyAction": {
@@ -624,12 +828,37 @@
       "$ref": "#/$defs/Criticality",
       "default": "normal"
     },
+    "dataset": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DatasetSpec"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "difficulty": {
       "$ref": "#/$defs/Difficulty",
       "default": "medium"
     },
     "execution": {
       "$ref": "#/$defs/ExecutionSpec"
+    },
+    "expanded_from": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExpandedFrom"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "expectations": {
       "$ref": "#/$defs/Expectations"
@@ -640,7 +869,7 @@
       "type": "string"
     },
     "id": {
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}(@[0-9a-f]{8})?$",
       "title": "Id",
       "type": "string"
     },
@@ -650,6 +879,17 @@
       },
       "title": "Issue Refs",
       "type": "array"
+    },
+    "matrix": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Matrix"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "name": {
       "minLength": 1,

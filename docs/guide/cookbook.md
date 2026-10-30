@@ -51,6 +51,93 @@ scorers:
   - {id: security.policy_adherence, threshold: 1.0}
 ```
 
+## Run one scenario over many rows, languages and personas
+
+A scenario with `dataset:` runs once per row of a CSV (header row) or JSONL file (one flat
+object per line), and `{{column}}` in its text is the row's value
+([ADR-0060](../adr/0060-datasets-and-matrices.md)). The file lives under `datasets/` at the
+catalogue root, beside `profile.yaml`, and the path is written relative to that root:
+
+```text
+my-catalogue/
+  profile.yaml
+  datasets/orders.csv
+  scenarios/refund-by-order-type.yaml
+  suites/full.yaml
+```
+
+```csv
+order_id,order_type,method
+10482,damaged,original_card
+10483,late,store_credit
+```
+
+```yaml
+id: refund-by-order-type
+name: Refund for a {{order_type}} order
+goal: Get a refund for order {{order_id}} ({{order_type}}).
+dataset: datasets/orders.csv        # or {path: …, allow_blank: [column]}
+persona: {role: Busy customer, language: en}
+conversation:
+  scripted_turns:
+    - "Order {{order_id}} arrived {{order_type}}. I'd like my money back."
+  stop_at: supervisor_review
+  checkpoint_policy:
+    proposal_approval: {action: approve}
+scorers:
+  - {id: output.payload_equals, params: {checkpoint: proposal_approval, path: refund_proposal.method, equals: "{{method}}"}}
+```
+
+A `matrix:` crosses the scenario with languages (BCP-47, resolved by the language packs),
+dialects and persona variants; with a dataset, every row runs in every cell. An Arabic dialect
+matrix with an LLM customer:
+
+```yaml
+id: refund-arabic
+name: Refund in {{language}}
+goal: Get a refund for order {{order_id}}.
+dataset: datasets/orders.csv
+matrix:
+  language: [ar-EG, ar-x-gulf, ar]        # Egyptian, Gulf, MSA
+  persona:
+    - {name: impatient, role: an impatient customer, typing_noise: 0.2}
+    - {name: first-time, role: a first-time customer}
+  exclude:
+    - {language: ar, persona: impatient}  # persona by its name (or its index from 0)
+persona: {role: customer, language: ar}
+conversation:
+  flow: Ask for a refund on order {{order_id}}. Answer questions briefly.
+  stop_at: goal_reached
+```
+
+What to know:
+
+- **Each row is a scenario of its own**, with the id `<id>@<8 hex>` (a hash of the row's values
+  and the cell, so reordering rows keeps the ids, and a changed value gets a new one). Each is
+  graded, gated and trended separately, with the scenario's criticality and tags: one failing
+  row fails the gate as any scenario would.
+- **Placeholders are plain text.** `{{name}}` only; no filters, defaults or conditions, and
+  `\{{` writes a literal `{{`. They work in text fields (name, goal, persona role, opening
+  message, flow, scripted turns, injections, checkpoint feedback, expected outcome, policy,
+  string scorer params), never in ids, tags, tool names or numbers. A value is inserted as it
+  is: `a: b`, a newline or `{{x}}` in a cell stays text. `{{language}}`, `{{dialect}}` and
+  `{{persona}}` name the matrix cell; `{{persona}}` is the variant's `name`, or, without
+  one, an 8-hex hash of what the variant says (never its place in the list).
+- **Mistakes fail at load**, with the file, the row and the field: a placeholder with no column,
+  a blank cell (unless its column is in `allow_blank`), two identical rows, a nested JSONL value,
+  a path outside `datasets/`, an unknown language for an LLM customer, or `{{…}}` in a scenario
+  with no `dataset:` or `matrix:`.
+- **The cap**: one scenario may expand to `OPSEVAL_MAX_EXPANSION` scenarios (100). Over it is a
+  load error, never a cut-down set; it is counted before anything is built, so a huge matrix
+  fails at once. A matrix with `exclude` may have at most 100,000 cells before the exclude. Dataset files are limited to `OPSEVAL_MAX_DATASET_BYTES`
+  (5 MB).
+- `opseval validate` prints each scenario's expansion and its attempts (count × repeats), and
+  warns about a column no placeholder reads. `--filter id=refund-by-order-type` selects every
+  expansion; `id=refund-by-order-type@1a2b3c4d` one of them.
+- A run saves the expanded scenarios with the dataset's SHA-256, so `opseval rescore` grades
+  what ran even after the file changes. `opseval catalogue push` stores the dataset files too
+  (server mode).
+
 ## Stop early, or cancel
 
 ```yaml

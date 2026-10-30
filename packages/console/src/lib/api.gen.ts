@@ -619,6 +619,7 @@ export interface ScenarioCheckOut {
   title: string | null;
   problems: Problem[];
   warnings: Problem[];
+  expanded: string[];
 }
 
 export interface ImportOut {

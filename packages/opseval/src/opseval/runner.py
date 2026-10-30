@@ -26,6 +26,7 @@ from opseval.auth import (
 )
 from opseval.catalogue import load_catalogue, load_profile
 from opseval.config import Settings, check_url_allowed, config_digest
+from opseval.datasets import Limits
 from opseval.demo import catalogue_dir as demo_catalogue_dir
 from opseval.driver import RATE_LIMITED_NOTE, Driver
 from opseval.errors import ConfigError
@@ -609,13 +610,18 @@ async def _launch(
         known_scorers=REGISTRY,
         known_invariants=set(INVARIANTS),
         filters=options.filters,
+        limits=Limits.from_settings(settings),
     )
     if options.only_ids is not None:
+        # An authored id names every scenario its dataset or matrix expands to (ADR-0060).
         wanted = set(options.only_ids)
-        missing = sorted(wanted - {sc.id for sc in catalogue.scenarios})
+        known = {sc.id for sc in catalogue.scenarios} | {sc.base_id for sc in catalogue.scenarios}
+        missing = sorted(wanted - known)
         if missing:
             raise ConfigError(f"no valid scenario with id {', '.join(map(repr, missing))}")
-        catalogue.scenarios = [sc for sc in catalogue.scenarios if sc.id in wanted]
+        catalogue.scenarios = [
+            sc for sc in catalogue.scenarios if sc.id in wanted or sc.base_id in wanted
+        ]
         # A broken file elsewhere in the folder is not part of this run. (A broken file
         # that *was* chosen has no valid id, so it already failed as "no valid scenario".)
         catalogue.problems = []

@@ -51,8 +51,8 @@ NAMING = {
     "pk": "pk_%(table_name)s",
 }
 
-KINDS = ("scenario", "suite", "profile")
-"""What a catalogue item can be. The same three files a catalogue folder holds."""
+KINDS = ("scenario", "suite", "profile", "dataset")
+"""What a catalogue item can be: the files a catalogue folder holds (datasets: ADR-0060)."""
 TASK_KINDS = ("chat", "agentic", "voice", "batch")
 """What a task's agent does (ADR-0049)."""
 MODALITIES = ("text", "audio_file", "audio_stream", "telephony", "webrtc")
@@ -222,15 +222,22 @@ event.listen(Task.__table__, "after_create", _after_create)
 event.listen(Task.__table__, "before_drop", _before_drop)
 
 
+ITEM_NAME_MAX = 200
+"""``catalogue_items.name``: a push checks every item against it before writing."""
+ITEM_PATH_MAX = 500
+"""``catalogue_versions.path``."""
+
+
 class CatalogueItem(Base):
-    """One scenario, suite or profile, by the name it is known by in its task."""
+    """One scenario, suite, profile or dataset (ADR-0060), by the name it is known by in its
+    task. A dataset's name is its path (``datasets/orders.csv``)."""
 
     __tablename__ = "catalogue_items"
     __table_args__ = (
         UniqueConstraint("task_id", "kind", "name"),
         # The target of the tasks' (item, task) links above.
         UniqueConstraint("id", "task_id"),
-        CheckConstraint("kind IN ('scenario', 'suite', 'profile')", name="kind"),
+        CheckConstraint(_one_of("kind", KINDS), name="kind"),
         ForeignKeyConstraint(
             ["task_id", "project_id"], ["tasks.id", "tasks.project_id"], ondelete="CASCADE"
         ),
@@ -244,8 +251,8 @@ class CatalogueItem(Base):
     consistent."""
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    """A scenario's id, a suite's name, a profile's name."""
+    name: Mapped[str] = mapped_column(String(ITEM_NAME_MAX), nullable=False)
+    """A scenario's id, a suite's name, a profile's name, a dataset's path."""
     created_at: Mapped[datetime] = _created()
 
 
@@ -260,7 +267,7 @@ class CatalogueVersion(Base):
         ForeignKey("catalogue_items.id", ondelete="CASCADE"), nullable=False, index=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    path: Mapped[str] = mapped_column(String(500), nullable=False)
+    path: Mapped[str] = mapped_column(String(ITEM_PATH_MAX), nullable=False)
     """Where the file goes when the catalogue is written out (``scenarios/llm/x.yaml``), so
     a suite's ``include`` globs select the same files they did in the folder."""
     source: Mapped[str] = mapped_column(Text, nullable=False)

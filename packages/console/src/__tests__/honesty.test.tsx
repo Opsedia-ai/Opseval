@@ -10,7 +10,7 @@ import { ProgressLine } from "../components/Progress";
 import StopEditor, { NEVER, budget, stopFields } from "../components/StopEditor";
 import { CancelRun, StoppedNotice } from "../components/RunControl";
 import { Cell } from "../components/ScenarioTrend";
-import { Warnings } from "../components/Warnings";
+import { Expansion, Warnings } from "../components/Warnings";
 import { Amount, Cost, Tokens, UsageLine } from "../components/UsageFigures";
 import { MeasuredValue, RatioValue, StackedBars, count, usd } from "../components/Charts";
 import { MemoryRouter } from "react-router-dom";
@@ -194,6 +194,20 @@ describe("scenario warnings (FR-AUT)", () => {
 
   it("no warnings, no panel", () => {
     expect(render(<Warnings items={[]} />).container.textContent).toBe("");
+  });
+});
+
+describe("a dataset scenario's expansion (ADR-0060)", () => {
+  it("lists the ids the loader gave, as information, never as a result", () => {
+    const { container } = render(<Expansion ids={["refund@1a2b3c4d", "refund@5e6f7a8b"]} />);
+    const panel = container.querySelector('[data-state="expansion"]');
+    expect(panel?.textContent).toMatch(/expands to 2 scenario\(s\)/);
+    expect(panel?.textContent).toMatch(/refund@1a2b3c4d/);
+    expect(tone(panel?.querySelector("[data-tone]"))).toBe("neutral");
+  });
+
+  it("a plain scenario has no panel", () => {
+    expect(render(<Expansion ids={[]} />).container.textContent).toBe("");
   });
 });
 
