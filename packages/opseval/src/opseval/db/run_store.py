@@ -527,6 +527,11 @@ class DbRunStore:
     def write_manifest(self, run_id: str, manifest: dict[str, Any]) -> None:
         self._write_manifest(run_id, {"layout": LAYOUT, **manifest})
 
+    def import_manifest(self, run_id: str, manifest: dict[str, Any]) -> None:
+        """A manifest as another store wrote it, its layout kept (``runs import``): a run
+        written before per-call usage must still read as one."""
+        self._write_manifest(run_id, {"layout": LEGACY_LAYOUT, **manifest})
+
     def _write_manifest(self, run_id: str, body: dict[str, Any], **extra: Any) -> None:
         project_id, task_id = self._task()
         values = {
@@ -957,6 +962,11 @@ class DbRunStore:
 
     def audio(self, run_id: str) -> DbRunAudio:
         return DbRunAudio(self, run_id)
+
+    def import_pruned_marker(self, run_id: str, text: str | None) -> None:
+        """A run folder's audio prune marker, kept as written (unreadable stays unreadable)."""
+        body = (text if text is not None else "").encode("utf-8")
+        self._put_committed(run_id, MARKER, "other", body, JSON)
 
     # --- retention of orphans --------------------------------------------------------------
 

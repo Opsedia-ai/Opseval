@@ -672,8 +672,17 @@ class FileStore:
     def load_rescore(self, run_id: str, stamp: str) -> SuiteResult:
         return load_result_at(self.run_dir(run_id) / f"{RESCORE_PREFIX}{stamp}")
 
+    def rescore_files(self, run_id: str, stamp: str) -> tuple[str | None, str | None]:
+        """A re-score's report and JUnit, as written (``None`` when missing)."""
+        name = f"{RESCORE_PREFIX}{stamp}"
+        return self._text(run_id, f"{name}/report.html"), self._text(run_id, f"{name}/junit.xml")
+
     def audio(self, run_id: str) -> FileRunAudio:
         return FileRunAudio(self.run_dir(run_id), run_id)
+
+    def audio_marker_text(self, run_id: str) -> str | None:
+        """The run's audio prune marker as written, or ``None``."""
+        return self._text(run_id, f"audio/{AUDIO_MARKER}")
 
 
 def parse_snapshot(

@@ -676,6 +676,16 @@ async def _launch(
         judge_independence=settings.judge_independence,
     )
     store: RunStore = options.store or FileStore(settings.reports_dir)
+    sealed_only = options.store is not None and getattr(
+        options.store.audio("-"), "sealed_only", False
+    )
+    if audio_plan.mode == "files" and audio_plan.key is None and sealed_only:
+        # Server mode keeps audio only sealed (ADR-0051), the demo's synthetic voices too:
+        # refused before anything is sent, never a plain file written to a shared store.
+        raise ConfigError(
+            "this store keeps recorded audio only encrypted: set "
+            "OPSEVAL_AUDIO_ENCRYPTION_KEY, or OPSEVAL_RECORD_AUDIO=hashes"
+        )
 
     default_where = make_transport(profile, None).target
     health = PreflightReport()
