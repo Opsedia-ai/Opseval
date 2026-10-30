@@ -54,9 +54,12 @@ from opseval.models.record import (
     TranscriptInfo,
     TransportEvent,
     VoiceEventRecord,
+    VoiceSpan,
     VoiceTimeline,
 )
+from opseval.models.voice import VoiceSpec
 from opseval.paths import dig
+from opseval.redaction import redact_text
 from opseval.speech.base import Audio, Transcript
 from opseval.speech.guard import GuardedSpeechToText, GuardedTextToSpeech
 from opseval.speech.wer import word_error_rate
@@ -73,6 +76,7 @@ from opseval.transport.audio import (
     Mark,
     Transfer,
     UndecodableAudio,
+    VoiceEvent,
 )
 from opseval.transport.base import (
     SYNTHETIC_KIND,
@@ -81,14 +85,23 @@ from opseval.transport.base import (
     Session,
     Transport,
 )
+from opseval.voice import noise as noises
+from opseval.voice.metrics import (
+    PAUSE_FLOOR_MS,
+    AgentTurn,
+    CallerTurn,
+    CallLog,
+    compute,
+)
 from opseval.voice.recording import AudioRecorder
 
 T = TypeVar("T")
 
-Heard = Literal["stt", "second_stt", "unintelligible", "asr_failed"]
+Heard = Literal["stt", "second_stt", "unintelligible", "asr_failed", "cut_short"]
 """How a spoken reply was heard: by the STT, by the second STT only, by neither while the
 canary proved the STT works (the agent's fault), or by neither with the canary failing
-(Opseval's)."""
+(Opseval's). ``cut_short`` (duplex, ADR-0055): no STT could read a turn the caller cut off,
+which is a fragment, not proof of bad audio: not measured, never the agent's fault."""
 
 
 @dataclass(frozen=True)
@@ -198,6 +211,28 @@ class _Turn:
     barge_event: int | None = None
     """Where this turn's ``barge_in`` event is in the timeline: tagged with the turn's file
     number when the turn is kept, so playback ties the overlap to this turn exactly."""
+    stretches: list[list[float]] = field(default_factory=list)
+    """The turn's voiced stretches as ``[start, end]`` on the play-out clock (ADR-0055):
+    chunks with energy, joined across pauses shorter than ``PAUSE_FLOOR_MS``."""
+    closed: int | None = None
+    """The agent turn number its spans were recorded under, once they were."""
+    latency_ms: float | None = None
+    """From the caller's last sample to this turn's first chunk with energy, taken when the
+    speech began; None for a barge-in (not measured, never 0)."""
+    said_end: bool = False
+    """The agent sent its own end-of-speech event in this turn."""
+    over: bool = False
+    """Something else ended the turn (silence in its audio, a data message that answers after
+    the speech); on the duplex driver it still ends only once its audio has played out."""
+    last_ms: float | None = None
+    """When its last audio chunk arrived."""
+    following: list[VoiceEvent] = field(default_factory=list)
+    """Events read after the turn was over that belong to the agent's next turn (speech that
+    began meanwhile, and everything after it, in order): handed to the next turn."""
+
+    @property
+    def done(self) -> bool:
+        return self.said_end or self.over
 
     def reset_audio(self) -> None:
         self.chunks.clear()
@@ -214,6 +249,7 @@ class VoiceBridge(Session):
         recorder: AudioRecorder,
         *,
         language: str,
+        voice: VoiceSpec | None = None,
     ) -> None:
         if profile.audio is None:
             raise ConfigError(f"profile {profile.name!r} has no audio: block for a voice run")
@@ -235,9 +271,25 @@ class VoiceBridge(Session):
         self._caller_end_ms: float | None = None
         self._hung_up = False
         self._enders: list[dict[str, Any]] = []  # frames that end the agent's turn
+        self._stale_frames: list[dict[str, Any]] = []  # frames that cannot answer (stale)
         self._text_path = placeholder_path(profile.user_message_frame, "text")
         self._feedback_path = placeholder_path(profile.resume_frame, "feedback")
         self._action_path = placeholder_path(profile.resume_frame, "action")
+        self.voice = voice or VoiceSpec()
+        # The bridge is made once the call is open: the agent's clock starts here (ADR-0055).
+        self._log = CallLog(mode=self.mode, call_start_ms=audio.clock.now_ms())
+        self._held: deque[VoiceEvent] = deque()
+        """Events read in one agent turn that belong to the next (the duplex driver)."""
+        self._spoken = 0
+        """Caller turns spoken through :meth:`send` (the scripted or simulated turns and the
+        checkpoint decisions): what ``voice.silences`` and the noise seed count. A planted
+        interruption is not one of them (review of #91)."""
+
+    mode: Literal["turns", "duplex"] = "turns"
+    holds_line: bool = True
+    """Whether a harness call keeps the agent's audio off the clock while it runs
+    (:attr:`VoiceSpan.holds_line`). The turn-based bridge reads the agent only between its own
+    calls, so it says yes; the duplex driver's session stamps the agent on arrival meanwhile."""
 
     # --- Session hooks -----------------------------------------------------------------
     def use_harness_clock(self, clock: HarnessClock) -> None:
@@ -254,9 +306,40 @@ class VoiceBridge(Session):
         return None
 
     def voice_timeline(self) -> VoiceTimeline:
-        return VoiceTimeline(
-            codec=self.audio.format.codec, rate=self.rate, events=tuple(self._events)
+        spans = tuple(sorted(self._log.spans, key=lambda s: (s.start_ms, s.end_ms)))
+        timeline = VoiceTimeline(
+            codec=self.audio.format.codec,
+            rate=self.rate,
+            events=tuple(self._events),
+            mode=self.mode,
+            spans=spans,
+            noise=noises.info(self.voice.noise) if self.voice.noise is not None else None,
+            inputs=self._log.inputs(),
+            stt_min_confidence=self.kit.min_confidence,
         )
+        # Computed from what the record keeps, exactly as `opseval rescore` recomputes it, so
+        # the stored rows and a recomputation can never differ for the same rules.
+        log = CallLog.from_timeline(timeline)
+        assert log is not None  # nosec B101 - the inputs and spans were just set
+        return timeline.model_copy(update={"metrics": compute(log)})
+
+    async def _harness(self, call: Awaitable[T], what: str) -> T:
+        """A TTS or STT call, off the agent's clock (``use_harness_clock``), and recorded as
+        a ``harness`` span: a gap it overlaps is never counted as the agent's (ADR-0055)."""
+        start = self.audio.clock.now_ms()
+        try:
+            return await self._clock(call)
+        finally:
+            end = self.audio.clock.now_ms()
+            self._log.spans.append(
+                VoiceSpan(
+                    kind="harness",
+                    start_ms=max(0.0, start),
+                    end_ms=max(0.0, start, end),
+                    detail=what,
+                    holds_line=self.holds_line,
+                )
+            )
 
     def transport_events(self) -> tuple[TransportEvent, ...]:
         return self.audio.transport_events()
@@ -265,7 +348,14 @@ class VoiceBridge(Session):
         self,
         at_ms: float,
         kind: Literal[
-            "speech_start", "speech_end", "barge_in", "dtmf", "transfer", "hangup", "mark"
+            "speech_start",
+            "speech_end",
+            "barge_in",
+            "dtmf",
+            "transfer",
+            "hangup",
+            "mark",
+            "agent_heard",
         ],
         speaker: Literal["caller", "agent"] | None = None,
         detail: str | None = None,
@@ -327,34 +417,129 @@ class VoiceBridge(Session):
         # A new caller turn: the agent's next latency is measured from its end, never from
         # an earlier one's.
         self._caller_end_ms = None
-        spoken = await self._clock(
-            self.kit.tts.synthesize(text, voice=None, language=self.language)
-        )
-        resampler = Resampler(spoken.rate, self.rate)
-        pcm = resampler.feed(spoken.pcm16) + resampler.flush()
-        codec = self.audio.format.codec
-        # The canary hears the caller exactly as the wire carried it (ADR-0053).
-        wire = pcm if codec == "pcm16" else decode(encode(pcm, codec), codec)
-        step = max(2, self.rate * self.cfg.chunk_ms // 1000 * 2)
+        self._spoken += 1
+        lead, clean, noisy = await self._caller_audio(text, self._spoken)
+        if lead:
+            await self._stream(lead)  # a planted silence before the turn: the caller's time
         start = self.audio.clock.now_ms()
         self._event(start, "speech_start", "caller")
-        for i in range(0, len(pcm), step):
-            await self.audio.send_audio(pcm[i : i + step])
+        await self._stream(noisy)
+        await self._caller_done(text, clean, noisy, start, timeout=timeout)
+
+    async def _caller_done(
+        self,
+        text: str,
+        clean: bytes,
+        sent: bytes,
+        start: float,
+        *,
+        timeout: float | None,
+        barge_in: bool = False,
+    ) -> tuple[FrameMedia, int]:
+        """The caller's turn is over: keep its audio, its span and its words, and end it.
+        Returns the frame's media and the turn's file number."""
+        number = len(self._log.callers) + 1
+        file_number = self._next_file()
         ref = self.recorder.keep(
-            turn=self._next_file(), speaker="caller", pcm16=pcm, rate=self.rate, start_ms=start
+            turn=file_number, speaker="caller", pcm16=sent, rate=self.rate, start_ms=start
         )
-        self._sent = FrameMedia(audio=ref, text=text)
+        media = FrameMedia(audio=ref, text=text)
+        self._sent = media
+        codec = self.audio.format.codec
+        # The canary hears the caller exactly as the wire carried it (ADR-0053), and always
+        # without the planted noise (ADR-0055): noise must not make a healthy STT look deaf.
+        wire = clean if codec == "pcm16" else decode(encode(clean, codec), codec)
         self._caller = (text, wire)
         # The last caller sample has gone: the agent's turn clock starts here (ADR-0042),
         # before end_of_caller_turn, which on a request/response transport sends the turn.
-        end = self.audio.clock.now_ms()
+        end = max(self.audio.clock.now_ms(), start + self._sent_ms(sent))
         self._caller_end_ms = end
         self._event(end, "speech_end", "caller")
+        # The WER reference is kept in the record (rescore recomputes from it): redacted like
+        # every text there; the agent's own transcript of it is redacted the same way.
+        said, _ = redact_text(text)
+        self._log.callers.append(
+            CallerTurn(turn=number, text=said, start_ms=start, end_ms=end, barge_in=barge_in)
+        )
+        self._log.spans.append(
+            VoiceSpan(
+                kind="speech",
+                speaker="caller",
+                start_ms=max(0.0, start),
+                end_ms=end,
+                turn=number,
+                barge_in=barge_in,
+            )
+        )
         await self.audio.end_of_caller_turn(timeout=timeout)
+        return media, file_number
+
+    def _sent_ms(self, pcm: bytes) -> float:
+        """How long the caller's audio plays. The turn-based bridge sends it as fast as the
+        line takes it, so its span ends when the last sample went, not when it would have
+        finished playing (that is the duplex driver's, which paces it)."""
+        return 0.0
+
+    async def _stream(self, pcm: bytes) -> None:
+        step = max(2, self.rate * self.cfg.chunk_ms // 1000 * 2)
+        for i in range(0, len(pcm), step):
+            await self.audio.send_audio(pcm[i : i + step])
+
+    async def _say(self, text: str) -> bytes:
+        """``text`` spoken by the caller's voice, at the session's rate (off the agent's clock)."""
+        spoken = await self._harness(
+            self.kit.tts.synthesize(text, voice=self.voice.caller_voice, language=self.language),
+            "tts",
+        )
+        resampler = Resampler(spoken.rate, self.rate)
+        return resampler.feed(spoken.pcm16) + resampler.flush()
+
+    async def _mix(self, pcm: bytes, turn: int) -> bytes:
+        """The planted noise mixed into ``pcm``, in a worker thread and as a ``noise`` harness
+        span: it is pure CPU, and on the event loop it would stall the session's own reader,
+        so agent audio arriving meanwhile would be stamped late (review of #91)."""
+        spec = self.voice.noise
+        if spec is None:
+            return pcm
+        return await self._harness(
+            asyncio.to_thread(noises.mix, pcm, self.rate, spec, turn=turn), "noise"
+        )
+
+    async def _caller_audio(self, text: str, number: int) -> tuple[bytes, bytes, bytes]:
+        """(planted silence before the turn, the turn's clean audio, the audio as sent).
+
+        ``number`` counts the turns spoken through :meth:`send` only, so a planted interruption
+        never moves a silence to another turn. A ``mid`` silence cuts the turn at its middle
+        word: each half is spoken on its own and the silence goes between them, inside the
+        turn (the caller has not finished, so it is never the agent's dead air). Noise is mixed
+        into what is sent only."""
+        planted = {s.at: s.ms for s in self.voice.silences if s.caller_turn == number}
+        words = text.split()
+        lead_ms = planted.get("before", 0)
+        if "mid" in planted and len(words) >= 2:
+            half = len(words) // 2
+            first = await self._say(" ".join(words[:half]))
+            second = await self._say(" ".join(words[half:]))
+            clean = first + noises.silence(planted["mid"], self.rate) + second
+        else:
+            clean = await self._say(text)
+            # One word cannot be cut in the middle: the pause goes before it instead, still
+            # the caller's time, never dropped.
+            lead_ms += planted.get("mid", 0)
+        lead = noises.silence(lead_ms, self.rate)
+        if self.voice.noise is None:
+            return lead, clean, clean
+        # One mix over the pause and the turn, so the noise runs on through the silence at
+        # the level set against the caller's speech.
+        mixed = await self._mix(lead + clean, number)
+        return mixed[: len(lead)], clean, mixed[len(lead) :]
 
     # --- in: the agent speaks ----------------------------------------------------------
     def _notification(self, event: str, **fields: Any) -> dict[str, Any]:
         return {SYNTHETIC_KIND: "notification", "event": event, **fields}
+
+    def stale(self, payload: Any) -> bool:
+        return any(kept is payload for kept in self._stale_frames)
 
     def ends_turn(self, payload: Any) -> bool:
         """A spoken turn (even with an empty transcript: whether those were words is
@@ -363,7 +548,8 @@ class VoiceBridge(Session):
         own rule (``SutProfile.answers``), as on any transport."""
         return any(kept is payload for kept in self._enders)
 
-    def _too_long(self) -> TurnNeverEnded:
+    def _too_long(self, turn: _Turn) -> TurnNeverEnded:
+        self._close(turn)
         return TurnNeverEnded(
             f"the agent spoke for more than {self.cfg.max_turn_seconds:g}s in one turn "
             "(audio.max_turn_seconds)"
@@ -373,6 +559,90 @@ class VoiceBridge(Session):
         kind = self.profile.classify(frame)
         text = frame.get(self.profile.text_field)
         return self.profile.answers(kind, text if isinstance(text, str) else None, frame)
+
+    # --- hooks the duplex driver overrides (ADR-0055) -------------------------------------
+    async def _next_event(self, wait: float) -> VoiceEvent:
+        if self._held:
+            return self._held.popleft()
+        return await self.audio.next_event(wait)
+
+    def _due(self, turn: _Turn) -> float | None:
+        """Seconds until the bridge must act within an agent turn that is speaking (the
+        duplex driver: a planted barge-in, or audio still playing out); None: nothing."""
+        return None
+
+    def _playing(self, turn: _Turn) -> bool:
+        """Whether the turn's audio is still playing out after its last chunk arrived."""
+        return False
+
+    def _speech_ended(self, turn: _Turn, at_ms: float) -> bool:
+        """The agent's own end-of-speech event, in a turn that spoke: whether the turn is
+        over now (the turn-based bridge: always)."""
+        return True
+
+    def _stale(self, at_ms: float) -> bool:
+        """Whether a data message that arrived at ``at_ms`` came before the caller's latest
+        turn ended, so it cannot be the answer to it (the duplex driver: a barge-in)."""
+        return False
+
+    def _turn_closed(self, turn: _Turn, number: int) -> None:
+        """The agent turn ``number`` is over (kept, or cut off as too long)."""
+
+    def _burst(self, turn: _Turn) -> bool:
+        """Whether the turn's audio arrived faster than it plays, by more than a pause: its
+        spans are placed by arrival here, so pauses inside it are not on the clock."""
+        if turn.first_ms is None or turn.last_ms is None:
+            return False
+        return turn.audio_ms - (turn.last_ms - turn.first_ms) > PAUSE_FLOOR_MS
+
+    # --- in: the agent speaks ------------------------------------------------------------
+    def _played(self, turn: _Turn, at_ms: float, pcm: bytes, voiced: bool) -> None:
+        """Lay a chunk on the clock. The turn-based bridge does not play the agent's audio
+        out: the caller answers once the turn is over however much of it is still unplayed,
+        so a chunk is placed when it arrived (review of #91: a play-out clock carried over
+        would push the agent's next turn late by audio it never had to wait for). Voiced
+        chunks extend the turn's stretches; a pause shorter than ``PAUSE_FLOOR_MS`` does not
+        break one."""
+        turn.last_ms = at_ms
+        if not voiced:
+            return
+        end = at_ms + duration_ms(pcm, self.rate)
+        if turn.stretches and at_ms - turn.stretches[-1][1] < PAUSE_FLOOR_MS:
+            turn.stretches[-1][1] = max(turn.stretches[-1][1], end)
+        else:
+            turn.stretches.append([at_ms, end])
+
+    def _close(self, turn: _Turn) -> int | None:
+        """Record the turn's spans once, under the agent's next turn number."""
+        if not turn.stretches or turn.closed is not None:
+            return turn.closed
+        number = len(self._log.agents) + 1
+        turn.closed = number
+        self._log.agents.append(AgentTurn(turn=number, burst=self._burst(turn)))
+        for start, end in turn.stretches:
+            self._log.spans.append(
+                VoiceSpan(
+                    kind="speech",
+                    speaker="agent",
+                    start_ms=max(0.0, start),
+                    end_ms=max(start, end),
+                    turn=number,
+                )
+            )
+        self._turn_closed(turn, number)
+        return number
+
+    def _agent_heard(self, event: AgentTranscript) -> None:
+        """The agent's own transcript of the caller (ADR-0055): evidence for
+        ``voice.agent_asr_wer``, redacted like any transcript. Every final is kept with its
+        arrival time; the metrics attribute it to a caller turn by time and join the finals of
+        one turn (review of #91), never "the turn logged last"."""
+        if not event.final:
+            return
+        text, _ = redact_text(event.text)
+        self._log.agent_transcripts_seen = True
+        self._log.heard.append((event.at_ms, text))
+        self._event(event.at_ms, "agent_heard", "caller", text)
 
     async def receive(self, timeout: float) -> Any:
         if self._queue:
@@ -388,82 +658,134 @@ class VoiceBridge(Session):
         turn = _Turn()
         max_deadline = math.inf  # wall clock, set when the agent first speaks
         trailing = 0.0  # ms of silence since the agent last had energy
-        while True:
-            now = loop.time()
-            if turn.voiced_ms is None:
-                wait = deadline - now
-                if wait <= 0:
-                    return self._nothing_heard(turn, timeout)
-            else:
-                if max_deadline - now <= 0:
-                    raise self._too_long()
-                wait = min(silence_ms / 1000, max_deadline - now)
-            try:
-                event = await self.audio.next_event(wait)
-            except TransportTimeout:
+        quiet_since = loop.time()  # when the last event came
+        try:
+            while True:
+                now = loop.time()
+                early = False  # woken before the silence is up, to act (the duplex driver)
                 if turn.voiced_ms is None:
-                    return self._nothing_heard(turn, timeout)
-                if loop.time() >= max_deadline:
-                    raise self._too_long() from None
-                break  # silence after it spoke: the end of its turn
-            if isinstance(event, AgentAudio):
-                if turn.first_ms is None:
-                    turn.first_ms = event.at_ms
-                turn.chunks.append(event.pcm16)
-                turn.audio_ms += duration_ms(event.pcm16, self.rate)
-                if has_energy(event.pcm16, self.cfg.silence_dbfs):
-                    trailing = 0.0
+                    wait = deadline - now
+                    if wait <= 0:
+                        return self._nothing_heard(turn, timeout)
+                else:
+                    if max_deadline - now <= 0:
+                        raise self._too_long(turn)
+                    if turn.done and not self._playing(turn):
+                        break  # it is over, and what it sent has played out
+                    if turn.done:
+                        wait = max_deadline - now  # only the play-out is left (_due)
+                    else:
+                        silence_left = silence_ms / 1000 - (now - quiet_since)
+                        wait = min(max(silence_left, 0.0), max_deadline - now)
+                    due = self._due(turn)
+                    if due is not None and (due < wait or wait <= 0):
+                        wait, early = due, True
+                    wait = max(wait, 0.0)
+                try:
+                    event = await self._next_event(wait)
+                except TransportTimeout:
                     if turn.voiced_ms is None:
-                        self._speech_starts(turn, event.at_ms)
-                        max_deadline = loop.time() + self.cfg.max_turn_seconds
-                elif turn.voiced_ms is not None:
-                    trailing += duration_ms(event.pcm16, self.rate)
-                    if trailing >= silence_ms:
-                        break
-                if turn.audio_ms > limit_ms:
-                    # Measured by the audio itself as well as the wall clock: an answer that
-                    # arrives all at once (audio-http) is ten minutes long however fast it
-                    # came. The STT never gets more than max_turn_seconds of it.
-                    if turn.voiced_ms is not None:
-                        raise self._too_long()
-                    turn.reset_audio()  # that much silence is not speech: drop it, keep waiting
-            elif isinstance(event, AgentSpeechEnd):
-                if turn.voiced_ms is not None:
-                    break
-                turn.reset_audio()  # silence is not speech: keep waiting for words
-            elif isinstance(event, AgentSpeechStart):
-                continue  # speech starts with its first chunk that has energy
-            elif isinstance(event, AgentTranscript):
-                if event.of == "agent":
-                    turn.own_transcript = event.text
-            elif isinstance(event, UndecodableAudio):
-                return self._hand_over([*turn.before, self._undecodable(event), *turn.after])
-            elif isinstance(event, AgentFrame):
-                payload = event.payload
-                frame = payload if isinstance(payload, dict) else {"_raw": payload}
-                answers = self._answers(frame)
-                if turn.voiced_ms is None:
-                    turn.before.append(frame)
-                    if answers:
-                        # A checkpoint, a result, an error, words: the agent answered.
-                        return self._hand_over([*turn.before, *turn.after])
-                    # A notification ("response.created") or anything else that is not an
-                    # answer is kept, in order, and the wait for the spoken answer goes on.
+                        return self._nothing_heard(turn, timeout)
+                    if loop.time() >= max_deadline:
+                        raise self._too_long(turn) from None
+                    if early or self._playing(turn):
+                        continue  # woken to act, or the audio is still playing out
+                    break  # silence after it spoke: the end of its turn
+                quiet_since = loop.time()
+                if turn.following or (
+                    turn.done
+                    and (
+                        isinstance(event, AgentSpeechStart)
+                        or (
+                            isinstance(event, AgentAudio)
+                            and has_energy(event.pcm16, self.cfg.silence_dbfs)
+                        )
+                    )
+                ):
+                    # Speech after the turn was over is the agent's next turn, and so is
+                    # everything read after it (the duplex driver waits for the play-out,
+                    # and the agent may start again meanwhile).
+                    turn.following.append(event)
                     continue
-                turn.after.append(frame)
-                if answers:
-                    break  # a data message that answers, after the speech: the speech is over
-            elif isinstance(event, Hangup):
-                self._event(event.at_ms, "hangup", event.by)
-                self._hung_up = True
-                note = self._notification("hangup", by=event.by)
-                self._enders.append(note)
-                if turn.voiced_ms is None:
-                    return self._hand_over([*turn.before, note, *turn.after])
-                turn.after.append(note)
-                break
-            elif isinstance(event, Dtmf | Transfer | Mark):
-                self._side_event(event, turn)
+                if isinstance(event, AgentAudio):
+                    if turn.first_ms is None:
+                        turn.first_ms = event.at_ms
+                    turn.chunks.append(event.pcm16)
+                    turn.audio_ms += duration_ms(event.pcm16, self.rate)
+                    voiced = has_energy(event.pcm16, self.cfg.silence_dbfs)
+                    if voiced:
+                        trailing = 0.0
+                        if turn.voiced_ms is None:
+                            self._speech_starts(turn, event.at_ms)
+                            max_deadline = loop.time() + self.cfg.max_turn_seconds
+                    elif turn.voiced_ms is not None:
+                        trailing += duration_ms(event.pcm16, self.rate)
+                    self._played(
+                        turn, event.at_ms, event.pcm16, voiced and turn.voiced_ms is not None
+                    )
+                    if turn.voiced_ms is not None and not voiced and trailing >= silence_ms:
+                        turn.over = True  # silence in its audio: over once played out
+                    if turn.audio_ms > limit_ms:
+                        # Measured by the audio itself as well as the wall clock: an answer
+                        # that arrives all at once (audio-http) is ten minutes long however
+                        # fast it came. The STT never gets more than max_turn_seconds of it.
+                        if turn.voiced_ms is not None:
+                            raise self._too_long(turn)
+                        turn.reset_audio()  # that much silence is not speech: keep waiting
+                elif isinstance(event, AgentSpeechEnd):
+                    if turn.voiced_ms is not None:
+                        turn.said_end = True
+                        if self._speech_ended(turn, event.at_ms):
+                            break
+                        continue  # its audio is still playing out (the duplex driver)
+                    turn.reset_audio()  # silence is not speech: keep waiting for words
+                elif isinstance(event, AgentSpeechStart):
+                    continue  # speech starts with its first chunk that has energy
+                elif isinstance(event, AgentTranscript):
+                    if event.of == "agent":
+                        turn.own_transcript = event.text
+                    else:
+                        self._agent_heard(event)
+                elif isinstance(event, UndecodableAudio):
+                    return self._hand_over([*turn.before, self._undecodable(event), *turn.after])
+                elif isinstance(event, AgentFrame):
+                    payload = event.payload
+                    frame = payload if isinstance(payload, dict) else {"_raw": payload}
+                    stale = self._stale(event.at_ms)
+                    if stale:
+                        # It came before the caller's latest turn ended: kept in order, and
+                        # never the answer to that turn (driver: Session.stale).
+                        self._stale_frames.append(frame)
+                    answers = self._answers(frame) and not stale
+                    if turn.voiced_ms is None:
+                        turn.before.append(frame)
+                        if answers:
+                            # A checkpoint, a result, an error, words: the agent answered.
+                            return self._hand_over([*turn.before, *turn.after])
+                        # A notification ("response.created") or anything else that is not
+                        # an answer is kept, in order, and the wait for the spoken answer
+                        # goes on.
+                        continue
+                    turn.after.append(frame)
+                    if answers:
+                        turn.over = True  # a data message that answers, after the speech
+                elif isinstance(event, Hangup):
+                    self._event(event.at_ms, "hangup", event.by)
+                    self._hung_up = True
+                    note = self._notification("hangup", by=event.by)
+                    self._enders.append(note)
+                    if turn.voiced_ms is None:
+                        return self._hand_over([*turn.before, note, *turn.after])
+                    turn.after.append(note)
+                    break
+                elif isinstance(event, Dtmf | Transfer | Mark):
+                    self._side_event(event, turn)
+        finally:
+            # Whatever ends the turn (a hand-over, too long, a closed line), what was read
+            # for the agent's next turn is read again by it, first and in order.
+            if turn.following:
+                self._held.extendleft(reversed(turn.following))
+                turn.following.clear()
         return await self._finish(turn)
 
     def _speech_starts(self, turn: _Turn, at_ms: float) -> None:
@@ -480,6 +802,8 @@ class VoiceBridge(Session):
             turn.barge_in = True
             turn.barge_event = len(self._events)
             self._event(at_ms, "barge_in", "agent", "agent speech began before the caller finished")
+        elif caller_end is not None:
+            turn.latency_ms = at_ms - caller_end
 
     def _hand_over(self, frames: list[dict[str, Any]]) -> dict[str, Any]:
         self._queue.extend(frames[1:])
@@ -528,6 +852,7 @@ class VoiceBridge(Session):
         start = turn.first_ms if turn.first_ms is not None else self.audio.clock.now_ms()
         end = self.audio.clock.now_ms()
         self._event(end, "speech_end", "agent")
+        agent_turn = self._close(turn)
         number = self._next_file()
         ref = self.recorder.keep(
             turn=number, speaker="agent", pcm16=pcm, rate=self.rate, start_ms=start
@@ -539,7 +864,15 @@ class VoiceBridge(Session):
             event = self._events[turn.barge_event]
             tagged = f"{event.detail} (turn {number})" if event.detail else f"(turn {number})"
             self._events[turn.barge_event] = event.model_copy(update={"detail": tagged})
-        text, info, evidence = await self._hear(pcm)
+        text, info, evidence = await self._hear(pcm, cut=self._cut(turn))
+        if self._yielded(turn):
+            # The caller interrupted it and it stopped: the judges are told (a harness fact)
+            # that the turn is a fragment by the caller's doing (review of #91).
+            evidence["cut_by_caller"] = True
+        if agent_turn is not None:
+            agent = self._log.agents[agent_turn - 1]
+            agent.heard = evidence.get("heard")
+            agent.confidence = info.confidence
         if turn.own_transcript is not None:
             evidence["agent_transcript"] = turn.own_transcript
         payload: dict[str, Any] = {
@@ -547,10 +880,8 @@ class VoiceBridge(Session):
             self.profile.text_field: text,
             VOICE_KEY: evidence,
         }
-        latency = None
-        if self._caller_end_ms is not None and turn.voiced_ms is not None and not turn.barge_in:
-            latency = turn.voiced_ms - self._caller_end_ms
-        self._received.append((payload, FrameMedia(audio=ref, transcript=info, latency_ms=latency)))
+        media = FrameMedia(audio=ref, transcript=info, latency_ms=turn.latency_ms)
+        self._received.append((payload, media))
         self._enders.append(payload)
         return self._hand_over([*turn.before, payload, *turn.after])
 
@@ -565,14 +896,25 @@ class VoiceBridge(Session):
             "confidence": heard.confidence,
         }
 
-    async def _hear(self, pcm: bytes) -> tuple[str, TranscriptInfo, dict[str, Any]]:
+    def _cut(self, turn: _Turn) -> bool:
+        """Whether this turn is a fragment too short to prove anything if no STT reads it:
+        the caller cut it off, the agent stopped, and little was said (the duplex driver)."""
+        return False
+
+    def _yielded(self, turn: _Turn) -> bool:
+        """Whether the caller interrupted this turn and the agent stopped for it."""
+        return False
+
+    async def _hear(
+        self, pcm: bytes, *, cut: bool = False
+    ) -> tuple[str, TranscriptInfo, dict[str, Any]]:
         audio = Audio(pcm16=pcm, rate=self.rate)
         level = level_dbfs(pcm)
         evidence: dict[str, Any] = {
             "level_dbfs": round(level, 1) if level != float("-inf") else None,
             "duration_ms": round(duration_ms(pcm, self.rate), 1),
         }
-        first = await self._clock(self.kit.stt.transcribe(audio, language=self.language))
+        first = await self._harness(self.kit.stt.transcribe(audio, language=self.language), "stt")
         tried = [self._tried("stt", first)]
         evidence["transcripts"] = tried
         if usable(first.text):
@@ -582,7 +924,9 @@ class VoiceBridge(Session):
         second = self.kit.second
         if second is not None:
             try:
-                other = await self._clock(second.transcribe(audio, language=self.language))
+                other = await self._harness(
+                    second.transcribe(audio, language=self.language), "second_stt"
+                )
             except SttError as exc:
                 tried.append({"by": "second_stt", "error": str(exc)})
             else:
@@ -591,6 +935,12 @@ class VoiceBridge(Session):
                     evidence["heard"] = "second_stt"
                     self._annotate(other, evidence)
                     return other.text, other.info(), evidence
+        if cut:
+            # A fragment the caller cut off may be too short for any STT: that is not proof
+            # the agent's audio is bad, and it must never fail it (ADR-0055). Its unusable
+            # text is not what the agent said, so no judge reads it (review of #91).
+            evidence["heard"] = "cut_short"
+            return "", first.info(), evidence
         canary = await self._canary()
         evidence["canary"] = canary
         heard: Heard = "unintelligible" if canary["healthy"] else "asr_failed"
@@ -623,8 +973,9 @@ class VoiceBridge(Session):
             return {**base, "healthy": False, "error": "no caller turn to check the STT on"}
         said, wire = self._caller
         try:
-            heard = await self._clock(
-                stt.transcribe(Audio(pcm16=wire, rate=self.rate), language=self.language)
+            heard = await self._harness(
+                stt.transcribe(Audio(pcm16=wire, rate=self.rate), language=self.language),
+                "canary",
             )
         except SttError as exc:
             return {**base, "healthy": False, "error": str(exc)}
@@ -653,17 +1004,21 @@ class VoiceTransport(Transport):
         *,
         recorder: AudioRecorder | None = None,
         language: str = "en",
+        voice: VoiceSpec | None = None,
     ) -> None:
         self.audio = audio
         self.profile = profile
         self.kit = kit
         self.recorder = recorder or AudioRecorder(None, "attempt", 0)
         self.language = language
+        self.voice = voice
         self.name = audio.name
 
-    def for_attempt(self, recorder: AudioRecorder, language: str) -> VoiceTransport:
+    def for_attempt(
+        self, recorder: AudioRecorder, language: str, voice: VoiceSpec | None = None
+    ) -> VoiceTransport:
         return VoiceTransport(
-            self.audio, self.profile, self.kit, recorder=recorder, language=language
+            self.audio, self.profile, self.kit, recorder=recorder, language=language, voice=voice
         )
 
     @property
@@ -677,7 +1032,29 @@ class VoiceTransport(Transport):
         except BaseException:
             await session.close()
             raise
-        return VoiceBridge(session, self.profile, self.kit, self.recorder, language=self.language)
+        if self.voice is not None and self.voice.runs_duplex:
+            from opseval.voice.duplex import DuplexBridge
+
+            try:
+                return DuplexBridge(
+                    session,
+                    self.profile,
+                    self.kit,
+                    self.recorder,
+                    language=self.language,
+                    voice=self.voice,
+                )
+            except BaseException:
+                await session.close()
+                raise
+        return VoiceBridge(
+            session,
+            self.profile,
+            self.kit,
+            self.recorder,
+            language=self.language,
+            voice=self.voice,
+        )
 
 
 __all__ = ["SpeechKit", "VoiceBridge", "VoiceTransport", "in_script", "usable"]

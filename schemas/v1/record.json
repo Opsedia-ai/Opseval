@@ -329,6 +329,41 @@
       "title": "InterruptRecord",
       "type": "object"
     },
+    "NoiseInfo": {
+      "additionalProperties": false,
+      "description": "The background noise mixed into the caller's audio (ADR-0055): enough to make it\nagain, bit for bit (generator, kind, seed) and to read a result against it (SNR).",
+      "properties": {
+        "generator": {
+          "title": "Generator",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "white",
+            "pink",
+            "babble"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "seed": {
+          "title": "Seed",
+          "type": "integer"
+        },
+        "snr_db": {
+          "title": "Snr Db",
+          "type": "number"
+        }
+      },
+      "required": [
+        "generator",
+        "kind",
+        "snr_db",
+        "seed"
+      ],
+      "title": "NoiseInfo",
+      "type": "object"
+    },
     "ProbeResult": {
       "additionalProperties": false,
       "description": "What one protocol probe got back (FR-RUN-07).",
@@ -799,6 +834,168 @@
       "title": "UsageEvent",
       "type": "object"
     },
+    "VoiceAgentHeard": {
+      "additionalProperties": false,
+      "description": "One final transcript the agent sent of the caller (``AgentTranscript(of=caller)``),\nstamped on arrival; attributed to a caller turn by time when the metrics are computed.",
+      "properties": {
+        "at_ms": {
+          "minimum": 0,
+          "title": "At Ms",
+          "type": "number"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "at_ms",
+        "text"
+      ],
+      "title": "VoiceAgentHeard",
+      "type": "object"
+    },
+    "VoiceAgentTurn": {
+      "additionalProperties": false,
+      "description": "One spoken agent turn, as the metrics read it.",
+      "properties": {
+        "burst": {
+          "default": false,
+          "title": "Burst",
+          "type": "boolean"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "heard": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Heard"
+        },
+        "turn": {
+          "minimum": 1,
+          "title": "Turn",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn"
+      ],
+      "title": "VoiceAgentTurn",
+      "type": "object"
+    },
+    "VoiceBargeIn": {
+      "additionalProperties": false,
+      "description": "A planted interruption and what became of it.",
+      "properties": {
+        "after_ms": {
+          "minimum": 0,
+          "title": "After Ms",
+          "type": "integer"
+        },
+        "agent_turn": {
+          "minimum": 1,
+          "title": "Agent Turn",
+          "type": "integer"
+        },
+        "ended_at_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At Ms"
+        },
+        "fired_at_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fired At Ms"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "agent_turn",
+        "after_ms"
+      ],
+      "title": "VoiceBargeIn",
+      "type": "object"
+    },
+    "VoiceCallerTurn": {
+      "additionalProperties": false,
+      "description": "One caller turn, as the metrics read it (ADR-0055).",
+      "properties": {
+        "barge_in": {
+          "default": false,
+          "title": "Barge In",
+          "type": "boolean"
+        },
+        "end_ms": {
+          "minimum": 0,
+          "title": "End Ms",
+          "type": "number"
+        },
+        "start_ms": {
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "number"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "turn": {
+          "minimum": 1,
+          "title": "Turn",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn",
+        "text",
+        "start_ms",
+        "end_ms"
+      ],
+      "title": "VoiceCallerTurn",
+      "type": "object"
+    },
     "VoiceEventRecord": {
       "additionalProperties": false,
       "properties": {
@@ -826,7 +1023,8 @@
             "dtmf",
             "transfer",
             "hangup",
-            "mark"
+            "mark",
+            "agent_heard"
           ],
           "title": "Kind",
           "type": "string"
@@ -855,6 +1053,224 @@
       "title": "VoiceEventRecord",
       "type": "object"
     },
+    "VoiceMetric": {
+      "additionalProperties": false,
+      "description": "One raw voice measurement (ADR-0055), the files-mode twin of an ``attempt_metrics`` row\n(ADR-0051): one row per turn for a per-turn metric (``turn`` set), one per attempt for an\nattempt-level one (``turn`` None). Percentiles are computed from the rows by whoever reads\nthem, never stored folded.\n\n``value`` None is **not measured**, and ``reason`` says why; it is never 0. ``degraded``\nmarks a value measured on partial evidence (a gap the clocks could not place was left\nout), and ``reason`` names what was left out.",
+      "properties": {
+        "degraded": {
+          "default": false,
+          "title": "Degraded",
+          "type": "boolean"
+        },
+        "name": {
+          "enum": [
+            "voice.time_to_first_audio_ms",
+            "voice.turn_latency_ms",
+            "voice.barge_in_yield_ms",
+            "voice.talk_over_ratio",
+            "voice.dead_air_ms",
+            "voice.agent_asr_wer",
+            "voice.asr_confidence"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "turn": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn"
+        },
+        "unit": {
+          "enum": [
+            "ms",
+            "ratio",
+            "wer",
+            "confidence"
+          ],
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "unit"
+      ],
+      "title": "VoiceMetric",
+      "type": "object"
+    },
+    "VoiceMetricInputs": {
+      "additionalProperties": false,
+      "description": "Everything besides the spans that the voice metrics are computed from (layout 8).",
+      "properties": {
+        "agent_heard": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/VoiceAgentHeard"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Heard"
+        },
+        "agents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VoiceAgentTurn"
+          },
+          "title": "Agents",
+          "type": "array"
+        },
+        "barge_ins": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VoiceBargeIn"
+          },
+          "title": "Barge Ins",
+          "type": "array"
+        },
+        "call_start_ms": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Call Start Ms",
+          "type": "number"
+        },
+        "callers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VoiceCallerTurn"
+          },
+          "title": "Callers",
+          "type": "array"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "VoiceMetricInputs",
+      "type": "object"
+    },
+    "VoiceSpan": {
+      "additionalProperties": false,
+      "description": "One stretch of the call on the attempt's monotonic clock (ADR-0055).\n\n``speech``: someone made sound. A caller span is one whole caller turn, from its first\nsample to its last (a planted mid-turn silence included: the caller has not finished);\n``barge_in`` marks the caller's planted interruptions. An agent span is one voiced stretch\nof an agent turn, from its first chunk with energy to the end of its last one as it would\nplay out (a chunk cannot play before it arrives, nor over the one before it), so a turn\nwith pauses is several spans with the same ``turn``. ``harness``: Opseval's own TTS or STT\nwas working; such a span is never the agent's time, and a gap it overlaps cannot be\nplaced (left out, degraded).",
+      "properties": {
+        "barge_in": {
+          "default": false,
+          "title": "Barge In",
+          "type": "boolean"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "end_ms": {
+          "title": "End Ms",
+          "type": "number"
+        },
+        "holds_line": {
+          "default": true,
+          "title": "Holds Line",
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "speech",
+            "harness"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "speaker": {
+          "anyOf": [
+            {
+              "enum": [
+                "caller",
+                "agent"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Speaker"
+        },
+        "start_ms": {
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "number"
+        },
+        "turn": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn"
+        }
+      },
+      "required": [
+        "kind",
+        "start_ms",
+        "end_ms"
+      ],
+      "title": "VoiceSpan",
+      "type": "object"
+    },
     "VoiceTimeline": {
       "additionalProperties": false,
       "description": "A voice attempt's timeline on its monotonic clock (ADR-0053, ADR-0055).",
@@ -876,9 +1292,84 @@
           "title": "Events",
           "type": "array"
         },
+        "inputs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VoiceMetricInputs"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/VoiceMetric"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metrics"
+        },
+        "mode": {
+          "default": "turns",
+          "enum": [
+            "turns",
+            "duplex"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "noise": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NoiseInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "rate": {
           "title": "Rate",
           "type": "integer"
+        },
+        "spans": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/VoiceSpan"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Spans"
+        },
+        "stt_min_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stt Min Confidence"
         }
       },
       "required": [

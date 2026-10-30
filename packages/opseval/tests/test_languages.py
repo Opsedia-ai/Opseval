@@ -444,4 +444,5 @@ def test_effective_language_tags() -> None:
 
 
 def test_the_language_judges_were_bumped() -> None:
-    assert LanguageConsistency.version == "3" and PersonaConsistency.version == "3"
+    # 3: the resolved pack (ADR-0059); 4: code-switching in context and rubric (ADR-0055).
+    assert LanguageConsistency.version == "4" and PersonaConsistency.version == "4"

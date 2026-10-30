@@ -140,9 +140,168 @@ class TranscriptInfo(Frozen):
 
 class VoiceEventRecord(Frozen):
     at_ms: float
-    kind: Literal["speech_start", "speech_end", "barge_in", "dtmf", "transfer", "hangup", "mark"]
+    kind: Literal[
+        "speech_start",
+        "speech_end",
+        "barge_in",
+        "dtmf",
+        "transfer",
+        "hangup",
+        "mark",
+        "agent_heard",
+    ]
+    """``agent_heard`` (ADR-0055): the agent's own transcript of a caller turn, when its
+    protocol sends one (``detail``, redacted like any transcript); ``voice.agent_asr_wer``
+    grades it against what the caller said."""
     speaker: Literal["caller", "agent"] | None = None
     detail: str | None = None
+
+
+class VoiceSpan(Frozen):
+    """One stretch of the call on the attempt's monotonic clock (ADR-0055).
+
+    ``speech``: someone made sound. A caller span is one whole caller turn, from its first
+    sample to its last (a planted mid-turn silence included: the caller has not finished);
+    ``barge_in`` marks the caller's planted interruptions. An agent span is one voiced stretch
+    of an agent turn, from its first chunk with energy to the end of its last one as it would
+    play out (a chunk cannot play before it arrives, nor over the one before it), so a turn
+    with pauses is several spans with the same ``turn``. ``harness``: Opseval's own TTS or STT
+    was working; such a span is never the agent's time, and a gap it overlaps cannot be
+    placed (left out, degraded)."""
+
+    kind: Literal["speech", "harness"]
+    speaker: Literal["caller", "agent"] | None = None
+    start_ms: float = Field(ge=0)
+    end_ms: float
+    turn: int | None = Field(default=None, ge=1)
+    """The speaker's own turn number (1 = its first): caller turns and agent turns are
+    counted separately. None for a harness span."""
+    barge_in: bool = False
+    """A caller turn the scenario planted to interrupt the agent (``voice.barge_in``)."""
+    detail: str | None = None
+    """For a harness span: what ran (``tts``, ``stt``, ``canary``, ``noise``)."""
+    holds_line: bool = True
+    """For a harness span: whether the agent's audio could not be heard (placed on the clock)
+    while it ran. ``False`` on the duplex driver, whose session stamps every agent event on
+    arrival while Opseval works (the ``duplex`` capability): such a span is beside the agent's
+    path, and a gap it overlaps is measured. Only a span that holds the line leaves a gap
+    out (``UNPLACEABLE``, review of #91)."""
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if self.end_ms < self.start_ms:
+            raise ValueError("a span cannot end before it starts (end_ms < start_ms)")
+        if (self.kind == "speech") != (self.speaker is not None):
+            raise ValueError("a speech span names its speaker; a harness span names none")
+        if self.barge_in and self.speaker != "caller":
+            raise ValueError("only a caller turn is a planted barge-in")
+        return self
+
+
+VoiceMetricName = Literal[
+    "voice.time_to_first_audio_ms",
+    "voice.turn_latency_ms",
+    "voice.barge_in_yield_ms",
+    "voice.talk_over_ratio",
+    "voice.dead_air_ms",
+    "voice.agent_asr_wer",
+    "voice.asr_confidence",
+]
+
+
+class VoiceMetric(Frozen):
+    """One raw voice measurement (ADR-0055), the files-mode twin of an ``attempt_metrics`` row
+    (ADR-0051): one row per turn for a per-turn metric (``turn`` set), one per attempt for an
+    attempt-level one (``turn`` None). Percentiles are computed from the rows by whoever reads
+    them, never stored folded.
+
+    ``value`` None is **not measured**, and ``reason`` says why; it is never 0. ``degraded``
+    marks a value measured on partial evidence (a gap the clocks could not place was left
+    out), and ``reason`` names what was left out."""
+
+    name: VoiceMetricName
+    turn: int | None = Field(default=None, ge=1)
+    """The agent turn (or, for ``voice.agent_asr_wer``, the caller turn) it measures."""
+    value: float | None
+    unit: Literal["ms", "ratio", "wer", "confidence"]
+    degraded: bool = False
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _explained(self) -> Self:
+        if (self.value is None or self.degraded) and not self.reason:
+            raise ValueError("a metric that is not measured, or degraded, says why (reason)")
+        return self
+
+
+class NoiseInfo(Frozen):
+    """The background noise mixed into the caller's audio (ADR-0055): enough to make it
+    again, bit for bit (generator, kind, seed) and to read a result against it (SNR)."""
+
+    generator: str
+    """``opseval-noise/<version>``: the in-house procedural generator."""
+    kind: Literal["white", "pink", "babble"]
+    snr_db: float
+    seed: int
+
+
+class VoiceCallerTurn(Frozen):
+    """One caller turn, as the metrics read it (ADR-0055)."""
+
+    turn: int = Field(ge=1)
+    """The caller's own turn number in the call (planted interruptions included), as on its
+    speech span."""
+    text: str
+    """What the caller said, before any noise (redacted): the agent WER's reference."""
+    start_ms: float = Field(ge=0)
+    end_ms: float = Field(ge=0)
+    barge_in: bool = False
+
+
+class VoiceAgentTurn(Frozen):
+    """One spoken agent turn, as the metrics read it."""
+
+    turn: int = Field(ge=1)
+    heard: str | None = None
+    """How Opseval heard it (``stt``, ``second_stt``, ``unintelligible``, ``asr_failed``,
+    ``cut_short``); None when it was never transcribed."""
+    confidence: float | None = None
+    burst: bool = False
+    """Its audio arrived faster than it plays (turn-based bridge): pauses inside it are not on
+    the clock, so its dead air is degraded."""
+
+
+class VoiceAgentHeard(Frozen):
+    """One final transcript the agent sent of the caller (``AgentTranscript(of=caller)``),
+    stamped on arrival; attributed to a caller turn by time when the metrics are computed."""
+
+    at_ms: float = Field(ge=0)
+    text: str
+
+
+class VoiceBargeIn(Frozen):
+    """A planted interruption and what became of it."""
+
+    agent_turn: int = Field(ge=1)
+    after_ms: int = Field(ge=0)
+    fired_at_ms: float | None = None
+    ended_at_ms: float | None = None
+    """When the caller finished the interruption."""
+    reason: str | None = None
+
+
+class VoiceMetricInputs(Frozen):
+    """Everything besides the spans that the voice metrics are computed from (layout 8)."""
+
+    version: str
+    """The metric rules' version (``voice.metrics.METRICS_VERSION``) the stored rows were
+    computed with."""
+    call_start_ms: float = Field(default=0.0, ge=0)
+    callers: tuple[VoiceCallerTurn, ...] = ()
+    agents: tuple[VoiceAgentTurn, ...] = ()
+    agent_heard: tuple[VoiceAgentHeard, ...] | None = None
+    """None: the agent sent no transcript of the caller at all (its WER is not measurable)."""
+    barge_ins: tuple[VoiceBargeIn, ...] = ()
 
 
 class VoiceTimeline(Frozen):
@@ -151,6 +310,24 @@ class VoiceTimeline(Frozen):
     codec: Literal["pcm16", "mulaw", "alaw"]
     rate: int
     events: tuple[VoiceEventRecord, ...] = ()
+    mode: Literal["turns", "duplex"] = "turns"
+    """``turns``: the voice bridge (one side speaks, then the other). ``duplex``: the
+    full-duplex driver, which plays the caller in real time while it listens (ADR-0055)."""
+    spans: tuple[VoiceSpan, ...] | None = None
+    """Who spoke when, and when the harness worked. None on records written before ADR-0055
+    (layouts 3 to 6): not recorded, so every voice metric reads as not measured."""
+    metrics: tuple[VoiceMetric, ...] | None = None
+    """The raw voice metrics, computed from ``spans`` when the attempt ended. None on older
+    records: not measured, never 0."""
+    noise: NoiseInfo | None = None
+    inputs: VoiceMetricInputs | None = None
+    """What the metrics were computed from besides ``spans`` (layout 8): caller texts and
+    times, the agent's own transcripts with their arrival, agent turns, planted barge-ins.
+    ``opseval rescore`` recomputes the metrics from them when the metric rules changed
+    (``inputs.version``). None on older records: their stored metrics are used as written."""
+    stt_min_confidence: float | None = Field(default=None, ge=0, le=1)
+    """``OPSEVAL_STT_MIN_CONFIDENCE`` when the call ran (layout 8): the bound under which a
+    word or turn Opseval heard counts as unsure (``judge.pronunciation_dialect_fit``)."""
 
     @field_validator("rate")
     @classmethod

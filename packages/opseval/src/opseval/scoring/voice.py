@@ -169,7 +169,9 @@ class VoiceIntelligible(Scorer):
     """
 
     id = VOICE_INTELLIGIBLE
-    version = "2"  # 2: undecodable audio fails it; unheard turns degrade, never void it
+    # 2: undecodable audio fails it; unheard turns degrade, never void it. 3: a turn the
+    # caller cut short that no STT could read (``cut_short``, ADR-0055) is left out.
+    version = "3"
     Params = NoParams
     axis = Axis.OUTPUT
     reads_text = False
@@ -194,7 +196,14 @@ class VoiceIntelligible(Scorer):
         # understand: the agent's fault, with the bytes' hash as proof, never a vacuous pass.
         broken = [(seq, ev) for seq, ev in turns if "undecodable" in ev]
         failed = [seq for seq, ev in turns if ev.get("heard") == "asr_failed"]
-        measured = len(turns) - len(failed)
+        cut = [seq for seq, ev in turns if ev.get("heard") == "cut_short"]
+        measured = len(turns) - len(failed) - len(cut)
+        if measured == 0 and cut and not failed:
+            return self.infra(
+                spec,
+                f"NOT_MEASURABLE: every agent turn was cut short by the caller (frames {cut}) "
+                "and none could be read",
+            )
         if measured == 0:
             found = voice_findings(record)
             return self.infra(spec, found.asr_reason if found else ASR_NO_TRANSCRIPT)
@@ -222,4 +231,5 @@ class VoiceIntelligible(Scorer):
             undecodable=undecodable,
             heard_by_second_stt=second,
             not_measured=failed,
+            cut_short=cut,
         )

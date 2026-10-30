@@ -62,11 +62,12 @@ class LanguageScriptParams(NoParams):
 
 
 def _spoken_unheard(frame: FrameRecord) -> bool:
-    """A spoken agent turn Opseval could not hear (its own STT proven broken, ADR-0053):
-    the agent did answer there, so calling it silence would blame it for Opseval's ears."""
+    """A spoken agent turn Opseval could not hear (its own STT proven broken, ADR-0053, or a
+    fragment the caller cut short, ADR-0055): the agent did answer there, so calling it
+    silence would blame it for Opseval's ears or the caller's interruption."""
     payload = frame.payload
     evidence = payload.get(VOICE_KEY) if isinstance(payload, dict) else None
-    return isinstance(evidence, dict) and evidence.get("heard") == "asr_failed"
+    return isinstance(evidence, dict) and evidence.get("heard") in ("asr_failed", "cut_short")
 
 
 @register

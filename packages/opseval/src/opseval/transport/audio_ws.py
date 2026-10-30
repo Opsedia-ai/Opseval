@@ -33,6 +33,7 @@ from opseval.errors import ConfigError, TransportClosed, TransportError, Transpo
 from opseval.models.profile import AudioConfig, SutProfile, render_frame
 from opseval.transport.audio import (
     DTMF,
+    DUPLEX,
     AgentAudio,
     AgentFrame,
     AgentSpeechEnd,
@@ -51,7 +52,7 @@ from opseval.transport.audio import (
 
 
 class AudioWsSession(AudioSession):
-    capabilities: ClassVar[frozenset[str]] = frozenset({DTMF})
+    capabilities: ClassVar[frozenset[str]] = frozenset({DTMF, DUPLEX})
 
     def __init__(self, transport: AudioWsTransport, cfg: AudioConfig) -> None:
         super().__init__(AudioFormat(codec=cfg.codec, rate=cfg.rate), AttemptClock())
@@ -160,7 +161,10 @@ class AudioWsSession(AudioSession):
         if kind == env.mark_event:
             return Mark(at_ms=at, name=str(frame.get(env.mark_name_field, "")))
         if kind == env.transcript_event:
-            return AgentTranscript(at_ms=at, text=str(frame.get(env.transcript_text_field, "")))
+            said = str(frame.get(env.transcript_text_field, ""))
+            if frame.get(env.transcript_of_field) == "caller":
+                return AgentTranscript(at_ms=at, text=said, of="caller")
+            return AgentTranscript(at_ms=at, text=said)
         if kind == env.dtmf_event:
             return Dtmf(at_ms=at, digits=str(frame.get(env.dtmf_digits_field, "")))
         if kind == env.transfer_event:
@@ -194,6 +198,7 @@ class AudioWsSession(AudioSession):
 
 class AudioWsTransport(AudioTransport):
     name = "audio-ws"
+    capabilities = AudioWsSession.capabilities
 
     def __init__(
         self,

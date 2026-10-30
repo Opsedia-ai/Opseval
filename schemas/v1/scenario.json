@@ -1,5 +1,39 @@
 {
   "$defs": {
+    "BargeIn": {
+      "additionalProperties": false,
+      "description": "The caller interrupts one of the agent's spoken turns.",
+      "properties": {
+        "after_ms": {
+          "default": 800,
+          "description": "How far into the agent's speech (from its first sample with energy) the caller starts\ntalking.",
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "After Ms",
+          "type": "integer"
+        },
+        "agent_turn": {
+          "description": "Which of the agent's spoken turns to interrupt (1 = its first).",
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Agent Turn",
+          "type": "integer"
+        },
+        "say": {
+          "description": "What the caller says over the agent. It becomes a customer turn in the record.",
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Say",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_turn",
+        "say"
+      ],
+      "title": "BargeIn",
+      "type": "object"
+    },
     "CheckpointPolicy": {
       "additionalProperties": false,
       "properties": {
@@ -476,6 +510,39 @@
       "title": "Matrix",
       "type": "object"
     },
+    "Noise": {
+      "additionalProperties": false,
+      "description": "Background noise mixed into the caller's audio at a set signal-to-noise ratio.\n\nThe noise is generated, not recorded (no speech, no licence, no size): ``white`` and\n``pink`` are what they say; ``babble`` is several amplitude-modulated, band-limited noise\nvoices, a crowd-like murmur with no words in it. The same ``seed`` gives the same noise.\nIt is mixed into what the agent hears only: the STT canary and every reference text use\nthe caller's clean audio and words.",
+      "properties": {
+        "kind": {
+          "default": "pink",
+          "enum": [
+            "white",
+            "pink",
+            "babble"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "seed": {
+          "default": 0,
+          "maximum": 2147483647,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "snr_db": {
+          "default": 15.0,
+          "description": "Signal-to-noise ratio in dB, measured against the caller's speech.",
+          "maximum": 60.0,
+          "minimum": -10.0,
+          "title": "Snr Db",
+          "type": "number"
+        }
+      },
+      "title": "Noise",
+      "type": "object"
+    },
     "OrderingRule": {
       "additionalProperties": false,
       "properties": {
@@ -647,6 +714,106 @@
       ],
       "title": "ScorerSpec",
       "type": "object"
+    },
+    "Silence": {
+      "additionalProperties": false,
+      "description": "The caller says nothing for a while, before speaking or in the middle of a turn.",
+      "properties": {
+        "at": {
+          "default": "mid",
+          "description": "``before``: silence, then the whole turn. ``mid``: the turn is cut at its middle word\nand the silence goes between the two halves (a caller pausing mid-sentence).",
+          "enum": [
+            "before",
+            "mid"
+          ],
+          "title": "At",
+          "type": "string"
+        },
+        "caller_turn": {
+          "description": "Which caller turn (1 = the opening message).",
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Caller Turn",
+          "type": "integer"
+        },
+        "ms": {
+          "description": "How long the silence lasts.",
+          "maximum": 30000,
+          "minimum": 50,
+          "title": "Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "caller_turn",
+        "ms"
+      ],
+      "title": "Silence",
+      "type": "object"
+    },
+    "VoiceSpec": {
+      "additionalProperties": false,
+      "description": "The scenario's ``voice:`` block (ADR-0055).",
+      "properties": {
+        "barge_in": {
+          "description": "Interruptions the caller makes (duplex only).",
+          "items": {
+            "$ref": "#/$defs/BargeIn"
+          },
+          "title": "Barge In",
+          "type": "array"
+        },
+        "caller_voice": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The caller's voice: a persona voice name looked up in ``OPSEVAL_TTS_VOICE_MAP`` (then\nthe language, then ``default``), or a provider voice as is. Unset: by language.",
+          "title": "Caller Voice"
+        },
+        "code_switching": {
+          "description": "Languages the caller mixes within a sentence (``[ar, en]``): an LLM persona is told to\nswitch between them, and the TTS voice is looked up for the first one, so it must be a\nvoice that speaks all of them (``caller_voice``).",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 3,
+          "title": "Code Switching",
+          "type": "array"
+        },
+        "duplex": {
+          "default": false,
+          "description": "Run on the full-duplex driver: the caller's audio is paced in real time while the\nagent's is read, so overlap, barge-in and dead air are measured. Implied by\n``barge_in``.",
+          "title": "Duplex",
+          "type": "boolean"
+        },
+        "noise": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Noise"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "silences": {
+          "items": {
+            "$ref": "#/$defs/Silence"
+          },
+          "title": "Silences",
+          "type": "array"
+        }
+      },
+      "title": "VoiceSpec",
+      "type": "object"
     }
   },
   "$id": "https://opsedia.ai/schemas/v1/scenario.json",
@@ -759,6 +926,17 @@
       },
       "title": "Tags",
       "type": "array"
+    },
+    "voice": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VoiceSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

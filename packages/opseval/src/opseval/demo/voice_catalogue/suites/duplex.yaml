@@ -1,0 +1,3 @@
+name: voice-duplex
+description: Full-duplex voice scenarios (the caller cuts in, pauses and speaks over noise). Used by `opseval demo --voice --duplex`.
+include: ["duplex/*.yaml"]

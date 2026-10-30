@@ -408,6 +408,10 @@ def schedule(record: RunRecord, found: list[Turn]) -> dict[int, float]:
     talking at once that never did. A barge-in the bridge recorded is kept as the overlap
     it was.
     """
+    if record.voice is not None and record.voice.mode == "duplex":
+        # The full-duplex driver plays both sides in real time (ADR-0055): the recorded
+        # times are the call as it happened, overlaps included.
+        return {turn.seq: turn.ref.start_ms for turn in found}
     kept = barged(record, found)
     out: dict[int, float] = {}
     shift = 0.0

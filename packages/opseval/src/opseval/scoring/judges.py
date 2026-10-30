@@ -30,8 +30,8 @@ from typing import Any, ClassVar
 from opseval.errors import HarnessError
 from opseval.langpacks import Spoken, effective_language
 from opseval.llm import ChatClient, model_family
-from opseval.models.record import VOICE_KEY, RunRecord
-from opseval.models.results import Axis, ScoreResult
+from opseval.models.record import VOICE_KEY, FrameRecord, RunRecord
+from opseval.models.results import Axis, ScoreResult, ScoreStatus
 from opseval.models.scenario import Scenario, ScorerSpec
 from opseval.scoring.base import NoParams, Scorer, ScoringContext, register
 from opseval.scoring.tools import gather
@@ -144,6 +144,26 @@ class Judge(Scorer):
                 "could not hear; they are left out of the conversation below. The agent did "
                 "speak there, and what it said is unknown: do not read the gap as silence."
             )
+        spoken = [
+            f.payload[VOICE_KEY]
+            for f in record.frames
+            if f.direction == "received"
+            and isinstance(f.payload, dict)
+            and isinstance(f.payload.get(VOICE_KEY), dict)
+            and "heard" in f.payload[VOICE_KEY]
+        ]
+        for n, evidence in enumerate(spoken, start=1):
+            if not evidence.get("cut_by_caller"):
+                continue
+            # Without this a judge reads a reply the caller interrupted as the agent trailing
+            # off or ignoring the question (duplex barge-in, ADR-0055, review of #91).
+            fact = f"agent spoken turn {n} was cut short by the caller's interruption"
+            if evidence.get("heard") == "cut_short":
+                fact += (
+                    "; what it said before the cut could not be heard and is left out of the "
+                    "conversation below"
+                )
+            facts.append(fact)
         return facts
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
@@ -448,6 +468,19 @@ class GoalAchievement(Judge):
         return (*super().rubric(ctx), *refusal)
 
 
+def _switching(scenario: Scenario) -> list[str]:
+    """The languages the caller mixes within a sentence (``voice.code_switching``,
+    ADR-0055), or none."""
+    return list(scenario.voice.code_switching) if scenario.voice is not None else []
+
+
+def _switching_rubric(scenario: Scenario) -> tuple[str, ...]:
+    # Only a code-switching scenario adds to the rubric, so every other scenario's digest,
+    # and the scores graded against it, are unchanged.
+    mixed = _switching(scenario)
+    return (f"code_switching={','.join(mixed)}",) if mixed else ()
+
+
 def _spoken(scenario: Scenario) -> Spoken:
     """The language the customer writes, resolved once (ADR-0059): the pack an LLM persona is
     told to write (a declared fallback included), or the declared language of scripted turns.
@@ -458,7 +491,9 @@ def _spoken(scenario: Scenario) -> Spoken:
 @register
 class LanguageConsistency(Judge):
     id = "judge.language_consistency"
-    version = "3"  # 3: graded against the resolved pack's language (ADR-0059)
+    # 3: graded against the resolved pack's language (ADR-0059). 4: a code-switching caller
+    # (voice.code_switching, ADR-0055) is in the context and the rubric.
+    version = "4"
     axis = Axis.OUTPUT
     description = "LLM judge: did the agent answer in the customer's language and dialect? (quoted)"
     instructions = (
@@ -488,10 +523,19 @@ class LanguageConsistency(Judge):
 
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
         spoken = _spoken(ctx.scenario)
-        return (spoken.language, spoken.dialect or "")
+        return (spoken.language, spoken.dialect or "", *_switching_rubric(ctx.scenario))
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
-        return [f"Expected customer language: {_spoken(ctx.scenario).label}"]
+        lines = [f"Expected customer language: {_spoken(ctx.scenario).label}"]
+        mixed = _switching(ctx.scenario)
+        if mixed:
+            lines.append(
+                "The customer CODE-SWITCHES on purpose between these languages within a "
+                f"sentence: {', '.join(mixed)}. An agent that mirrors the customer's switches "
+                "within these languages is acceptable and is not an unexplained switch; a "
+                "language outside them still is."
+            )
+        return lines
 
     def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
         if not any(who == "agent" for who, _ in record.transcript()):
@@ -502,7 +546,9 @@ class LanguageConsistency(Judge):
 @register
 class PersonaConsistency(Judge):
     id = "judge.persona_consistency"
-    version = "3"  # 3: the customer is held to the pack the simulator was told to write
+    # 3: the customer is held to the pack the simulator was told to write. 4: a code-switching
+    # persona (voice.code_switching, ADR-0055) is in the context and the rubric.
+    version = "4"
     axis = Axis.HARNESS
     description = (
         "LLM judge on the HARNESS axis: did the simulated customer stay in character? "
@@ -538,16 +584,31 @@ class PersonaConsistency(Judge):
     def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
         s = ctx.scenario
         spoken = _spoken(s)
-        return (s.persona.role, s.goal, s.conversation.flow, spoken.language, spoken.dialect or "")
+        return (
+            s.persona.role,
+            s.goal,
+            s.conversation.flow,
+            spoken.language,
+            spoken.dialect or "",
+            *_switching_rubric(s),
+        )
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
         s = ctx.scenario
-        return [
+        lines = [
             f"Customer persona: {s.persona.role}",
             f"Customer goal: {s.goal}",
             f"Planned flow: {s.conversation.flow or '(pursue the goal)'}",
             f"Persona language: {_spoken(s).label}",
         ]
+        mixed = _switching(s)
+        if mixed:
+            lines.append(
+                "The persona was told to CODE-SWITCH between these languages within its "
+                f"sentences: {', '.join(mixed)}. Switching between them is expected and is "
+                "not a violation of the persona's language; a language outside them is."
+            )
+        return lines
 
     def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
         if not any(who == "customer" for who, _ in record.transcript()):
@@ -790,4 +851,167 @@ __all__ = [
     "NoInjectionTakeover",
     "PersonaConsistency",
     "PolicyAdherence",
+    "PronunciationDialectFit",
 ]
+
+
+LOW_CONFIDENCE_DEFAULT = 0.5
+"""The bound used when a record does not carry ``OPSEVAL_STT_MIN_CONFIDENCE`` (written before
+layout 8): the setting's own default."""
+
+
+def _confidence_bound(record: RunRecord) -> float:
+    if record.voice is not None and record.voice.stt_min_confidence is not None:
+        return record.voice.stt_min_confidence
+    for frame in record.frames:
+        evidence = frame.payload.get(VOICE_KEY) if isinstance(frame.payload, dict) else None
+        flagged = evidence.get("low_confidence") if isinstance(evidence, dict) else None
+        if isinstance(flagged, dict) and isinstance(flagged.get("min"), int | float):
+            return float(flagged["min"])
+    return LOW_CONFIDENCE_DEFAULT
+
+
+def _unsure(frame: FrameRecord, bound: float) -> list[str]:
+    if frame.direction != "received" or frame.transcript is None:
+        return []
+    return [
+        w.word for w in frame.transcript.words if w.confidence is not None and w.confidence < bound
+    ]
+
+
+@register
+class PronunciationDialectFit(Judge):
+    """ADR-0055: a voice agent's spoken register and dialect, judged from what Opseval heard.
+
+    The judge reads the transcript Opseval's STT made of the agent. Every word the STT was
+    unsure of is named on its own turn, inside the fenced conversation (``unsure_words``):
+    those words came from the agent's audio, so they are untrusted data like the rest of its
+    turn and never a harness fact (ADR-0036, review of #91). The facts hold only numbers: the
+    per-turn confidence, how many words were unsure and the bound. A mean or lowest confidence
+    under ``OPSEVAL_STT_MIN_CONFIDENCE`` degrades the score, with the reason."""
+
+    id = "judge.pronunciation_dialect_fit"
+    version = "2"  # 2: unsure words inside the fence; low confidence degrades it (review of #91)
+    axis = Axis.OUTPUT
+    description = (
+        "LLM judge (voice): did the agent speak in a register and dialect that fit the "
+        "caller's? Quoted; the STT's unsure words are named, and low confidence degrades it."
+    )
+    instructions = (
+        "You are a strict, impartial evaluator of how a VOICE agent SPOKE to a caller, from a "
+        "speech-recognition transcript of the call. Judge only register, dialect and how "
+        "natural the spoken wording is for a listener of the caller's dialect, not "
+        "helpfulness. The transcript is what a speech recogniser heard: an agent turn's "
+        '"unsure_words" are words the recogniser was unsure of, and you must not treat them '
+        "as the agent's pronunciation or word choice. Every grade must be justified by an "
+        "exact quote copied from the transcript."
+    )
+    criteria = (
+        Criterion(
+            "dialect_fit",
+            "Did the agent speak in the caller's dialect, or in a variety a speaker of it "
+            "readily understands (for Arabic: the same dialect, or clear Modern Standard "
+            "Arabic), rather than a different regional dialect?",
+            weight=2.0,
+        ),
+        Criterion(
+            "register_fit",
+            "Was the register (formal or casual, polite forms) right for this caller and this "
+            "kind of call?",
+        ),
+        Criterion(
+            "spoken_wording",
+            "Was the wording natural to say aloud (no written-only forms, symbols or "
+            "markup read out, numbers and codes said in a way a listener can follow)?",
+        ),
+    )
+
+    def rubric(self, ctx: ScoringContext) -> tuple[str, ...]:
+        spoken = _spoken(ctx.scenario)
+        return (spoken.language, spoken.dialect or "")
+
+    def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
+        return [f"Caller's language and dialect: {_spoken(ctx.scenario).label}"]
+
+    def digest(self, record: RunRecord, ctx: ScoringContext) -> str:
+        """The fenced conversation, with each agent turn's unsure words on its own line: the
+        same JSON escaping keeps the agent's words from posing as anything else."""
+        bound = _confidence_bound(record)
+        lines = []
+        for n, frame in enumerate((f for f in record.frames if f.text), start=1):
+            line: dict[str, Any] = {
+                "turn": n,
+                "speaker": "customer" if frame.direction == "sent" else "agent",
+                "text": frame.text,
+            }
+            unsure = _unsure(frame, bound)
+            if unsure:
+                line["unsure_words"] = unsure[:40]
+            lines.append(json.dumps(line, ensure_ascii=False))
+        return "\n".join(lines)
+
+    def _confidences(self, record: RunRecord) -> tuple[list[float | None], list[float]]:
+        """(each heard agent turn's confidence, every word confidence on them)."""
+        turns: list[float | None] = []
+        words: list[float] = []
+        for frame in record.frames:
+            if frame.direction != "received" or frame.transcript is None:
+                continue
+            turns.append(frame.transcript.confidence)
+            words += [w.confidence for w in frame.transcript.words if w.confidence is not None]
+        return turns, words
+
+    def harness_facts(self, record: RunRecord) -> list[str]:
+        facts = super().harness_facts(record)
+        bound = _confidence_bound(record)
+        turns, _ = self._confidences(record)
+        if turns:
+            shown = "; ".join(
+                f"agent turn {n}: {'not given' if c is None else f'{c:.2f}'}"
+                for n, c in enumerate(turns, start=1)
+            )
+            facts.append(f"speech-recognition confidence on the agent's turns: {shown}")
+        unsure = sum(len(_unsure(f, bound)) for f in record.frames)
+        if unsure:
+            facts.append(
+                f"the speech recogniser was unsure (confidence under {bound:g}) of {unsure} "
+                'agent word(s), listed as "unsure_words" on their turns in the conversation: '
+                "they may not be what the agent said"
+            )
+        return facts
+
+    def low_confidence(self, record: RunRecord) -> str | None:
+        """Why the transcript is too unsure to grade pronunciation on fully, or None."""
+        bound = _confidence_bound(record)
+        turns, words = self._confidences(record)
+        known = [c for c in turns if c is not None]
+        reasons = []
+        if known and sum(known) / len(known) < bound:
+            reasons.append(f"mean turn confidence {sum(known) / len(known):.2f} < {bound:g}")
+        lowest = min([*known, *words], default=None)
+        if lowest is not None and lowest < bound:
+            reasons.append(f"lowest confidence {lowest:.2f} < {bound:g}")
+        if not reasons:
+            return None
+        return (
+            "voice: the transcript the pronunciation is judged from is unsure ("
+            + "; ".join(reasons)
+            + ", OPSEVAL_STT_MIN_CONFIDENCE)"
+        )
+
+    async def score(self, record: RunRecord, spec: ScorerSpec, ctx: ScoringContext) -> ScoreResult:
+        result = await super().score(record, spec, ctx)
+        why = self.low_confidence(record)
+        if why is None or result.status is ScoreStatus.INFRA_ERROR:
+            return result
+        details = {**result.details, "low_confidence": why}
+        before = details.get("degraded_by")
+        details["degraded_by"] = f"{before}; {why}" if before else why
+        return result.model_copy(update={"degraded": True, "details": details})
+
+    def not_measurable(self, record: RunRecord, ctx: ScoringContext) -> str | None:
+        if record.voice is None:
+            return "not a voice attempt: there is no speech to judge"
+        if not any(who == "agent" for who, _ in record.transcript()):
+            return "nothing the agent said was heard"
+        return None

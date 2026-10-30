@@ -5,6 +5,7 @@ from opseval.scoring import deterministic as _deterministic  # noqa: F401 - regi
 from opseval.scoring import judges as _judges  # noqa: F401 - registers judges
 from opseval.scoring import tools as _tools  # noqa: F401 - registers tool scorers
 from opseval.scoring import voice as _voice  # noqa: F401 - registers voice.intelligible
+from opseval.scoring import voice_metrics as _voice_metrics  # noqa: F401 - voice.* metrics
 from opseval.scoring.base import (
     ALWAYS_ON,
     DEFAULT_PACK,

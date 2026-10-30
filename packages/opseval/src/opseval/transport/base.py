@@ -100,6 +100,19 @@ class Session(ABC):
         """The driver hands over how to run a harness call off the agent's clock. Only a
         session that makes such calls itself (the voice bridge) needs it."""
 
+    def caller_interjections(self) -> list[tuple[dict[str, Any], str]]:
+        """Customer turns the session spoke on its own, not through :meth:`send`: the duplex
+        voice driver's planted barge-ins (ADR-0055), as ``(frame, text)``. The driver records
+        each as a sent customer turn the moment it reads the agent frame they came with, and
+        then waits for the agent's answer to it like to any other turn."""
+        return []
+
+    def stale(self, payload: Any) -> bool:
+        """Whether a received frame came before the customer's latest turn ended, so it
+        cannot be the answer to it: the duplex voice driver's frames that arrived while the
+        caller was still interrupting (ADR-0055, review of #91). Recorded, never an answer."""
+        return False
+
     def frame_media(self, direction: str, payload: Any) -> FrameMedia | None:
         """The audio behind a frame just sent or received, or ``None`` (text sessions)."""
         return None

@@ -79,7 +79,7 @@ from opseval.transport import (
     Transport,
     WebSocketTransport,
 )
-from opseval.transport.audio import AudioTransport
+from opseval.transport.audio import DUPLEX, AudioTransport
 from opseval.transport.audio_http import AudioHttpTransport
 from opseval.transport.audio_ws import AudioWsTransport
 from opseval.verdicts import (
@@ -436,6 +436,27 @@ def _unmet(
     return None
 
 
+def _check_voice_scenarios(scenarios: list[Scenario], transport: str) -> None:
+    """A scenario's ``voice:`` block (ADR-0055) on a run that cannot honour it is refused
+    before anything is sent (exit 3): left out, its barge-ins, silences and noise would never
+    happen, and the run would look as if it had tested them."""
+    voiced = [s.id for s in scenarios if s.voice is not None]
+    if voiced and transport not in VOICE_TRANSPORTS:
+        raise ConfigError(
+            f"scenario(s) {', '.join(voiced)} declare voice: (ADR-0055), which only a voice "
+            f"transport (audio-ws, audio-http) can play; this run uses {transport}"
+        )
+    duplex = [s.id for s in scenarios if s.voice is not None and s.voice.runs_duplex]
+    if duplex and transport in VOICE_TRANSPORTS:
+        cls = VOICE_TRANSPORTS[transport][0]
+        if DUPLEX not in getattr(cls, "capabilities", frozenset()):
+            raise ConfigError(
+                f"scenario(s) {', '.join(duplex)} run full duplex (voice.duplex or "
+                f"voice.barge_in), which {transport} cannot: it hears the caller only once a "
+                "turn is over. Use audio-ws"
+            )
+
+
 def _voice_language(scenarios: list[Scenario], profile: SutProfile) -> str:
     """The language the preflight canary is spoken in: the profile's, else the first
     scenario's persona's."""
@@ -622,6 +643,7 @@ async def _launch(
     sinks = build_sinks(settings)
     meter = UsageMeter()
     voice = options.transport in VOICE_TRANSPORTS and options.transport_factory is None
+    _check_voice_scenarios(catalogue.scenarios, options.transport)
     kit: SpeechKit | None = None
     audio_plan = AudioPlan("hashes")
     if voice:
@@ -869,7 +891,9 @@ async def _launch(
                     key=audio_plan.key,
                     run_id=run_id,
                 )
-                transport = transport.for_attempt(recorder, scenario.persona.language)
+                transport = transport.for_attempt(
+                    recorder, scenario.persona.language, scenario.voice
+                )
             driver = Driver(
                 scenario=scenario,
                 profile=profile,

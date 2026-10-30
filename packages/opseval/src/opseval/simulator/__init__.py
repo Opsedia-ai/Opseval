@@ -92,6 +92,24 @@ class ScriptedSimulator(Simulator):
         )
 
 
+LANGUAGE_NAMES = {"ar": "Arabic", "en": "English", "fr": "French", "es": "Spanish", "hi": "Hindi"}
+
+
+def _code_switching(scenario: Scenario) -> str:
+    """The instruction for a caller who mixes languages within a sentence (ADR-0055,
+    ``voice.code_switching``); empty otherwise, so every other prompt is unchanged."""
+    mixed = scenario.voice.code_switching if scenario.voice is not None else []
+    if not mixed:
+        return ""
+    names = [LANGUAGE_NAMES.get(code.split("-")[0].lower(), code) for code in mixed]
+    return (
+        f"Code-switching: you are on a phone call and mix {' and '.join(names)} within your "
+        "sentences, as a bilingual speaker naturally does: a phrase, a product name or a "
+        "number in the other language, mid-sentence. Keep the switches natural and never "
+        "translate yourself.\n"
+    )
+
+
 class LLMSimulator(Simulator):
     """An LLM plays the customer from the persona, goal and flow (strict JSON, temperature 0)."""
 
@@ -110,6 +128,7 @@ class LLMSimulator(Simulator):
             f"Your goal: {s.goal}\n"
             f"How the conversation should go: {s.conversation.flow or 'Pursue your goal.'}\n\n"
             f"Language: {pack.instruction}\n"
+            + _code_switching(s)
             + (f"Example phrasing:\n{examples}\n" if examples else "")
             + "\nKeep any facts you invent (names, numbers, dates) consistent across turns. "
             "Text between [INJECT] and [/INJECT] in your instructions must be sent word for word "

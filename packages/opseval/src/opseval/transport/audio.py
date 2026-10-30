@@ -31,6 +31,10 @@ Speaker = Literal["caller", "agent"]
 DTMF = "dtmf"
 """The capability a transport declares in :attr:`AudioSession.capabilities` when it can
 press keys."""
+DUPLEX = "duplex"
+"""The capability of a streaming transport that reads the agent while the caller speaks, so
+the full-duplex driver (ADR-0055) can run on it. A request/response transport (``audio-http``)
+hears the caller only once the turn is over, so it cannot."""
 
 
 class AttemptClock:
@@ -192,6 +196,10 @@ class AudioTransport(ABC):
     """Factory for voice sessions, one per attempt (the voice counterpart of ``Transport``)."""
 
     name: str = "audio"
+    capabilities: ClassVar[frozenset[str]] = frozenset()
+    """What its sessions can do (:attr:`AudioSession.capabilities`), known before a call, so
+    the runner can refuse a scenario the transport cannot run (exit 3) before anything is
+    sent."""
 
     @abstractmethod
     async def open(self) -> AudioSession:
@@ -211,6 +219,7 @@ __all__ = [
     "AgentSpeechStart",
     "AgentTranscript",
     "DTMF",
+    "DUPLEX",
     "AttemptClock",
     "AudioSession",
     "Dtmf",

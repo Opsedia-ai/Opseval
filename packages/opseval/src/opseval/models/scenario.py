@@ -23,6 +23,7 @@ from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from opseval.models.gate import GatePolicy
 from opseval.models.stop import StopPolicy
+from opseval.models.voice import VoiceSpec
 
 SCHEMA_VERSION = "opseval/v1"
 
@@ -359,6 +360,11 @@ class Scenario(Strict):
     expanded_from: ExpandedFrom | None = None
     """Set by the loader on each expanded scenario; refused in an authored file."""
 
+    voice: VoiceSpec | None = None
+    """What the simulated caller does on a voice call (ADR-0055): barge-in, silences, noise,
+    its voice. A text run of a scenario that declares it is refused (exit 3), so it is never
+    silently left out."""
+
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     @field_validator("dataset", mode="before", json_schema_input_type=DatasetSpec | str | None)
@@ -380,6 +386,18 @@ class Scenario(Strict):
             raise ValueError("an expanded scenario has no dataset or matrix of its own")
         if self.id != f"{self.expanded_from.base_id}@{self.expanded_from.hash}":
             _id_error(self.id, "an expanded scenario's id is <base_id>@<hash>")
+        return self
+
+    @model_validator(mode="after")
+    def _voice_turns(self) -> Scenario:
+        # A silence planted in a turn the conversation can never reach would quietly not
+        # happen: an authoring mistake, refused at load like an injection beyond max_turns.
+        late = [s.caller_turn for s in (self.voice.silences if self.voice else [])]
+        if any(t > self.conversation.max_turns for t in late):
+            raise ValueError(
+                f"voice.silences: caller turn {max(late)} is beyond max_turns "
+                f"({self.conversation.max_turns})"
+            )
         return self
 
     @property

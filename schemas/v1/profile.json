@@ -226,6 +226,11 @@
           "default": "transcript",
           "title": "Transcript Event"
         },
+        "transcript_of_field": {
+          "default": "of",
+          "title": "Transcript Of Field",
+          "type": "string"
+        },
         "transcript_text_field": {
           "default": "text",
           "title": "Transcript Text Field",
