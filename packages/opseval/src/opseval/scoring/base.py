@@ -16,6 +16,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from opseval.errors import ConfigError
+from opseval.langpacks import Spoken, effective_language, graded_language
 from opseval.llm import ChatClient, model_family
 from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
@@ -42,6 +43,16 @@ class ScoringContext:
     """Caps judge requests in flight. A multi-vote judge fans its ballots out
     concurrently, so without a shared bound peak concurrency would be
     ``judge_concurrency x votes`` and a 3-vote judge could triple the request rate."""
+    language: Spoken | None = None
+    """The language the attempt is graded against, from the pack recorded at run time
+    (:func:`opseval.langpacks.graded_language`). Unset: the packs as they are now."""
+
+    def spoken(self) -> Spoken:
+        """What the customer was told to write: :attr:`language`, else resolved now."""
+        if self.language is not None:
+            return self.language
+        conv = self.scenario.conversation
+        return effective_language(self.scenario.persona, scripted=not conv.llm_persona)
 
     def graded_model(self, axis: Axis) -> str | None:
         """The model a judge on ``axis`` grades: the simulator for HARNESS, else the agent."""
@@ -367,6 +378,13 @@ class ScoringEngine:
             simulator_model=self.simulator_model,
             judge_independence=self.judge_independence,
             ballot_slots=self._ballot_slots,
+            # The pack resolved when the attempt ran, so a later change to the packs never
+            # re-grades a saved run (ADR-0059).
+            language=graded_language(
+                scenario.persona,
+                scripted=not scenario.conversation.llm_persona,
+                recorded=record.persona,
+            ),
         )
         # An always-on check runs with its own spec, even if the scenario lists it: a listed
         # threshold of 0 would otherwise switch off the check that catches a wrong mapping.

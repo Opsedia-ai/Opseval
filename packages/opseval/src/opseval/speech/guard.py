@@ -34,6 +34,7 @@ from opseval.errors import (
     TtsRateLimited,
     TtsRequestError,
 )
+from opseval.langpacks import provider_language
 from opseval.llm import UsageMeter
 from opseval.speech.base import Audio, SpeechConfig, SpeechToText, TextToSpeech, Transcript
 
@@ -107,11 +108,15 @@ class GuardedTextToSpeech:
         return f"{self.config.provider} ({self.config.model or 'default model'})"
 
     async def synthesize(self, text: str, *, voice: str | None, language: str) -> Audio:
+        # The voice map is keyed by the pack's tag (ar-x-gulf); the provider is only ever
+        # given a BCP-47 tag it can know (ar), never a private-use one (ADR-0059).
         resolved = resolve_voice(dict(self.config.voice_map), voice, language)
         began = time.monotonic()
         try:
             async with asyncio.timeout(self.config.timeout_seconds):
-                audio = await self.provider.synthesize(text, voice=resolved, language=language)
+                audio = await self.provider.synthesize(
+                    text, voice=resolved, language=provider_language(language)
+                )
         except Exception as exc:
             error = _harness_error(
                 exc,
@@ -191,7 +196,9 @@ class GuardedSpeechToText:
         began = time.monotonic()
         try:
             async with asyncio.timeout(self.config.timeout_seconds):
-                transcript = await self.provider.transcribe(audio, language=language, hint=hint)
+                transcript = await self.provider.transcribe(
+                    audio, language=provider_language(language), hint=hint
+                )
         except Exception as exc:
             error = _harness_error(
                 exc,

@@ -33,7 +33,7 @@ from opseval.models.gate import Preset
 from opseval.models.results import SuiteResult
 from opseval.models.stop import StopPolicy
 from opseval.reporting import console_summary
-from opseval.runner import VOICE_TRANSPORTS, RunOptions, launch
+from opseval.runner import VOICE_TRANSPORTS, RunOptions, launch, voice_language_for
 from opseval.scaffold import PLACEHOLDER_URL, TEMPLATES, Answers, scaffold
 from opseval.scoring import INVARIANTS, REGISTRY, describe_params
 from opseval.storage import FileStore, RunStore, load_result_at
@@ -829,7 +829,7 @@ def preflight(
                 verify_llm=verify_llm,
                 # A voice transport speaks and listens: check the TTS and STT too (ADR-0054).
                 voice_scenarios=len(found.scenarios) if transport in VOICE_TRANSPORTS else 0,
-                voice_language=(found.scenarios[0].persona.language if found.scenarios else "en"),
+                voice_language=voice_language_for(found.scenarios, sut_profile),
             )
         )
     except ConfigError as exc:

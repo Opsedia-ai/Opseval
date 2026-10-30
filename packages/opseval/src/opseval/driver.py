@@ -25,6 +25,7 @@ from opseval.errors import (
     TransportTimeout,
     TurnNeverEnded,
 )
+from opseval.langpacks import PACK_KEY, effective_language
 from opseval.models.profile import FrameKind, Probe, SutProfile, render_frame
 from opseval.models.record import (
     SCRIPT_EXHAUSTED,
@@ -351,7 +352,14 @@ class Driver:
             probes=tuple(self._probes),
             interrupts=tuple(self._interrupts),
             user_turns=self._user_turns,
-            persona=self.s.persona.model_dump(mode="json"),
+            # With the pack resolved now (ADR-0059), so a re-score grades this attempt
+            # against what its simulator was told, whatever the packs become.
+            persona={
+                **self.s.persona.model_dump(mode="json"),
+                PACK_KEY: effective_language(
+                    self.s.persona, scripted=not self.s.conversation.llm_persona
+                ).tag,
+            },
             infra_errors=infra,
             notes=notes,
             planted_injections=tuple(self._injections),

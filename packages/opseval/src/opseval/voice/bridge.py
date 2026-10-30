@@ -48,6 +48,7 @@ from opseval.audio import (
     level_dbfs,
 )
 from opseval.errors import ConfigError, SttError, TransportTimeout, TurnNeverEnded
+from opseval.langpacks import SCRIPT_PREFIXES, Script, is_letter, primary_subtag, script_of
 from opseval.models.profile import AudioConfig, SutProfile, placeholder_path
 from opseval.models.record import (
     VOICE_KEY,
@@ -124,31 +125,34 @@ SPOKEN_DECISIONS = {
 }
 """What the caller says for a checkpoint decision, by primary language (English otherwise)."""
 
-SCRIPTS: dict[str, tuple[str, ...]] = {
-    "ar": ("ARABIC",),
-    "fa": ("ARABIC",),
-    "ur": ("ARABIC",),
-    "zh": ("CJK",),
-    "ja": ("CJK", "HIRAGANA", "KATAKANA"),
-    "ko": ("HANGUL",),
-    "ru": ("CYRILLIC",),
-    "uk": ("CYRILLIC",),
-    "bg": ("CYRILLIC",),
-    "sr": ("CYRILLIC", "LATIN"),
-    "he": ("HEBREW",),
-    "yi": ("HEBREW",),
-    "hi": ("DEVANAGARI",),
-    "mr": ("DEVANAGARI",),
-    "ne": ("DEVANAGARI",),
-    "el": ("GREEK",),
-    "th": ("THAI",),
+SCRIPTS: dict[str, tuple[Script, ...]] = {
+    "ar": ("arabic",),
+    "fa": ("arabic",),
+    "ur": ("arabic",),
+    "zh": ("han",),
+    "ja": ("han", "kana"),
+    "ko": ("hangul",),
+    "ru": ("cyrillic",),
+    "uk": ("cyrillic",),
+    "bg": ("cyrillic",),
+    "sr": ("cyrillic", "latin"),
+    "he": ("hebrew",),
+    "yi": ("hebrew",),
+    "hi": ("devanagari",),
+    "mr": ("devanagari",),
+    "ne": ("devanagari",),
+    "el": ("greek",),
+    "th": ("thai",),
 }
-"""The Unicode scripts a transcript is expected in, by primary language; Latin otherwise.
-Only an annotation (:func:`in_script`): whether a transcript is usable never depends on it."""
+"""The scripts (:data:`opseval.langpacks.SCRIPT_PREFIXES`, the one script table) a
+transcript is expected in, by primary language; Latin otherwise. Only an annotation
+(:func:`in_script`): whether a transcript is usable never depends on it."""
+
+_primary = primary_subtag
 
 
-def _primary(language: str) -> str:
-    return language.split("-")[0].split("_")[0].lower()
+def _expected(language: str) -> tuple[Script, ...]:
+    return SCRIPTS.get(_primary(language), ("latin",))
 
 
 async def _direct(call: Awaitable[T]) -> T:
@@ -172,11 +176,11 @@ def usable(text: str) -> bool:
 def in_script(text: str, language: str) -> bool:
     """Whether a usable transcript has a letter in the language's expected script (Latin
     unless :data:`SCRIPTS` says otherwise). A transcript of digits alone is in every script."""
-    scripts = SCRIPTS.get(_primary(language), ("LATIN",))
-    letters = [ch for ch in text if unicodedata.category(ch)[0] == "L"]
+    scripts = _expected(language)
+    letters = [script_of(ch) for ch in text if is_letter(ch)]
     if not letters:
         return True
-    return any(unicodedata.name(ch, "").startswith(scripts) for ch in letters)
+    return any(script in scripts for script in letters)
 
 
 @dataclass
@@ -955,8 +959,9 @@ class VoiceBridge(Session):
         if heard.confidence is not None and heard.confidence < bound:
             evidence["low_confidence"] = {"confidence": heard.confidence, "min": bound}
         if not in_script(heard.text, self.language):
-            expected = SCRIPTS.get(_primary(self.language), ("LATIN",))
-            evidence["off_script"] = {"language": self.language, "expected": list(expected)}
+            # Unicode name prefixes (``CYRILLIC``), as recorded before the shared table.
+            expected = [p for script in _expected(self.language) for p in SCRIPT_PREFIXES[script]]
+            evidence["off_script"] = {"language": self.language, "expected": expected}
 
     async def _canary(self) -> dict[str, Any]:
         """The caller turn just before, heard by the same STT through the same codec path.
