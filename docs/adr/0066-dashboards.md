@@ -209,3 +209,70 @@ Deferred, as the phasing says or because nothing to build it on exists yet:
 - the agent cost series from traces: no trace source carries the agent's token usage yet;
 - the `attacker`, `generator` and `telephony` roles are in the list but nothing calls them yet;
 - custom dashboards (D3).
+
+## Implementation note: D2 (2026-10-30)
+
+Built (the ADR stays Proposed):
+
+- **The known-part cost (the D1 follow-up).** A usage row carries `cost_known_usd` and
+  `unpriced_calls` beside `cost_usd`, which stays `null` when any answered call had no price.
+  One function, `models.usage.cost_parts` (a `CostParts` of known USD, priced and unpriced
+  calls, summed with `math.fsum` so a database and a folder add the same calls to the same
+  figure), is the arithmetic of the usage rows (`llm.fold_usage`), the run detail
+  (`RunDetail.cost`), the Usage page (`unpricedCalls`) and both analytics stores. Costs on the
+  wire are rounded to 6 digits everywhere, so the run detail and the Cost dashboard show the
+  same number. Layout `opseval-runs/9`; rows of layouts 1–8 read with the split they tell (a
+  total means every call was priced; no total and no per-count tally means none was), else
+  `unpriced_calls: null` ("not recorded"), and the run detail then splits the run from its
+  records. A failed call is not an unpriced call.
+- **Prices.** The built-in table stays in `pricing/builtin.yaml` (reviewed regexes); a project's
+  own rows are in `model_prices` (migration `0008`). A project row names its models exactly or
+  by a glob whose only wildcard is `*` (at most four, characters `[A-Za-z0-9._:/@+-]`), matched
+  case-insensitively by a linear-time two-pointer matcher: a pattern typed in a browser is
+  never a regular expression, so it cannot hang the server. A project row in force wins over a
+  built-in one; within each, the newest in force wins. **Stored cost stays authoritative** (the
+  D1 rule): a row is in force from an instant that may not be in the past (422
+  `PRICE_BACKDATED`), so "the price in force when the call was made" and "the cost stored with
+  the call" can never disagree, and adding a row never changes an earlier run. A server-mode
+  run is priced with the project's table, read once when the run starts. An edit adds a row;
+  nothing updates or deletes one. API: `GET /prices` (built-in and project rows, and
+  `canEdit`/`editNote`, decided by the server), `POST /prices` (`manage`: admins and owners,
+  never a key; audited as `price.create`; 409 `PRICES_READ_ONLY` without a database),
+  `GET /prices/resolve?model=&at=` (the row that applies, or `null`: "no price", never $0).
+- **Latency, Quality, Voice and Usage**, on `AnalyticsStore` (ADR-0052), `GET
+  /api/v1/analytics/latency|quality|voice|usage`:
+  - Latency: the agent's reply time per turn (the first frame back after each frame sent,
+    `RunRecord.turn_latencies`; a reply the clocks could not time is unmeasured), voice turn
+    latency and time to first audio (ADR-0055 metrics), and the harness's own LLM/TTS/STT call
+    latency per role (answered calls, retries included; a re-score's calls are not the run).
+  - Quality: pass rate per bucket over judged verdicts (`passed / (passed + failed)`; anything
+    else is `not_judged`, never in the denominator, and a bucket with nothing judged is
+    `null`), the gate state of every run, flaky scenarios (marked flaky, or judged verdicts
+    that changed within a suite), every check's pass rate (`infra_error` not judged) and mean
+    score, and the scenario × run matrix of the newest `limit` runs (the
+    `views.scenario_trend` shape). Judge agreement is `null` with a note: calibrations are
+    written beside a run folder and no store reads them yet.
+  - Voice: `voice.barge_in_yield_ms`, `voice.talk_over_ratio`, `voice.dead_air_ms`,
+    `voice.asr_confidence`, `voice.agent_asr_wer`, in total and by the persona's language and
+    dialect, with unmeasured rows and degraded values counted apart.
+  - Usage: runs, attempts, voice attempts and audio minutes (TTS audio out plus STT audio in,
+    over answered speech calls; `null` with none) per project and task, and per bucket.
+  - **Percentiles are nearest-rank** in both stores: the value at rank `ceil(p·n)` of the
+    sorted values, which is Postgres `percentile_disc`. Every answer carries `n` (and
+    `unmeasured`) beside the value; nothing measured is `null`, drawn as a gap.
+  - Filters: suite, task, language, dialect, since/until and bucket where they apply. Each is
+    applied or refused with a code, never ignored: `FILTER_NEEDS_SERVER_MODE` (task,
+    organisation, project, label in local mode), `FILTER_NOT_APPLICABLE` (model or role on a
+    dashboard that is not about calls; language on cost, tokens or usage),
+    `FILTER_NOT_RECORDED` (label: a run does not record the catalogue label it ran), and
+    `FILTER_OUTSIDE_SCOPE` (another project in server mode). A verdict's language is its
+    scenario's first attempt's persona.
+- **Console.** `/latency`, `/quality`, `/voice`, `/usage-totals` and `/prices`, drawn with the
+  in-house SVG of D1 plus `GapLines` (a `null` ends the line: no point and no segment across
+  it, the bucket says "no data", "not measured" or "nothing judged"). The add-a-price form is
+  shown only when the server says `canEdit`. The run detail shows the cost split. Vitest
+  proves a null is never drawn as 0 and that the pages say "not measured".
+
+Deferred: the label filter (needs runs to record the label they ran), judge agreement (needs
+calibrations stored through the run store), budgets and the agent cost series (as D1 said),
+custom dashboards (D3).

@@ -101,3 +101,36 @@ licence key.
 - The ClickHouse table layout and retention.
 - Materialised views or rollup tables in Postgres; added only when a measured query needs them.
 - An analytics API for third parties beyond what the console uses.
+
+## Implementation note: PgAnalytics (2026-10-30)
+
+Built with ADR-0066 D2 (the ADR stays Proposed):
+
+- `opseval.analytics.pg.PgAnalytics` answers every question `FileAnalytics` answers, from the
+  ADR-0051 rows, never from a blob. It is chosen by the server when the run store is the
+  database (`server.app.analytics_for`), and keeps the store's scope: the project, and the
+  task when the store serves one task's reads (`DbRunStore(task_reads=True)`, accounts mode).
+  A filter naming another project or organisation is refused (`FILTER_OUTSIDE_SCOPE`).
+- Latency, quality, voice and usage are SQL: the picked runs (an indexed scan of `runs` by
+  project, task and start, `ix_runs_project_started`), then `GROUP BY ... GROUPING SETS` per
+  bucket and in total, with `percentile_disc(ARRAY[0.5, 0.95, 0.99])` for percentiles.
+  Python only orders rows (its order, not the database's collation), counts flips between
+  consecutive verdicts and labels buckets, with the same functions the folders use
+  (`analytics.dashboards`).
+- Cost and tokens read the picked runs' usage rows and fold them with `UsageFold`, the D1
+  arithmetic `FileAnalytics` uses: one implementation of "the cost stored with each call".
+- Migration `0008` adds what it reads: `attempts.language/dialect/voice/usage_recorded`,
+  `verdicts.name`, `usage_events.rescore` (a re-score's calls, written by
+  `DbRunStore.save_rescore`; only a run's latest re-score is counted), `run_usage` (a run's
+  usage rows, read for runs written before per-call usage), the agent's reply time per turn as
+  `attempt_metrics` rows named `agent.turn_latency_ms` (unmeasured: null with a reason), and
+  the indexes. Rows written before `0008` read their new columns as not measured; re-import a
+  run to fill them.
+- **The golden test** (`tests/test_dashboards.py`) writes the same fixture runs (per-call and
+  pre-usage layouts, text and voice, unpriced and failed calls, a re-score, a flaky scenario,
+  a run with nothing judged) to a folder and to Postgres and requires identical answers to
+  every question under 18 filter combinations, `null`s included. Only what one mode has is
+  left out of the comparison: the task list and project names a database serves, and which
+  filters need server mode.
+
+Not built: ClickHouse and its outbox, judge agreement from calibrations, the label filter.
