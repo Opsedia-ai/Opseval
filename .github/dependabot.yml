@@ -3,11 +3,15 @@
 version: 2
 updates:
   - package-ecosystem: github-actions
-    directory: /
+    # The composite action lives twice, byte for byte (root action.yml and its source under
+    # integrations/github-action, ADR-0058; test_github_ci keeps them identical), so Dependabot
+    # must update both in the same pull request or the identity test fails it.
+    directories: ["/", "/integrations/github-action"]
     schedule:
       interval: weekly
     groups:
       actions:
+        group-by: dependency-name
         patterns: ["*"]
   # The image's base images are pinned by digest (Dockerfile, ADR-0038).
   - package-ecosystem: docker
