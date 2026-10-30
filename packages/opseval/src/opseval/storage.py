@@ -160,10 +160,19 @@ def read_pruned_marker(run_dir: Path) -> PrunedMarker | None:
     the player, the CLI and the report share, so they never disagree on a run."""
     path = run_dir / "audio" / AUDIO_MARKER
     try:
-        data = json.loads(path.read_text("utf-8"))
+        text = path.read_text("utf-8")
     except (FileNotFoundError, NotADirectoryError):
         return PrunedMarker(None, readable=False) if os.path.lexists(path) else None
-    except (OSError, ValueError):
+    except OSError:
+        return PrunedMarker(None, readable=False)
+    return parse_pruned_marker(text)
+
+
+def parse_pruned_marker(text: str) -> PrunedMarker:
+    """A marker that exists, from its text: unreadable text still means pruned."""
+    try:
+        data = json.loads(text)
+    except ValueError:
         return PrunedMarker(None, readable=False)
     if not isinstance(data, dict):
         return PrunedMarker(None, readable=False)
@@ -174,6 +183,32 @@ def read_pruned_marker(run_dir: Path) -> PrunedMarker | None:
         except ValueError:
             pass
     return PrunedMarker(None)
+
+
+def marker_text(previous: str | None, *, at: datetime, older_than_days: int, files: int) -> str:
+    """The prune marker to write, carrying the history of an earlier one forward."""
+    earlier: list[object] = []
+    try:
+        found = json.loads(previous) if previous is not None else None
+        if isinstance(found, dict) and isinstance(found.get("history"), list):
+            earlier = found["history"]
+    except ValueError:
+        pass
+    body = {
+        "pruned_at": at.isoformat(),
+        "older_than_days": older_than_days,
+        "files": files,
+        "history": [*earlier, {"pruned_at": at.isoformat(), "files": files}],
+    }
+    return json.dumps(body, indent=2)
+
+
+def check_audio_path(relative: str) -> str:
+    """A path a record may name for audio: under ``audio/``, no ``..``, no absolute path."""
+    parts = relative.split("/")
+    if parts[0] != "audio" or len(parts) < 2 or any(p in ("", ".", "..") for p in parts):
+        raise AudioPathRefused(f"{relative} leaves the run's audio/")
+    return relative
 
 
 class AudioPathRefused(ValueError):
@@ -338,21 +373,13 @@ class FileRunAudio:
             return 0
         audio = self.folder / "audio"
         marker = audio / AUDIO_MARKER
-        earlier: list[object] = []
         try:
-            previous = json.loads(marker.read_text("utf-8"))
-            if isinstance(previous, dict) and isinstance(previous.get("history"), list):
-                earlier = previous["history"]
-        except (OSError, ValueError):
-            pass
-        body = {
-            "pruned_at": at.isoformat(),
-            "older_than_days": older_than_days,
-            "files": len(files),
-            "history": [*earlier, {"pruned_at": at.isoformat(), "files": len(files)}],
-        }
+            previous: str | None = marker.read_text("utf-8")
+        except OSError:
+            previous = None
+        body = marker_text(previous, at=at, older_than_days=older_than_days, files=len(files))
         tmp = marker.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(body, indent=2), encoding="utf-8")
+        tmp.write_text(body, encoding="utf-8")
         os.replace(tmp, marker)
         for path in files:
             path.unlink(missing_ok=True)

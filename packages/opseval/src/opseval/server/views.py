@@ -35,29 +35,9 @@ from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
 from opseval.storage import PRE_USAGE_LAYOUTS, RunStore, process_gone
 from opseval.transcript import connection, short, transcript
-from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS
+from opseval.verdicts import EXIT_FAIL, EXIT_HARNESS, gate_state
 
 JUDGED_STATUSES = {VerdictStatus.PASSED, VerdictStatus.FAILED}
-
-
-def gate_state(result: SuiteResult) -> s.GateState:
-    """What a finished run means for the release. The one place this is decided.
-
-    A harness error is never drawn as an agent failure, and an agent failure is never
-    drawn as green: exit 1 under a blocking gate is ``blocked``, under a passing gate
-    (only normal scenarios failed) it is ``gaps``.
-    """
-    if result.exit_code == EXIT_HARNESS:
-        return "harness_error"
-    if result.gate.status != "pass":
-        # What blocked decides it: an agent failure (or a flaky scenario, when flaky
-        # blocks) is "blocked"; only what could not be judged is "not_judged".
-        if result.gate.policy is not None:
-            by_agent = result.gate.agent_blocked
-        else:  # a result from before gate policies (ADR-0032): read its reasons
-            by_agent = any(": failed (" in b or b.endswith(": flaky") for b in result.gate.blocking)
-        return "blocked" if by_agent else "not_judged"
-    return "safe" if result.safe_to_release else "gaps"
 
 
 def _counts(tests: list[TestVerdict]) -> tuple[int, int, int, int]:

@@ -83,6 +83,11 @@ class CredentialsError(HarnessError):
     agent's: no request reached the agent without credentials."""
 
 
+class BlobStoreError(HarnessError):
+    """The blob store (a folder, or S3) could not keep or return an object (ADR-0051). Never
+    the agent's fault: a run whose record could not be stored ends as a harness error."""
+
+
 class TraceUnavailable(HarnessError):
     """The agent's trace could not be read (source down, not ingested yet, no session id)."""
 

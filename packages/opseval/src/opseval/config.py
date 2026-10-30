@@ -268,6 +268,33 @@ class Settings(BaseSettings):
     a password, so it is a secret. Its host must be allowlisted, and a host other than
     localhost needs TLS (``?ssl=require``, ``verify-ca`` or ``verify-full``)."""
 
+    # Runs and blobs in the database (ADR-0051).
+    blob_store: Literal["file", "s3"] = "file"
+    """Where server mode keeps run files (records, results, reports, audio): ``file`` (a
+    folder, ``OPSEVAL_BLOB_DIR``) or ``s3`` (any S3-compatible store)."""
+    blob_dir: str = "blobs"
+    """The folder ``OPSEVAL_BLOB_STORE=file`` keeps objects in."""
+    s3_endpoint: str | None = None
+    """The S3 endpoint (``https://s3.eu-west-1.amazonaws.com``, a MinIO or R2 URL). Its host
+    must be allowlisted, and anything but loopback must use https."""
+    s3_bucket: str | None = None
+    """The bucket objects are kept in (path-style addressing)."""
+    s3_region: str = "us-east-1"
+    """The region requests are signed for (SigV4)."""
+    s3_prefix: str = ""
+    """A prefix for every object key (``opseval/``), so a bucket can be shared."""
+    s3_access_key_id: SecretStr | None = None
+    """The S3 access key id."""
+    s3_secret_access_key: SecretStr | None = None
+    """The S3 secret access key."""
+    s3_server_side_encryption: bool = True
+    """Ask the store to encrypt every object at rest (``x-amz-server-side-encryption:
+    AES256``), recorded on the blob's row. Audio is sealed by Opseval besides, always."""
+    blob_pending_grace_hours: float = Field(default=24.0, gt=0, le=24 * 365)
+    """A blob still ``pending`` this long after it was written, in a run that is no longer
+    running, is an orphan (a crash between the upload and its row): ``opseval prune`` deletes
+    it, the object first and then its row."""
+
     def __init__(self, **values: Any) -> None:
         if "_env_file" not in values and _dotenv_off():
             values["_env_file"] = None
@@ -337,6 +364,8 @@ SECRET_FIELDS = (
     "github_token",
     "jira_token",
     "database_url",
+    "s3_access_key_id",
+    "s3_secret_access_key",
 )
 
 

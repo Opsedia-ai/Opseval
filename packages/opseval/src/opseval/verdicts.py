@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from typing import Literal
 
 from opseval.models.gate import PRESETS, ByCriticality, ResolvedGatePolicy, resolve
 from opseval.models.record import RunRecord, TerminalState
@@ -21,6 +22,7 @@ from opseval.models.results import (
     ScoreResult,
     ScoreStatus,
     SkipKind,
+    SuiteResult,
     TestVerdict,
     VerdictStatus,
 )
@@ -388,3 +390,26 @@ def failure_blocks(policy: ResolvedGatePolicy, criticality: Criticality, declare
         criticality.value if declared or policy.undeclared_criticality == "normal" else "critical"
     )
     return _at(policy.failed, level) == "block"
+
+
+GateState = Literal["safe", "gaps", "blocked", "not_judged", "harness_error"]
+
+
+def gate_state(result: SuiteResult) -> GateState:
+    """What a finished run means for the release. The one place this is decided.
+
+    A harness error is never drawn as an agent failure, and an agent failure is never
+    drawn as green: exit 1 under a blocking gate is ``blocked``, under a passing gate
+    (only normal scenarios failed) it is ``gaps``.
+    """
+    if result.exit_code == EXIT_HARNESS:
+        return "harness_error"
+    if result.gate.status != "pass":
+        # What blocked decides it: an agent failure (or a flaky scenario, when flaky
+        # blocks) is "blocked"; only what could not be judged is "not_judged".
+        if result.gate.policy is not None:
+            by_agent = result.gate.agent_blocked
+        else:  # a result from before gate policies (ADR-0032): read its reasons
+            by_agent = any(": failed (" in b or b.endswith(": flaky") for b in result.gate.blocking)
+        return "blocked" if by_agent else "not_judged"
+    return "safe" if result.safe_to_release else "gaps"
