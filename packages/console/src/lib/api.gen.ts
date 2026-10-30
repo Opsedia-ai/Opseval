@@ -863,6 +863,7 @@ export interface MemberIn {
   role: "viewer" | "member" | "admin" | "owner" | null;
   projectRole?: "viewer" | "member" | "admin" | "owner" | null;
   password?: string | null;
+  oidcSubject?: string | null;
 }
 
 export interface MemberOut {

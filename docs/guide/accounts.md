@@ -89,7 +89,9 @@ The secret is printed once and stored only as a hash. Send it as
 | `label:protected` | move protected labels such as `production` |
 
 - A key never does more than the person who created it **can do now**: demote them and the key
-  loses what they lost, at its next request. A key whose creator is gone holds nothing.
+  loses what they lost, at its next request. A disabled creator's keys hold nothing, and
+  deleting a person deletes their keys. Only `opseval admin create-key --system` makes a key
+  with nobody behind it, and it holds at most what a member could.
 - `label:protected` is never implied by another scope, only an admin or owner can grant it, and
   the grant is an audit event.
 - A **system key** (`--system`, for Opseval's own automation) can never hold `label:protected`:
@@ -104,13 +106,17 @@ revoked key is 401 even when the browser also has a valid session.
 
 `production` is always protected: only an admin or owner, or a key holding `label:protected`,
 may move it. An admin can protect other labels with
-`PUT /api/v1/catalogue/labels/protection`. A `catalogue:label` key or a member trying to move a
+`PUT /api/v1/catalogue/labels/protection`, by name: the protection holds even before any item
+carries the label. A `catalogue:label` key or a member trying to move a
 protected label gets 403 `PROTECTED_LABEL`.
 
 ## Sessions and CSRF
 
-The session is a `__Host-opseval-session` cookie: `Secure`, `HttpOnly`, `SameSite=Lax`, no
-`Domain`. A new one is issued at every sign-in and the old one ends; signing out deletes it.
+Behind an https public URL the session is a `__Host-opseval-session` cookie: `Secure`,
+`HttpOnly`, `SameSite=Lax`, no `Domain`. On plain-http loopback (no https public URL), where a
+`Secure` cookie is dropped by some browsers and a `__Host-` name requires `Secure`, it is
+`opseval-session`: still `HttpOnly`, `SameSite=Lax` and host-only, without `Secure`. The OIDC
+sign-in's cookie follows the same rule (`__Host-opseval-oidc` or `opseval-oidc`). A new one is issued at every sign-in and the old one ends; signing out deletes it.
 It ends after `OPSEVAL_SESSION_IDLE_MINUTES` (120) unused, and `OPSEVAL_SESSION_MAX_HOURS` (24)
 after sign-in in any case. Only a hash of it is stored.
 
@@ -118,11 +124,9 @@ Every write made with the cookie needs a same-origin `Origin` and the session's
 `X-CSRF-Token` (the console sends it). Requests with an API key are exempt.
 
 Sign-in is rate-limited per account and per address, with a growing wait after a few failures
-(429 with `Retry-After`). The limiter is per process: see the note under deployment.
-
-!!! warning "Cookies on plain http"
-    A `Secure` cookie on `http://127.0.0.1` is kept by Chrome and Firefox, which treat loopback
-    as secure, but not by every browser. Use `--public-url https://…` with TLS when in doubt.
+(429 with `Retry-After`). Each attempt is counted before its password is checked, so a burst of
+parallel sign-ins gets no more tries than the allowance. Starting an OIDC sign-in is limited
+per address too, and a sign-in not finished within ten minutes is dropped. The limiter is per process: see the note under deployment.
 
 ## Single sign-on (OIDC)
 
@@ -140,12 +144,16 @@ checked. The issuer must be allowlisted and https, or the server refuses to star
 endpoint its discovery document names must be too, or the sign-in is refused before any
 redirect.
 
+The issuer is compared exactly, as the identity provider names itself: `https://idp/` and
+`https://idp` are different issuers, so copy it from the provider's discovery document.
+
 Email is never used to match a sign-in to a user. Link a person to their identity when creating
-them:
+them, later from the command line, or from the members API (`oidcSubject`):
 
 ```bash
 opseval admin create-user ana@example.com --org acme --role member --no-password \
   --oidc-subject 00u1abcd…          # the ID token's `sub`
+opseval admin link-identity bo@example.com --oidc-subject 00u1efgh…   # an existing user
 ```
 
 A sign-in with an identity nobody linked is refused, and its audit event records the subject so

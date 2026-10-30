@@ -7,7 +7,7 @@ import { Button, Callout, CoralButton } from "../components/ui";
 
 /** Why an OIDC sign-in came back refused (the server redirects here with ?error=CODE). */
 const OIDC_ERRORS: Record<string, string> = {
-  NO_ACCOUNT: "No Opseval account is linked to that sign-in. Ask an admin to create one; sign-up is off.",
+  NO_ACCOUNT: "No Opseval account is linked to that sign-in (sign-up is off). Ask an admin to link it to your account: they can find your sign-in in the audit trail.",
   OIDC_FAILED: "The identity provider's answer did not check out. Try again.",
   OIDC_NO_FLOW: "That sign-in was not started from this browser, or took too long. Try again.",
   OIDC_OFF: "Single sign-on is not configured on this server.",

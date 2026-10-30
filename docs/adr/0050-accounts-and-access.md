@@ -35,7 +35,8 @@ roles, API keys and OIDC login are core.
 - `api_keys`: per project. A public id `pk-oe-…` and a secret `sk-oe-…` shown once and stored
   only as a hash. Scopes (below), an optional list of tasks it may touch, `system` (a key
   Opseval's own automation uses), `expires_at`, `revoked_at`, `last_used_at`.
-- `catalogue_labels.protected`: a protected label (by default `production`) moves only for
+- `catalogue_labels.protected` (built as a `protected_labels` table, see the implementation
+  note): a protected label (by default `production`) moves only for
   `admin` and `owner`, or for a key holding `label:protected`.
 - `audit_events`: who (user or key), what, on which org/project/task, when, from where.
   Written in core for every write and every sign-in. The viewer and export are `ee/`.
@@ -165,16 +166,30 @@ the build had to choose, it chose as follows.
   worthless for another session. Idle expiry `OPSEVAL_SESSION_IDLE_MINUTES` (120), absolute
   `OPSEVAL_SESSION_MAX_HOURS` (24). `last_seen_at` is written at most once a minute.
 - **Protected labels.** `production` is always protected. An admin can protect another label
-  (`PUT /api/v1/catalogue/labels/protection`); the flag is kept on the label's rows and a moved
-  label keeps it. The API gained the label routes (`GET`/`PUT /api/v1/catalogue/labels`) so the
+  (`PUT /api/v1/catalogue/labels/protection`). Protection is kept per task and label name in
+  `protected_labels`, not on `catalogue_labels` rows, so a label protected before any item
+  carries it is protected at its first move (review of #95). The API gained the label routes (`GET`/`PUT /api/v1/catalogue/labels`) so the
   rule has an endpoint; `opseval catalogue label`, run with the database's own credentials,
   is not gated.
 - **OIDC.** One issuer (`OPSEVAL_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_SCOPES`), its
   host and every endpoint its discovery names allowlisted and https. Sign-up is off and email is
-  never the join key, so an identity is linked with `opseval admin create-user --oidc-subject`;
+  never the join key, so an identity is linked with `opseval admin create-user --oidc-subject`,
+  `opseval admin link-identity` or the members API's `oidcSubject`;
   a refused sign-in's audit event carries the issuer and subject for the admin to link. The
   flow's state, nonce and PKCE verifier are kept in memory, bound to the browser by a
-  `__Host-opseval-oidc` cookie, for ten minutes.
+  `__Host-opseval-oidc` cookie, for ten minutes; at most ten starts per address per minute. The
+  issuer is compared exactly as configured (OIDC Discovery 4.3), trailing slash included.
+- **Cookie names.** `__Host-` and `Secure` whenever the public URL is https; on plain-http
+  loopback `opseval-session` / `opseval-oidc` (HttpOnly, SameSite=Lax, host-only, no `Secure`),
+  because a `__Host-` name requires `Secure` and some browsers drop `Secure` cookies on http.
+- **Who made a key.** `api_keys.creator_kind` is `user` (`created_by` names them, deleted with
+  them) or `cli` (`opseval admin create-key --system` with nobody behind it, the only key with no
+  creator, a check constraint says so). A person's key whose person is disabled or without a
+  role holds nothing; it never falls back to the CLI cap.
+- **Sign-in limits** reserve the attempt before the password is checked (counted as a failure
+  until it succeeds), so a parallel burst cannot exceed the allowance. Resolving a session or
+  a key reads in a read transaction and writes only when `last_seen_at`/`last_used_at` is due
+  or a session must end.
 - **Audit.** Sign-ins (and failures), sign-outs, key creation (with `grants_label_protected`)
   and revocation, role changes, member creation and label moves are written in the same
   transaction as the change. Every other successful write is recorded after it as
