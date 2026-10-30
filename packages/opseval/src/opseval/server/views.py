@@ -4,6 +4,7 @@ is read through :class:`~opseval.storage.RunStore` only, whichever store it is (
 
 from __future__ import annotations
 
+import weakref
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -15,7 +16,7 @@ from opseval.analytics.costs import events_cost, rows_cost
 from opseval.analytics.dashboards import flips
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, check_url_allowed, config_digest
-from opseval.errors import ConfigError, StorageError
+from opseval.errors import ConfigError, HarnessError, StorageError
 from opseval.models.gate import (
     PRESETS,
     SETTINGS,
@@ -32,7 +33,7 @@ from opseval.models.profile import SutProfile
 from opseval.models.record import RunRecord
 from opseval.models.results import ModelUsage, SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.stop import StopPolicy
-from opseval.models.usage import ModelPrice
+from opseval.models.usage import CostParts, ModelPrice
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
@@ -405,11 +406,7 @@ def run_cost(store: RunStore, r: SuiteResult) -> s.CostSplitOut | None:
     be not recorded. ``None``: the run made no call it paid for."""
     parts = rows_cost(r.usage)
     if parts is None and store.layout(r.run_id) not in PRE_USAGE_LAYOUTS:
-        try:
-            events = [e for rec in store.load_records(r.run_id) for e in rec.usage_events or ()]
-            parts = events_cost([*events, *r.usage_events])
-        except (ValueError, OSError):
-            parts = None
+        parts = _split_from_records(store, r)
     if parts is None:
         reported = [u.reported for u in r.usage if u.reported is not None]
         priced = sum(x.cost for x in reported)
@@ -429,6 +426,39 @@ def run_cost(store: RunStore, r: SuiteResult) -> s.CostSplitOut | None:
         unpriced_calls=parts.unpriced,
         total_usd=known if parts.complete else None,
     )
+
+
+_SPLITS: weakref.WeakKeyDictionary[Any, dict[str, tuple[float | None, CostParts | None]]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Splits worked out from a run's records, per store and run, valid while the run's result is
+unchanged (``store.changed_at``): the Usage page asks for every run on every request, and an
+older run's records are read once, not each time."""
+
+
+def _split_from_records(store: RunStore, r: SuiteResult) -> CostParts | None:
+    """The split of a run written before layout 9, from its records; ``None`` when they cannot
+    be read (an unreadable file, a store or blob failure): said "not recorded", and one bad
+    run never fails the page or the run detail."""
+    try:
+        stamp = store.changed_at(r.run_id)
+    except (ValueError, OSError, HarnessError):
+        stamp = None
+    try:
+        cache = _SPLITS.setdefault(store, {})
+    except TypeError:  # a store that cannot be weakly referenced: no cache
+        cache = {}
+    hit = cache.get(r.run_id)
+    if hit is not None and stamp is not None and hit[0] == stamp:
+        return hit[1]
+    try:
+        events = [e for rec in store.load_records(r.run_id) for e in rec.usage_events or ()]
+        parts: CostParts | None = events_cost([*events, *r.usage_events])
+    except (ValueError, OSError, HarnessError):
+        parts = None
+    if stamp is not None:
+        cache[r.run_id] = (stamp, parts)
+    return parts
 
 
 def _total(values: list[float | None]) -> float | None:

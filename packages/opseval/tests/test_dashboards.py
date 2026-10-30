@@ -19,6 +19,7 @@ import pytest
 from opseval.analytics import FileAnalytics, UsageFilter
 from opseval.analytics.base import FilterNotApplicable, FilterNotRecorded, UnsupportedFilter
 from opseval.analytics.dashboards import nearest_rank, percentiles
+from opseval.errors import BlobStoreError, StorageError
 from opseval.llm import fold_usage
 from opseval.models.profile import FrameKind
 from opseval.models.record import FrameRecord, RunRecord, TerminalState, VoiceMetric, VoiceTimeline
@@ -873,3 +874,81 @@ class TestPricesInServerMode:
         assert r.status_code == 400 and r.json()["code"] == "FILTER_OUTSIDE_SCOPE"
         r = admin.get("/api/v1/analytics/latency", params={"label": "production"})
         assert r.status_code == 400 and r.json()["code"] == "FILTER_NOT_RECORDED"
+
+
+# --- review of #97: the run's cost split never fails a page, and is not recomputed ---------
+
+
+class _FlakyRecords(FileStore):
+    """A folder whose records fail to load as a broken blob store would, and counts reads."""
+
+    def __init__(self, root: Path, error: Exception | None) -> None:
+        super().__init__(root)
+        self.error = error
+        self.reads = 0
+
+    def load_records(self, run_id: str) -> list[RunRecord]:
+        self.reads += 1
+        if self.error is not None:
+            raise self.error
+        return super().load_records(run_id)
+
+
+def _layout_8_partial(store: FileStore) -> None:
+    """A run written before the split, with a row whose split it cannot tell."""
+    events = (
+        ev("judge", "m-judge", input_tokens=10, output_tokens=1),
+        ev("judge", "m-judge", input_tokens=10),  # not priced
+    )
+    store.write_manifest("P", {"run_id": "P", "suite": "smoke"})
+    store.save_record(rec("P", "s1", 0, events=events))
+    row = fold_usage("judge", "m-judge", list(events)).model_dump()
+    row.pop("cost_known_usd"), row.pop("unpriced_calls")
+    store.save_result(
+        result(
+            "P",
+            DAY,
+            "smoke",
+            [verdict("s1", VerdictStatus.PASSED)],
+            usage=[ModelUsage.model_validate(row)],
+        )
+    )
+    path = store.run_dir("P") / "manifest.json"
+    path.write_text(json.dumps({"run_id": "P", "layout": "opseval-runs/8"}), "utf-8")
+
+
+class TestRunCostReview:
+    @pytest.mark.parametrize("error", [StorageError("db down"), BlobStoreError("blob gone")])
+    def test_a_bad_blob_marks_the_split_not_recorded(
+        self, tmp_path: Path, error: Exception
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from opseval.config import Settings
+        from opseval.server import create_app
+
+        store = _FlakyRecords(tmp_path / "runs", None)
+        _layout_8_partial(store)
+        store.error = error
+        app = create_app(
+            settings=Settings(_env_file=None, reports_dir=str(store.root)), store=store, token="t"
+        )
+        c = TestClient(app, base_url="http://127.0.0.1:8000", headers={"Authorization": "Bearer t"})
+        usage = c.get("/api/v1/usage")
+        assert usage.status_code == 200
+        (row,) = usage.json()
+        assert row["costUsd"] is None and row["costComplete"] is False
+        assert row["unpricedCalls"] is None  # not recorded, never 0
+        detail = c.get("/api/v1/runs/P")
+        assert detail.status_code == 200
+        assert detail.json()["cost"]["recorded"] is False
+
+    def test_the_split_is_read_once_per_result(self, tmp_path: Path) -> None:
+        from opseval.server.views import usage
+
+        store = _FlakyRecords(tmp_path / "runs", None)
+        _layout_8_partial(store)
+        first = usage(store)
+        assert first[0].unpriced_calls == 1 and first[0].cost_complete is False
+        reads = store.reads
+        assert usage(store) == first and store.reads == reads  # cached, not reparsed
