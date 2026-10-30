@@ -154,3 +154,24 @@ async def test_the_simulator_warning_matches_what_the_runner_does(
         )
     persona = next(t for t in result.tests if t.test_id == "rf-101")
     assert (persona.status.value, persona.skip_kind) == ("skipped_precondition", "simulator")
+
+
+def test_a_rubric_with_no_must_under_a_threshold_below_one(profile: SutProfile) -> None:
+    """ADR-0061: weights could average a serious failure away; a must-criterion cannot."""
+    criteria = [
+        {"name": "a", "question": "Did the agent answer?"},
+        {"name": "b", "question": "Did it state the window?"},
+    ]
+
+    def rubric(threshold: float, crit: list[dict[str, Any]]) -> set[str]:
+        scorers = [
+            {"id": "output.terminal_state"},
+            {"id": "tools.expected_called"},
+            {"id": "judge.rubric", "threshold": threshold, "params": {"criteria": crit}},
+        ]
+        return fields(profile, scorers=scorers)
+
+    assert "scorers.2.params.criteria" in rubric(0.5, criteria)
+    assert rubric(1.0, criteria) == set()
+    assert rubric(0.5, [criteria[0], {**criteria[1], "must": True}]) == set()
+    assert rubric(0.5, criteria[:1]) == set()  # one criterion: the threshold is the rule

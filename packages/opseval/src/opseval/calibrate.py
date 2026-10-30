@@ -34,7 +34,7 @@ from opseval.models.calibration import (
     LabelSet,
     ScorerAgreement,
 )
-from opseval.models.results import ScoreStatus, SuiteResult
+from opseval.models.results import ScoreResult, ScoreStatus, SuiteResult
 from opseval.storage import FileStore
 from opseval.verdicts import EXIT_FAIL, EXIT_NOT_JUDGED, EXIT_PASS
 
@@ -78,13 +78,55 @@ def load_labels(path: str | Path) -> LabelSet:
     return labels
 
 
+CRITERION = ":"
+"""``judge.rubric:return_window`` labels one criterion of a rubric score (ADR-0061)."""
+
+_CRITERION_STATUS = {
+    "passed": ScoreStatus.PASSED,
+    "failed": ScoreStatus.FAILED,
+    "unmeasured": ScoreStatus.INFRA_ERROR,
+}
+
+
+def _criteria(score: ScoreResult) -> dict[str, ScoreStatus]:
+    """Each criterion's own outcome in a score that grades several (``details.criteria``
+    rows with a ``name`` and a ``result``, as ``judge.rubric`` writes them). An unmeasured
+    criterion is ``infra_error``: never measured, so it cannot agree."""
+    rows = score.details.get("criteria")
+    if not isinstance(rows, list):
+        return {}
+    out = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("name"), str):
+            status = _CRITERION_STATUS.get(str(row.get("result")))
+            if status is not None:
+                out[row["name"]] = status
+    return out
+
+
 def _judge_scores(result: SuiteResult) -> dict[JudgeCell, ScoreStatus]:
+    """Every score by (test, attempt, scorer), and every criterion of a rubric score by
+    (test, attempt, ``scorer:criterion``)."""
     out: dict[JudgeCell, ScoreStatus] = {}
     for test in result.tests:
         for attempt in test.attempts:
             for score in attempt.scores:
                 out[(test.test_id, attempt.attempt_index, score.scorer_id)] = score.status
+                for name, status in _criteria(score).items():
+                    cell = (test.test_id, attempt.attempt_index, f"{score.scorer_id}:{name}")
+                    out[cell] = status
     return out
+
+
+def _lookup(scores: dict[JudgeCell, ScoreStatus], item: HumanLabel) -> ScoreStatus | None:
+    """The score a label is compared with. A criterion label on an attempt whose whole rubric
+    score was not measured (no judge, bad params) is not measured too, never unmatched."""
+    status = scores.get((item.test_id, item.attempt_index, item.scorer_id))
+    if status is not None or CRITERION not in item.scorer_id:
+        return status
+    base = item.scorer_id.split(CRITERION, 1)[0]
+    whole = scores.get((item.test_id, item.attempt_index, base))
+    return whole if whole is ScoreStatus.INFRA_ERROR else None
 
 
 def _kappa(table: dict[tuple[Label, Label], int], total: int) -> tuple[float | None, str | None]:
@@ -132,7 +174,7 @@ def _agreement(
         scorer_id=scorer_id, status=AgreementStatus.NOT_MEASURED, labels=len(labels)
     )
     for item in labels:
-        status = scores.get((item.test_id, item.attempt_index, item.scorer_id))
+        status = _lookup(scores, item)
         if status is None:
             out.unmatched += 1
             continue
@@ -205,7 +247,19 @@ def calibrate_run(
         )
 
     scored_ids = {scorer for _t, _a, scorer in scores}
-    misspelled = sorted({i.scorer_id for i in label_set.labels} - scored_ids)
+    # A criterion of a rubric that was never graded anywhere in the run (no judge) is not a
+    # misspelling: its labels are counted as not measured.
+    ungraded = {
+        sid
+        for sid in scored_ids
+        if CRITERION not in sid
+        and all(st is ScoreStatus.INFRA_ERROR for (_t, _a, o), st in scores.items() if o == sid)
+    }
+    misspelled = sorted(
+        sid
+        for sid in {i.scorer_id for i in label_set.labels} - scored_ids
+        if sid.split(CRITERION, 1)[0] not in ungraded or CRITERION not in sid
+    )
     if misspelled:
         raise ConfigError(
             f"labels name scorers that run {run_id} never scored: {', '.join(misspelled)}. "
@@ -319,7 +373,7 @@ def label_template(result: SuiteResult, scorer_id: str) -> str:
         }
         for test in result.tests
         for attempt in test.attempts
-        if any(s.scorer_id == scorer_id for s in attempt.scores)
+        if any(s.scorer_id == scorer_id.split(CRITERION, 1)[0] for s in attempt.scores)
     ]
     if not rows:
         raise ConfigError(

@@ -6,7 +6,8 @@ code: it says what the scenario will *not* tell you, so nobody reads a green run
 something it never checked. Two kinds:
 
 - about the file itself (a dialect simulated with a nearer pack, scripted turns in a language
-  with no pack, one repeat, a lowered pass threshold, a planted injection or a declared
+  with no pack, one repeat, a lowered pass threshold, a rubric with no must-criterion under a
+  threshold below 1, a planted injection or a declared
   expectation that no scorer grades, trace-backed checks with no trace source, the commit
   opt-in, quarantine);
 - about this machine (judge checks with no judge configured, an LLM persona with no simulator).
@@ -58,6 +59,7 @@ def scenario_warnings(
             )
     _language(scenario, warn)
     _script_default(scenario, specs, warn)
+    _rubrics(specs, warn)
     if scenario.execution.repeats == 1:
         warn(
             "execution.repeats",
@@ -169,6 +171,25 @@ def _script_default(
                 + (f" ({scenario.persona.dialect!r})" if scenario.persona.dialect else "")
                 + "; give params.script if that is not how it is typed",
             )
+
+
+def _rubrics(specs: list[ScorerSpec], warn: Callable[[str, str], None]) -> None:
+    """A ``judge.rubric`` with no ``must`` criterion and a threshold under 1 passes with some
+    criteria failed, whichever they are (ADR-0061): a serious one can be averaged away."""
+    for index, spec in enumerate(specs):
+        if spec.id != "judge.rubric" or spec.threshold >= 1:
+            continue
+        criteria = spec.params.get("criteria")
+        if not isinstance(criteria, list) or len(criteria) < 2:
+            continue
+        if any(isinstance(c, dict) and c.get("must") is True for c in criteria):
+            continue
+        warn(
+            f"scorers.{index}.params.criteria",
+            f"no criterion is a must and the threshold is {spec.threshold:g}: it passes with "
+            "some criteria failed, whichever they are; mark the ones that must hold "
+            "(must: true)",
+        )
 
 
 def _ungraded(
