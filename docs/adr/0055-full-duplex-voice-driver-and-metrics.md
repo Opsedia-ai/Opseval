@@ -1,6 +1,6 @@
 # ADR-0055: Full-duplex voice driver and voice metrics
 
-- **Status:** Accepted (V1 built, see the implementation note)
+- **Status:** Proposed (V1 built, see the implementation note)
 - **Date:** 2026-10-28
 - **Deciders:** Opseval maintainers (owner request 2026-10-28)
 
