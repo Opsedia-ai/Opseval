@@ -221,7 +221,10 @@ Built (the ADR stays Proposed):
   figure), is the arithmetic of the usage rows (`llm.fold_usage`), the run detail
   (`RunDetail.cost`), the Usage page (`unpricedCalls`) and both analytics stores. Costs on the
   wire are rounded to 6 digits everywhere, so the run detail and the Cost dashboard show the
-  same number. Layout `opseval-runs/9`; rows of layouts 1–8 read with the split they tell (a
+  same number. A split worked out from records (an older run) is cached per result, and a
+  record that cannot be read (a file, the database or the blob store failing) marks only that
+  run's split "not recorded": it never fails the Usage page or the run detail. Layout
+  `opseval-runs/9`; rows of layouts 1–8 read with the split they tell (a
   total means every call was priced; no total and no per-count tally means none was), else
   `unpriced_calls: null` ("not recorded"), and the run detail then splits the run from its
   records. A failed call is not an unpriced call.
@@ -241,10 +244,17 @@ Built (the ADR stays Proposed):
   `GET /prices/resolve?model=&at=` (the row that applies, or `null`: "no price", never $0).
 - **Latency, Quality, Voice and Usage**, on `AnalyticsStore` (ADR-0052), `GET
   /api/v1/analytics/latency|quality|voice|usage`:
-  - Latency: the agent's reply time per turn (the first frame back after each frame sent,
-    `RunRecord.turn_latencies`; a reply the clocks could not time is unmeasured), voice turn
-    latency and time to first audio (ADR-0055 metrics), and the harness's own LLM/TTS/STT call
-    latency per role (answered calls, retries included; a re-score's calls are not the run).
+  - Latency: the agent's reply time per conversation turn (`RunRecord.turn_latencies`: a
+    customer message or checkpoint answer, and the first frame back; protocol probes and their
+    answers, handshake and auth frames and notifications are not turns, as for
+    `protocol.replies_read`). A reply the clocks could not time is `unmeasured`; a turn the agent
+    never answered before the next turn or the end (a timeout) is `unanswered`, counted beside
+    `n` and never a number in the percentiles (stored as a null row with reason `NO_REPLY`).
+    Voice turn latency and time to first audio (ADR-0055 metrics), and the harness's own
+    LLM/TTS/STT call latency per role (answered calls, retries included; a re-score's calls are
+    not the run). Under a language or dialect filter the per-role panel counts the calls made
+    for matching attempts; calls made outside any attempt have no language and are counted in
+    `llm_calls_unattributed`.
   - Quality: pass rate per bucket over judged verdicts (`passed / (passed + failed)`; anything
     else is `not_judged`, never in the denominator, and a bucket with nothing judged is
     `null`), the gate state of every run, flaky scenarios (marked flaky, or judged verdicts
@@ -265,8 +275,9 @@ Built (the ADR stays Proposed):
     organisation, project, label in local mode), `FILTER_NOT_APPLICABLE` (model or role on a
     dashboard that is not about calls; language on cost, tokens or usage),
     `FILTER_NOT_RECORDED` (label: a run does not record the catalogue label it ran), and
-    `FILTER_OUTSIDE_SCOPE` (another project in server mode). A verdict's language is its
-    scenario's first attempt's persona.
+    `FILTER_OUTSIDE_SCOPE` (another project in server mode). The label is refused first, so it
+    says `FILTER_NOT_RECORDED` in every mode. A verdict's language is its scenario's first
+    attempt's persona.
 - **Console.** `/latency`, `/quality`, `/voice`, `/usage-totals` and `/prices`, drawn with the
   in-house SVG of D1 plus `GapLines` (a `null` ends the line: no point and no segment across
   it, the bucket says "no data", "not measured" or "nothing judged"). The add-a-price form is

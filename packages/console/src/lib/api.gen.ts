@@ -444,6 +444,7 @@ export interface PercentilesOut {
   p95: number | null;
   p99: number | null;
   mean: number | null;
+  unanswered: number;
 }
 
 export interface PercentileSeriesOut {
@@ -486,6 +487,7 @@ export interface LatencyDashboard {
   voiceTurnLatency: PercentileSeriesOut;
   timeToFirstAudio: PercentileSeriesOut;
   llmLatency: PercentileSeriesOut[];
+  llmCallsUnattributed: number;
 }
 
 export interface GateRunOut {

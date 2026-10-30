@@ -17,7 +17,8 @@ export default function LatencyDashboard() {
         <Card><DashFilters query={query} options={res.data?.options} onChange={setQuery} /></Card>
         <Data res={res}>{(d) => (<>
           <div className="grid gap-4 md:grid-cols-3">
-            <Stat label="Agent reply time" value={<span className="text-lg"><PercentileStats p={d.turnLatency.total} /></span>} note="from each message sent to the first frame back" />
+            <Stat label="Agent reply time" value={<span className="text-lg"><PercentileStats p={d.turnLatency.total} /></span>}
+              note={<>from each message sent to the first frame back{d.turnLatency.total.unanswered > 0 && <> · <b data-testid="unanswered">{d.turnLatency.total.unanswered} turn{d.turnLatency.total.unanswered === 1 ? "" : "s"} never answered</b> (a timeout on the agent)</>}</>} />
             <Stat label="Voice turn latency" value={<span className="text-lg"><PercentileStats p={d.voiceTurnLatency.total} /></span>} note="the caller's end of speech to the agent's audio" />
             <Stat label="Time to first audio" value={<span className="text-lg"><PercentileStats p={d.timeToFirstAudio.total} /></span>} note="voice calls only" />
           </div>
@@ -27,6 +28,7 @@ export default function LatencyDashboard() {
             {d.llmLatency.length === 0 ? <p className="text-sm">No answered calls in these runs.</p> : (<>
               <GapLines title="p95 per role" buckets={d.buckets} fmt={ms}
                 lines={d.llmLatency.map((s) => ({ name: s.group, values: s.points.map((p) => p.p95) }))} />
+              {d.llmCallsUnattributed > 0 && <p className="mb-2 text-sm" data-testid="unattributed">{d.llmCallsUnattributed} call{d.llmCallsUnattributed === 1 ? " was" : "s were"} made outside any attempt and {d.llmCallsUnattributed === 1 ? "has" : "have"} no language: left out under this filter.</p>}
               <Table head={["Role", "Latency (retries included)"]}>
                 {d.llmLatency.map((s) => <tr key={s.group}><td>{s.group}</td><td><PercentileStats p={s.total} /></td></tr>)}
               </Table>

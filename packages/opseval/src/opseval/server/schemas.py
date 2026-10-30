@@ -531,6 +531,7 @@ class PercentilesOut(Api):
     p95: float | None
     p99: float | None
     mean: float | None
+    unanswered: int  # agent turns with no reply (a timeout): counted, never a number
 
 
 class PercentileSeriesOut(Api):
@@ -574,6 +575,7 @@ class LatencyDashboard(Api):
     voice_turn_latency: PercentileSeriesOut
     time_to_first_audio: PercentileSeriesOut
     llm_latency: list[PercentileSeriesOut]  # the harness's own calls, per role
+    llm_calls_unattributed: int  # left out under a language filter: made outside any attempt
 
 
 class GateRunOut(Api):

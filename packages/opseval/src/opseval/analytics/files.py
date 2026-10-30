@@ -64,7 +64,7 @@ from opseval.analytics.models import (
     VoiceAnswer,
 )
 from opseval.errors import HarnessError
-from opseval.models.record import RunRecord
+from opseval.models.record import NO_REPLY, RunRecord
 from opseval.models.results import ModelUsage, SuiteResult, VerdictStatus
 from opseval.models.usage import UsageEvent, has_tokens
 from opseval.storage import KNOWN_LAYOUTS, PRE_USAGE_LAYOUTS, RunStore
@@ -772,7 +772,7 @@ class FileAnalytics(UsageFold):
 
     def latency(self, filters: UsageFilter) -> LatencyAnswer:
         finished, runs, left_out = self._facts(filters, "latency", "model", "role")
-        buckets, agent, llm, attempts = fold_latency(
+        buckets, agent, llm, attempts, unattributed = fold_latency(
             runs, filters.bucket, filters.language, filters.dialect
         )
         return LatencyAnswer(
@@ -784,6 +784,7 @@ class FileAnalytics(UsageFold):
             voice_turn_latency=agent["voice_turn"],
             time_to_first_audio=agent["ttfa"],
             llm_latency=llm,
+            llm_calls_unattributed=unattributed,
         )
 
     def quality(self, filters: UsageFilter, *, limit: int = 20) -> QualityAnswer:
@@ -859,7 +860,9 @@ def _facts(result: SuiteResult, records: list[RunRecord]) -> RunFacts:
         for a in t.attempts
     }
     attempts = []
-    calls: list[UsageEvent] = list(result.usage_events)
+    calls: list[tuple[UsageEvent, tuple[str, int] | None]] = [
+        (e, None) for e in result.usage_events
+    ]
     for record in records:
         language, dialect = record.language()
         voice = record.voice
@@ -870,7 +873,9 @@ def _facts(result: SuiteResult, records: list[RunRecord]) -> RunFacts:
                 language=language,
                 dialect=dialect,
                 voice=voice is not None,
-                latencies=tuple(record.turn_latencies()),
+                latencies=tuple(
+                    NO_REPLY if why == NO_REPLY else value for value, why in record.turn_latencies()
+                ),
                 metrics=tuple(
                     (m.name, m.value, m.degraded)
                     for m in (voice.metrics or () if voice is not None else ())
@@ -878,7 +883,8 @@ def _facts(result: SuiteResult, records: list[RunRecord]) -> RunFacts:
                 scores=scores.get((record.test_id, record.attempt_index), ()),
             )
         )
-        calls.extend(record.usage_events or ())
+        key = (record.test_id, record.attempt_index)
+        calls.extend((e, key) for e in record.usage_events or ())
     return RunFacts(
         run_id=result.run_id,
         suite=result.suite,
@@ -902,8 +908,9 @@ def _facts(result: SuiteResult, records: list[RunRecord]) -> RunFacts:
                 latency_ms=e.latency_ms,
                 audio_in_seconds=e.audio_in_seconds,
                 audio_out_seconds=e.audio_out_seconds,
+                attempt=attempt,
             )
-            for e in calls
+            for e, attempt in calls
         ),
     )
 

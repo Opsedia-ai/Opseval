@@ -34,6 +34,9 @@ How to read them:
   values, a time that was actually measured. Each one says how many values it covers (`n`) and
   how many were not measured (a reply during a barge-in, a voice metric the call could not
   measure).
+- **The agent's reply time** is timed per conversation turn: probes, handshakes and
+  notifications are not turns. A turn the agent never answered (a timeout) is shown as
+  **unanswered** next to `n`, never as a time.
 - **A pass rate counts judged verdicts only.** An outage, a skip or a check that could not run
   is counted apart (`not judged`), so a harness problem never shows as the agent's bad week,
   and a day with nothing judged is a gap, not 0%.

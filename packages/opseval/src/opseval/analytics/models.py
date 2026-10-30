@@ -231,6 +231,10 @@ class Percentiles(BaseModel):
     p95: float | None
     p99: float | None
     mean: float | None
+    unanswered: int = 0
+    """Agent turns that got no reply before the next turn or the end (a timeout on the agent):
+    counted apart, never a number in the percentiles. Always 0 for a metric that is not about
+    replies."""
 
 
 class PercentileSeries(BaseModel):
@@ -298,7 +302,11 @@ class LatencyAnswer(BaseModel):
     """``voice.time_to_first_audio_ms``: one per voice attempt."""
     llm_latency: list[PercentileSeries]
     """The harness's own LLM, TTS and STT calls, per role (answered calls; ms, retries
-    included). A call that reported no latency is ``unmeasured``."""
+    included). A call that reported no latency is ``unmeasured``. Under a language or dialect
+    filter, only the calls made for the attempts that match."""
+    llm_calls_unattributed: int = 0
+    """Answered calls left out of ``llm_latency`` because a language or dialect filter is set
+    and they were made outside any attempt (they have no language). 0 with no such filter."""
 
 
 class GateRun(BaseModel):

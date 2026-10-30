@@ -257,7 +257,7 @@ export function GapLines({ buckets, lines, fmt, title, gap = () => "no data", yM
 export function PercentileChart({ buckets, points, title, fmt = ms }: { buckets: UsageBucket[]; points: Percentiles[]; title: string; fmt?: Format }) {
   return (
     <GapLines title={title} buckets={buckets} fmt={fmt}
-      gap={(i) => (points[i].unmeasured > 0 ? "not measured" : "no data")}
+      gap={(i) => (points[i].unanswered > 0 ? "no reply" : points[i].unmeasured > 0 ? "not measured" : "no data")}
       lines={[
         { name: "p50", values: points.map((p) => p.p50) },
         { name: "p95", values: points.map((p) => p.p95) },
@@ -266,15 +266,19 @@ export function PercentileChart({ buckets, points, title, fmt = ms }: { buckets:
   );
 }
 
-/** Percentiles in text: "p50 120 ms · p95 … (n = 40, 2 not measured)", or not measured. */
+/** Percentiles in text: "p50 120 ms · p95 … (n = 40, 2 not measured, 1 unanswered)", or not
+ * measured. A turn the agent never answered is counted beside n, never as a time. */
 export function PercentileStats({ p, fmt = ms }: { p: Percentiles; fmt?: Format }) {
+  const unanswered = p.unanswered ? `${p.unanswered} unanswered` : "";
   if (p.n === 0 || p.p50 === null || p.p95 === null || p.p99 === null) {
-    return <NotMeasured text={p.unmeasured ? `not measured (${p.unmeasured})` : "no data"} />;
+    const parts = [p.unmeasured ? `${p.unmeasured}` : "", unanswered].filter(Boolean);
+    return <NotMeasured text={parts.length ? `not measured (${parts.join(", ")})` : "no data"} />;
   }
+  const apart = [p.unmeasured ? `${p.unmeasured} not measured` : "", unanswered].filter(Boolean).map((x) => `, ${x}`).join("");
   return (
-    <span data-n={p.n}>
+    <span data-n={p.n} data-unanswered={p.unanswered || undefined}>
       p50 {fmt(p.p50)} · p95 {fmt(p.p95)} · p99 {fmt(p.p99)}
-      <span className="ml-1 text-xs font-normal text-muted-ink">(n = {p.n}{p.unmeasured ? `, ${p.unmeasured} not measured` : ""})</span>
+      <span className="ml-1 text-xs font-normal text-muted-ink">(n = {p.n}{apart})</span>
     </span>
   );
 }

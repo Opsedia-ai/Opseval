@@ -22,7 +22,14 @@ from opseval.analytics.dashboards import nearest_rank, percentiles
 from opseval.errors import BlobStoreError, StorageError
 from opseval.llm import fold_usage
 from opseval.models.profile import FrameKind
-from opseval.models.record import FrameRecord, RunRecord, TerminalState, VoiceMetric, VoiceTimeline
+from opseval.models.record import (
+    FrameRecord,
+    ProbeResult,
+    RunRecord,
+    TerminalState,
+    VoiceMetric,
+    VoiceTimeline,
+)
 from opseval.models.results import (
     AttemptVerdict,
     Axis,
@@ -59,36 +66,45 @@ def ev(role: str, model: str, at: datetime = DAY, **kw: Any) -> UsageEvent:
     return priced(UsageEvent(at=at, role=role, model=model, **kw), PRICES)  # type: ignore[arg-type]
 
 
-def frames(*latencies: float | None) -> tuple[FrameRecord, ...]:
-    """One message sent and one reply per latency (``None``: a reply the clocks could not time)."""
+def frames(
+    *latencies: float | str | None,
+) -> tuple[tuple[FrameRecord, ...], tuple[ProbeResult, ...]]:
+    """A conversation: a handshake and a protocol probe first (neither is a turn), then one
+    customer message per latency and its reply. ``None``: a reply the clocks could not time;
+    ``"no_reply"``: a message the agent never answered. A notification before the first reply
+    and a second frame after it are not replies."""
     out: list[FrameRecord] = []
-    for latency in latencies:
-        for direction, value in (("sent", None), ("received", latency)):
-            out.append(
-                FrameRecord(
-                    seq=len(out),
-                    at=DAY,
-                    direction=direction,  # type: ignore[arg-type]
-                    kind=FrameKind.MESSAGE,
-                    payload={},
-                    latency_ms=value,
-                    text="hi",
-                )
-            )
-    # A second frame after a reply is not another turn.
-    if out:
+
+    def add(direction: str, kind: FrameKind, latency: float | None = None) -> int:
         out.append(
             FrameRecord(
                 seq=len(out),
                 at=DAY,
-                direction="received",
-                kind=FrameKind.MESSAGE,
+                direction=direction,  # type: ignore[arg-type]
+                kind=kind,
                 payload={},
-                latency_ms=999.0,
-                text="more",
+                latency_ms=latency,
+                text="hi",
             )
         )
-    return tuple(out)
+        return len(out) - 1
+
+    probes: tuple[ProbeResult, ...] = ()
+    if latencies:
+        add("sent", FrameKind.HANDSHAKE)
+        add("received", FrameKind.HANDSHAKE, 5.0)
+        sent = add("sent", FrameKind.UNKNOWN)
+        got = add("received", FrameKind.MESSAGE, 7.0)
+        probes = (ProbeResult(name="ping", passed=True, sent_seq=sent, received_seq=got),)
+    for i, latency in enumerate(latencies):
+        add("sent", FrameKind.USER_MESSAGE)
+        if i == 0:
+            add("received", FrameKind.NOTIFICATION, 1.0)
+        if latency != "no_reply":
+            add("received", FrameKind.MESSAGE, latency if not isinstance(latency, str) else None)
+    if latencies and latencies[-1] != "no_reply":
+        add("received", FrameKind.MESSAGE, 999.0)  # a second frame after a reply: not a turn
+    return tuple(out), probes
 
 
 def voice(*metrics: tuple[str, int | None, float | None, bool]) -> VoiceTimeline:
@@ -118,7 +134,7 @@ def rec(
     *,
     language: str = "en",
     dialect: str | None = None,
-    latencies: tuple[float | None, ...] = (),
+    latencies: tuple[float | str | None, ...] = (),
     events: tuple[UsageEvent, ...] | None = (),
     timeline: VoiceTimeline | None = None,
 ) -> RunRecord:
@@ -131,7 +147,8 @@ def rec(
         started_at=DAY,
         ended_at=DAY,
         terminal_state=TerminalState.GOAL_REACHED,
-        frames=frames(*latencies),
+        frames=frames(*latencies)[0],
+        probes=frames(*latencies)[1],
         persona={"role": "customer", "language": language, "dialect": dialect},
         usage_events=events,
         voice=timeline,
@@ -310,7 +327,7 @@ def populate(store: RunStore, legacy: Any) -> None:
     # Run D (next Tue): s1 flips to failed; re-scored later.
     d1 = (ev("judge", "m-judge", input_tokens=20, output_tokens=2, latency_ms=700.0),)
     store.write_manifest("D", {"run_id": "D", "suite": "smoke"})
-    store.save_record(rec("D", "s1", 0, latencies=(150.0,), events=d1))
+    store.save_record(rec("D", "s1", 0, latencies=(150.0, "no_reply"), events=d1))
     store.save_result(
         result(
             "D",
@@ -393,6 +410,33 @@ class TestLatency:
     def test_language_filter(self, files: FileStore) -> None:
         answer = FileAnalytics(files).latency(UsageFilter(language="ar", dialect="egyptian"))
         assert answer.turn_latency.total.n == 1 and answer.scope.attempts == 1
+
+    def test_a_turn_the_agent_never_answered_is_counted_not_dropped(self, files: FileStore) -> None:
+        answer = FileAnalytics(files).latency(UsageFilter(bucket="run"))
+        total = answer.turn_latency.total
+        assert (total.n, total.unmeasured, total.unanswered) == (6, 1, 1)
+        d = answer.turn_latency.points[[b.key for b in answer.buckets].index("D")]
+        assert (d.n, d.unanswered, d.p99) == (1, 1, 150.0)  # never a number in the percentiles
+
+    def test_only_conversation_turns_are_timed(self) -> None:
+        record = rec("X", "s", 0, latencies=(40.0, None, "no_reply", 60.0))
+        # The handshake (5 ms), the probe's answer (7 ms) and the notification (1 ms) are not
+        # replies; the message never answered is NO_REPLY, the untimed one NOT_TIMED.
+        assert record.turn_latencies() == [
+            (40.0, None),
+            (None, "NOT_TIMED"),
+            (None, "NO_REPLY"),
+            (60.0, None),
+        ]
+        last = rec("X", "s", 0, latencies=(40.0, "no_reply"))
+        assert last.turn_latencies() == [(40.0, None), (None, "NO_REPLY")]
+
+    def test_the_language_filter_applies_to_the_per_role_panel(self, files: FileStore) -> None:
+        answer = FileAnalytics(files).latency(UsageFilter(language="ar"))
+        roles = {s.group: s.total for s in answer.llm_latency}
+        assert set(roles) == {"stt", "tts"}  # only the Arabic attempt's calls
+        assert answer.llm_calls_unattributed == 1  # the judge call outside any attempt
+        assert FileAnalytics(files).latency(UsageFilter()).llm_calls_unattributed == 0
 
     def test_model_does_not_apply(self, files: FileStore) -> None:
         with pytest.raises(FilterNotApplicable):
@@ -541,6 +585,11 @@ QUERIES: list[tuple[str, UsageFilter]] = [
     ("latency", UsageFilter()),
     ("latency", UsageFilter(bucket="week", language="en")),
     ("latency", UsageFilter(bucket="run", suite="other")),
+    ("latency", UsageFilter(bucket="run")),
+    ("latency", UsageFilter(language="ar")),
+    ("latency", UsageFilter(language="ar", dialect="egyptian", bucket="week")),
+    ("latency", UsageFilter(dialect="nope")),
+    ("cost", UsageFilter(since=date(2026, 3, 3), until=date(2026, 3, 9))),
     ("quality", UsageFilter()),
     ("quality", UsageFilter(bucket="week", language="ar")),
     ("quality", UsageFilter(until=date(2026, 3, 2))),
@@ -569,7 +618,7 @@ async def test_file_and_database_give_identical_answers(pg_url: str, tmp_path: P
     from opseval.analytics.pg import PgAnalytics
     from opseval.blobs import FileBlobStore
     from opseval.db.run_store import DbRunStore
-    from tests.test_db_runs import PROJECT, prepare, settings_for
+    from tests.test_db_runs import PROJECT, prepare, settings_for, sql
 
     files = FileStore(tmp_path / "runs")
     populate(files, file_legacy)
@@ -595,10 +644,27 @@ async def test_file_and_database_give_identical_answers(pg_url: str, tmp_path: P
             assert got == want, f"{question} {filters}"
         # Not two empty answers agreeing: the database counted what the folder did.
         assert database.latency(UsageFilter()).turn_latency.total.n == 6
+        assert database.latency(UsageFilter()).turn_latency.total.unanswered == 1
+        assert database.latency(UsageFilter(language="ar")).llm_calls_unattributed == 1
+        stored = sql(
+            db,
+            "SELECT count(*) FROM attempt_metrics WHERE name = 'agent.turn_latency_ms' "
+            "AND value IS NULL AND reason LIKE 'NO_REPLY%'",
+        )
+        assert stored[0][0] == 1
         assert database.cost(UsageFilter()).scope.rescore_calls == 1
         assert database.cost(UsageFilter()).scope.legacy_runs == ["B"]
         assert database.voice(UsageFilter()).metrics[0].total.p50 == 320.0
         assert database.quality(UsageFilter()).pass_rate_total.judged == 4
+        # The filter choices are read once per scope, not on every request.
+        fresh = PgAnalytics(db)
+        reads: list[int] = []
+        original = fresh._read_options
+        fresh._read_options = lambda: (reads.append(1), original())[1]  # type: ignore[method-assign]
+        fresh.latency(UsageFilter())
+        fresh.quality(UsageFilter())
+        fresh.voice(UsageFilter())
+        assert len(reads) == 1
         # The task filter is applied in the database, never ignored.
         assert database.usage(UsageFilter(task="default")).scope.runs == 4
         assert database.usage(UsageFilter(task="nope")).scope.runs == 0
@@ -644,7 +710,15 @@ class TestEndpoints:
         latency = api.get("/api/v1/analytics/latency", params={"bucket": "week"}).json()
         assert latency["rule"] == "nearest-rank"
         gap = latency["voiceTurnLatency"]["points"][1]
-        assert gap == {"n": 0, "unmeasured": 0, "p50": None, "p95": None, "p99": None, "mean": None}
+        assert gap == {
+            "n": 0,
+            "unmeasured": 0,
+            "unanswered": 0,
+            "p50": None,
+            "p95": None,
+            "p99": None,
+            "mean": None,
+        }
         quality = api.get("/api/v1/analytics/quality").json()
         # Mar 9: only an inconclusive verdict. Not judged is a gap, never a 0% day.
         assert quality["passRate"][2]["value"] is None and quality["passRate"][2]["notJudged"] == 1

@@ -52,13 +52,21 @@ def nearest_rank(values: list[float], p: float) -> float | None:
     return ordered[max(math.ceil(p * len(ordered)), 1) - 1]
 
 
-def percentiles(values: Iterable[float | None]) -> Percentiles:
-    """``n`` measured values and the ``unmeasured`` ones (``None``), never folded together."""
+Sample = float | str | None
+"""A value to take percentiles of: a number, ``None`` (not measured) or :data:`NO_REPLY` (a turn
+the agent never answered: counted as ``unanswered``, never as a number)."""
+
+
+def percentiles(values: Iterable[Sample]) -> Percentiles:
+    """``n`` measured values, the ``unmeasured`` ones (``None``) and the ``unanswered`` ones
+    (:data:`NO_REPLY`), never folded together."""
     measured: list[float] = []
-    unmeasured = 0
+    unmeasured = unanswered = 0
     for v in values:
         if v is None:
             unmeasured += 1
+        elif isinstance(v, str):
+            unanswered += 1
         else:
             measured.append(float(v))
     n = len(measured)
@@ -66,6 +74,7 @@ def percentiles(values: Iterable[float | None]) -> Percentiles:
     return Percentiles(
         n=n,
         unmeasured=unmeasured,
+        unanswered=unanswered,
         p50=p50,
         p95=p95,
         p99=p99,
@@ -110,7 +119,8 @@ class AttemptFacts:
     language: str | None
     dialect: str | None
     voice: bool
-    latencies: tuple[float | None, ...] = ()
+    latencies: tuple[Sample, ...] = ()
+    """The agent's reply time per turn: ms, ``None`` (not timed) or :data:`NO_REPLY`."""
     metrics: tuple[tuple[str, float | None, bool], ...] = ()
     """Voice metric rows: (name, value, degraded)."""
     scores: tuple[tuple[str, str, str, float | None], ...] = ()
@@ -135,6 +145,8 @@ class CallFacts:
     latency_ms: float | None
     audio_in_seconds: float | None
     audio_out_seconds: float | None
+    attempt: tuple[str, int] | None = None
+    """The attempt it was made for; ``None``: outside any attempt (it has no language)."""
 
 
 @dataclass(frozen=True)
@@ -329,17 +341,25 @@ def minutes(calls: Iterable[CallFacts]) -> Measured:
 
 def fold_latency(
     runs: list[RunFacts], bucket: str, language: str | None, dialect: str | None
-) -> tuple[list[BucketOut], dict[str, PercentileSeries], list[PercentileSeries], int]:
-    """(buckets, the three agent series by name, LLM latency per role, attempts counted)."""
+) -> tuple[list[BucketOut], dict[str, PercentileSeries], list[PercentileSeries], int, int]:
+    """(buckets, the three agent series by name, LLM latency per role, attempts counted, calls
+    left out of the per-role latency because a language filter cannot place them).
+
+    Under a language or dialect filter a call counts when the attempt it was made for matches;
+    a call made outside any attempt has no language, so it is left out and counted apart."""
     buckets = Buckets(bucket)
-    cells: dict[tuple[str, str], list[float | None]] = defaultdict(list)
-    roles: dict[tuple[str, str], list[float | None]] = defaultdict(list)
+    cells: dict[tuple[str, str], list[Sample]] = defaultdict(list)
+    roles: dict[tuple[str, str], list[Sample]] = defaultdict(list)
     attempts = 0
+    unattributed = 0
+    filtered = language is not None or dialect is not None
     for run in runs:
         key = buckets.add(run)
+        picked: set[tuple[str, int]] = set()
         for a in run.attempts:
             if not wanted(a, language, dialect):
                 continue
+            picked.add((a.test_id, a.index))
             attempts += 1
             cells[("turn", key)].extend(a.latencies)
             for name, value, _ in a.metrics:
@@ -348,12 +368,16 @@ def fold_latency(
                 elif name == "voice.time_to_first_audio_ms":
                     cells[("ttfa", key)].append(value)
         for c in run.calls:
-            if c.answered:
+            if not c.answered:
+                continue
+            if filtered and c.attempt is None:
+                unattributed += 1
+            elif not filtered or c.attempt in picked:
                 roles[(c.role, key)].append(c.latency_ms)
     keys = buckets.keys
 
     def series(
-        group: str, source: dict[tuple[str, str], list[float | None]], name: str
+        group: str, source: dict[tuple[str, str], list[Sample]], name: str
     ) -> PercentileSeries:
         return PercentileSeries(
             group=group,
@@ -367,7 +391,7 @@ def fold_latency(
         "ttfa": series("agent", cells, "ttfa"),
     }
     llm = [series(role, roles, role) for role in sorted({r for r, _ in roles})]
-    return buckets.list(), agent, llm, attempts
+    return buckets.list(), agent, llm, attempts, unattributed
 
 
 def fold_quality(

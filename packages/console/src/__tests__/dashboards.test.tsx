@@ -14,8 +14,8 @@ const buckets: UsageBucket[] = [
   { key: "2026-03-03", label: "Mar 3", start: "2026-03-03T00:00:00Z", runs: 1 },
   { key: "2026-03-04", label: "Mar 4", start: "2026-03-04T00:00:00Z", runs: 1 },
 ];
-const none = (unmeasured = 0): Percentiles => ({ n: 0, unmeasured, p50: null, p95: null, p99: null, mean: null });
-const some = (p50: number, n = 3): Percentiles => ({ n, unmeasured: 0, p50, p95: p50 * 2, p99: p50 * 3, mean: p50 });
+const none = (unmeasured = 0, unanswered = 0): Percentiles => ({ n: 0, unmeasured, unanswered, p50: null, p95: null, p99: null, mean: null });
+const some = (p50: number, n = 3, unanswered = 0): Percentiles => ({ n, unmeasured: 0, unanswered, p50, p95: p50 * 2, p99: p50 * 3, mean: p50 });
 const rate = (value: number | null, passed: number, judged: number, notJudged: number): Rate => ({ value, passed, judged, notJudged });
 const options: DashboardOptions = { suites: ["smoke"], tasks: [], languages: ["ar", "en"], dialects: [], serverOnly: ["task"], notRecorded: ["label"] };
 const scope: DashboardScope = { runs: 3, attempts: 5, unreadableRuns: [], inFlightExcluded: true };
@@ -50,6 +50,9 @@ describe("figures", () => {
   it("percentiles: measured, not measured, or nothing", () => {
     expect(render(<PercentileStats p={some(100, 4)} />).container.textContent).toBe("p50 100 ms · p95 200 ms · p99 300 ms(n = 4)");
     expect(render(<PercentileStats p={none(3)} />).container.textContent).toBe("not measured (3)");
+    // A turn the agent never answered is counted beside n, never as a time.
+    expect(render(<PercentileStats p={some(100, 4, 2)} />).container.textContent).toBe("p50 100 ms · p95 200 ms · p99 300 ms(n = 4, 2 unanswered)");
+    expect(render(<PercentileStats p={none(0, 1)} />).container.textContent).toBe("not measured (1 unanswered)");
     expect(render(<PercentileStats p={none()} />).container.textContent).toBe("no data");
   });
 
@@ -74,10 +77,11 @@ describe("figures", () => {
 
 const latency: LatencyDashboard = {
   filters, options, scope, rule: "nearest-rank", buckets,
-  turnLatency: { group: "agent", points: [some(100), none(1), none()], total: some(100) },
+  turnLatency: { group: "agent", points: [some(100), none(1), none(0, 2)], total: some(100, 3, 2) },
   voiceTurnLatency: { group: "agent", points: [none(), none(), none()], total: none() },
   timeToFirstAudio: { group: "agent", points: [none(), none(), none()], total: none() },
-  llmLatency: [],
+  llmLatency: [{ group: "judge", points: [some(50), none(), none()], total: some(50) }],
+  llmCallsUnattributed: 1,
 };
 const quality: QualityDashboard = {
   filters, options, scope, buckets,
@@ -113,6 +117,10 @@ describe("the D2 pages", () => {
     // Axis ticks may read 0; no mark of data does.
     expect(container.querySelector('circle[data-value="0"]')).toBeNull();
     expect(container.querySelector('[data-bucket="2026-03-03"] [data-gap="true"]')?.textContent).toBe("not measured");
+    // Turns the agent never answered: shown next to n, and a bucket of them says so.
+    expect(screen.getByTestId("unanswered").textContent).toBe("2 turns never answered");
+    expect(container.querySelector('[data-bucket="2026-03-04"] [data-gap="true"]')?.textContent).toBe("no reply");
+    expect(screen.getByTestId("unattributed").textContent).toContain("1 call was made outside any attempt");
   });
 
   it("Quality: a day with nothing judged is a gap and judge agreement is not measured", async () => {

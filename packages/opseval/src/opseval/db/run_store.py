@@ -59,7 +59,7 @@ from opseval.db.schema import (
 from opseval.errors import BlobStoreError, ConfigError, StorageError
 from opseval.models.profile import SutProfile
 from opseval.models.progress import RunProgress
-from opseval.models.record import RunRecord
+from opseval.models.record import NO_REPLY, NOT_TIMED, RunRecord
 from opseval.models.results import SuiteResult, VerdictStatus
 from opseval.models.scenario import Scenario
 from opseval.models.usage import ModelPrice, PriceTable, UsageEvent
@@ -87,7 +87,12 @@ from opseval.verdicts import gate_state
 
 T = TypeVar("T")
 JSON = "application/json"
-NOT_TIMED = "NOT_TIMED: the reply came while the clocks could not time it (a barge-in)"
+TURN_REASONS = {
+    NOT_TIMED: f"{NOT_TIMED}: the reply came while the clocks could not time it (a barge-in)",
+    NO_REPLY: f"{NO_REPLY}: the agent did not answer before the next turn or the end",
+}
+"""Why a turn's reply time is null: a ``NO_REPLY`` row is an unanswered turn (counted apart
+on the Latency dashboard), any other null is not measured."""
 MARKER = f"audio/{AUDIO_MARKER}"
 
 
@@ -927,7 +932,7 @@ class DbRunStore:
                 )
             # The agent's reply time per turn (ADR-0066 D2, the Latency dashboard): a reply the
             # clocks could not time is stored as not measured, with why, never as 0.
-            for turn, latency in enumerate(record.turn_latencies(), start=1):
+            for turn, (latency, why) in enumerate(record.turn_latencies(), start=1):
                 s.add(
                     AttemptMetric(
                         attempt_id=attempt_id,
@@ -937,7 +942,7 @@ class DbRunStore:
                         value=latency,
                         unit="ms",
                         degraded=False,
-                        reason=None if latency is not None else NOT_TIMED,
+                        reason=None if why is None else TURN_REASONS[why],
                     )
                 )
             await s.execute(delete(UsageEventRow).where(UsageEventRow.attempt_id == attempt_id))

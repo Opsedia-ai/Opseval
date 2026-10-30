@@ -24,11 +24,12 @@ The store's scope is the store's: a project, and a task when it serves one task'
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
@@ -74,6 +75,12 @@ from opseval.storage import KNOWN_LAYOUTS, PRE_USAGE_LAYOUTS, RESCORE_PREFIX
 if TYPE_CHECKING:
     from opseval.db.run_store import DbRunStore
 
+OPTIONS_TTL = 30.0
+"""Seconds the filter choices are reused: a new suite or language shows within half a minute."""
+IS_NO_REPLY = "m.reason LIKE 'NO_REPLY%'"
+NOT_NO_REPLY = "(m.reason IS NULL OR m.reason NOT LIKE 'NO_REPLY%')"
+"""A null reply time is an unanswered turn when its reason says ``NO_REPLY`` (written by
+``DbRunStore.save_record``), and not measured otherwise."""
 PCT = "percentile_disc(ARRAY[0.5, 0.95, 0.99]) WITHIN GROUP (ORDER BY {col})"
 EVENT_COLUMNS = (
     "at, role, provider, model, answered, input_tokens, output_tokens, reasoning_tokens, "
@@ -106,13 +113,22 @@ class _Picked:
         return f"to_char({day}, 'YYYY-MM-DD')"
 
 
-def _pcts(n: int, unmeasured: int, values: Any, mean: Any) -> Percentiles:
+def _pcts(n: int, unmeasured: int, values: Any, mean: Any, unanswered: int = 0) -> Percentiles:
     if not n:
-        return Percentiles(n=0, unmeasured=unmeasured, p50=None, p95=None, p99=None, mean=None)
+        return Percentiles(
+            n=0,
+            unmeasured=unmeasured,
+            unanswered=unanswered,
+            p50=None,
+            p95=None,
+            p99=None,
+            mean=None,
+        )
     p50, p95, p99 = (float(v) for v in values)
     return Percentiles(
         n=n,
         unmeasured=unmeasured,
+        unanswered=unanswered,
         p50=p50,
         p95=p95,
         p99=p99,
@@ -129,6 +145,7 @@ class PgAnalytics(UsageFold):
 
     def __init__(self, store: DbRunStore) -> None:
         self.store = store
+        self._options: tuple[float, DashboardOptions] | None = None
 
     # --- plumbing -------------------------------------------------------------------------
 
@@ -175,12 +192,14 @@ class PgAnalytics(UsageFold):
         if filters.task is not None:
             where += " AND r.task_id IN (SELECT id FROM tasks WHERE slug = :task)"
             params["task"] = filters.task
+        # Bounds as UTC-midnight instants, so the comparison is on the indexed column itself
+        # (``ix_runs_project_started``): the same days as "started on or after/before" in UTC.
         if filters.since is not None:
-            where += " AND (r.started_at AT TIME ZONE 'UTC')::date >= :since"
-            params["since"] = filters.since
+            where += " AND r.started_at >= :since_at"
+            params["since_at"] = _midnight(filters.since)
         if filters.until is not None:
-            where += " AND (r.started_at AT TIME ZONE 'UTC')::date <= :until"
-            params["until"] = filters.until
+            where += " AND r.started_at < :until_at"
+            params["until_at"] = _midnight(filters.until + timedelta(days=1))
         return _Picked(where, params, filters.bucket)
 
     @staticmethod
@@ -209,6 +228,17 @@ class PgAnalytics(UsageFold):
         return buckets
 
     def dashboard_options(self) -> DashboardOptions:
+        """The filters' choices for this store's scope, kept for :data:`OPTIONS_TTL` seconds:
+        every dashboard request returns them, and three ``DISTINCT`` scans per request would
+        cost more than the answer itself."""
+        now = time.monotonic()
+        if self._options is not None and now - self._options[0] < OPTIONS_TTL:
+            return self._options[1]
+        options = self._read_options()
+        self._options = (now, options)
+        return options
+
+    def _read_options(self) -> DashboardOptions:
         params: dict[str, Any] = {}
         where = self._scope_sql(params)
         suites = self._rows(f"SELECT DISTINCT r.suite FROM runs r WHERE {where}", dict(params))  # nosec B608
@@ -233,10 +263,11 @@ class PgAnalytics(UsageFold):
     def _percentile_rows(
         self, sql: str, params: dict[str, Any]
     ) -> dict[tuple[str, str | None], Percentiles]:
-        """Rows of ``(group, bucket or None for the total, n, unmeasured, pcts, mean)``."""
+        """Rows of ``(group, bucket or None for the total, n, unmeasured, pcts, mean,
+        unanswered)``."""
         out: dict[tuple[str, str | None], Percentiles] = {}
-        for group, bucket, n, unmeasured, pcts, mean in self._rows(sql, params):
-            out[(group, bucket)] = _pcts(n, unmeasured, pcts, mean)
+        for group, bucket, n, unmeasured, pcts, mean, unanswered in self._rows(sql, params):
+            out[(group, bucket)] = _pcts(n, unmeasured, pcts, mean, unanswered)
         return out
 
     @staticmethod
@@ -263,8 +294,9 @@ class PgAnalytics(UsageFold):
         bucket = picked.key()
         agent = self._percentile_rows(
             f"SELECT m.name, CASE WHEN GROUPING({bucket}) = 0 THEN {bucket} END, "  # nosec B608
-            f"count(m.value), count(*) - count(m.value), {PCT.format(col='m.value')}, "
-            "avg(m.value) "
+            f"count(m.value), count(*) FILTER (WHERE m.value IS NULL AND {NOT_NO_REPLY}), "
+            f"{PCT.format(col='m.value')}, avg(m.value), "
+            f"count(*) FILTER (WHERE m.value IS NULL AND {IS_NO_REPLY}) "
             "FROM runs r JOIN attempts a ON a.run_id = r.id AND a.project_id = r.project_id "
             "JOIN attempt_metrics m ON m.attempt_id = a.id "
             f"WHERE {picked.where} AND m.name = ANY(:names){lang} "
@@ -272,22 +304,34 @@ class PgAnalytics(UsageFold):
             params,
         )
         params = dict(picked.params)
+        filtered = filters.language is not None or filters.dialect is not None
+        # Under a language filter a call counts when the attempt it was made for matches; a
+        # call outside any attempt has no language and is counted apart (as the folders do).
+        through = ""
+        if filtered:
+            through = (
+                " JOIN attempts a ON a.id = e.attempt_id AND a.project_id = e.project_id"
+                + self._attempt_filter(filters, params)
+            )
         llm = self._percentile_rows(
             f"SELECT e.role, CASE WHEN GROUPING({bucket}) = 0 THEN {bucket} END, "  # nosec B608
             f"count(e.latency_ms), count(*) - count(e.latency_ms), "
-            f"{PCT.format(col='e.latency_ms')}, avg(e.latency_ms) "
-            "FROM runs r JOIN usage_events e ON e.run_id = r.id AND e.project_id = r.project_id "
+            f"{PCT.format(col='e.latency_ms')}, avg(e.latency_ms), 0 "
+            "FROM runs r JOIN usage_events e ON e.run_id = r.id AND e.project_id = r.project_id"
+            f"{through} "
             f"WHERE {picked.where} AND e.answered AND e.rescore IS NULL "
             f"GROUP BY GROUPING SETS ((e.role, {bucket}), (e.role))",
             params,
         )
-        params = dict(picked.params)
-        lang = self._attempt_filter(filters, params)
-        attempts = self._count(
-            "SELECT count(*) FROM runs r JOIN attempts a ON a.run_id = r.id "  # nosec B608
-            f"AND a.project_id = r.project_id WHERE {picked.where}{lang}",
-            params,
-        )
+        unattributed = 0
+        if filtered:
+            unattributed = self._count(
+                "SELECT count(*) FROM runs r JOIN usage_events e ON e.run_id = r.id "  # nosec B608
+                f"AND e.project_id = r.project_id WHERE {picked.where} AND e.answered "
+                "AND e.rescore IS NULL AND e.attempt_id IS NULL",
+                dict(picked.params),
+            )
+        attempts, _voice = self._attempts(picked, filters)
         return LatencyAnswer(
             filters=filters.echo(),
             options=self.dashboard_options(),
@@ -299,7 +343,21 @@ class PgAnalytics(UsageFold):
             llm_latency=[
                 self._pseries(role, role, llm, keys) for role in sorted({g for g, _ in llm})
             ],
+            llm_calls_unattributed=unattributed,
         )
+
+    def _attempts(self, picked: _Picked, filters: UsageFilter) -> tuple[int, int]:
+        """(attempts, voice attempts) of the picked runs under the attempt filters: one query,
+        the one every D2 answer's scope reads."""
+        params = dict(picked.params)
+        lang = self._attempt_filter(filters, params)
+        rows = self._rows(
+            "SELECT count(*), count(*) FILTER (WHERE a.voice) FROM runs r "  # nosec B608
+            "JOIN attempts a ON a.run_id = r.id AND a.project_id = r.project_id "
+            f"WHERE {picked.where}{lang}",
+            params,
+        )
+        return (int(rows[0][0] or 0), int(rows[0][1] or 0)) if rows else (0, 0)
 
     def _count(self, sql: str, params: dict[str, Any]) -> int:
         rows = self._rows(sql, params)
@@ -377,13 +435,7 @@ class PgAnalytics(UsageFold):
             for run_id, suite, started, gate in runs
         ]
         flaky, matrix = flaky_and_matrix(facts, limit)
-        params = dict(picked.params)
-        lang = self._attempt_filter(filters, params)
-        attempts = self._count(
-            "SELECT count(*) FROM runs r JOIN attempts a ON a.run_id = r.id "  # nosec B608
-            f"AND a.project_id = r.project_id WHERE {picked.where}{lang}",
-            params,
-        )
+        attempts, _voice = self._attempts(picked, filters)
         return QualityAnswer(
             filters=filters.echo(),
             options=self.dashboard_options(),
@@ -437,14 +489,7 @@ class PgAnalytics(UsageFold):
                 groups[name].append(
                     VoiceGroup(language=language, dialect=dialect, stats=stats, degraded=degraded)
                 )
-        params = dict(picked.params)
-        lang = self._attempt_filter(filters, params)
-        counted = self._rows(
-            "SELECT count(*), count(*) FILTER (WHERE a.voice) FROM runs r JOIN attempts a "  # nosec B608
-            f"ON a.run_id = r.id AND a.project_id = r.project_id WHERE {picked.where}{lang}",
-            params,
-        )
-        attempts, voice = (int(counted[0][0] or 0), int(counted[0][1] or 0)) if counted else (0, 0)
+        attempts, voice = self._attempts(picked, filters)
         return VoiceAnswer(
             filters=filters.echo(),
             options=self.dashboard_options(),
@@ -667,6 +712,10 @@ class PgAnalytics(UsageFold):
         self._check(filters, "tokens", "language", "dialect")
         options, runs = self._usage_runs(filters)
         return self.fold_tokens(filters, options, runs, [])
+
+
+def _midnight(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, tzinfo=UTC)
 
 
 def _utc(at: datetime) -> datetime:

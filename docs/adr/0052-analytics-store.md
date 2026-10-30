@@ -113,7 +113,9 @@ Built with ADR-0066 D2 (the ADR stays Proposed):
   A filter naming another project or organisation is refused (`FILTER_OUTSIDE_SCOPE`).
 - Latency, quality, voice and usage are SQL: the picked runs (an indexed scan of `runs` by
   project, task and start, `ix_runs_project_started`), then `GROUP BY ... GROUPING SETS` per
-  bucket and in total, with `percentile_disc(ARRAY[0.5, 0.95, 0.99])` for percentiles.
+  bucket and in total, with `percentile_disc(ARRAY[0.5, 0.95, 0.99])` for percentiles. Date
+  filters compare `started_at` with UTC-midnight instants, so the index is used; the filter
+  choices are kept 30 seconds per store scope; one query counts a scope's attempts.
   Python only orders rows (its order, not the database's collation), counts flips between
   consecutive verdicts and labels buckets, with the same functions the folders use
   (`analytics.dashboards`).
