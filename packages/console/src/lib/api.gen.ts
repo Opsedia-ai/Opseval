@@ -30,6 +30,16 @@ export interface RunProgress {
   cancelRequested: boolean;
 }
 
+/** Where a run a CI job reported came from (ADR-0058 E2). ``run_url`` is http(s) only. */
+export interface CiOut {
+  provider: string;
+  repository: string | null;
+  ref: string | null;
+  sha: string | null;
+  runUrl: string | null;
+  label: string | null;
+}
+
 export interface RunSummary {
   id: string;
   suite: string;
@@ -42,6 +52,8 @@ export interface RunSummary {
   flaky: number | null;
   error: string | null;
   progress: RunProgress | null;
+  origin: "ci" | null;
+  ci: CiOut | null;
 }
 
 export interface ScoreOut {

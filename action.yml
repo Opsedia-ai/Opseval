@@ -14,8 +14,10 @@ inputs:
     description: Scenario file, directory or suite file to run.
     required: true
   profile:
-    description: SUT profile YAML, or builtin:<name>.
-    required: true
+    description: >-
+      SUT profile YAML, or builtin:<name>. Required, except with server-url: the label's own
+      profile is used then.
+    default: ""
   target:
     description: Agent URL (ws://, wss://, http(s)://).
     required: true
@@ -50,6 +52,32 @@ inputs:
       "true" lets Opseval read a .env file in the workspace. Off by default: a checked-out
       repository must not be able to configure the run (OPSEVAL_DOTENV=false).
     default: "false"
+  server-url:
+    description: >-
+      Report the run to an Opseval server (ADR-0058): pull the catalogue under `label` for
+      `project`/`task`, run it here, upload the run. `suite` is then a path inside the pulled
+      catalogue (suites/smoke.yaml). Its host must be in OPSEVAL_ALLOWED_HOSTS, with https
+      unless loopback. A failed upload never changes the exit code; a failed pull is 3.
+    default: ""
+  project:
+    description: With server-url, the server's project (org/project).
+    default: ""
+  task:
+    description: With server-url, the project's task.
+    default: default
+  label:
+    description: With server-url, the catalogue label to run.
+    default: production
+  opseval-public-key:
+    description: >-
+      With server-url, the project API key's public half (OPSEVAL_PUBLIC_KEY). Empty keeps the
+      job's own OPSEVAL_PUBLIC_KEY.
+    default: ""
+  opseval-secret-key:
+    description: >-
+      With server-url, the key's secret half: pass a secret (secrets.OPSEVAL_SECRET_KEY). Empty
+      keeps the job's own OPSEVAL_SECRET_KEY.
+    default: ""
   github-token:
     description: Token for the pull-request comment.
     default: ${{ github.token }}
@@ -115,12 +143,40 @@ runs:
         FILTERS: ${{ inputs.filter }}
         EXTRA_ARGS: ${{ inputs.extra-args }}
         READ_DOTENV: ${{ inputs.read-dotenv }}
+        SERVER_URL: ${{ inputs.server-url }}
+        PROJECT: ${{ inputs.project }}
+        TASK: ${{ inputs.task }}
+        LABEL: ${{ inputs.label }}
+        PUBLIC_KEY_INPUT: ${{ inputs.opseval-public-key }}
+        SECRET_KEY_INPUT: ${{ inputs.opseval-secret-key }}
       run: |
         set -uo pipefail
         if [ "$READ_DOTENV" = "true" ]; then export OPSEVAL_DOTENV=true; else export OPSEVAL_DOTENV=false; fi
+        # The server key: from the inputs when given, else the job's own environment.
+        if [ -n "$SECRET_KEY_INPUT" ]; then
+          echo "::add-mask::$SECRET_KEY_INPUT"
+          export OPSEVAL_SECRET_KEY="$SECRET_KEY_INPUT"
+        fi
+        if [ -n "$PUBLIC_KEY_INPUT" ]; then export OPSEVAL_PUBLIC_KEY="$PUBLIC_KEY_INPUT"; fi
+        unset SECRET_KEY_INPUT PUBLIC_KEY_INPUT
+        server=()
+        if [ -n "$SERVER_URL" ]; then
+          if [ -z "$PROJECT" ]; then
+            echo "::error::server-url needs project (org/project)."
+            echo "exit-code=3" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          server=(--server "$SERVER_URL" --project "$PROJECT" --task "${TASK:-default}" --label "${LABEL:-production}")
+        elif [ -n "$PROJECT" ]; then
+          echo "::error::project needs server-url: without a server nothing would be reported."
+          echo "exit-code=3" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         reports="$RUNNER_TEMP/opseval-reports-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"
         mkdir -p "$reports"
-        args=(run "$SUITE" --profile "$PROFILE" --target "$TARGET" --transport "$TRANSPORT" --reports-dir "$reports")
+        args=(run "$SUITE" --target "$TARGET" --transport "$TRANSPORT" --reports-dir "$reports")
+        if [ -n "$PROFILE" ]; then args+=(--profile "$PROFILE"); fi
+        args+=(${server[@]+"${server[@]}"})
         if [ -n "$REPEATS" ]; then args+=(--repeats "$REPEATS"); fi
         while IFS= read -r f; do
           if [ -n "$f" ]; then args+=(--filter "$f"); fi

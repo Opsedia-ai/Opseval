@@ -65,6 +65,17 @@ class RunProgress(Api):
     cancel_requested: bool = False  # it stops before its next attempt (ADR-0035)
 
 
+class CiOut(Api):
+    """Where a run a CI job reported came from (ADR-0058 E2). ``run_url`` is http(s) only."""
+
+    provider: str
+    repository: str | None = None
+    ref: str | None = None
+    sha: str | None = None
+    run_url: str | None = None
+    label: str | None = None  # the catalogue label the job pulled
+
+
 class RunSummary(Api):
     id: str
     suite: str
@@ -77,6 +88,8 @@ class RunSummary(Api):
     flaky: int | None
     error: str | None = None  # why a harness_error run could not be carried out
     progress: RunProgress | None = None  # only while running
+    origin: Literal["ci"] | None = None  # None: started here, or from a folder
+    ci: CiOut | None = None  # set when origin is "ci"
 
 
 class ScoreOut(Api):

@@ -76,6 +76,10 @@ def render_junit(result: SuiteResult) -> str:
             name="unmeasured_scorers",
             value=",".join(result.unmeasured_scorers),
         )
+    if result.failed_sinks:
+        # A sink (a server upload included, ADR-0058 E2) that was asked for and did not
+        # publish: named where CI reads test reports, never only in a log.
+        ET.SubElement(props, "property", name="failed_sinks", value=",".join(result.failed_sinks))
 
     for t in result.tests:
         case = ET.SubElement(

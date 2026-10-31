@@ -22,6 +22,10 @@
 // (secretCredentials: [OPSEVAL_LANGFUSE_SECRET_KEY: 'langfuse-secret']); a name that is not
 // a secret setting (config.SECRET_FIELDS) is exit 3.
 //
+// To report the run to an Opseval server (ADR-0058 E2): serverUrl, project (task, label),
+// with the project key as two Secret text credentials, opsevalPublicKeyCredentialsId and
+// opsevalSecretKeyCredentialsId. suite is then a path inside the pulled catalogue.
+//
 // When the agent itself runs in a container that uses the host's Docker (a Docker-in-Docker
 // socket), `docker run -v` mounts a path on the Docker host, not in the agent: set
 // dockerWorkspaceHostPath to where the workspace is on the host.
@@ -32,7 +36,8 @@ def call(Map config = [:]) {
         'allowedHosts', 'simulatorBaseUrl', 'simulatorModel', 'judgeBaseUrl', 'judgeModel',
         'opsevalEnv', 'readDotenv', 'image', 'reportsDir', 'dockerWorkspaceHostPath',
         'simulatorApiKeyCredentialsId', 'judgeApiKeyCredentialsId', 'agentTokenCredentialsId',
-        'secretCredentials',
+        'secretCredentials', 'serverUrl', 'project', 'task', 'label',
+        'opsevalPublicKeyCredentialsId', 'opsevalSecretKeyCredentialsId',
     ]
     def unknown = config.keySet().findAll { !(it in known) }
     if (unknown) {
@@ -59,6 +64,10 @@ def call(Map config = [:]) {
         "READ_DOTENV=${setting(config, 'readDotenv', 'false')}",
         "REPORTS_DIR=${reports}",
         "DOCKER_WORKSPACE_HOST_PATH=${setting(config, 'dockerWorkspaceHostPath')}",
+        "SERVER_URL=${setting(config, 'serverUrl')}",
+        "PROJECT=${setting(config, 'project')}",
+        "TASK=${setting(config, 'task', 'default')}",
+        "LABEL=${setting(config, 'label', 'production')}",
     ]
     def secrets = []
     if (config.simulatorApiKeyCredentialsId) {
@@ -69,6 +78,12 @@ def call(Map config = [:]) {
     }
     if (config.agentTokenCredentialsId) {
         secrets << string(credentialsId: config.agentTokenCredentialsId, variable: 'OPSEVAL_STATIC_TOKEN')
+    }
+    if (config.opsevalPublicKeyCredentialsId) {
+        secrets << string(credentialsId: config.opsevalPublicKeyCredentialsId, variable: 'OPSEVAL_PUBLIC_KEY')
+    }
+    if (config.opsevalSecretKeyCredentialsId) {
+        secrets << string(credentialsId: config.opsevalSecretKeyCredentialsId, variable: 'OPSEVAL_SECRET_KEY')
     }
     // Other secret settings: bound under their own names, and named (never valued) to the
     // script, which checks each is a secret setting and passes it to the container by name.

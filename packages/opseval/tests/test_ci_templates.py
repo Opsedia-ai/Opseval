@@ -47,6 +47,10 @@ YAML_FILES = sorted(TEMPLATES.rglob("*.yml"))
 ALL_FILES = sorted(p for p in TEMPLATES.rglob("*") if p.is_file())
 PLACEHOLDER = "ghcr.io/opsedia-ai/opseval:<version>"
 SECRETS = ("OPSEVAL_SIMULATOR_API_KEY", "OPSEVAL_JUDGE_API_KEY", "OPSEVAL_STATIC_TOKEN")
+SERVER_KEYS = ("OPSEVAL_PUBLIC_KEY", "OPSEVAL_SECRET_KEY")
+"""The project key ``run --server`` reports with (ADR-0058 E2): secrets in every system, as
+the three above are, and the action's inputs ``opseval-public-key``/``opseval-secret-key``."""
+KEY_INPUTS = {"opseval-public-key", "opseval-secret-key"}
 
 # The action's inputs that have a counterpart here, and the reusable workflow's settings
 # inputs (ADR-0058, E1). python-version and opseval-spec do not apply (the image is the
@@ -121,7 +125,7 @@ def _expected_inputs() -> set[str]:
     """The action's inputs, plus the secret settings named for the templates to pass on (the
     action reads every OPSEVAL_ secret from the job's own environment)."""
     action = set(_yaml(ACTION)["inputs"])
-    return (action - GITHUB_ONLY) | SETTINGS_INPUTS | {"secret-env-names"}
+    return (action - GITHUB_ONLY - KEY_INPUTS) | SETTINGS_INPUTS | {"secret-env-names"}
 
 
 def _code_lines(path: Path) -> list[str]:
@@ -722,7 +726,7 @@ def test_named_secrets_reach_opseval_by_name_only(mode: str, tmp_path: Path) -> 
 def test_every_secret_setting_can_be_named(tmp_path: Path) -> None:
     from opseval.config import SECRET_FIELDS
 
-    names = {f"OPSEVAL_{n.upper()}" for n in SECRET_FIELDS} - set(SECRETS)
+    names = {f"OPSEVAL_{n.upper()}" for n in SECRET_FIELDS} - set(SECRETS) - set(SERVER_KEYS)
     done, _, _ = _run(tmp_path, SECRET_ENV_NAMES=" ".join(sorted(names)))
     assert done.returncode == 0, done.stderr
 
@@ -1050,7 +1054,14 @@ def test_jenkins_parameters_mirror_the_action() -> None:
     known = text[text.index("def known = [") : text.index("]", text.index("def known = ["))]
     names = {_kebab(n) for n in re.findall(r"'([A-Za-z]+)'", known)}
     extra = {"image", "reports-dir", "docker-workspace-host-path"} | {
-        f"{s}-credentials-id" for s in ("simulator-api-key", "judge-api-key", "agent-token")
+        f"{s}-credentials-id"
+        for s in (
+            "simulator-api-key",
+            "judge-api-key",
+            "agent-token",
+            "opseval-public-key",
+            "opseval-secret-key",
+        )
     }
     # secretCredentials maps each other secret setting's name to a credential id.
     names = {"secret-env-names" if n == "secret-credentials" else n for n in names}
@@ -1074,7 +1085,7 @@ def test_jenkins_fails_the_build_on_1_2_and_3_with_distinct_messages() -> None:
 
 def test_jenkins_secrets_come_only_from_credentials() -> None:
     text = JENKINS.read_text(encoding="utf-8")
-    for name in SECRETS:
+    for name in SECRETS + SERVER_KEYS:
         assert f"variable: '{name}'" in text
     assert "withCredentials(secrets)" in text
     # The sh call is a constant: no Groovy interpolation of anything into the shell.
@@ -1106,8 +1117,9 @@ def test_azure_parameters_mirror_the_action() -> None:
 
 def test_azure_maps_exactly_the_secret_variables_and_no_secret_parameter() -> None:
     step = _azure_step()
-    for name in SECRETS:
+    for name in SECRETS + SERVER_KEYS:
         assert step["env"][name] == f"$({name})"
+        assert step["env"][f"OE_KV_{name}"] == f"$({name.replace('_', '-')})"
     for param in _yaml(AZURE)["parameters"]:
         if param["name"] in ("secretEnvNames", "llmWithoutKey"):  # names and a boolean
             assert param["type"] in ("object", "boolean")
@@ -1143,7 +1155,13 @@ def test_circleci_parameters_mirror_the_action() -> None:
     orb = _yaml(ORB)
     job = set(orb["jobs"]["run"]["parameters"])
     command = set(orb["commands"]["evaluate"]["parameters"])
-    secrets = {"simulator_api_key", "judge_api_key", "agent_token"}
+    secrets = {
+        "simulator_api_key",
+        "judge_api_key",
+        "agent_token",
+        "opseval_public_key",
+        "opseval_secret_key",
+    }
     assert {_kebab(p) for p in job - secrets} - {"image"} == _expected_inputs()
     assert command == job - {"image"}
     assert orb["executors"]["default"]["parameters"]["image"]["default"] == PLACEHOLDER
@@ -1158,7 +1176,13 @@ def test_circleci_leaves_the_primary_containers_entrypoint_ignored() -> None:
 
 def test_circleci_secrets_are_variable_names_never_values() -> None:
     params = _yaml(ORB)["commands"]["evaluate"]["parameters"]
-    for name in ("simulator_api_key", "judge_api_key", "agent_token"):
+    for name in (
+        "simulator_api_key",
+        "judge_api_key",
+        "agent_token",
+        "opseval_public_key",
+        "opseval_secret_key",
+    ):
         assert params[name]["type"] == "env_var_name"
     assert "<<" not in _orb_step()["command"]  # parameters reach it only through environment
 
@@ -1172,7 +1196,7 @@ def test_circleci_stores_results_and_the_run() -> None:
 
 def test_the_bitbucket_pipe_variables_mirror_the_action() -> None:
     variables = {v["name"] for v in _yaml(PIPE_YML)["variables"]}
-    secrets = {"SIMULATOR_API_KEY", "JUDGE_API_KEY", "AGENT_TOKEN"}
+    secrets = {"SIMULATOR_API_KEY", "JUDGE_API_KEY", "AGENT_TOKEN", "PUBLIC_KEY", "SECRET_KEY"}
     assert {_kebab(v) for v in variables - secrets} == _expected_inputs() - {"image"}
     for v in _yaml(PIPE_YML)["variables"]:
         assert v.get("secret", False) == (v["name"] in secrets)
@@ -1216,3 +1240,145 @@ def test_the_guide_has_a_section_per_system() -> None:
     for path in (GITLAB, JENKINS, AZURE, ORB, PIPE):
         assert _ids(path) in guide
     assert "PowerShell" in guide and "```powershell" in guide
+
+
+# --- reporting to a server (ADR-0058 E2) ------------------------------------------------------
+
+
+@needs_bash
+@pytest.mark.parametrize("mode", ["local", "docker"])
+def test_the_script_reports_to_a_server_and_passes_the_key_by_name(
+    mode: str, tmp_path: Path
+) -> None:
+    done, _, log = _run(
+        tmp_path,
+        MODE=mode,
+        IMAGE="opseval",
+        PROFILE="",
+        SUITE="suites/smoke.yaml",
+        SERVER_URL="https://opseval.example.com",
+        PROJECT="acme/bot",
+        TASK="voice",
+        OPSEVAL_PUBLIC_KEY="pk-oe-1",
+        OPSEVAL_SECRET_KEY="sk-oe-secret-value",
+    )
+    assert done.returncode == 0, done.stderr
+    args = _args(log)
+    assert "--profile" not in args
+    at = args.index("--server")
+    assert args[at : at + 8] == [
+        "--server", "https://opseval.example.com", "--project", "acme/bot",
+        "--task", "voice", "--label", "production",
+    ]  # fmt: skip
+    env = _env(log)
+    assert env["OPSEVAL_SECRET_KEY"] == "sk-oe-secret-value"
+    assert env["OPSEVAL_PUBLIC_KEY"] == "pk-oe-1"
+    if mode == "docker":
+        argv = (log / "docker").read_text(encoding="utf-8")
+        assert "sk-oe-secret-value" not in argv and "OPSEVAL_SECRET_KEY" in argv.splitlines()
+        assert "sk-oe-secret-value" not in (log / "envfile").read_text(encoding="utf-8")
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("env", "said"),
+    [
+        ({"SERVER_URL": "https://opseval.example.com"}, "SERVER_URL needs PROJECT"),
+        ({"PROJECT": "acme/bot"}, "PROJECT needs SERVER_URL"),
+        ({"SERVER_URL": "https://a\nOPSEVAL_X=1", "PROJECT": "p"}, "more than one line"),
+        ({"PROFILE": ""}, "PROFILE is required"),
+        ({"OPSEVAL_ENV": "OPSEVAL_SECRET_KEY=x"}, "a secret"),
+        ({"OPSEVAL_ENV": "OPSEVAL_PUBLIC_KEY=x"}, "its own input"),
+        ({"SECRET_ENV_NAMES": "OPSEVAL_SECRET_KEY"}, "its own input"),
+    ],
+)
+def test_server_settings_are_checked(env: dict[str, str], said: str, tmp_path: Path) -> None:
+    done, _, log = _run(tmp_path, **env)
+    assert done.returncode == 3 and said in done.stderr, done.stderr
+    assert not (log / "args").exists()
+
+
+@needs_bash
+def test_with_a_server_the_suite_is_inside_the_pulled_catalogue(tmp_path: Path) -> None:
+    """In docker mode the suite is not a workspace path: Opseval pulls it in the container."""
+    done, _, _ = _run(
+        tmp_path,
+        MODE="docker",
+        IMAGE="opseval",
+        PROFILE="",
+        SUITE="suites/smoke.yaml",
+        SERVER_URL="https://opseval.example.com",
+        PROJECT="acme/bot",
+    )
+    assert done.returncode == 0, done.stderr
+
+
+def test_every_template_offers_the_server_inputs() -> None:
+    spec, _ = _gitlab()
+    assert {"server-url", "project", "task", "label"} <= set(spec["spec"]["inputs"])
+    assert spec["spec"]["inputs"]["profile"]["default"] == ""
+    variables = _gitlab_job()["variables"]
+    assert variables["SERVER_URL"] == {"value": "$[[ inputs.server-url ]]", "expand": False}
+    azure = {p["name"]: p for p in _yaml(AZURE)["parameters"]}
+    assert azure["label"]["default"] == "production" and azure["task"]["default"] == "default"
+    assert _azure_step()["env"]["SERVER_URL"] == "${{ parameters.serverUrl }}"
+    orb = _orb_step()
+    assert orb["environment"]["SERVER_URL"] == "<< parameters.server_url >>"
+    assert orb["environment"]["OE_SECRET_KEY_VAR"] == "<< parameters.opseval_secret_key >>"
+    assert "\"SERVER_URL=${setting(config, 'serverUrl')}\"" in JENKINS.read_text("utf-8")
+    pipe = {v["name"]: v for v in _yaml(PIPE_YML)["variables"]}
+    assert pipe["SECRET_KEY"]["secret"] is True and pipe["SERVER_URL"]["default"] == ""
+
+
+@needs_bash
+def test_circleci_reads_the_server_key_from_the_named_variables(tmp_path: Path) -> None:
+    done, _, log = _run(
+        tmp_path,
+        _orb_step()["command"],
+        MODE="local",
+        OE_SIMULATOR_API_KEY_VAR="OPSEVAL_SIMULATOR_API_KEY",
+        OE_JUDGE_API_KEY_VAR="OPSEVAL_JUDGE_API_KEY",
+        OE_AGENT_TOKEN_VAR="OPSEVAL_STATIC_TOKEN",
+        OE_PUBLIC_KEY_VAR="TEAM_PK",
+        OE_SECRET_KEY_VAR="TEAM_SK",
+        TEAM_PK="pk-team",
+        TEAM_SK="sk-team",
+        SERVER_URL="https://opseval.example.com",
+        PROJECT="acme/bot",
+    )
+    assert done.returncode == 0, done.stderr
+    env = _env(log)
+    assert env["OPSEVAL_PUBLIC_KEY"] == "pk-team" and env["OPSEVAL_SECRET_KEY"] == "sk-team"
+
+
+@needs_bash
+def test_the_bitbucket_pipe_maps_the_server_key(tmp_path: Path) -> None:
+    done, _, log = _run(
+        tmp_path,
+        PIPE,
+        PUBLIC_KEY="pk-pipe",
+        SECRET_KEY="sk-pipe",
+        SERVER_URL="https://opseval.example.com",
+        PROJECT="acme/bot",
+    )
+    assert done.returncode == 0, done.stderr
+    env = _env(log)
+    assert env["OPSEVAL_PUBLIC_KEY"] == "pk-pipe" and env["OPSEVAL_SECRET_KEY"] == "sk-pipe"
+
+
+@needs_bash
+def test_azure_reads_the_server_key_from_either_spelling(tmp_path: Path) -> None:
+    done, _, log = _run(
+        tmp_path,
+        _azure_step()["bash"],
+        MODE="local",
+        OPSEVAL_PUBLIC_KEY="$(OPSEVAL_PUBLIC_KEY)",  # undefined: its own macro text
+        OE_KV_OPSEVAL_PUBLIC_KEY="pk-kv",
+        OPSEVAL_SECRET_KEY="sk-var",
+        OE_KV_OPSEVAL_SECRET_KEY="$(OPSEVAL-SECRET-KEY)",
+        SERVER_URL="https://opseval.example.com",
+        PROJECT="acme/bot",
+    )
+    assert done.returncode == 0, done.stderr
+    env = _env(log)
+    assert env["OPSEVAL_PUBLIC_KEY"] == "pk-kv" and env["OPSEVAL_SECRET_KEY"] == "sk-var"

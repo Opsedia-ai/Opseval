@@ -333,6 +333,24 @@ class Settings(BaseSettings):
     running, is an orphan (a crash between the upload and its row): ``opseval prune`` deletes
     it, the object first and then its row."""
 
+    # Reporting a CI run to a server (ADR-0058 E2): `opseval run --server`.
+    public_key: str | None = None
+    """The public half of a project API key (``pk-oe-…``) that ``opseval run --server`` pulls
+    the catalogue and uploads the run with. Its scopes come from ADR-0050: ``runs:read`` to
+    pull, ``runs:start`` to upload."""
+    secret_key: SecretStr | None = None
+    """The secret half of that key (``sk-oe-…``). Never logged, never in a report."""
+    server_timeout_seconds: float = Field(default=60.0, gt=0, le=3600)
+    """How long one request to the server (the pull, each upload try) may take."""
+    server_upload_retries: int = Field(default=3, ge=0, le=10)
+    """How many more times a failed upload is tried (a connection error, a timeout, 408, 425,
+    429, any 5xx, or 409 ``RUN_IMPORTING`` while another try of the run is still being stored),
+    waiting longer each time. Any other refusal (401, 403, 404, 409, 413, 422) is not retried. A
+    failed upload never changes the exit code; it is named in every output."""
+    upload_max_mb: int = Field(default=256, ge=1, le=16384)
+    """The largest run upload ``opseval serve`` accepts, in MB (the request body, audio
+    included). Larger is refused with 413, and the run stays in the CI job's folder."""
+
     def __init__(self, **values: Any) -> None:
         if "_env_file" not in values and _dotenv_off():
             values["_env_file"] = None
@@ -381,6 +399,53 @@ class CatalogueLimits(BaseSettings):
         super().__init__(**values)
 
 
+class CiEnvironment(BaseSettings):
+    """Where a CI job runs, from the CI system's own variables (ADR-0058 E2), so a run
+    reported to a server can link back to its job. Read from the real environment only,
+    never from ``.env``: a checked-out file must not claim a job it did not come from. Only
+    ``opseval run --server`` reads it. None of these is a secret."""
+
+    model_config = SettingsConfigDict(env_prefix="", env_file=None, extra="ignore")
+
+    github_actions: str | None = Field(default=None, alias="GITHUB_ACTIONS")
+    github_server_url: str | None = Field(default=None, alias="GITHUB_SERVER_URL")
+    github_repository: str | None = Field(default=None, alias="GITHUB_REPOSITORY")
+    github_ref: str | None = Field(default=None, alias="GITHUB_REF")
+    github_sha: str | None = Field(default=None, alias="GITHUB_SHA")
+    github_run_id: str | None = Field(default=None, alias="GITHUB_RUN_ID")
+    github_run_attempt: str | None = Field(default=None, alias="GITHUB_RUN_ATTEMPT")
+    gitlab_ci: str | None = Field(default=None, alias="GITLAB_CI")
+    ci_project_path: str | None = Field(default=None, alias="CI_PROJECT_PATH")
+    ci_commit_ref_name: str | None = Field(default=None, alias="CI_COMMIT_REF_NAME")
+    ci_commit_sha: str | None = Field(default=None, alias="CI_COMMIT_SHA")
+    ci_job_url: str | None = Field(default=None, alias="CI_JOB_URL")
+    jenkins_url: str | None = Field(default=None, alias="JENKINS_URL")
+    git_url: str | None = Field(default=None, alias="GIT_URL")
+    git_branch: str | None = Field(default=None, alias="GIT_BRANCH")
+    git_commit: str | None = Field(default=None, alias="GIT_COMMIT")
+    build_url: str | None = Field(default=None, alias="BUILD_URL")
+    tf_build: str | None = Field(default=None, alias="TF_BUILD")
+    build_repository_name: str | None = Field(default=None, alias="BUILD_REPOSITORY_NAME")
+    build_sourcebranch: str | None = Field(default=None, alias="BUILD_SOURCEBRANCH")
+    build_sourceversion: str | None = Field(default=None, alias="BUILD_SOURCEVERSION")
+    system_collectionuri: str | None = Field(default=None, alias="SYSTEM_COLLECTIONURI")
+    system_teamproject: str | None = Field(default=None, alias="SYSTEM_TEAMPROJECT")
+    build_buildid: str | None = Field(default=None, alias="BUILD_BUILDID")
+    circleci: str | None = Field(default=None, alias="CIRCLECI")
+    circle_project_username: str | None = Field(default=None, alias="CIRCLE_PROJECT_USERNAME")
+    circle_project_reponame: str | None = Field(default=None, alias="CIRCLE_PROJECT_REPONAME")
+    circle_branch: str | None = Field(default=None, alias="CIRCLE_BRANCH")
+    circle_tag: str | None = Field(default=None, alias="CIRCLE_TAG")
+    circle_sha1: str | None = Field(default=None, alias="CIRCLE_SHA1")
+    circle_build_url: str | None = Field(default=None, alias="CIRCLE_BUILD_URL")
+    bitbucket_build_number: str | None = Field(default=None, alias="BITBUCKET_BUILD_NUMBER")
+    bitbucket_repo_full_name: str | None = Field(default=None, alias="BITBUCKET_REPO_FULL_NAME")
+    bitbucket_branch: str | None = Field(default=None, alias="BITBUCKET_BRANCH")
+    bitbucket_tag: str | None = Field(default=None, alias="BITBUCKET_TAG")
+    bitbucket_commit: str | None = Field(default=None, alias="BITBUCKET_COMMIT")
+    bitbucket_git_http_origin: str | None = Field(default=None, alias="BITBUCKET_GIT_HTTP_ORIGIN")
+
+
 def _dotenv_off() -> bool:
     """``OPSEVAL_DOTENV`` set false in the real environment: no ``.env`` is read at all."""
     flag = os.environ.get("OPSEVAL_DOTENV", "").strip().lower()
@@ -405,6 +470,7 @@ SECRET_FIELDS = (
     "database_url",
     "s3_access_key_id",
     "s3_secret_access_key",
+    "secret_key",
 )
 
 

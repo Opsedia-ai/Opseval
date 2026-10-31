@@ -45,7 +45,8 @@ WORKFLOW_ONLY = {
     "judge-model",
     "opseval-env",
 }
-ACTION_ONLY = {"github-token"}
+# The server key (ADR-0058 E2) is an action input, and the reusable workflow's secrets.
+ACTION_ONLY = {"github-token", "opseval-public-key", "opseval-secret-key"}
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -92,6 +93,7 @@ def test_the_examples_are_found() -> None:
         "tag-gate.yml",
         "release-published.yml",
         "deployment-status.yml",
+        "report-to-server.yml",
     }
 
 
@@ -287,6 +289,8 @@ def test_the_reusable_workflow_runs_only_when_called() -> None:
         "simulator-api-key",
         "judge-api-key",
         "agent-token",
+        "opseval-public-key",
+        "opseval-secret-key",
     }
     assert all(not s.get("required") for s in on["workflow_call"]["secrets"].values())
 
@@ -319,6 +323,8 @@ def test_the_reusable_workflow_mirrors_the_action() -> None:
             "OPSEVAL_SIMULATOR_API_KEY": "${{ secrets.simulator-api-key }}",
             "OPSEVAL_JUDGE_API_KEY": "${{ secrets.judge-api-key }}",
             "OPSEVAL_STATIC_TOKEN": "${{ secrets.agent-token }}",
+            "OPSEVAL_PUBLIC_KEY": "${{ secrets.opseval-public-key }}",
+            "OPSEVAL_SECRET_KEY": "${{ secrets.opseval-secret-key }}",
         }
 
 
@@ -643,6 +649,12 @@ def _run_env(**extra: str) -> dict[str, str]:
         "FILTERS": "",
         "EXTRA_ARGS": "",
         "READ_DOTENV": "false",
+        "SERVER_URL": "",
+        "PROJECT": "",
+        "TASK": "default",
+        "LABEL": "production",
+        "PUBLIC_KEY_INPUT": "",
+        "SECRET_KEY_INPUT": "",
     }
     env.update(extra)
     return env
@@ -774,3 +786,98 @@ def test_dotenv_false_reads_no_env_file(tmp_path: Path, monkeypatch: pytest.Monk
         assert settings.dotenv is False
     monkeypatch.setenv("OPSEVAL_DOTENV", "true")
     assert Settings().judge_model == "from-dotenv"
+
+
+# --- reporting to a server (ADR-0058 E2) ------------------------------------------------------
+
+
+def _record_args(bin_dir: Path, tmp_path: Path) -> None:
+    _fake(
+        bin_dir,
+        "opseval",
+        f'printf "%s\\n" "$@" > "{tmp_path}/args"\n'
+        'printf "%s\\n" "${OPSEVAL_PUBLIC_KEY:-}" "${OPSEVAL_SECRET_KEY:-}"'
+        f' > "{tmp_path}/keys"\n'
+        "exit 1",
+    )
+
+
+@needs_bash
+def test_the_action_reports_to_a_server_with_the_key_from_its_inputs(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    _record_args(bin_dir, tmp_path)
+    step = _step(_action_steps(), "run")
+    for name, value in {
+        "SERVER_URL": "${{ inputs.server-url }}",
+        "PROJECT": "${{ inputs.project }}",
+        "TASK": "${{ inputs.task }}",
+        "LABEL": "${{ inputs.label }}",
+        "PUBLIC_KEY_INPUT": "${{ inputs.opseval-public-key }}",
+        "SECRET_KEY_INPUT": "${{ inputs.opseval-secret-key }}",
+    }.items():
+        assert step["env"][name] == value
+    env = _run_env(
+        PROFILE="",
+        SUITE="suites/smoke.yaml",
+        SERVER_URL="https://opseval.example.com",
+        PROJECT="acme/bot",
+        LABEL="staging",
+        PUBLIC_KEY_INPUT="pk-oe-1",
+        SECRET_KEY_INPUT="sk-oe-secret",
+    )
+    done, out = _gh_bash(step["run"], env, tmp_path, _bin_path(bin_dir))
+    assert done.returncode == 0, done.stdout + done.stderr
+    args = (tmp_path / "args").read_text(encoding="utf-8").splitlines()
+    assert "--profile" not in args  # the label's own profile
+    at = args.index("--server")
+    assert args[at : at + 8] == [
+        "--server",
+        "https://opseval.example.com",
+        "--project",
+        "acme/bot",
+        "--task",
+        "default",
+        "--label",
+        "staging",
+    ]
+    assert (tmp_path / "keys").read_text().splitlines() == ["pk-oe-1", "sk-oe-secret"]
+    assert "::add-mask::sk-oe-secret" in done.stdout
+    assert "exit-code=1" in out["output"].splitlines()  # the local verdict
+
+
+@needs_bash
+def test_the_action_keeps_the_jobs_own_key_when_the_inputs_are_empty(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    _record_args(bin_dir, tmp_path)
+    env = _run_env(SERVER_URL="http://127.0.0.1:8000", PROJECT="acme/bot")
+    env.update(OPSEVAL_PUBLIC_KEY="pk-job", OPSEVAL_SECRET_KEY="sk-job")
+    done, _ = _gh_bash(_step(_action_steps(), "run")["run"], env, tmp_path, _bin_path(bin_dir))
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "keys").read_text().splitlines() == ["pk-job", "sk-job"]
+    assert "--profile" in (tmp_path / "args").read_text().splitlines()
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("server", "project", "said"),
+    [("https://opseval.example.com", "", "needs project"), ("", "acme/bot", "needs server-url")],
+)
+def test_a_server_without_a_project_or_the_reverse_is_3(
+    server: str, project: str, said: str, tmp_path: Path
+) -> None:
+    bin_dir = tmp_path / "bin"
+    _record_args(bin_dir, tmp_path)
+    env = _run_env(SERVER_URL=server, PROJECT=project)
+    done, out = _gh_bash(_step(_action_steps(), "run")["run"], env, tmp_path, _bin_path(bin_dir))
+    assert done.returncode == 0 and said in done.stdout
+    assert "exit-code=3" in out["output"].splitlines()
+    assert not (tmp_path / "args").exists()
+
+
+def test_the_reusable_workflow_passes_the_key_only_as_secrets() -> None:
+    inputs = _on(_load(REUSABLE))["workflow_call"]["inputs"]
+    assert {"server-url", "project", "task", "label"} <= set(inputs)
+    assert not {"opseval-public-key", "opseval-secret-key"} & set(inputs)
+    script = _step(_reusable_steps(), "Settings")["run"]
+    (own,) = (ln for ln in script.splitlines() if ln.strip().startswith('own="'))
+    assert " OPSEVAL_PUBLIC_KEY " in own  # its own secret, never in opseval-env

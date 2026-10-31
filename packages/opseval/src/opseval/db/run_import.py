@@ -12,15 +12,71 @@ reported and skipped, never half-imported: a failure part-way removes what was w
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from enum import StrEnum
+from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
 from opseval.db.run_store import DbRunStore
 from opseval.errors import ConfigError, StorageError
-from opseval.storage import FileStore
+from opseval.models.profile import SutProfile
+from opseval.models.progress import RunProgress
+from opseval.models.record import RunRecord
+from opseval.models.results import SuiteResult
+from opseval.models.scenario import Scenario
+from opseval.models.upload import same_result
+from opseval.storage import PrunedMarker, UnknownLayout
+
+
+class SourceAudio(Protocol):
+    def size(self, relative: str) -> int | None: ...
+    def read(self, relative: str) -> bytes: ...
+    def pruned(self) -> PrunedMarker | None: ...
+
+
+class RunSource(Protocol):
+    """What an import reads from a run: a run folder (:class:`~opseval.storage.FileStore`), or
+    a run a CI job uploaded (``server.ci_api``)."""
+
+    def exists(self, run_id: str) -> bool: ...
+    def check_layout(self, run_id: str) -> None: ...
+    def has_result(self, run_id: str) -> bool: ...
+    def has_error(self, run_id: str) -> bool: ...
+    def load_result(self, run_id: str) -> SuiteResult: ...
+    def load_error(self, run_id: str) -> dict[str, Any] | None: ...
+    def load_records(self, run_id: str) -> list[RunRecord]: ...
+    def load_snapshot(self, run_id: str) -> tuple[SutProfile, dict[str, Scenario]] | None: ...
+    def load_manifest(self, run_id: str) -> dict[str, Any]: ...
+    def load_progress(self, run_id: str) -> RunProgress | None: ...
+    def cancel_requested(self, run_id: str) -> bool: ...
+    def audio(self, run_id: str) -> SourceAudio: ...
+    def audio_marker_text(self, run_id: str) -> str | None: ...
+    def rescores(self, run_id: str) -> list[str]: ...
+    def load_rescore(self, run_id: str, stamp: str) -> SuiteResult: ...
+    def rescore_files(self, run_id: str, stamp: str) -> tuple[str | None, str | None]: ...
+    def load_report(self, run_id: str) -> str | None: ...
+    def load_junit(self, run_id: str) -> str | None: ...
+
 
 Outcome = Literal["imported", "unchanged", "refused"]
+
+
+class Refusal(StrEnum):
+    """Why an import was refused, typed, so a caller maps each to its answer in one place
+    (``server.ci_api.REFUSALS`` for an upload)."""
+
+    RUN_ID_TAKEN = "run_id_taken"
+    """The id is another project's run: never compared with, replaced or removed."""
+    RUN_EXISTS = "run_exists"
+    """The database holds a different run under this id."""
+    IMPORTING = "importing"
+    """Another import of this run is in flight (it holds the run's import lock)."""
+    NOT_A_RUN = "not_a_run"
+    RUNNING = "running"
+    """No result and no error yet: the run has not ended."""
+    UNKNOWN_LAYOUT = "unknown_layout"
+    INVALID = "invalid"
+    """The run cannot be read or stored as it is (plain audio, a broken record, ...)."""
 
 
 @dataclass(frozen=True)
@@ -28,9 +84,11 @@ class Imported:
     run_id: str
     outcome: Outcome
     detail: str
+    reason: Refusal | None = None
+    """Set exactly when ``outcome`` is ``refused``."""
 
 
-def _sealed_audio(src: FileStore, run_id: str) -> list[tuple[str, bytes]]:
+def _sealed_audio(src: RunSource, run_id: str) -> list[tuple[str, bytes]]:
     """Every audio file the run's records name, read and checked sealed before anything is
     written. A pruned run carries its marker instead."""
     from opseval.voice.crypto import MAGIC
@@ -54,44 +112,68 @@ def _sealed_audio(src: FileStore, run_id: str) -> list[tuple[str, bytes]]:
     return out
 
 
-def import_run(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
+def import_run(src: RunSource, run_id: str, dst: DbRunStore) -> Imported:
     """One run folder into the database; never raises for a run it cannot take."""
     try:
-        return _import(src, run_id, dst)
+        return import_from(src, run_id, dst)
     except (ConfigError, ValidationError, ValueError, OSError, StorageError) as exc:
         detail = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
         notes = getattr(exc, "__notes__", ())
-        return Imported(run_id, "refused", "; ".join([detail, *notes]))
+        return Imported(run_id, "refused", "; ".join([detail, *notes]), Refusal.INVALID)
 
 
-def _import(src: FileStore, run_id: str, dst: DbRunStore) -> Imported:
+def _refused(run_id: str, reason: Refusal, detail: str) -> Imported:
+    return Imported(run_id, "refused", detail, reason)
+
+
+def import_from(src: RunSource, run_id: str, dst: DbRunStore) -> Imported:
+    """One run into the database, raising what :func:`import_run` reports: a
+    :class:`StorageError` stays one (the server answers 503 and the uploader tries again).
+
+    Serialised per run id by a Postgres advisory lock held for the whole import
+    (``DbRunStore.import_lock``): a second import of the same id while one is in flight is
+    refused (:attr:`Refusal.IMPORTING`), never allowed to remove the first's rows. The lock is
+    a session's, so it goes with a process that dies: a run left ``importing`` while nobody
+    holds its lock was cut short, and only then is it removed and imported again."""
     if dst.foreign(run_id):
         # Checked before anything is read or written: another project's run is never
         # compared with, replaced or removed (review of #93).
-        return Imported(run_id, "refused", "run id exists in another project; not changed")
+        return _refused(run_id, Refusal.RUN_ID_TAKEN, "run id exists in another project")
     if not src.exists(run_id):
-        return Imported(run_id, "refused", "not a run folder (no manifest.json)")
-    src.check_layout(run_id)
+        return _refused(run_id, Refusal.NOT_A_RUN, "not a run folder (no manifest.json)")
+    try:
+        src.check_layout(run_id)
+    except UnknownLayout as exc:
+        return _refused(run_id, Refusal.UNKNOWN_LAYOUT, str(exc).splitlines()[0])
     if not src.has_result(run_id) and not src.has_error(run_id):
-        return Imported(run_id, "refused", "still running (no result): import it once it ends")
+        return _refused(
+            run_id, Refusal.RUNNING, "still running (no result): import it once it ends"
+        )
+    with dst.import_lock(run_id) as held:
+        if not held:
+            return _refused(run_id, Refusal.IMPORTING, "another import of this run is in progress")
+        return _import_locked(src, run_id, dst)
+
+
+def _import_locked(src: RunSource, run_id: str, dst: DbRunStore) -> Imported:
     result = src.load_result(run_id) if src.has_result(run_id) else None
     error = src.load_error(run_id) if result is None else None
     replaced = ""
     if dst.importing(run_id):
-        # An earlier import of this run was cut short (a crash, a lost connection): what it
-        # wrote is removed, then the run is imported whole.
+        # An earlier import of this run was cut short (a crash, a lost connection): nobody
+        # holds its lock (we do), so what it wrote is removed, then the run imported whole.
         dst.delete_run(run_id)
         replaced = "; replaced an import that had been cut short"
     elif dst.exists(run_id):
         same = (
-            dst.load_result(run_id).model_dump() == result.model_dump()
+            same_result(dst.load_result(run_id), result)
             if result is not None and dst.has_result(run_id)
             else result is None and dst.load_error(run_id) == error
         )
         if same:
             return Imported(run_id, "unchanged", "already imported")
-        return Imported(
-            run_id, "refused", "the database holds a different run under this id; not changed"
+        return _refused(
+            run_id, Refusal.RUN_EXISTS, "the database holds a different run under this id"
         )
     records = src.load_records(run_id)
     snapshot = src.load_snapshot(run_id)
@@ -152,4 +234,4 @@ def _roll_back(dst: DbRunStore, run_id: str, exc: BaseException) -> None:
         )
 
 
-__all__ = ["Imported", "import_run"]
+__all__ = ["Imported", "Refusal", "RunSource", "import_from", "import_run"]

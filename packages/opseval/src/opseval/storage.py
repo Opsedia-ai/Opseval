@@ -263,6 +263,16 @@ class RunCounts:
 
 
 @dataclass(frozen=True)
+class RunOrigin:
+    """Where a run came from, when a store knows (ADR-0058 E2): a run a CI job reported to the
+    server is ``ci``, with what its CI system said (provider, repository, ref, commit, the
+    job's URL) and the catalogue versions it pulled. Run folders keep none: ``None``."""
+
+    kind: str
+    ci: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class StoredRun:
     """One run as a listing needs it. ``counts`` is ``None`` when the store keeps no index
     (run folders): the reader then reads the result, and names a run it cannot read."""
@@ -276,6 +286,7 @@ class StoredRun:
     cancel_requested: bool
     changed_at: float | None
     counts: RunCounts | None = None
+    origin: RunOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +355,7 @@ class RunStore(Protocol):
     def rescores(self, run_id: str) -> list[str]: ...
     def load_rescore(self, run_id: str, stamp: str) -> SuiteResult: ...
     def audio(self, run_id: str) -> RunAudio: ...
+    def origin(self, run_id: str) -> RunOrigin | None: ...
 
 
 def process_gone(manifest: dict[str, Any]) -> bool:
@@ -767,6 +779,10 @@ class FileStore:
 
     def audio(self, run_id: str) -> FileRunAudio:
         return FileRunAudio(self.run_dir(run_id), run_id)
+
+    def origin(self, run_id: str) -> RunOrigin | None:
+        """Run folders record no origin: only the server knows a run was reported to it."""
+        return None
 
     def audio_marker_text(self, run_id: str) -> str | None:
         """The run's audio prune marker as written, or ``None``."""

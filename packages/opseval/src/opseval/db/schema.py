@@ -311,6 +311,8 @@ class CatalogueLabel(Base):
 # --- runs and blobs (ADR-0051) ---------------------------------------------------------------
 
 RUN_STATUSES = ("running", "finished", "harness_error", "interrupted", "deleting")
+RUN_ORIGINS = ("ci",)
+"""Where a run came from, when it is not this server's own (ADR-0058 E2)."""
 SCORE_STATUSES = ("passed", "failed", "infra_error")
 VERDICT_STATUSES = ("passed", "failed", "inconclusive", "skipped_precondition", "blocked")
 BLOB_KINDS = ("record", "result", "report", "junit", "audio", "transcript", "other")
@@ -328,6 +330,11 @@ class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (
         CheckConstraint(_one_of("status", RUN_STATUSES), name="status"),
+        CheckConstraint(
+            f"(origin IS NULL AND ci IS NULL) OR ({_one_of('origin', RUN_ORIGINS)} "
+            "AND ci IS NOT NULL)",
+            name="origin",
+        ),
         # A run is in its task's project: (task, project) must be a task of that project.
         ForeignKeyConstraint(["task_id", "project_id"], ["tasks.id", "tasks.project_id"]),
         # The target of the child tables' (run, project, task) keys.
@@ -361,6 +368,11 @@ class Run(Base):
     """Why the run could not be carried out (``error.json``)."""
     profile_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     """The SUT profile as run, as written (offline re-scoring)."""
+    origin: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    """``ci`` for a run a CI job reported (``opseval run --server``, ADR-0058); else null."""
+    ci: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    """What the CI system said (provider, repository, ref, commit, job URL) and the catalogue
+    versions the job pulled; set exactly when ``origin`` is."""
     importing: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )

@@ -16,7 +16,7 @@ Adds what ``PgAnalytics`` queries and what the price table keeps:
 The downgrade drops them, and with them every project price.
 
 Revision ID: 0008
-Revises: 0006
+Revises: 0007
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "0008"
-down_revision = "0006"
+down_revision = "0007"
 branch_labels = None
 depends_on = None
 
