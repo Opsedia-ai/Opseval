@@ -228,7 +228,8 @@ async def test_the_driver_records_the_resolved_pack() -> None:
     for persona, tag in [
         ({"language": "ar", "dialect": "ksa"}, "ar-SA"),
         ({"language": "ar", "dialect": "yemeni"}, None),  # scripted: no pack stands in
-        ({"language": "fr"}, None),
+        ({"language": "fr"}, "fr-FR"),  # scripted, and exactly a pack (US/EU step)
+        ({"language": "sw"}, None),
     ]:
         sc = Scenario.model_validate(
             {
@@ -315,14 +316,14 @@ def test_scripted_turns_take_the_script_of_the_nearest_pack(
 
 
 def test_no_script_and_no_pack_is_a_load_error(profile: SutProfile) -> None:
-    errors = _problems(_scripted(language="fr"), profile)
+    errors = _problems(_scripted(language="sw"), profile)
     assert any(e.startswith("scorers.0.params.script: output.language_script:") for e in errors)
     given = _scripted(
-        {"id": "output.language_script", "params": {"script": "latin"}}, language="fr"
+        {"id": "output.language_script", "params": {"script": "latin"}}, language="sw"
     )
     assert _problems(given, profile) == []
     listed = _scripted(
-        {"id": "output.language_script", "params": {"scripts": ["latin"]}}, language="fr"
+        {"id": "output.language_script", "params": {"scripts": ["latin"]}}, language="sw"
     )
     assert _problems(listed, profile) == []
 

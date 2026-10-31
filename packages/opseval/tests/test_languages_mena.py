@@ -102,8 +102,10 @@ FALLBACKS = [
     ("ar-LY", None, "ar", "ar", True),
     ("ar-SD", None, "ar", "ar", True),
     ("ar-YE", None, "ar", "ar", True),
-    ("en-US", None, "en", "en", True),
-    ("en", "british", "en", "en", True),
+    # The US/EU step gave these a pack of their own, as the warning said.
+    ("en-US", None, "en", "en-US", False),
+    ("en", "british", "en", "en-GB", False),
+    ("en-AU", None, "en", "en", True),
 ]
 
 
@@ -307,7 +309,8 @@ def test_voice_code_switching_still_wins_over_the_pack(profile: SutProfile) -> N
         ({"language": "ar", "dialect": "egyptian"}, True, "ar-EG"),
         ({"language": "ar", "dialect": "yemeni"}, False, "ar"),
         ({"language": "ar", "dialect": "yemeni"}, True, "ar"),
-        ({"language": "fr"}, True, "fr"),
+        ({"language": "fr"}, True, "fr-FR"),
+        ({"language": "sw"}, True, "sw"),
         ({"language": "en"}, False, "en"),
     ],
 )
@@ -402,10 +405,10 @@ async def test_the_default_script_comes_from_the_pack(profile: SutProfile) -> No
 
 
 async def test_no_pack_and_no_script_is_not_measured_never_a_guess() -> None:
-    french = make_scenario(persona={"role": "c", "language": "fr"})
-    out = await _score(french, "Votre commande arrive")
+    swahili = make_scenario(persona={"role": "c", "language": "sw"})
+    out = await _score(swahili, "Agizo lako linakuja")
     assert out.status is ScoreStatus.INFRA_ERROR and "BAD_PARAMS" in (out.reason or "")
-    out = await _score(french, "Votre commande arrive", script="latin")
+    out = await _score(swahili, "Agizo lako linakuja", script="latin")
     assert out.status is ScoreStatus.PASSED
 
 

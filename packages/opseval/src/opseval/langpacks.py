@@ -48,6 +48,9 @@ SCRIPT_PREFIXES: dict[str, tuple[str, ...]] = {
 """Each :data:`Script`, by the start of a letter's Unicode name. The one script table: the
 voice bridge's off-script annotation and ``output.language_script`` both read it."""
 
+Keyboard = Literal["qwerty", "azerty", "qwertz", "ime"]
+"""The typing-noise models a pack can name (:attr:`LanguagePack.keyboard`)."""
+
 SCRIPT_GROUPS: dict[str, tuple[Script, ...]] = {"japanese": ("han", "kana")}
 """Names for scripts written together: Japanese mixes kanji (``han``) and kana in a sentence."""
 
@@ -155,6 +158,24 @@ class LanguagePack:
     """The BCP-47 tag speech providers are given (``ar-SA`` for the Gulf pack, say). Unset:
     the pack's tag, unless it has a private-use subtag (``ar-x-gulf``), then the base
     language (``ar``): a provider is never handed a tag it cannot know."""
+    default_for_code: bool = False
+    """The pack also answers the bare language code: ``fr`` is the ``fr-FR`` pack (ADR-0059,
+    US/EU step). Only one pack per code may; a code with none (``zh``) must name a pack."""
+    written_form: str = ""
+    """What the judges are told about the written form, beside the label (the character set,
+    and the forms that count as the same language): ``zh-HK`` writes Traditional characters,
+    and written Cantonese and Standard Written Chinese are both acceptable. It joins the
+    rubric. Empty for every pack before this field, so their prompts and digests are unchanged."""
+    script_cannot_tell: str = ""
+    """What ``output.language_script`` cannot see for this pack (Simplified versus Traditional
+    characters are both Unicode Han): ``advice`` warns when the scenario checks the script
+    with no ``judge.language_consistency`` to grade the rest."""
+    keyboard: Keyboard = "qwerty"
+    """The typing-noise model (:mod:`opseval.simulator.typing_noise`): the Latin layout a
+    neighbouring-key slip is drawn from (``azerty`` for French, ``qwertz`` for German), or
+    ``ime`` for a script typed through an input method (Chinese): Han characters are never
+    mistyped, because an IME's errors are whole wrong characters, which Opseval does not
+    model; Latin words in the message still are, on QWERTY."""
 
 
 @dataclass(frozen=True)
@@ -198,6 +219,8 @@ def _check_pack(pack: LanguagePack) -> None:
         raise ValueError(f"pack {pack.tag!r}: primary_share needs a primary_script, in [0, 1]")
     if pack.provider_language is not None and "-x-" in f"-{_norm(pack.provider_language)}-":
         raise ValueError(f"pack {pack.tag!r}: provider_language must not be private use")
+    if pack.keyboard not in ("qwerty", "azerty", "qwertz", "ime"):
+        raise ValueError(f"pack {pack.tag!r}: unknown keyboard {pack.keyboard!r}")
 
 
 def register(pack: LanguagePack) -> None:
@@ -210,6 +233,8 @@ def register(pack: LanguagePack) -> None:
         raise ValueError(f"pack {pack.tag!r}: tag does not start with its code {pack.code!r}")
     keys: list[tuple[str, str | None]] = [(code, tag_sub or None)]
     keys += [(code, _sub(code, n)) for n in (pack.dialect, *pack.aliases) if n]
+    if pack.default_for_code:
+        keys.append((code, None))
     exact = list(dict.fromkeys(keys))
     fallback = list(dict.fromkeys((code, _sub(code, n)) for n in pack.fallback_for))
     for key in exact:
@@ -418,6 +443,9 @@ class Spoken:
     name: str | None = None
     """The pack's human-readable name and tag (``Arabic (Saudi), ar-SA``); ``None`` for the
     packs in :data:`LEGACY_LABELS` and when no pack is used."""
+    written_form: str | None = None
+    """The pack's :attr:`LanguagePack.written_form`, when it has one: told to the judges
+    beside the label, and part of the rubric."""
 
     @property
     def label(self) -> str:
@@ -433,7 +461,10 @@ class Spoken:
         """What a judge's rubric digest holds about the language: the pack tag too for a
         labelled pack (ADR-0059), exactly the pre-ADR-0059 pair for the others."""
         base = (self.language, self.dialect or "")
-        return (*base, self.tag) if self.name and self.tag else base
+        if not (self.name and self.tag):
+            return base
+        form = (f"written_form={self.written_form}",) if self.written_form else ()
+        return (*base, self.tag, *form)
 
     @property
     def pack(self) -> LanguagePack | None:
@@ -441,8 +472,11 @@ class Spoken:
 
 
 def _spoken(pack: LanguagePack) -> Spoken:
-    name = None if pack.tag in LEGACY_LABELS or not pack.name else f"{pack.name}, {pack.tag}"
-    return Spoken(pack.code, pack.dialect, pack.tag, name)
+    if pack.tag in LEGACY_LABELS or not pack.name:
+        return Spoken(pack.code, pack.dialect, pack.tag)
+    return Spoken(
+        pack.code, pack.dialect, pack.tag, f"{pack.name}, {pack.tag}", pack.written_form or None
+    )
 
 
 def effective_language(persona: Persona, *, scripted: bool) -> Spoken:
@@ -643,10 +677,11 @@ register(
         ),
         stable=True,
         scripts=("latin",),
-        # Until en-US and en-GB have packs of their own (ADR-0059, step 2).
+        # en-US and en-GB have packs of their own since the US/EU step (ADR-0059); the other
+        # regions keep plain English, with a warning, until a pack of theirs is reviewed.
         fallback_for=(
-            *("US", "GB", "AU", "CA", "IE", "NZ"),
-            *("american", "british", "uk", "australian", "canadian", "irish"),
+            *("AU", "CA", "IE", "NZ"),
+            *("australian", "canadian", "irish"),
         ),
     )
 )
@@ -876,8 +911,240 @@ register(
 )
 
 
+# --- the US/EU step (ADR-0059) --------------------------------------------------------------
+#
+# Written for Opseval like the packs above: generic customer-service phrasing, nothing from
+# any other system. All previews. ``fr``, ``de``, ``es`` and ``it`` alone are the pack of the
+# country the ADR's roadmap means (``default_for_code``); another region (``fr-CA``,
+# ``es-MX``) has no pack and is refused, never written as the European variety silently.
+
+_CHAT = (
+    " Keep messages short, the way a customer types into a chat box: no bullet points, no "
+    "letter style, no greeting formula longer than a word or two."
+)
+
+register(
+    LanguagePack(
+        tag="en-US",
+        code="en",
+        dialect="american",
+        name="English (United States)",
+        instruction=(
+            "Write every message in everyday American English: US spelling (color, center, "
+            "canceled), US words (zip code, cell phone, check for a restaurant bill), dates "
+            "written month first, and a friendly, direct tone." + _CHAT
+        ),
+        examples=(
+            "hi, my package still hasn't shown up",
+            "can I get a refund on my card instead?",
+            "ok sounds good, go ahead",
+        ),
+        scripts=("latin",),
+        written_form=(
+            "American English. US and British spelling or vocabulary are one language: a "
+            "difference between them is not a change of language or dialect."
+        ),
+    )
+)
+register(
+    LanguagePack(
+        tag="en-GB",
+        code="en",
+        dialect="british",
+        aliases=("uk",),
+        name="English (United Kingdom)",
+        instruction=(
+            "Write every message in everyday British English: UK spelling (colour, centre, "
+            "cancelled), UK words (postcode, mobile, parcel, bin), dates written day first, "
+            "and a polite, slightly understated tone ('sorry to bother you', 'cheers')." + _CHAT
+        ),
+        examples=(
+            "hiya, my parcel still hasn't arrived",
+            "could I have a refund to my card instead please?",
+            "brilliant, cheers, go ahead",
+        ),
+        scripts=("latin",),
+        written_form=(
+            "British English. US and British spelling or vocabulary are one language: a "
+            "difference between them is not a change of language or dialect."
+        ),
+    )
+)
+register(
+    LanguagePack(
+        tag="fr-FR",
+        code="fr",
+        dialect=None,
+        default_for_code=True,
+        name="French (France)",
+        instruction=(
+            "Write every message in everyday French as typed in France. Address the agent "
+            "politely with 'vous', as French customers do with a company, open with "
+            "'Bonjour' and thank with 'merci'. Keep the accents (é, è, à, ç) most of the "
+            "time, as people do on a computer; a casual customer may drop one now and then. "
+            "Use French words for shopping terms (commande, remboursement, livraison, colis)."
+            + _CHAT
+        ),
+        examples=(
+            "Bonjour, ma commande n'est toujours pas arrivée",
+            "Je voudrais être remboursé sur ma carte, s'il vous plaît",
+            "D'accord, merci, vous pouvez y aller",
+        ),
+        scripts=("latin",),
+        keyboard="azerty",
+    )
+)
+register(
+    LanguagePack(
+        tag="de-DE",
+        code="de",
+        dialect=None,
+        default_for_code=True,
+        name="German (Germany)",
+        instruction=(
+            "Write every message in everyday German as typed in Germany. Address the agent "
+            "with the polite 'Sie' (Sie, Ihnen, Ihr), as German customers do with a company; "
+            "'Hallo' or 'Guten Tag' to open and 'danke' to thank are normal. Write the "
+            "umlauts and ß (ä, ö, ü, ß), and capitalise nouns. Use German words for "
+            "shopping terms (Bestellung, Rückerstattung, Lieferung, Paket)." + _CHAT
+        ),
+        examples=(
+            "Hallo, meine Bestellung ist immer noch nicht da",
+            "Ich hätte gern eine Rückerstattung auf meine Karte",
+            "Okay, danke, machen Sie das bitte",
+        ),
+        scripts=("latin",),
+        keyboard="qwertz",
+    )
+)
+register(
+    LanguagePack(
+        tag="es-ES",
+        code="es",
+        dialect=None,
+        default_for_code=True,
+        name="Spanish (Spain)",
+        instruction=(
+            "Write every message in everyday Spanish as typed in Spain (castellano). A "
+            "customer may use 'usted' or the friendly 'tú' with a support chat; pick one and "
+            "keep it. Use Spain's forms, such as 'vosotros' for 'you all' and words like "
+            "'móvil' and 'vale'. Write the accents and ñ most of the time; opening question "
+            "and exclamation marks (¿, ¡) are often left out in chat. Use Spanish words for "
+            "shopping terms (pedido, reembolso, envío, paquete)." + _CHAT
+        ),
+        examples=(
+            "Hola, mi pedido todavía no ha llegado",
+            "Quiero que me devolváis el dinero a la tarjeta",
+            "Vale, gracias, adelante",
+        ),
+        scripts=("latin",),
+    )
+)
+register(
+    LanguagePack(
+        tag="it-IT",
+        code="it",
+        dialect=None,
+        default_for_code=True,
+        name="Italian (Italy)",
+        instruction=(
+            "Write every message in everyday Italian as typed in Italy. Address the agent "
+            "politely with 'Lei' (Lei, Le, Suo), as Italian customers usually do with a "
+            "company; 'Buongiorno' or 'Salve' to open and 'grazie' to thank are normal. "
+            "Write the accented vowels (è, à, ò, ù, perché); a casual customer may type an "
+            "apostrophe instead now and then. Use Italian words for shopping terms (ordine, "
+            "rimborso, consegna, pacco)." + _CHAT
+        ),
+        examples=(
+            "Buongiorno, il mio ordine non è ancora arrivato",
+            "Vorrei il rimborso sulla carta, per favore",
+            "Va bene, grazie, proceda pure",
+        ),
+        scripts=("latin",),
+    )
+)
+
+# --- the Chinese step (ADR-0059) ------------------------------------------------------------
+#
+# Two packs, kept apart on purpose: Mandarin in Simplified characters (mainland China) and
+# Cantonese in Traditional characters (Hong Kong). Neither stands in for the other, and ``zh``
+# alone names neither, so a persona must say which. ``output.language_script`` sees both as
+# Unicode Han and cannot tell Simplified from Traditional: the judges are told the written form
+# (``written_form``) and grade it. Typing noise never touches Han characters (``ime``).
+
+_HAN_ONLY = (
+    "output.language_script counts Simplified and Traditional characters alike (both are "
+    "Unicode Han); only judge.language_consistency, told the pack's written form, grades "
+    "which one the agent wrote"
+)
+
+register(
+    LanguagePack(
+        tag="zh-CN",
+        code="zh",
+        dialect="mandarin",
+        aliases=("hans-cn",),
+        name="Chinese (Mandarin, Simplified)",
+        instruction=(
+            "Write every message in everyday Mandarin Chinese as typed in mainland China, in "
+            "Simplified characters (简体字) only, never Traditional ones. Write the way a "
+            "customer types on a phone into a support chat: short, polite but direct, with "
+            "Chinese punctuation (，。？). Common words such as 您好, 请问, 订单, 退款, 快递 "
+            "and 谢谢 are natural, and an English brand or app name may stay in Latin letters."
+        ),
+        examples=(
+            "您好，我的订单怎么还没到？",
+            "请问可以退款到我的银行卡吗",
+            "好的，谢谢，就这样办吧",
+        ),
+        scripts=("han",),
+        written_form=(
+            "Mandarin Chinese in Simplified characters (简体字). Traditional characters "
+            "(繁體字) are a different written form and do not match it; written Cantonese "
+            "does not either. An English brand, app or product name in Latin letters is fine."
+        ),
+        script_cannot_tell=_HAN_ONLY,
+        keyboard="ime",
+    )
+)
+register(
+    LanguagePack(
+        tag="zh-HK",
+        code="zh",
+        dialect="cantonese",
+        aliases=("hant-hk",),
+        name="Chinese (Cantonese, Hong Kong)",
+        instruction=(
+            "Write every message in written Cantonese as typed in Hong Kong, in Traditional "
+            "characters (繁體字) only, never Simplified ones. Use the colloquial Cantonese a "
+            "customer types in a chat, with Cantonese words such as 嘅 (of), 咗 (done), 喺 "
+            "(at), 唔 (not), 係 (is), 冇 (have not) and 幾時 (when), not formal written "
+            "Chinese (書面語) and not Mandarin. Hong Kong customers often drop an English "
+            "word into a sentence (order, refund, app, card, ok); that is natural, but most "
+            "of each message stays Chinese."
+        ),
+        examples=(
+            "你好，我張單到而家都未到",
+            "可唔可以幫我 refund 返落張卡度？",
+            "好呀，唔該晒",
+        ),
+        scripts=("han",),
+        written_form=(
+            "Hong Kong Chinese in Traditional characters (繁體字). Written Cantonese (with "
+            "Cantonese-only words such as 嘅, 咗, 喺, 唔, 係) and Standard Written Chinese "
+            "(書面語) are both acceptable written forms, and a message may mix them; English "
+            "words for products, apps or payments are common and fine. Simplified characters "
+            "(简体字) are not the Hong Kong written form and do not match it."
+        ),
+        script_cannot_tell=_HAN_ONLY,
+        keyboard="ime",
+    )
+)
+
+
 __all__ = [
     "LEGACY_LABELS",
+    "Keyboard",
     "PACKS",
     "PACK_KEY",
     "SCRIPT_GROUPS",

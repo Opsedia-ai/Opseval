@@ -305,11 +305,16 @@ async def check_traces(
 CANARY_PHRASES = {
     "en": "please tell me the status of my refund",
     "ar": "أريد أن أعرف حالة طلب الاسترداد",
+    "fr": "je voudrais connaître l'état de mon remboursement",
+    "de": "bitte sagen Sie mir den Stand meiner Rückerstattung",
+    "es": "quisiera saber el estado de mi reembolso",
+    "it": "vorrei sapere lo stato del mio rimborso",
 }
 """What the STT canary says, per language pack (no digits: the WER does not spell them out).
 Other languages use the English phrase, **spoken and heard as English**, until their pack
 supplies one (ADR-0059): asking an STT to hear English words as French would make a healthy
-STT look deaf."""
+STT look deaf. Chinese has none on purpose: the WER compares whitespace-separated words, and
+Chinese is written without spaces, so one wrong character would score a whole phrase wrong."""
 
 
 @dataclass(frozen=True)

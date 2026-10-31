@@ -503,6 +503,13 @@ def _spoken(ctx: ScoringContext) -> Spoken:
     return ctx.spoken()
 
 
+def _written_form(spoken: Spoken) -> list[str]:
+    """The pack's written form (ADR-0059: ``zh-HK`` is Traditional characters, written Cantonese
+    or Standard Written Chinese), on its own trusted line; nothing for a pack without one, so
+    every other prompt is unchanged. The rubric holds it too (:attr:`Spoken.rubric`)."""
+    return [f"Expected written form: {spoken.written_form}"] if spoken.written_form else []
+
+
 @register
 class LanguageConsistency(Judge):
     id = "judge.language_consistency"
@@ -540,7 +547,8 @@ class LanguageConsistency(Judge):
         return (*_spoken(ctx).rubric, *_switching_rubric(ctx))
 
     def context(self, record: RunRecord, ctx: ScoringContext) -> list[str]:
-        lines = [f"Expected customer language: {_spoken(ctx).label}"]
+        spoken = _spoken(ctx)
+        lines = [f"Expected customer language: {spoken.label}", *_written_form(spoken)]
         mixed = _switching(ctx)
         if mixed:
             lines.append(
@@ -613,6 +621,7 @@ class PersonaConsistency(Judge):
             f"Customer goal: {s.goal}",
             f"Planned flow: {s.conversation.flow or '(pursue the goal)'}",
             f"Persona language: {_spoken(ctx).label}",
+            *_written_form(_spoken(ctx)),
         ]
         mixed = _switching(ctx)
         if mixed:

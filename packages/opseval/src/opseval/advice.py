@@ -21,7 +21,13 @@ from dataclasses import dataclass
 
 from opseval.catalogue import LoadProblem
 from opseval.datasets import Expansion
-from opseval.langpacks import UnknownLanguage, lookup, narrower, script_expectation
+from opseval.langpacks import (
+    LanguagePack,
+    UnknownLanguage,
+    lookup,
+    narrower,
+    script_expectation,
+)
 from opseval.models.profile import SutProfile
 from opseval.models.scenario import Scenario, ScorerSpec
 from opseval.scoring import REGISTRY, effective_specs
@@ -59,6 +65,8 @@ def scenario_warnings(
             )
     _language(scenario, warn)
     _script_default(scenario, specs, warn)
+    _script_blind(scenario, specs, warn)
+    _ime_noise(scenario, warn)
     _rubrics(scenario, warn)
     if scenario.execution.repeats == 1:
         warn(
@@ -171,6 +179,45 @@ def _script_default(
                 + (f" ({scenario.persona.dialect!r})" if scenario.persona.dialect else "")
                 + "; give params.script if that is not how it is typed",
             )
+
+
+def _pack(scenario: Scenario) -> LanguagePack | None:
+    persona = scenario.persona
+    try:
+        return lookup(persona.language, persona.dialect).pack
+    except UnknownLanguage:
+        return None
+
+
+def _script_blind(
+    scenario: Scenario, specs: list[ScorerSpec], warn: Callable[[str, str], None]
+) -> None:
+    """``output.language_script`` passes a reply in the right Unicode script that is still the
+    wrong written form (Simplified for a ``zh-HK`` customer): only the language judge, told the
+    pack's written form, grades that (ADR-0059). Named when the judge is not in the scenario."""
+    pack = _pack(scenario)
+    if pack is None or not pack.script_cannot_tell:
+        return
+    ids = [spec.id for spec in specs]
+    if "output.language_script" in ids and "judge.language_consistency" not in ids:
+        index = ids.index("output.language_script")
+        warn(
+            f"scorers.{index}",
+            f"{pack.script_cannot_tell}; this scenario has no judge.language_consistency, so "
+            f"the {pack.tag} written form is not measured",
+        )
+
+
+def _ime_noise(scenario: Scenario, warn: Callable[[str, str], None]) -> None:
+    """Typing noise on a pack typed through an input method mistypes Latin words only."""
+    pack = _pack(scenario)
+    if pack is not None and pack.keyboard == "ime" and scenario.persona.typing_noise > 0:
+        warn(
+            "persona.typing_noise",
+            f"the {pack.tag} pack is typed through an input method: typing noise never changes "
+            "its Chinese characters (an IME's wrong-character errors are not modelled), only "
+            "Latin words in a message",
+        )
 
 
 def _rubrics(scenario: Scenario, warn: Callable[[str, str], None]) -> None:

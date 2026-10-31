@@ -987,12 +987,26 @@ class TestCanaryLanguage:
         assert canary_phrase("en-GB") == (CANARY_PHRASES["en"], "en")
 
     def test_another_language_falls_back_to_english_spoken_as_english(self) -> None:
-        assert canary_phrase("fr-FR") == (CANARY_PHRASES["en"], "en")
+        assert canary_phrase("sw-KE") == (CANARY_PHRASES["en"], "en")
+        # Chinese has packs but no phrase: the WER is word-level and Chinese has no spaces.
+        assert canary_phrase("zh-HK") == (CANARY_PHRASES["en"], "en")
 
-    async def test_a_french_suite_hears_the_english_canary_in_english(
+    def test_the_us_eu_packs_have_their_own_phrase(self) -> None:
+        for tag in ("fr-FR", "de-DE", "es-ES", "it-IT"):
+            primary = tag.split("-")[0]
+            assert canary_phrase(tag) == (CANARY_PHRASES[primary], primary)
+            assert not any(ch.isdigit() for ch in CANARY_PHRASES[primary])
+
+    async def test_a_french_suite_hears_it_in_french(self, server: FakeSpeechServer) -> None:
+        await speech_checks(settings(), 1, language="fr-FR")
+        assert server.last_spoken == CANARY_PHRASES["fr"]
+        transcription = next(r for r in server.requests if r.url.path.endswith("transcriptions"))
+        assert b'name="language"\r\n\r\nfr\r\n' in transcription.content
+
+    async def test_a_swahili_suite_hears_the_english_canary_in_english(
         self, server: FakeSpeechServer
     ) -> None:
-        tts_check, stt_check = await speech_checks(settings(), 1, language="fr")
+        tts_check, stt_check = await speech_checks(settings(), 1, language="sw")
         assert tts_check.status is CheckStatus.OK
         assert stt_check.status is CheckStatus.OK, stt_check.detail
         assert server.last_spoken == CANARY_PHRASES["en"]

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from opseval.errors import SimulatorError
-from opseval.langpacks import resolve
+from opseval.langpacks import LEGACY_LABELS, UnknownLanguage, lookup, resolve
 from opseval.llm import ChatClient
 from opseval.models.scenario import Decision, DecisionAction, Scenario
 from opseval.simulator.typing_noise import add_typing_noise
@@ -48,9 +48,20 @@ class Simulator(ABC):
             if inj.turn == self._turn:
                 text = f"{text}\n[INJECT]{inj.payload}[/INJECT]"
         injections = INJECT_RE.findall(text)
-        noisy = add_typing_noise(text, self.scenario.persona.typing_noise, self.seed + self._turn)
+        noisy = add_typing_noise(
+            text, self.scenario.persona.typing_noise, self.seed + self._turn, self._keyboard()
+        )
         clean = INJECT_RE.sub(lambda m: m.group(1), noisy)
         return SimTurn(text=clean, goal_reached=goal_reached, injections=injections)
+
+    def _keyboard(self) -> str:
+        """The persona's pack's keyboard (ADR-0059), QWERTY when no pack matches (scripted
+        turns may name a language with no pack): what typing noise is drawn from."""
+        persona = self.scenario.persona
+        try:
+            return lookup(persona.language, persona.dialect).pack.keyboard
+        except UnknownLanguage:
+            return "qwerty"
 
     @abstractmethod
     async def opening(self) -> SimTurn: ...
@@ -121,13 +132,16 @@ class LLMSimulator(Simulator):
         s = self.scenario
         pack = resolve(s.persona.language, s.persona.dialect)
         examples = "\n".join(f"- {e}" for e in pack.examples)
+        # A pack with a human-readable name is named, with its tag, before its instruction
+        # (``Cantonese``, not only "Chinese"); the four older packs keep their prompt.
+        named = "" if pack.tag in LEGACY_LABELS or not pack.name else f"{pack.name} ({pack.tag}). "
         return (
             "You are role-playing a CUSTOMER talking to a company's support agent in a chat. "
             "Stay in character. Never act as the agent, never mention being an AI or a test.\n\n"
             f"Who you are: {s.persona.role}\n"
             f"Your goal: {s.goal}\n"
             f"How the conversation should go: {s.conversation.flow or 'Pursue your goal.'}\n\n"
-            f"Language: {pack.instruction}\n"
+            f"Language: {named}{pack.instruction}\n"
             + _code_switching(s)
             + (f"Example phrasing:\n{examples}\n" if examples else "")
             + "\nKeep any facts you invent (names, numbers, dates) consistent across turns. "

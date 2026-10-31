@@ -84,7 +84,7 @@ def test_the_old_pack_names_are_unchanged() -> None:
     }
 
 
-@pytest.mark.parametrize("language", ["fr", "de", "xx", "zh-HK", "", "english"])
+@pytest.mark.parametrize("language", ["sw", "pl", "xx", "zh", "zh-TW", "", "english"])
 def test_an_unknown_language_raises_never_english(language: str) -> None:
     with pytest.raises(UnknownLanguage) as exc:
         resolve(language, None)
@@ -115,13 +115,12 @@ def test_two_fields_naming_different_packs_are_refused() -> None:
         ("ar", "omani", "ar-x-gulf"),
         ("ar-SY", None, "ar-x-levant"),
         ("ar", "palestinian", "ar-x-levant"),
-        ("en-US", None, "en"),
-        ("en", "GB", "en"),
-        # English dialect names load as they did before ADR-0059, now with a warning
-        ("en", "american", "en"),
-        ("en", "us", "en"),
-        ("en", "British", "en"),
-        ("en", "uk", "en"),
+        # English regions with no pack of their own (en-US and en-GB have one since the
+        # US/EU step) load as plain English, with a warning
+        ("en-AU", None, "en"),
+        ("en", "IE", "en"),
+        ("en", "canadian", "en"),
+        ("en", "Irish", "en"),
     ],
 )
 def test_a_declared_fallback_names_what_it_stands_in_for(
@@ -150,7 +149,7 @@ def test_the_simulator_never_writes_english_for_an_unknown_code() -> None:
     assert ENGLISH.instruction in _system(language="en")
     assert resolve("ar", "egyptian").instruction in _system(language="ar-EG")
     with pytest.raises(UnknownLanguage):
-        _system(language="fr")
+        _system(language="sw")
     with pytest.raises(UnknownLanguage):
         _system(language="ar", dialect="klingon")
 
@@ -158,7 +157,7 @@ def test_the_simulator_never_writes_english_for_an_unknown_code() -> None:
 # --- every place a scenario is loaded ------------------------------------------------------
 
 FRENCH = (
-    "id: fr-001\nname: n\ngoal: g\npersona: {role: r, language: fr}\n"
+    "id: fr-001\nname: n\ngoal: g\npersona: {role: r, language: sw}\n"
     "conversation: {scripted_turns: [bonjour]}\n"
 )
 FRENCH_LLM = FRENCH.replace("scripted_turns: [bonjour]", "flow: ask for a refund")
@@ -171,7 +170,7 @@ def test_an_llm_persona_is_refused_at_persona_language(tmp_path: Path, profile: 
         tmp_path, profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
     )
     assert cat.scenarios == []
-    assert [(p.field, "'fr'" in p.message) for p in cat.problems] == [("persona.language", True)]
+    assert [(p.field, "'sw'" in p.message) for p in cat.problems] == [("persona.language", True)]
 
 
 def test_scripted_turns_need_no_pack_and_are_warned_about(
@@ -191,7 +190,7 @@ def test_scripted_turns_need_no_pack_and_are_warned_about(
 
 
 def test_an_unknown_dialect_is_reported_at_persona_dialect(profile: SutProfile) -> None:
-    text = FRENCH_LLM.replace("language: fr", "language: ar, dialect: klingon")
+    text = FRENCH_LLM.replace("language: sw", "language: ar, dialect: klingon")
     sc, problems = check_scenario_text(
         text, "x.yaml", profile, known_scorers=REGISTRY, known_invariants=set(INVARIANTS)
     )
@@ -220,12 +219,12 @@ def test_a_declared_fallback_loads_with_a_warning(profile: SutProfile) -> None:
         persona={"role": "r", "language": "ar-QA"}, conversation=LLM, execution={"repeats": 3}
     )
     assert [w.field for w in scenario_warnings(by_tag, "x.yaml", profile)] == ["persona.language"]
-    american = make_scenario(
-        persona={"role": "r", "language": "en", "dialect": "american"},
+    aussie = make_scenario(
+        persona={"role": "r", "language": "en", "dialect": "australian"},
         conversation=LLM,
         execution={"repeats": 3},
     )
-    assert [w.field for w in scenario_warnings(american, "x.yaml", profile)] == ["persona.dialect"]
+    assert [w.field for w in scenario_warnings(aussie, "x.yaml", profile)] == ["persona.dialect"]
 
 
 def test_scripted_turns_in_a_fallback_dialect_are_not_warned_about(profile: SutProfile) -> None:
@@ -258,12 +257,12 @@ def test_the_console_editor_and_import_refuse_it(tmp_path: Path) -> None:
 
     app, cat = app_for(tmp_path, copy=True)
     c = connect(app)
-    scripted = (cat / RF1).read_text("utf-8").replace("language: en", "language: fr")
+    scripted = (cat / RF1).read_text("utf-8").replace("language: en", "language: sw")
     out = c.post("/api/v1/scenarios/validate", json={"text": scripted, "file": RF1}).json()
     assert out["ok"] is True
     assert "persona.language" in {w["field"] for w in out["warnings"]}
     text = re.sub(r"scripted_turns:\n\s+- .*\n", "flow: ask for a refund\n", scripted)
-    assert "language: fr" in text and "scripted_turns" not in text
+    assert "language: sw" in text and "scripted_turns" not in text
     out = c.post("/api/v1/scenarios/validate", json={"text": text, "file": RF1}).json()
     assert out["ok"] is False
     assert "persona.language" in {p["field"] for p in out["problems"]}
@@ -294,10 +293,25 @@ def test_the_guided_form_offers_pack_names(tmp_path: Path) -> None:
             "tunisian",
             "uae",
         ],
-        "en": [],
+        "de": [],
+        "en": ["american", "british"],
+        "es": [],
+        "fr": [],
+        "it": [],
+        "zh": ["cantonese", "mandarin"],
     }
     # Arabic is offered as a preview: no Arabic pack has had its native-speaker review.
-    assert {lang.code: lang.stable for lang in languages()} == {"ar": False, "en": True}
+    # Only English has a stable pack (the base, en); every other language is a preview.
+    stable = {lang.code: lang.stable for lang in languages()}
+    assert stable == {
+        "ar": False,
+        "de": False,
+        "en": True,
+        "es": False,
+        "fr": False,
+        "it": False,
+        "zh": False,
+    }
 
 
 def test_a_copied_demo_catalogue_still_loads(tmp_path: Path, profile: SutProfile) -> None:
@@ -331,22 +345,22 @@ def registry() -> Iterator[None]:
 @pytest.mark.usefixtures("registry")
 def test_a_regional_pack_needs_no_base_pack() -> None:
     canadian = LanguagePack(
-        tag="fr-CA",
-        code="fr",
-        dialect="canadian",
+        tag="sw-TZ",
+        code="sw",
+        dialect="tanzanian",
         instruction="i",
-        aliases=("quebecois",),
+        aliases=("kiunguja",),
         scripts=("latin",),
     )
     register(canadian)
-    for language, dialect in [("fr-CA", None), ("FR_ca", None), ("fr", "canadian"), ("fr", "CA")]:
+    for language, dialect in [("sw-TZ", None), ("SW_tz", None), ("sw", "tanzanian"), ("sw", "TZ")]:
         assert lookup(language, dialect).pack is canadian
-    assert lookup("fr", "quebecois").pack is canadian
+    assert lookup("sw", "kiunguja").pack is canadian
     with pytest.raises(UnknownLanguage, match="no base pack") as exc:
-        resolve("fr", None)
+        resolve("sw", None)
     assert exc.value.field == "language"
     with pytest.raises(UnknownLanguage) as exc:
-        resolve("fr", "belgian")
+        resolve("sw", "kenyan")
     assert exc.value.field == "dialect"
 
 
@@ -461,8 +475,8 @@ def test_scripted_turns_are_graded_against_the_declared_language(profile: SutPro
     lang, persona, *_ = _told(_scripted(language="ar", dialect="yemeni"), profile)
     assert lang == "Expected customer language: ar (yemeni)"
     assert persona == "Persona language: ar (yemeni)"
-    lang, persona, *_ = _told(_scripted(language="fr"), profile)
-    assert lang == "Expected customer language: fr"
+    lang, persona, *_ = _told(_scripted(language="sw"), profile)
+    assert lang == "Expected customer language: sw"
 
 
 def test_effective_language_tags() -> None:
@@ -472,7 +486,7 @@ def test_effective_language_tags() -> None:
     assert tag(_llm(language="ar", dialect="masri")) == "ar-EG"
     assert tag(_llm(language="ar", dialect="yemeni")) == "ar"
     assert tag(_scripted(language="ar", dialect="yemeni")) is None
-    assert tag(_scripted(language="fr")) is None
+    assert tag(_scripted(language="sw")) is None
     assert tag(_scripted(language="ar-EG")) == "ar-EG"
 
 
