@@ -4,6 +4,7 @@ is read through :class:`~opseval.storage.RunStore` only, whichever store it is (
 
 from __future__ import annotations
 
+import weakref
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -11,9 +12,11 @@ from typing import Any
 import yaml
 
 from opseval.analytics import AnalyticsStore, UsageFilter
+from opseval.analytics.costs import events_cost, rows_cost
+from opseval.analytics.dashboards import flips
 from opseval.catalogue import load_catalogue
 from opseval.config import Settings, check_url_allowed, config_digest
-from opseval.errors import ConfigError, StorageError
+from opseval.errors import ConfigError, HarnessError, StorageError
 from opseval.models.gate import (
     PRESETS,
     SETTINGS,
@@ -31,6 +34,7 @@ from opseval.models.record import RunRecord
 from opseval.models.results import ModelUsage, SuiteResult, TestVerdict, VerdictStatus
 from opseval.models.stop import StopPolicy
 from opseval.models.upload import http_url
+from opseval.models.usage import CostParts, ModelPrice
 from opseval.redaction import redact_text
 from opseval.scoring import INVARIANTS, REGISTRY
 from opseval.server import schemas as s
@@ -414,9 +418,12 @@ def run_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
                 reported=s.UsageReportedOut.model_validate(u.reported.model_dump())
                 if u.reported
                 else None,
+                cost_known_usd=u.cost_known_usd,
+                unpriced_calls=u.unpriced_calls,
             )
             for u in r.usage
         ],
+        cost=run_cost(store, r),
         load_errors=r.load_errors,
         degraded_scorers=r.degraded_scorers,
         vacuous_scorers=r.vacuous_scorers,
@@ -429,6 +436,72 @@ def run_detail(store: RunStore, run_id: str) -> s.RunDetail | None:
             else None
         ),
     )
+
+
+COST_DIGITS = 6
+"""Every cost the API says is rounded to this many digits, as the dashboards round them."""
+
+
+def run_cost(store: RunStore, r: SuiteResult) -> s.CostSplitOut | None:
+    """What the run cost: the known part and the unpriced calls, by the dashboards' own
+    arithmetic (:mod:`opseval.analytics.costs`). A row written before layout 9 whose split it
+    cannot tell is split from the run's records; if they cannot be read, the split is said to
+    be not recorded. ``None``: the run made no call it paid for."""
+    parts = rows_cost(r.usage)
+    if parts is None and store.layout(r.run_id) not in PRE_USAGE_LAYOUTS:
+        parts = _split_from_records(store, r)
+    if parts is None:
+        reported = [u.reported for u in r.usage if u.reported is not None]
+        priced = sum(x.cost for x in reported)
+        return s.CostSplitOut(
+            known_usd=None,
+            priced_calls=priced,
+            unpriced_calls=sum(x.answered for x in reported) - priced,
+            total_usd=None,
+            recorded=False,
+        )
+    if parts.calls == 0 and parts.known_usd is None:
+        return None
+    known = None if parts.known_usd is None else round(parts.known_usd, COST_DIGITS)
+    return s.CostSplitOut(
+        known_usd=known,
+        priced_calls=parts.priced,
+        unpriced_calls=parts.unpriced,
+        total_usd=known if parts.complete else None,
+    )
+
+
+_SPLITS: weakref.WeakKeyDictionary[Any, dict[str, tuple[float | None, CostParts | None]]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Splits worked out from a run's records, per store and run, valid while the run's result is
+unchanged (``store.changed_at``): the Usage page asks for every run on every request, and an
+older run's records are read once, not each time."""
+
+
+def _split_from_records(store: RunStore, r: SuiteResult) -> CostParts | None:
+    """The split of a run written before layout 9, from its records; ``None`` when they cannot
+    be read (an unreadable file, a store or blob failure): said "not recorded", and one bad
+    run never fails the page or the run detail."""
+    try:
+        stamp = store.changed_at(r.run_id)
+    except (ValueError, OSError, HarnessError):
+        stamp = None
+    try:
+        cache = _SPLITS.setdefault(store, {})
+    except TypeError:  # a store that cannot be weakly referenced: no cache
+        cache = {}
+    hit = cache.get(r.run_id)
+    if hit is not None and stamp is not None and hit[0] == stamp:
+        return hit[1]
+    try:
+        events = [e for rec in store.load_records(r.run_id) for e in rec.usage_events or ()]
+        parts: CostParts | None = events_cost([*events, *r.usage_events])
+    except (ValueError, OSError, HarnessError):
+        parts = None
+    if stamp is not None:
+        cache[r.run_id] = (stamp, parts)
+    return parts
 
 
 def _total(values: list[float | None]) -> float | None:
@@ -457,8 +530,7 @@ def usage(store: RunStore) -> list[s.RunUsage]:
             counts = [_tokens(u) for u in r.usage if u.role == role]
             return _count(counts), bool(counts) and None not in counts
 
-        costs = [u.cost_usd for u in r.usage]
-        known = _total(costs)
+        cost = run_cost(store, r)
         simulator, judge = tokens("simulator"), tokens("judge")
         rows.append(
             s.RunUsage(
@@ -467,8 +539,10 @@ def usage(store: RunStore) -> list[s.RunUsage]:
                 simulator_tokens_complete=simulator[1],
                 judge_tokens=judge[0],
                 judge_tokens_complete=judge[1],
-                cost_usd=round(known, 4) if known is not None else None,
-                cost_complete=bool(costs) and all(c is not None for c in costs),
+                # The same split as the run detail and the dashboards (ADR-0066 D2).
+                cost_usd=cost.known_usd if cost is not None else None,
+                cost_complete=cost is not None and cost.total_usd is not None,
+                unpriced_calls=cost.unpriced_calls if cost is not None and cost.recorded else None,
                 audio_in_seconds=_total([u.audio_in_seconds for u in r.usage]),
                 audio_out_seconds=_total([u.audio_out_seconds for u in r.usage]),
                 characters=_count([u.characters for u in r.usage]),
@@ -494,6 +568,39 @@ def cost_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.CostDas
 def tokens_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.TokensDashboard:
     """The Tokens dashboard (ADR-0066)."""
     return s.TokensDashboard.model_validate(analytics.tokens(filters).model_dump(mode="json"))
+
+
+def latency_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.LatencyDashboard:
+    """The Latency dashboard (ADR-0066 D2)."""
+    return s.LatencyDashboard.model_validate(analytics.latency(filters).model_dump(mode="json"))
+
+
+def quality_dashboard(
+    analytics: AnalyticsStore, filters: UsageFilter, *, limit: int
+) -> s.QualityDashboard:
+    """The Quality dashboard (ADR-0066 D2)."""
+    answer = analytics.quality(filters, limit=limit)
+    return s.QualityDashboard.model_validate(answer.model_dump(mode="json"))
+
+
+def voice_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.VoiceDashboard:
+    """The Voice dashboard (ADR-0066 D2)."""
+    return s.VoiceDashboard.model_validate(analytics.voice(filters).model_dump(mode="json"))
+
+
+def usage_dashboard(analytics: AnalyticsStore, filters: UsageFilter) -> s.UsageDashboard:
+    """The Usage dashboard (ADR-0066 D2): runs, attempts and audio minutes per task."""
+    return s.UsageDashboard.model_validate(analytics.usage(filters).model_dump(mode="json"))
+
+
+def price_out(row: ModelPrice) -> s.PriceOut:
+    return s.PriceOut.model_validate(
+        {
+            **row.model_dump(mode="json", exclude={"effective_from", "effective_at"}),
+            "effective_from": row.effective_from.isoformat(),
+            "effective_at": row.effective_at.isoformat() if row.effective_at else None,
+        }
+    )
 
 
 def trend(store: RunStore) -> list[s.TrendPoint]:
@@ -540,17 +647,14 @@ def scenario_trend(store: RunStore, *, suite: str | None, limit: int) -> s.Scena
                     flaky=found.flaky if found else False,
                 )
             )
-        # Within one suite only: two suites can run a scenario differently (repeats,
-        # thresholds), so alternating between them is not the scenario changing.
-        flips = 0
-        for name in {r.suite for r in chosen}:
-            judged = [
-                c.status
-                for c, r in zip(cells, chosen, strict=True)
-                if r.suite == name and c.status in JUDGED_STATUSES
-            ]
-            flips += sum(1 for a, b in zip(judged, judged[1:], strict=False) if a != b)
-        rows.append(s.ScenarioTrendRow(id=test_id, name=names[test_id], cells=cells, flips=flips))
+        judged = [
+            (r.suite, c.status.value)
+            for c, r in zip(cells, chosen, strict=True)
+            if c.status in JUDGED_STATUSES
+        ]
+        rows.append(
+            s.ScenarioTrendRow(id=test_id, name=names[test_id], cells=cells, flips=flips(judged))
+        )
     runs = [
         s.TrendRun(run=r.run_id, label=r.started_at.strftime("%b %-d %H:%M"), suite=r.suite)
         for r in chosen

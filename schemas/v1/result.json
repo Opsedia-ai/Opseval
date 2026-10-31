@@ -322,6 +322,18 @@
           "default": null,
           "title": "Characters"
         },
+        "cost_known_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Known Usd"
+        },
         "cost_usd": {
           "anyOf": [
             {
@@ -398,6 +410,18 @@
         "role": {
           "title": "Role",
           "type": "string"
+        },
+        "unpriced_calls": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unpriced Calls"
         }
       },
       "required": [

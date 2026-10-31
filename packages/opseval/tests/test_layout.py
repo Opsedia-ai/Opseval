@@ -23,7 +23,7 @@ from opseval.retention import apply, plan
 from opseval.runner import RunOptions, launch
 from opseval.storage import LAYOUT, LEGACY_LAYOUT, PRE_USAGE_LAYOUTS, FileStore, UnknownLayout
 
-FUTURE = "opseval-runs/9"
+FUTURE = "opseval-runs/10"
 
 
 @pytest.fixture
@@ -51,8 +51,8 @@ def relayout(run: Path, layout: str | None, *, started: datetime | None = None) 
 
 def test_a_new_run_records_its_layout(run: Path) -> None:
     assert json.loads((run / "manifest.json").read_text("utf-8"))["layout"] == LAYOUT
-    assert LAYOUT == "opseval-runs/8", (
-        "8: a voice timeline carries the metric inputs, so rescore recomputes them (ADR-0055)"
+    assert LAYOUT == "opseval-runs/9", (
+        "9: a usage row carries its cost split, known part and unpriced calls (ADR-0066 D2)"
     )
 
 
@@ -65,6 +65,7 @@ def test_a_new_run_records_its_layout(run: Path) -> None:
         "opseval-runs/5",
         "opseval-runs/6",
         "opseval-runs/7",
+        "opseval-runs/8",
     ],
 )
 def test_an_older_layout_run_is_still_read(run: Path, older: str) -> None:

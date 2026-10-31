@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { BarChart3, ClipboardList, Cog, Coins, DollarSign, FlaskConical, GitCompareArrows, KeyRound, Layers, ListChecks, LogOut, MessageSquare, Play, PieChart, Upload } from "lucide-react";
+import { Activity, BarChart3, ClipboardList, Cog, Coins, DollarSign, FlaskConical, GitCompareArrows, KeyRound, Layers, ListChecks, LogOut, MessageSquare, Mic, Play, PieChart, ShieldCheck, Tag, Timer, Upload } from "lucide-react";
 import type { ReactNode } from "react";
 import { api } from "../lib/api";
 import { useSession } from "../lib/session";
@@ -16,8 +16,12 @@ const nav: { heading: string; items: { to: string; label: string; icon: ReactNod
   { heading: "Results", items: [
     { to: "/compare", label: "Compare runs", icon: <GitCompareArrows size={18} /> },
     { to: "/trend", label: "Trend", icon: <BarChart3 size={18} /> },
+    { to: "/quality", label: "Quality", icon: <ShieldCheck size={18} /> },
+    { to: "/latency", label: "Latency", icon: <Timer size={18} /> },
+    { to: "/voice", label: "Voice", icon: <Mic size={18} /> },
     { to: "/cost", label: "Cost", icon: <DollarSign size={18} /> },
     { to: "/tokens", label: "Tokens", icon: <Coins size={18} /> },
+    { to: "/usage-totals", label: "Usage", icon: <Activity size={18} /> },
     { to: "/usage", label: "Usage per run", icon: <PieChart size={18} /> },
   ] },
   { heading: "Author", items: [
@@ -29,6 +33,7 @@ const nav: { heading: string; items: { to: string; label: string; icon: ReactNod
   { heading: "Reference", items: [
     { to: "/checks", label: "Checks & judges", icon: <FlaskConical size={18} /> },
     { to: "/settings", label: "Settings", icon: <Cog size={18} /> },
+    { to: "/prices", label: "Prices", icon: <Tag size={18} /> },
     { to: "/keys", label: "API keys", icon: <KeyRound size={18} />, needs: "manage" },
   ] },
 ];

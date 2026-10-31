@@ -1320,7 +1320,7 @@ class TestAgainstARealServer:
                 )
                 assert list(cols) == []
             await migrate.upgrade(engine)
-            assert await migrate.current(engine) == "0007"
+            assert await migrate.current(engine) == migrate.head()
         finally:
             await engine.dispose()
 

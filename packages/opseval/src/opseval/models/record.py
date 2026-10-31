@@ -428,6 +428,14 @@ class RedactionInfo(Frozen):
     single leaked key appears on both and a tally would say two."""
 
 
+TURN_KINDS = frozenset({FrameKind.USER_MESSAGE, FrameKind.RESUME})
+"""Sent frames that are conversation turns (a customer message, a checkpoint answer)."""
+NOT_REPLIES = frozenset({FrameKind.HANDSHAKE, FrameKind.NOTIFICATION})
+"""Received frames that never answer a turn: transport chatter and out-of-band notices."""
+NO_REPLY = "NO_REPLY"
+NOT_TIMED = "NOT_TIMED"
+
+
 class RunRecord(Frozen):
     run_id: str
     test_id: str
@@ -470,6 +478,44 @@ class RunRecord(Frozen):
 
     def received(self) -> list[FrameRecord]:
         return [f for f in self.frames if f.direction == "received"]
+
+    def turn_latencies(self) -> list[tuple[float | None, str | None]]:
+        """The agent's reply time per conversation turn (ADR-0066, the Latency dashboard), as
+        ``(latency_ms, reason)``.
+
+        A turn is a customer message or a checkpoint answer the driver sent; protocol probes,
+        their answers, handshake and auth frames and out-of-band notifications are not turns
+        (the same frames ``protocol.replies_read`` leaves out). Its latency is the
+        ``latency_ms`` of the first frame back. ``(None, NOT_TIMED)``: a reply the clocks could
+        not time (a voice barge-in). ``(None, NO_REPLY)``: the agent never answered before the
+        next turn or the end of the attempt (a timeout on the agent): counted, never dropped
+        and never a number."""
+        probe_sent = {p.sent_seq for p in self.probes if p.sent_seq is not None}
+        probe_replies = {p.received_seq for p in self.probes if p.received_seq is not None}
+        out: list[tuple[float | None, str | None]] = []
+        waiting = False
+        for f in self.frames:
+            if f.direction == "sent":
+                if f.kind not in TURN_KINDS or f.seq in probe_sent:
+                    continue
+                if waiting:
+                    out.append((None, NO_REPLY))
+                waiting = True
+            elif waiting and f.kind not in NOT_REPLIES and f.seq not in probe_replies:
+                out.append((f.latency_ms, None if f.latency_ms is not None else NOT_TIMED))
+                waiting = False
+        if waiting:
+            out.append((None, NO_REPLY))
+        return out
+
+    def language(self) -> tuple[str | None, str | None]:
+        """The persona's language and dialect as the scenario declared them."""
+        language = self.persona.get("language")
+        dialect = self.persona.get("dialect")
+        return (
+            language if isinstance(language, str) else None,
+            dialect if isinstance(dialect, str) and dialect else None,
+        )
 
     def transcript(self) -> list[tuple[str, str]]:
         """(speaker, text) pairs; speaker is ``customer`` or ``agent``."""

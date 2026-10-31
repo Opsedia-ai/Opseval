@@ -84,6 +84,29 @@ export type UsageBucketing = G.UsageFiltersOut["bucket"];
 /** The dashboards' filters as the page holds them; "" is "any". */
 export interface UsageQuery { suite: string; role: string; model: string; since: string; until: string; bucket: UsageBucketing }
 
+/** The Latency, Quality, Voice and Usage dashboards (ADR-0066 D2). Percentiles are the server's
+ * (nearest rank); a null is a gap. */
+export type Percentiles = G.PercentilesOut;
+export type PercentileSeries = G.PercentileSeriesOut;
+export type Rate = G.RateOut;
+export type DashboardOptions = G.DashboardOptionsOut;
+export type DashboardScope = G.DashboardScopeOut;
+export type LatencyDashboard = G.LatencyDashboard;
+export type QualityDashboard = G.QualityDashboard;
+export type VoiceDashboard = G.VoiceDashboard;
+export type VoiceMetric = G.VoiceMetricOut;
+export type UsageDashboard = G.UsageDashboard;
+export type TaskUsage = G.TaskUsageOut;
+export type CostSplit = G.CostSplitOut;
+/** The D2 dashboards' filters as the page holds them; "" is "any". */
+export interface DashQuery { suite: string; task: string; language: string; dialect: string; since: string; until: string; bucket: UsageBucketing }
+
+/** Model prices (ADR-0066 D2): the built-in table and a project's own rows. */
+export type Price = G.PriceOut;
+export type Prices = G.PricesOut;
+export type PriceBody = G.PriceIn;
+export type PriceResolved = G.PriceResolveOut;
+
 /** Recorded audio of a voice attempt (ADR-0053): what each turn can do is the server's call. */
 export type AudioTurn = G.AudioTurnOut;
 export type AttemptAudio = G.AttemptAudioOut;

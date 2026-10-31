@@ -233,7 +233,8 @@ def test_usage_with_an_unpriced_model_shows_the_known_cost_as_partial(tmp_path: 
     run = _result("speech", 1, {"a": VerdictStatus.PASSED})
     run.usage = [
         ModelUsage(role="simulator", model="m", input_tokens=5, output_tokens=5, cost_usd=0.5),
-        ModelUsage(role="judge", model="j", input_tokens=1, output_tokens=1),
+        # An unpriced model's answered call: its cost is missing, so the run's is a floor.
+        ModelUsage(role="judge", model="j", calls=1, input_tokens=1, output_tokens=1),
         ModelUsage(
             role="tts",
             model="tts-1",
@@ -258,6 +259,7 @@ def test_usage_with_an_unpriced_model_shows_the_known_cost_as_partial(tmp_path: 
         detail = c.get("/api/v1/runs/speech").json()
     row = rows["speech"]
     assert row["costUsd"] == 0.75 and row["costComplete"] is False
+    assert row["unpricedCalls"] == 1  # the judge's call; the STT row made no answered call
     assert (row["audioInSeconds"], row["audioOutSeconds"], row["characters"]) == (2.0, 1.5, 12)
     assert row["simulatorTokens"] == 10 and row["judgeTokens"] == 2
     assert rows["priced"]["costComplete"] is True and rows["priced"]["costUsd"] == 0.1

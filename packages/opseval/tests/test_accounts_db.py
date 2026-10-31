@@ -408,6 +408,14 @@ ROUTES: list[tuple[str, str, dict[str, Any] | None, str]] = [
     ("PUT", "/suites", {"name": "x", "scenarios": []}, "catalogue:write"),
     ("GET", "/auth/keys", None, "manage"),
     ("GET", "/auth/members", None, "manage"),
+    ("GET", "/analytics/quality", None, "runs:read"),
+    ("GET", "/prices", None, "runs:read"),
+    (
+        "POST",
+        "/prices",
+        {"pattern": "m-role", "matchKind": "exact", "unit": "tokens", "input": 1, "output": 2},
+        "manage",
+    ),
 ]
 ALLOWED = {
     "owner": {"runs:read", "runs:start", "catalogue:write", "catalogue:label", "manage"},

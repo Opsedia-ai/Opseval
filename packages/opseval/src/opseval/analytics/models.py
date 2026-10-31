@@ -104,6 +104,9 @@ class UsageFilterEcho(BaseModel):
     since: date | None = None
     until: date | None = None
     bucket: Bucket = "day"
+    task: str | None = None
+    language: str | None = None
+    dialect: str | None = None
 
 
 class FilterOptions(BaseModel):
@@ -206,3 +209,250 @@ class TokensAnswer(BaseModel):
     tokens_per_attempt: Ratio
     """Mean tokens per attempt, over the attempts whose every call reported its tokens."""
     scenarios: list[ScenarioTokens]
+
+
+# --- D2: latency, quality, voice and usage (ADR-0066) -------------------------------------
+
+PERCENTILE_RULE = "nearest-rank"
+"""How every percentile is computed, by every store: the value at rank ``ceil(p * n)`` of the
+sorted values (Postgres ``percentile_disc``). Never interpolated: a p95 is a value that was
+measured."""
+
+
+class Percentiles(BaseModel):
+    """Percentiles of measured values (nearest rank). ``n`` values were counted; ``unmeasured``
+    units had no value (not measured, never 0) and are left out of ``n``. With ``n`` 0 every
+    figure is ``None``."""
+
+    model_config = ConfigDict(extra="forbid")
+    n: int
+    unmeasured: int
+    p50: float | None
+    p95: float | None
+    p99: float | None
+    mean: float | None
+    unanswered: int = 0
+    """Agent turns that got no reply before the next turn or the end (a timeout on the agent):
+    counted apart, never a number in the percentiles. Always 0 for a metric that is not about
+    replies."""
+
+
+class PercentileSeries(BaseModel):
+    """One group's percentiles, one per bucket in the answer's ``buckets`` order."""
+
+    model_config = ConfigDict(extra="forbid")
+    group: str
+    points: list[Percentiles]
+    total: Percentiles
+
+
+class Rate(BaseModel):
+    """A pass rate over judged results only. ``value`` is ``passed / judged``; ``None`` when
+    nothing was judged (never 0%). ``not_judged`` results (an outage, a skip, an
+    ``infra_error`` score) are counted apart, never in the denominator: a harness outage must
+    not pull a pass rate down (ADR-0052)."""
+
+    model_config = ConfigDict(extra="forbid")
+    value: float | None
+    passed: int
+    judged: int
+    not_judged: int
+
+
+class DashboardOptions(BaseModel):
+    """What the D2 dashboards' filters can be set to, from the finished runs in scope."""
+
+    model_config = ConfigDict(extra="forbid")
+    suites: list[str]
+    tasks: list[str]
+    """Task slugs in scope (server mode); empty in local mode."""
+    languages: list[str]
+    dialects: list[str]
+    server_only: list[str]
+    """Filters only server mode can apply."""
+    not_recorded: list[str]
+    """Filters no store can apply yet, because runs do not record them (``label``)."""
+
+
+class DashboardScope(BaseModel):
+    """What a D2 answer covered, so nothing left out is invisible."""
+
+    model_config = ConfigDict(extra="forbid")
+    runs: int
+    attempts: int
+    """Attempts in those runs that pass the attempt filters (language, dialect)."""
+    unreadable_runs: list[str] = Field(default_factory=list)
+    """Runs whose records could not be read: left out entirely, and named."""
+    in_flight_excluded: bool = True
+
+
+class LatencyAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    filters: UsageFilterEcho
+    options: DashboardOptions
+    scope: DashboardScope
+    rule: str = PERCENTILE_RULE
+    buckets: list[BucketOut]
+    turn_latency: PercentileSeries
+    """The agent's reply time: from each message sent to the first frame back (ms). A reply
+    the clocks could not time (a voice barge-in) is ``unmeasured``."""
+    voice_turn_latency: PercentileSeries
+    """``voice.turn_latency_ms`` (ADR-0055): the caller's end of speech to the agent's audio."""
+    time_to_first_audio: PercentileSeries
+    """``voice.time_to_first_audio_ms``: one per voice attempt."""
+    llm_latency: list[PercentileSeries]
+    """The harness's own LLM, TTS and STT calls, per role (answered calls; ms, retries
+    included). A call that reported no latency is ``unmeasured``. Under a language or dialect
+    filter, only the calls made for the attempts that match."""
+    llm_calls_unattributed: int = 0
+    """Answered calls left out of ``llm_latency`` because a language or dialect filter is set
+    and they were made outside any attempt (they have no language). 0 with no such filter."""
+
+
+class GateRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run: str
+    suite: str
+    started_at: datetime
+    gate: str
+    """``safe``, ``gaps``, ``blocked``, ``not_judged`` or ``harness_error``."""
+
+
+class FlakyScenario(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenario: str
+    name: str
+    judged_runs: int
+    """Runs in which it was judged (passed or failed)."""
+    flaky_runs: int
+    """Runs whose verdict was marked flaky."""
+    flips: int
+    """Changes between consecutive judged verdicts, within each suite."""
+
+
+class CheckStats(BaseModel):
+    """One check's scores across the attempts in scope."""
+
+    model_config = ConfigDict(extra="forbid")
+    scorer_id: str
+    axis: str
+    pass_rate: Rate
+    """Passed over passed + failed; ``infra_error`` scores are ``not_judged``."""
+    mean_score: float | None
+    """The mean of the scores that have one (``infra_error`` has none)."""
+
+
+class MatrixRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run: str
+    label: str
+    suite: str
+
+
+class MatrixCell(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run: str
+    status: str | None
+    """``None``: the scenario was not in that run (an absence, never a result)."""
+    pass_rate: float | None
+    flaky: bool = False
+
+
+class MatrixRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    name: str
+    cells: list[MatrixCell]
+    flips: int
+
+
+class VerdictMatrix(BaseModel):
+    """The scenario x run verdict matrix of the newest ``limit`` runs, oldest first, as
+    ``views.scenario_trend`` draws it."""
+
+    model_config = ConfigDict(extra="forbid")
+    runs: list[MatrixRun]
+    scenarios: list[MatrixRow]
+
+
+class QualityAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    filters: UsageFilterEcho
+    options: DashboardOptions
+    scope: DashboardScope
+    buckets: list[BucketOut]
+    pass_rate: list[Rate]
+    """Scenario verdicts per bucket: passed over passed + failed."""
+    pass_rate_total: Rate
+    gate_history: list[GateRun]
+    """Every run in scope, oldest first (the language filter does not apply to a run's gate)."""
+    flaky: list[FlakyScenario]
+    checks: list[CheckStats]
+    matrix: VerdictMatrix
+    judge_agreement: None = None
+    """Not measured yet: calibrations (``opseval calibrate``) are written beside a run folder
+    and no store reads them. Always ``None`` until one does, never a made-up agreement."""
+    judge_agreement_note: str
+
+
+VOICE_METRICS: tuple[tuple[str, str], ...] = (
+    ("voice.barge_in_yield_ms", "ms"),
+    ("voice.talk_over_ratio", "ratio"),
+    ("voice.dead_air_ms", "ms"),
+    ("voice.asr_confidence", "confidence"),
+    ("voice.agent_asr_wer", "wer"),
+)
+"""The Voice dashboard's metrics (ADR-0055 names), in the order it draws them."""
+
+
+class VoiceGroup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    language: str | None
+    dialect: str | None
+    stats: Percentiles
+    degraded: int
+    """Of ``stats.n``, values measured on partial evidence."""
+
+
+class VoiceMetricOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    unit: str
+    total: Percentiles
+    degraded: int
+    by_language: list[VoiceGroup]
+
+
+class VoiceAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    filters: UsageFilterEcho
+    options: DashboardOptions
+    scope: DashboardScope
+    voice_attempts: int
+    rule: str = PERCENTILE_RULE
+    metrics: list[VoiceMetricOut]
+
+
+class TaskUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project: str | None
+    """``org/project`` in server mode; ``None`` in local mode (a folder has no project)."""
+    task: str | None
+    runs: int
+    attempts: int
+    voice_attempts: int
+    audio_minutes: Measured
+    """Speech the harness synthesised or transcribed (TTS audio out, STT audio in), over the
+    answered speech calls: ``None`` with no speech call, never 0."""
+
+
+class UsageCountsAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    filters: UsageFilterEcho
+    options: DashboardOptions
+    scope: DashboardScope
+    buckets: list[BucketOut]
+    attempts: list[int]
+    """Attempts per bucket (runs per bucket are on ``buckets``)."""
+    audio_minutes: list[Measured]
+    by_task: list[TaskUsage]

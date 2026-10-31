@@ -271,6 +271,19 @@ class UsageOut(Api):
     cached_input_tokens: int | None = None  # part of the input served from cache
     failed_calls: int = 0  # calls with no usable answer: nothing to count
     reported: UsageReportedOut | None = None  # None: written before per-call usage
+    cost_known_usd: float | None = None  # the priced calls' cost; None: none was priced
+    unpriced_calls: int | None = None  # answered calls with no price; None: not recorded
+
+
+class CostSplitOut(Api):
+    """What a run cost (ADR-0066 D2), the same arithmetic as the dashboards: the known part
+    and how many calls had no price. ``totalUsd`` is set only when every call was priced."""
+
+    known_usd: float | None  # None: no call was priced (never $0)
+    priced_calls: int
+    unpriced_calls: int
+    total_usd: float | None  # None unless every answered call had a price
+    recorded: bool = True  # false: written before the split and its records are unreadable
 
 
 class SinkOut(Api):
@@ -294,6 +307,7 @@ class RunDetail(Api):
     ignored: list[str] = []
     tests: list[TestOut]
     usage: list[UsageOut]
+    cost: CostSplitOut | None = None  # None: the run made no call it paid for
     load_errors: list[str]
     degraded_scorers: list[str] = []
     vacuous_scorers: list[str] = []
@@ -376,6 +390,7 @@ class RunUsage(Api):
     judge_tokens_complete: bool = False
     cost_usd: float | None  # the known cost; None when no model in the run has a price
     cost_complete: bool = False  # True only when every model in the run has a price
+    unpriced_calls: int | None = None  # calls with no price; None: not recorded
     audio_in_seconds: float | None = None  # STT audio heard in the run; None = not measured
     audio_out_seconds: float | None = None  # TTS audio spoken
     characters: int | None = None  # TTS characters spoken
@@ -438,6 +453,9 @@ class UsageFiltersOut(Api):
     since: str | None
     until: str | None
     bucket: Literal["day", "week", "run"]
+    task: str | None = None
+    language: str | None = None
+    dialect: str | None = None
 
 
 class UsageFilterOptions(Api):
@@ -511,6 +529,210 @@ class TokensDashboard(Api):
     reasoning_share: RatioOut
     tokens_per_attempt: RatioOut
     scenarios: list[ScenarioTokensOut]
+
+
+# --- dashboards D2 and model prices (ADR-0066) ------------------------------------------------
+
+
+class PercentilesOut(Api):
+    """Nearest-rank percentiles of ``n`` measured values; ``unmeasured`` had none (never 0).
+    With ``n`` 0 every figure is null: drawn as a gap."""
+
+    n: int
+    unmeasured: int
+    p50: float | None
+    p95: float | None
+    p99: float | None
+    mean: float | None
+    unanswered: int  # agent turns with no reply (a timeout): counted, never a number
+
+
+class PercentileSeriesOut(Api):
+    group: str
+    points: list[PercentilesOut]  # one per bucket, in the answer's bucket order
+    total: PercentilesOut
+
+
+class RateOut(Api):
+    """A pass rate over judged results only; null when nothing was judged (never 0%)."""
+
+    value: float | None
+    passed: int
+    judged: int
+    not_judged: int  # outages, skips, infra_error scores: never in the denominator
+
+
+class DashboardOptionsOut(Api):
+    suites: list[str]
+    tasks: list[str]  # server mode: the task slugs in scope
+    languages: list[str]
+    dialects: list[str]
+    server_only: list[str]  # filters only server mode applies: refused here, never ignored
+    not_recorded: list[str]  # filters no store can apply yet (runs do not record a label)
+
+
+class DashboardScopeOut(Api):
+    runs: int
+    attempts: int
+    unreadable_runs: list[str]  # left out entirely, and named
+    in_flight_excluded: bool
+
+
+class LatencyDashboard(Api):
+    filters: UsageFiltersOut
+    options: DashboardOptionsOut
+    scope: DashboardScopeOut
+    rule: str  # how percentiles are computed: nearest-rank
+    buckets: list[UsageBucket]
+    turn_latency: PercentileSeriesOut  # the agent's reply time per turn (ms)
+    voice_turn_latency: PercentileSeriesOut
+    time_to_first_audio: PercentileSeriesOut
+    llm_latency: list[PercentileSeriesOut]  # the harness's own calls, per role
+    llm_calls_unattributed: int  # left out under a language filter: made outside any attempt
+
+
+class GateRunOut(Api):
+    run: str
+    suite: str
+    started_at: str
+    gate: GateState
+
+
+class FlakyScenarioOut(Api):
+    scenario: str
+    name: str
+    judged_runs: int
+    flaky_runs: int
+    flips: int
+
+
+class CheckStatsOut(Api):
+    scorer_id: str
+    axis: Axis
+    pass_rate: RateOut  # infra_error scores are not judged
+    mean_score: float | None
+
+
+class VerdictMatrixOut(Api):
+    runs: list[TrendRun]
+    scenarios: list[ScenarioTrendRow]
+
+
+class QualityDashboard(Api):
+    filters: UsageFiltersOut
+    options: DashboardOptionsOut
+    scope: DashboardScopeOut
+    buckets: list[UsageBucket]
+    pass_rate: list[RateOut]
+    pass_rate_total: RateOut
+    gate_history: list[GateRunOut]
+    flaky: list[FlakyScenarioOut]
+    checks: list[CheckStatsOut]
+    matrix: VerdictMatrixOut
+    judge_agreement: None = None  # not measured: no store reads calibrations yet
+    judge_agreement_note: str
+
+
+class VoiceGroupOut(Api):
+    language: str | None
+    dialect: str | None
+    stats: PercentilesOut
+    degraded: int
+
+
+class VoiceMetricOut(Api):
+    name: str
+    unit: str
+    total: PercentilesOut
+    degraded: int
+    by_language: list[VoiceGroupOut]
+
+
+class VoiceDashboard(Api):
+    filters: UsageFiltersOut
+    options: DashboardOptionsOut
+    scope: DashboardScopeOut
+    voice_attempts: int
+    rule: str
+    metrics: list[VoiceMetricOut]
+
+
+class TaskUsageOut(Api):
+    project: str | None  # null in local mode: a folder has no project
+    task: str | None
+    runs: int
+    attempts: int
+    voice_attempts: int
+    audio_minutes: MeasuredOut
+
+
+class UsageDashboard(Api):
+    filters: UsageFiltersOut
+    options: DashboardOptionsOut
+    scope: DashboardScopeOut
+    buckets: list[UsageBucket]
+    attempts: list[int]
+    audio_minutes: list[MeasuredOut]
+    by_task: list[TaskUsageOut]
+
+
+MatchKind = Literal["regex", "exact", "glob"]
+PriceUnit = Literal["tokens", "characters", "seconds"]
+
+
+class PriceOut(Api):
+    """One price row. USD per 1M tokens or characters, or per minute of audio."""
+
+    id: str | None
+    match: str
+    match_kind: MatchKind
+    unit: PriceUnit
+    effective_from: str  # the day it is in force from
+    effective_at: str | None  # a project row: the instant it is in force from
+    project: bool  # a project's own row (wins over the built-in table)
+    input: float | None
+    output: float | None
+    reasoning: float | None
+    cached_input: float | None
+    audio_in: float | None
+    audio_out: float | None
+    characters: float | None
+    source: str
+    created_by: str | None
+
+
+class PricesOut(Api):
+    builtin: list[PriceOut]
+    project: list[PriceOut]
+    can_edit: bool  # the server can add a row and this caller may: decided here, never by a browser
+    edit_note: str | None  # why not, when it cannot
+
+
+Price = Annotated[float, Field(ge=0, le=1_000_000)]
+
+
+class PriceIn(ApiIn):
+    """A new project price row. An edit is a new row; nothing is rewritten."""
+
+    pattern: Annotated[str, Field(min_length=1, max_length=200)]
+    match_kind: Literal["exact", "glob"]  # never a regular expression
+    unit: PriceUnit
+    effective_at: str | None = None  # ISO instant, now or later; omitted: now
+    input: Price | None = None
+    output: Price | None = None
+    reasoning: Price | None = None
+    cached_input: Price | None = None
+    audio_in: Price | None = None
+    audio_out: Price | None = None
+    characters: Price | None = None
+    source: Annotated[str, Field(max_length=500)] = ""
+
+
+class PriceResolveOut(Api):
+    model: str
+    at: str
+    price: PriceOut | None  # null: no price ("no price", never $0)
+    source: Literal["project", "builtin"] | None
 
 
 class TrendPoint(Api):

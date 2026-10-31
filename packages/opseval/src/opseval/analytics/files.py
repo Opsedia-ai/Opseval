@@ -18,17 +18,40 @@ telephony call is not a call whose tokens are unknown.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
-from opseval.analytics.base import SERVER_ONLY_FILTERS, UnsupportedFilter, UsageFilter
+from opseval.analytics.base import (
+    NOT_RECORDED_FILTERS,
+    SERVER_ONLY_FILTERS,
+    UnsupportedFilter,
+    UsageFilter,
+)
+from opseval.analytics.dashboards import (
+    NOT_CALIBRATED,
+    AttemptFacts,
+    CallFacts,
+    RunFacts,
+    VerdictFacts,
+    bucket_of,
+    fold_latency,
+    fold_quality,
+    fold_usage,
+    fold_voice,
+)
 from opseval.analytics.models import (
     BucketOut,
     CostAnswer,
+    DashboardOptions,
+    DashboardScope,
     FilterOptions,
+    GateRun,
+    LatencyAnswer,
     Measured,
+    QualityAnswer,
     Ratio,
     RunCost,
     ScenarioCost,
@@ -36,12 +59,16 @@ from opseval.analytics.models import (
     Series,
     TokensAnswer,
     TokenTotals,
+    UsageCountsAnswer,
     UsageScope,
+    VoiceAnswer,
 )
 from opseval.errors import HarnessError
+from opseval.models.record import NO_REPLY, RunRecord
 from opseval.models.results import ModelUsage, SuiteResult, VerdictStatus
 from opseval.models.usage import UsageEvent, has_tokens
 from opseval.storage import KNOWN_LAYOUTS, PRE_USAGE_LAYOUTS, RunStore
+from opseval.verdicts import gate_state
 
 AttemptKey = tuple[str, int]
 RESCORE = " (rescore)"
@@ -50,16 +77,22 @@ RESCORE = " (rescore)"
 
 @dataclass
 class Acc:
-    """A running sum that remembers how much of it was measured."""
+    """A running sum that remembers how much of it was measured. Summed with
+    :func:`math.fsum`, exact whatever the order, so every store adds the same calls to the
+    same figure (the known-part arithmetic of :mod:`opseval.analytics.costs`)."""
 
-    total: float = 0.0
+    values: list[float] = field(default_factory=list)
     measured: int = 0
     of: int = 0
+
+    @property
+    def total(self) -> float:
+        return math.fsum(self.values)
 
     def add(self, value: float | None, of: int = 1, measured: int | None = None) -> None:
         self.of += of
         if value is not None:
-            self.total += value
+            self.values.append(value)
             self.measured += of if measured is None else measured
 
     def out(self, digits: int | None = None) -> Measured:
@@ -75,10 +108,39 @@ class Acc:
 
 
 @dataclass(frozen=True)
-class RunUsage:
-    """One finished run's usage, as read from its folder (cached per result file)."""
+class TestHead:
+    test_id: str
+    status: VerdictStatus
 
-    result: SuiteResult
+
+@dataclass(frozen=True)
+class RunHead:
+    """What the usage folds read of a run's result: whichever store it came from."""
+
+    run_id: str
+    suite: str
+    started_at: datetime
+    tests: tuple[TestHead, ...]
+    usage: tuple[ModelUsage, ...]
+    """The run's usage rows as written (read for runs written before per-call usage)."""
+
+    @classmethod
+    def of(cls, result: SuiteResult) -> RunHead:
+        return cls(
+            run_id=result.run_id,
+            suite=result.suite,
+            started_at=result.started_at,
+            tests=tuple(TestHead(t.test_id, t.status) for t in result.tests),
+            usage=tuple(result.usage),
+        )
+
+
+@dataclass(frozen=True)
+class RunUsage:
+    """One finished run's usage, as read from its folder (cached per result file) or from the
+    database's rows."""
+
+    result: RunHead
     legacy: bool
     unreadable: bool
     attempts: dict[AttemptKey, tuple[UsageEvent, ...] | None]
@@ -87,6 +149,8 @@ class RunUsage:
     """Every call the latest re-score made (per attempt and outside any)."""
     rescored: bool = False
     rescore_unreadable: bool = False
+    facts: RunFacts | None = None
+    """What the D2 dashboards read (``None``: the records could not be read)."""
 
     def measured(self, test_id: str) -> bool:
         """Every attempt of ``test_id`` in this run has per-call usage."""
@@ -136,17 +200,8 @@ class _Scope:
         )
 
 
-def _bucket_of(result: SuiteResult, bucket: str) -> tuple[str, str, datetime]:
-    started = result.started_at.astimezone(UTC)
-    if bucket == "run":
-        return result.run_id, started.strftime("%b %-d %H:%M"), started
-    day = started.date()
-    if bucket == "week":
-        day = day - timedelta(days=day.weekday())
-        start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-        return day.isoformat(), f"wk of {start:%b %-d}", start
-    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    return day.isoformat(), f"{start:%b %-d}", start
+def _bucket_of(result: RunHead, bucket: str) -> tuple[str, str, datetime]:
+    return bucket_of(result.run_id, result.started_at, bucket)
 
 
 Metric = Callable[[UsageEvent], float | None]
@@ -200,121 +255,10 @@ def _ratio(num: Measured, measured: int, of: int) -> Ratio:
     return Ratio(value=value, measured=measured, of=of, complete=num.complete)
 
 
-class FileAnalytics:
-    """The analytics store over a :class:`~opseval.storage.RunStore`: run folders in local
-    mode, and the run store in server mode until analytics has tables of its own (ADR-0052).
-    It reads through the store's contract only."""
-
-    def __init__(self, store: RunStore) -> None:
-        self.store = store
-        self._cache: dict[str, tuple[Stamp, RunUsage]] = {}
-        self._unreadable: list[str] = []
-        """Finished runs whose result could not be read on the last pass: named in every
-        answer's scope, never silently left out (review of #93)."""
-
-    # --- reading ------------------------------------------------------------------------
-
-    def _latest_rescore(self, run_id: str) -> tuple[str, float]:
-        found = self.store.rescores(run_id)
-        if not found:
-            return "", -1.0
-        at = self.store.changed_at(run_id, found[-1])
-        return found[-1], -1.0 if at is None else at
-
-    def _finished(self) -> list[RunUsage]:
-        """Every finished run, newest first, each parsed once and then reused until its
-        ``result.json`` (or its latest re-score) changes. One request reads them once and
-        shares them between the filter options and the answer."""
-        runs: list[RunUsage] = []
-        unreadable: list[str] = []
-        for stored in self.store.listing():  # one query in the database
-            run_id = stored.run_id
-            if not stored.finished or stored.layout not in KNOWN_LAYOUTS:
-                continue  # listed by the console as an error row: shown, never misread
-            mtime = stored.changed_at
-            if mtime is None:
-                unreadable.append(run_id)
-                continue
-            stamp: Stamp = (mtime, *self._latest_rescore(run_id))
-            hit = self._cache.get(run_id)
-            if hit is not None and hit[0] == stamp:
-                runs.append(hit[1])
-                continue
-            try:
-                result = self.store.load_result(run_id)
-            except (ValueError, OSError, HarnessError):
-                unreadable.append(run_id)  # named in the scope, never silently dropped
-                continue
-            usage = self._read(result, stamp[1])
-            self._cache[run_id] = (stamp, usage)
-            runs.append(usage)
-        self._unreadable = sorted(unreadable)
-        return sorted(runs, key=lambda r: r.result.started_at, reverse=True)
-
-    def _read(self, result: SuiteResult, rescore: str) -> RunUsage:
-        run_id = result.run_id
-        attempts: dict[AttemptKey, tuple[UsageEvent, ...] | None] = {
-            (t.test_id, i): None for t in result.tests for i, _ in enumerate(t.attempts)
-        }
-        unreadable = False
-        try:
-            for record in self.store.load_records(run_id):
-                attempts[(record.test_id, record.attempt_index)] = record.usage_events
-        except (ValueError, OSError, HarnessError):
-            unreadable = True
-        rescore_events: tuple[UsageEvent, ...] = ()
-        rescore_unreadable = False
-        if rescore:
-            try:
-                again = self.store.load_rescore(run_id, rescore)
-                rescore_events = (
-                    *(e for a in again.attempt_usage for e in a.events),
-                    *again.usage_events,
-                )
-            except (ValueError, OSError, HarnessError):
-                rescore_unreadable = True
-        return RunUsage(
-            result=result,
-            legacy=self.store.layout(run_id) in PRE_USAGE_LAYOUTS,
-            unreadable=unreadable,
-            attempts=attempts,
-            outside=tuple(result.usage_events),
-            rescore=rescore_events,
-            rescored=bool(rescore) and not rescore_unreadable,
-            rescore_unreadable=rescore_unreadable,
-        )
-
-    def _runs(
-        self, finished: list[RunUsage], filters: UsageFilter
-    ) -> tuple[list[RunUsage], list[str]]:
-        """The runs the filters pick, oldest first, and the picked runs left out because
-        their records could not be read. Such a run contributes nothing at all: half a run
-        (its result's outside calls and passed tests without its attempts) would be a total
-        that looks whole."""
-        server_only = filters.server_only()
-        if server_only:
-            raise UnsupportedFilter(
-                f"filter by {', '.join(server_only)} needs server mode: local run folders have "
-                "no organisation, project, task or label"
-            )
-        picked: list[RunUsage] = []
-        # A run whose result cannot be read cannot be filtered either: named, whatever the
-        # filters, rather than left out of the scope without a word.
-        left_out: list[str] = list(self._unreadable)
-        for run in reversed(finished):  # oldest first
-            result = run.result
-            day = result.started_at.astimezone(UTC).date()
-            if filters.suite is not None and result.suite != filters.suite:
-                continue
-            if filters.since is not None and day < filters.since:
-                continue
-            if filters.until is not None and day > filters.until:
-                continue
-            if run.unreadable:
-                left_out.append(result.run_id)
-                continue
-            picked.append(run)
-        return picked, left_out
+class UsageFold:
+    """The Cost and Tokens dashboards' arithmetic over runs' usage (ADR-0066 D1), shared by
+    every store: ``FileAnalytics`` reads the runs from folders, ``PgAnalytics`` from the
+    database's rows, and both fold them here, so a total can never mean two things."""
 
     @staticmethod
     def options(finished: list[RunUsage]) -> FilterOptions:
@@ -479,11 +423,13 @@ class FileAnalytics:
                 if e.answered:
                     accs[sid].add(metric(e))
 
-    # --- the questions ------------------------------------------------------------------
-
-    def cost(self, filters: UsageFilter) -> CostAnswer:
-        finished = self._finished()
-        runs, left_out = self._runs(finished, filters)
+    def fold_cost(
+        self,
+        filters: UsageFilter,
+        options: FilterOptions,
+        runs: list[RunUsage],
+        left_out: list[str],
+    ) -> CostAnswer:
         buckets, series = self._series(
             runs,
             filters,
@@ -540,7 +486,7 @@ class FileAnalytics:
         total_out = total.out(6)
         return CostAnswer(
             filters=filters.echo(),
-            options=self.options(finished),
+            options=options,
             scope=self._scope(runs, left_out, filters, tokens=False).out(),
             buckets=buckets,
             by_role=series["*role"],
@@ -564,9 +510,13 @@ class FileAnalytics:
             sources=dict(sorted(sources.items())),
         )
 
-    def tokens(self, filters: UsageFilter) -> TokensAnswer:
-        finished = self._finished()
-        runs, left_out = self._runs(finished, filters)
+    def fold_tokens(
+        self,
+        filters: UsageFilter,
+        options: FilterOptions,
+        runs: list[RunUsage],
+        left_out: list[str],
+    ) -> TokensAnswer:
         buckets, by_kind = self._series(
             runs,
             filters,
@@ -634,7 +584,7 @@ class FileAnalytics:
         )
         return TokensAnswer(
             filters=filters.echo(),
-            options=self.options(finished),
+            options=options,
             scope=self._scope(runs, left_out, filters, tokens=True).out(),
             buckets=buckets,
             by_kind=[s for k in TOKEN_SEGMENTS for s in by_kind.get(k, [])],
@@ -661,8 +611,312 @@ class FileAnalytics:
         )
 
 
+class FileAnalytics(UsageFold):
+    """The analytics store over a :class:`~opseval.storage.RunStore`: run folders in local
+    mode, and the run store in server mode until analytics has tables of its own (ADR-0052).
+    It reads through the store's contract only."""
+
+    def __init__(self, store: RunStore) -> None:
+        self.store = store
+        self._cache: dict[str, tuple[Stamp, RunUsage]] = {}
+        self._unreadable: list[str] = []
+        """Finished runs whose result could not be read on the last pass: named in every
+        answer's scope, never silently left out (review of #93)."""
+
+    # --- reading ------------------------------------------------------------------------
+
+    def _latest_rescore(self, run_id: str) -> tuple[str, float]:
+        found = self.store.rescores(run_id)
+        if not found:
+            return "", -1.0
+        at = self.store.changed_at(run_id, found[-1])
+        return found[-1], -1.0 if at is None else at
+
+    def _finished(self) -> list[RunUsage]:
+        """Every finished run, newest first, each parsed once and then reused until its
+        ``result.json`` (or its latest re-score) changes. One request reads them once and
+        shares them between the filter options and the answer."""
+        runs: list[RunUsage] = []
+        unreadable: list[str] = []
+        for stored in self.store.listing():  # one query in the database
+            run_id = stored.run_id
+            if not stored.finished or stored.layout not in KNOWN_LAYOUTS:
+                continue  # listed by the console as an error row: shown, never misread
+            mtime = stored.changed_at
+            if mtime is None:
+                unreadable.append(run_id)
+                continue
+            stamp: Stamp = (mtime, *self._latest_rescore(run_id))
+            hit = self._cache.get(run_id)
+            if hit is not None and hit[0] == stamp:
+                runs.append(hit[1])
+                continue
+            try:
+                result = self.store.load_result(run_id)
+            except (ValueError, OSError, HarnessError):
+                unreadable.append(run_id)  # named in the scope, never silently dropped
+                continue
+            usage = self._read(result, stamp[1])
+            self._cache[run_id] = (stamp, usage)
+            runs.append(usage)
+        self._unreadable = sorted(unreadable)
+        return sorted(runs, key=lambda r: (r.result.started_at, r.result.run_id), reverse=True)
+
+    def _read(self, result: SuiteResult, rescore: str) -> RunUsage:
+        run_id = result.run_id
+        attempts: dict[AttemptKey, tuple[UsageEvent, ...] | None] = {
+            (t.test_id, i): None for t in result.tests for i, _ in enumerate(t.attempts)
+        }
+        unreadable = False
+        records: list[RunRecord] = []
+        try:
+            records = self.store.load_records(run_id)
+            for record in records:
+                attempts[(record.test_id, record.attempt_index)] = record.usage_events
+        except (ValueError, OSError, HarnessError):
+            unreadable = True
+        rescore_events: tuple[UsageEvent, ...] = ()
+        rescore_unreadable = False
+        if rescore:
+            try:
+                again = self.store.load_rescore(run_id, rescore)
+                rescore_events = (
+                    *(e for a in again.attempt_usage for e in a.events),
+                    *again.usage_events,
+                )
+            except (ValueError, OSError, HarnessError):
+                rescore_unreadable = True
+        return RunUsage(
+            facts=None if unreadable else _facts(result, records),
+            result=RunHead.of(result),
+            legacy=self.store.layout(run_id) in PRE_USAGE_LAYOUTS,
+            unreadable=unreadable,
+            attempts=attempts,
+            outside=tuple(result.usage_events),
+            rescore=rescore_events,
+            rescored=bool(rescore) and not rescore_unreadable,
+            rescore_unreadable=rescore_unreadable,
+        )
+
+    def _runs(
+        self, finished: list[RunUsage], filters: UsageFilter
+    ) -> tuple[list[RunUsage], list[str]]:
+        """The runs the filters pick, oldest first, and the picked runs left out because
+        their records could not be read. Such a run contributes nothing at all: half a run
+        (its result's outside calls and passed tests without its attempts) would be a total
+        that looks whole."""
+        picked: list[RunUsage] = []
+        # A run whose result cannot be read cannot be filtered either: named, whatever the
+        # filters, rather than left out of the scope without a word.
+        left_out: list[str] = list(self._unreadable)
+        for run in reversed(finished):  # oldest first
+            result = run.result
+            day = result.started_at.astimezone(UTC).date()
+            if filters.suite is not None and result.suite != filters.suite:
+                continue
+            if filters.since is not None and day < filters.since:
+                continue
+            if filters.until is not None and day > filters.until:
+                continue
+            if run.unreadable:
+                left_out.append(result.run_id)
+                continue
+            picked.append(run)
+        return picked, left_out
+
+    # --- the questions ------------------------------------------------------------------
+
+    def cost(self, filters: UsageFilter) -> CostAnswer:
+        _check(filters, "cost", "language", "dialect")
+        finished = self._finished()
+        runs, left_out = self._runs(finished, filters)
+        return self.fold_cost(filters, self.options(finished), runs, left_out)
+
+    def tokens(self, filters: UsageFilter) -> TokensAnswer:
+        _check(filters, "tokens", "language", "dialect")
+        finished = self._finished()
+        runs, left_out = self._runs(finished, filters)
+        return self.fold_tokens(filters, self.options(finished), runs, left_out)
+
+    # --- D2: latency, quality, voice and usage (ADR-0066) ---------------------------------
+
+    def _facts(
+        self, filters: UsageFilter, question: str, *refused: str
+    ) -> tuple[list[RunUsage], list[RunFacts], list[str]]:
+        """The finished runs (every one, for the options), the facts of those the filters
+        pick, oldest first, and the picked runs left out because their records could not be
+        read."""
+        _check(filters, question, *refused)
+        finished = self._finished()
+        picked, left_out = self._runs(finished, filters)
+        return finished, [r.facts for r in picked if r.facts is not None], left_out
+
+    @staticmethod
+    def dashboard_options(finished: list[RunUsage]) -> DashboardOptions:
+        languages: set[str] = set()
+        dialects: set[str] = set()
+        for run in finished:
+            for a in run.facts.attempts if run.facts is not None else ():
+                if a.language is not None:
+                    languages.add(a.language)
+                if a.dialect is not None:
+                    dialects.add(a.dialect)
+        return DashboardOptions(
+            suites=sorted({r.result.suite for r in finished}),
+            tasks=[],
+            languages=sorted(languages),
+            dialects=sorted(dialects),
+            server_only=[f for f in SERVER_ONLY_FILTERS if f not in NOT_RECORDED_FILTERS],
+            not_recorded=list(NOT_RECORDED_FILTERS),
+        )
+
+    def latency(self, filters: UsageFilter) -> LatencyAnswer:
+        finished, runs, left_out = self._facts(filters, "latency", "model", "role")
+        buckets, agent, llm, attempts, unattributed = fold_latency(
+            runs, filters.bucket, filters.language, filters.dialect
+        )
+        return LatencyAnswer(
+            filters=filters.echo(),
+            options=self.dashboard_options(finished),
+            scope=DashboardScope(runs=len(runs), attempts=attempts, unreadable_runs=left_out),
+            buckets=buckets,
+            turn_latency=agent["turn"],
+            voice_turn_latency=agent["voice_turn"],
+            time_to_first_audio=agent["ttfa"],
+            llm_latency=llm,
+            llm_calls_unattributed=unattributed,
+        )
+
+    def quality(self, filters: UsageFilter, *, limit: int = 20) -> QualityAnswer:
+        finished, runs, left_out = self._facts(filters, "quality", "model", "role")
+        buckets, points, total, checks, flaky, matrix, attempts = fold_quality(
+            runs, filters.bucket, filters.language, filters.dialect, limit
+        )
+        return QualityAnswer(
+            filters=filters.echo(),
+            options=self.dashboard_options(finished),
+            scope=DashboardScope(runs=len(runs), attempts=attempts, unreadable_runs=left_out),
+            buckets=buckets,
+            pass_rate=points,
+            pass_rate_total=total,
+            gate_history=[
+                GateRun(run=r.run_id, suite=r.suite, started_at=r.started_at, gate=r.gate)
+                for r in runs
+            ],
+            flaky=flaky,
+            checks=checks,
+            matrix=matrix,
+            judge_agreement_note=NOT_CALIBRATED,
+        )
+
+    def voice(self, filters: UsageFilter) -> VoiceAnswer:
+        finished, runs, left_out = self._facts(filters, "voice", "model", "role")
+        metrics, voice, attempts = fold_voice(runs, filters.language, filters.dialect)
+        return VoiceAnswer(
+            filters=filters.echo(),
+            options=self.dashboard_options(finished),
+            scope=DashboardScope(runs=len(runs), attempts=attempts, unreadable_runs=left_out),
+            voice_attempts=voice,
+            metrics=metrics,
+        )
+
+    def usage(self, filters: UsageFilter) -> UsageCountsAnswer:
+        finished, runs, left_out = self._facts(
+            filters, "usage", "model", "role", "language", "dialect"
+        )
+        buckets, attempts, audio, by_task, total = fold_usage(runs, filters.bucket)
+        return UsageCountsAnswer(
+            filters=filters.echo(),
+            options=self.dashboard_options(finished),
+            scope=DashboardScope(runs=len(runs), attempts=total, unreadable_runs=left_out),
+            buckets=buckets,
+            attempts=attempts,
+            audio_minutes=audio,
+            by_task=by_task,
+        )
+
+
+def _check(filters: UsageFilter, question: str, *refused: str) -> None:
+    """Refuse what no store records (a label), then what a folder cannot filter by
+    (server-only), then what does not apply."""
+    filters.refuse_not_recorded()
+    server_only = [n for n in filters.server_only() if n not in NOT_RECORDED_FILTERS]
+    if server_only:
+        raise UnsupportedFilter(
+            f"filter by {', '.join(server_only)} needs server mode: local run folders have "
+            "no organisation, project, task or label"
+        )
+    filters.refuse(question, *refused)
+
+
+def _facts(result: SuiteResult, records: list[RunRecord]) -> RunFacts:
+    """What the D2 dashboards read from one run: its verdicts, each recorded attempt (with
+    its scores from the result) and the calls it made as it ran."""
+    scores = {
+        (t.test_id, a.attempt_index): tuple(
+            (x.scorer_id, x.axis.value, x.status.value, x.score) for x in a.scores
+        )
+        for t in result.tests
+        for a in t.attempts
+    }
+    attempts = []
+    calls: list[tuple[UsageEvent, tuple[str, int] | None]] = [
+        (e, None) for e in result.usage_events
+    ]
+    for record in records:
+        language, dialect = record.language()
+        voice = record.voice
+        attempts.append(
+            AttemptFacts(
+                test_id=record.test_id,
+                index=record.attempt_index,
+                language=language,
+                dialect=dialect,
+                voice=voice is not None,
+                latencies=tuple(
+                    NO_REPLY if why == NO_REPLY else value for value, why in record.turn_latencies()
+                ),
+                metrics=tuple(
+                    (m.name, m.value, m.degraded)
+                    for m in (voice.metrics or () if voice is not None else ())
+                ),
+                scores=scores.get((record.test_id, record.attempt_index), ()),
+            )
+        )
+        key = (record.test_id, record.attempt_index)
+        calls.extend((e, key) for e in record.usage_events or ())
+    return RunFacts(
+        run_id=result.run_id,
+        suite=result.suite,
+        started_at=result.started_at,
+        gate=gate_state(result),
+        verdicts=tuple(
+            VerdictFacts(
+                test_id=t.test_id,
+                name=t.name,
+                status=t.status.value,
+                pass_rate=t.pass_rate,
+                flaky=t.flaky,
+            )
+            for t in result.tests
+        ),
+        attempts=tuple(sorted(attempts, key=lambda a: (a.test_id, a.index))),
+        calls=tuple(
+            CallFacts(
+                role=e.role,
+                answered=e.answered,
+                latency_ms=e.latency_ms,
+                audio_in_seconds=e.audio_in_seconds,
+                audio_out_seconds=e.audio_out_seconds,
+                attempt=attempt,
+            )
+            for e, attempt in calls
+        ),
+    )
+
+
 def _all(totals: dict[str, Acc], names: Iterable[str]) -> dict[str, Acc]:
     return {name: totals.get(name) or Acc() for name in names}
 
 
-__all__ = ["FileAnalytics", "RunUsage", "UnsupportedFilter"]
+__all__ = ["FileAnalytics", "RunHead", "RunUsage", "TestHead", "UnsupportedFilter", "UsageFold"]

@@ -9,6 +9,11 @@ import BulkImport from "./pages/BulkImport";
 import Checks from "./pages/Checks";
 import Compare from "./pages/Compare";
 import CostDashboard from "./pages/CostDashboard";
+import LatencyDashboard from "./pages/LatencyDashboard";
+import Prices from "./pages/Prices";
+import QualityDashboard from "./pages/QualityDashboard";
+import UsageDashboard from "./pages/UsageDashboard";
+import VoiceDashboard from "./pages/VoiceDashboard";
 import NewRun from "./pages/NewRun";
 import RunDetail from "./pages/RunDetail";
 import Runs from "./pages/Runs";
@@ -53,6 +58,11 @@ function AppRoutes() {
         <Route path="usage" element={<Usage />} />
         <Route path="cost" element={<CostDashboard />} />
         <Route path="tokens" element={<TokensDashboard />} />
+        <Route path="latency" element={<LatencyDashboard />} />
+        <Route path="quality" element={<QualityDashboard />} />
+        <Route path="voice" element={<VoiceDashboard />} />
+        <Route path="usage-totals" element={<UsageDashboard />} />
+        <Route path="prices" element={<Prices />} />
         <Route path="simulator" element={<Simulator />} />
         <Route path="scenarios" element={<Scenarios />} />
         <Route path="scenarios/new" element={<ScenarioForm />} />

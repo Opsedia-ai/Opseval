@@ -39,9 +39,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import defer
 
+from opseval.analytics.dashboards import TURN_LATENCY
 from opseval.blobs import BlobStore
 from opseval.config import Settings
-from opseval.db import migrate
+from opseval.db import migrate, prices
 from opseval.db.catalogue_store import get_project, get_task
 from opseval.db.engine import make_engine, sessions
 from opseval.db.schema import (
@@ -50,6 +51,7 @@ from opseval.db.schema import (
     Blob,
     Run,
     RunScenario,
+    RunUsageRow,
     ScoreRow,
     UsageEventRow,
     VerdictRow,
@@ -57,10 +59,11 @@ from opseval.db.schema import (
 from opseval.errors import BlobStoreError, ConfigError, StorageError
 from opseval.models.profile import SutProfile
 from opseval.models.progress import RunProgress
-from opseval.models.record import RunRecord
+from opseval.models.record import NO_REPLY, NOT_TIMED, RunRecord
 from opseval.models.results import SuiteResult, VerdictStatus
 from opseval.models.scenario import Scenario
-from opseval.models.usage import UsageEvent
+from opseval.models.usage import ModelPrice, PriceTable, UsageEvent
+from opseval.pricing import with_project
 from opseval.storage import (
     AUDIO_MARKER,
     KNOWN_LAYOUTS,
@@ -85,6 +88,12 @@ from opseval.verdicts import gate_state
 
 T = TypeVar("T")
 JSON = "application/json"
+TURN_REASONS = {
+    NOT_TIMED: f"{NOT_TIMED}: the reply came while the clocks could not time it (a barge-in)",
+    NO_REPLY: f"{NO_REPLY}: the agent did not answer before the next turn or the end",
+}
+"""Why a turn's reply time is null: a ``NO_REPLY`` row is an unanswered turn (counted apart
+on the Latency dashboard), any other null is not measured."""
 MARKER = f"audio/{AUDIO_MARKER}"
 
 
@@ -690,6 +699,11 @@ class DbRunStore:
                     UsageEventRow.run_id == run_id, UsageEventRow.project_id == project_id
                 )
             )
+            await s.execute(
+                delete(RunUsageRow).where(
+                    RunUsageRow.run_id == run_id, RunUsageRow.project_id == project_id
+                )
+            )
             await s.execute(delete(RunScenario).where(RunScenario.run_id == run_id))
             await s.execute(
                 update(Blob)
@@ -851,6 +865,7 @@ class DbRunStore:
         blob_id = self._put_pending(record.run_id, name, "record", data, JSON)
         project_id, task_id = self._owner(record.run_id)
         prefix = _audio_prefix(record.test_id, record.attempt_index)
+        language, dialect = record.language()
         values = {
             "terminal_state": record.terminal_state.value,
             "started_at": record.started_at,
@@ -858,6 +873,10 @@ class DbRunStore:
             "trace_coverage": record.trace_coverage,
             "redaction_applied": record.redaction.applied,
             "record_blob_id": blob_id,
+            "language": language[:64] if language else None,
+            "dialect": dialect[:64] if dialect else None,
+            "voice": record.voice is not None,
+            "usage_recorded": record.usage_events is not None,
         }
         superseded: list[Blob] = []
 
@@ -920,6 +939,21 @@ class DbRunStore:
                         unit=m.unit,
                         degraded=m.degraded,
                         reason=m.reason,
+                    )
+                )
+            # The agent's reply time per turn (ADR-0066 D2, the Latency dashboard): a reply the
+            # clocks could not time is stored as not measured, with why, never as 0.
+            for turn, (latency, why) in enumerate(record.turn_latencies(), start=1):
+                s.add(
+                    AttemptMetric(
+                        attempt_id=attempt_id,
+                        project_id=project_id,
+                        turn=turn,
+                        name=TURN_LATENCY,
+                        value=latency,
+                        unit="ms",
+                        degraded=False,
+                        reason=None if why is None else TURN_REASONS[why],
                     )
                 )
             await s.execute(delete(UsageEventRow).where(UsageEventRow.attempt_id == attempt_id))
@@ -1152,6 +1186,7 @@ class DbRunStore:
                         run_id=run_id,
                         project_id=project_id,
                         task_id=task_id,
+                        name=t.name,
                         test_id=t.test_id,
                         status=t.status.value,
                         skip_kind=t.skip_kind,
@@ -1192,8 +1227,25 @@ class DbRunStore:
                     UsageEventRow.run_id == run_id,
                     UsageEventRow.project_id == project_id,
                     UsageEventRow.attempt_id.is_(None),
+                    UsageEventRow.rescore.is_(None),
                 )
             )
+            await s.execute(
+                delete(RunUsageRow).where(
+                    RunUsageRow.run_id == run_id, RunUsageRow.project_id == project_id
+                )
+            )
+            for u in result.usage:
+                s.add(
+                    RunUsageRow(
+                        run_id=run_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                        role=u.role[:32],
+                        model=u.model[:200],
+                        body=u.model_dump(mode="json"),
+                    )
+                )
             for e in result.usage_events:
                 s.add(
                     UsageEventRow(
@@ -1345,7 +1397,7 @@ class DbRunStore:
         base = f"{RESCORE_PREFIX}{stamp}/"
         if self._blob(run_id, base + "result.json") is not None:
             raise FileExistsError(base)
-        project_id, _ = self._owner(run_id)
+        project_id, task_id = self._owner(run_id)
         ids = [
             self._put_pending(run_id, base + "report.html", "report", html.encode(), "text/html"),
             self._put_pending(run_id, base + "junit.xml", "junit", xml.encode(), "application/xml"),
@@ -1358,12 +1410,26 @@ class DbRunStore:
             ),
         ]
 
+        events = [*(e for a in result.attempt_usage for e in a.events), *result.usage_events]
+
         async def go(s: AsyncSession) -> None:
             await s.execute(
                 update(Blob)
                 .where(Blob.id.in_(ids), Blob.project_id == project_id)
                 .values(state="committed")
             )
+            # The calls the re-score made, for the dashboards (ADR-0066 D2): counted with
+            # their run, the latest re-score only, never as a run of their own.
+            for e in events:
+                s.add(
+                    UsageEventRow(
+                        run_id=run_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                        rescore=stamp[:64],
+                        **_usage_row(e),
+                    )
+                )
 
         self._run(go, write=True)
         return stamp
@@ -1386,6 +1452,38 @@ class DbRunStore:
         if found is None or found.state != "committed":
             raise FileNotFoundError(stamp)
         return SuiteResult.model_validate_json(self._get(found))
+
+    # --- a project's own prices (ADR-0066 D2) ----------------------------------------------
+
+    def project_prices(self) -> list[ModelPrice]:
+        """The served project's own price rows, oldest first; none when unscoped."""
+        if self.project_id is None:
+            return []
+        project_id = self.project_id
+
+        async def go(s: AsyncSession) -> list[ModelPrice]:
+            return await prices.project_prices(s, project_id)
+
+        return self._run(go)
+
+    def price_table(self) -> PriceTable:
+        """The built-in table with the project's own rows: what a run in this project is
+        priced with when its calls are made."""
+        return with_project(self.project_prices())
+
+    def add_price(
+        self, price: ModelPrice, *, by: str | None, now: datetime | None = None
+    ) -> ModelPrice:
+        """Add a project row (never one that reaches into the past: ``PriceBackdated``).
+        ``now`` is the moment the caller checked it against (the request's)."""
+        if self.project_id is None:
+            raise ConfigError("a price belongs to a project: open the store with --project")
+        project_id = self.project_id
+
+        async def go(s: AsyncSession) -> ModelPrice:
+            return await prices.add_price(s, project_id, price, by=by, now=now)
+
+        return self._run(go, write=True)
 
     def audio(self, run_id: str) -> DbRunAudio:
         return DbRunAudio(self, run_id)
