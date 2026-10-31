@@ -66,6 +66,52 @@
   fallback or the base pack (with a warning), and with none of those the scenario does not
   load. A code-switching pack and a different `voice.code_switching` do not load either. One
   Unicode script table (`langpacks.SCRIPT_PREFIXES`) serves the scorer and the voice bridge.
+- **US/EU and Chinese steps implemented (2026-10-31).** Roadmap steps 2 and 3, all *preview*.
+  New packs: `en-US` (`american`), `en-GB` (`british`, `uk`), `fr-FR`, `de-DE`, `es-ES`,
+  `it-IT`, `zh-CN` (`mandarin`; Mandarin in Simplified characters) and `zh-HK` (`cantonese`;
+  Cantonese in Traditional characters). `en` stays the stable base pack, unchanged (prompt,
+  label, digest); `en-AU`, `en-CA`, `en-IE`, `en-NZ` stay its declared fallbacks. What moved
+  are the fallbacks `en-US`, `en-GB`, `american`, `british`, `uk` (they warned "no pack yet"):
+  each now names its own pack; a recorded attempt keeps the pack it ran with
+  (`RunRecord.persona["pack"]`, else the step-1 tables), and `en-GB` + `american` (two English
+  fallbacks then, two packs now) keeps `en` with a warning. The roadmap names `fr`, `de`, `es`
+  and `it`: each bare code is its country pack (`LanguagePack.default_for_code`, one per code),
+  so `language: fr` is `French (France), fr-FR`; another region (`fr-CA`, `es-MX`, `es-419`,
+  `de-AT`) has no pack and is refused, never written as the European variety. No `pt-*` pack.
+  `zh` alone names **no** pack (Mandarin or Cantonese must be said), and neither Chinese pack
+  declares a fallback: `zh-TW`, `zh-MO`, `zh-SG`, `zh-Hant`, `zh-Hans` are refused, and a
+  Cantonese customer is never simulated or graded as Mandarin. The script-explicit
+  tags `zh-Hans-CN` and `zh-Hant-HK` name the same packs (aliases); `cmn` and `yue` are not
+  language codes Opseval maps. **The written form.** Simplified and Traditional characters are
+  both Unicode Han, so `output.language_script` checks `han` only; no character-variant table
+  ships (none Opseval could verify). A pack's `written_form` is told to the language and
+  persona judges on its own trusted line (`Expected written form: …`) and joins the rubric:
+  `zh-CN` is Simplified, and Traditional or written Cantonese does not match; `zh-HK` is
+  Traditional, with written Cantonese and Standard Written Chinese (書面語) **both acceptable**,
+  as this ADR asks; the simulator writes colloquial written Cantonese. `en-US` and `en-GB` say
+  that a US/UK spelling difference is not a change of language, so neither judge fails an
+  agent, or invalidates an attempt, on spelling. Packs without a `written_form` (every older
+  one) keep their prompts and digests, so the judges' versions are unchanged. `advice` warns
+  when a Chinese scenario has `output.language_script` and no `judge.language_consistency`
+  (`script_cannot_tell`): the written form is then not measured. Cantonese-only characters are
+  named in the pack and the judge note, not used as a heuristic check. **The simulator** is
+  told `Language: Chinese (Cantonese, Hong Kong) (zh-HK). <instruction>` for every pack with a
+  human-readable name; the four packs in `LEGACY_LABELS` keep their prompt. **Typing noise** is
+  per pack (`LanguagePack.keyboard`): `qwerty` (the default, byte-identical noise to before),
+  `azerty` (`fr-FR`), `qwertz` (`de-DE`), and `ime` for Chinese: Han, kana and Hangul
+  characters are never changed, because an IME's errors are whole wrong characters (homophones
+  from the candidate list), which Opseval does not model; Latin words in the message still
+  slip on QWERTY, and `advice` says so when `typing_noise` is set. **Voice.** No vendor voice
+  ids ship (as for MENA): `OPSEVAL_TTS_VOICE_MAP` is looked up by the pack tag, then the primary
+  language, then `default`, so a `zh-CN` entry never speaks for `zh-HK` (map both; a plain `zh`
+  key would serve both). OpenAI-compatible voices are language-agnostic and are **unverified**
+  for Cantonese (they may read Traditional characters in Mandarin). `stt_language` is still not
+  built: the built-in STT is asked for `zh` for both packs, unverified for Cantonese, so
+  `zh-HK` voice results wait on the STT check of the promotion steps. The STT canary has
+  phrases for `fr`, `de`, `es`, `it`; Chinese keeps the English canary, because the WER is
+  word-level and Chinese is written without spaces. The voice bridge's spoken checkpoint words
+  (`SPOKEN_DECISIONS`) still cover `en` and `ar` only, so a French or Chinese voice caller
+  approves in English: left for the telephony work, named in ATTENTION.
 
 ## Context
 

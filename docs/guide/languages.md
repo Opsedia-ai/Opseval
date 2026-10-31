@@ -22,7 +22,15 @@ another dialect. Scripted turns are sent as written, so they load with a warning
 
 | Tag | Dialect name | Other names | Status | Stands in for (with a warning) |
 |---|---|---|---|---|
-| `en` | — | — | stable | `en-US`, `en-GB`, `en-AU`, `en-CA`, `en-IE`, `en-NZ`, `american`, `british`, … |
+| `en` | — | — | stable | `en-AU`, `en-CA`, `en-IE`, `en-NZ`, `australian`, `canadian`, `irish` |
+| `en-US` | `american` | — | preview | — |
+| `en-GB` | `british` | `uk` | preview | — |
+| `fr-FR` | — | `fr` alone | preview | — |
+| `de-DE` | — | `de` alone | preview | — |
+| `es-ES` | — | `es` alone | preview | — |
+| `it-IT` | — | `it` alone | preview | — |
+| `zh-CN` | `mandarin` | `zh-Hans-CN` | preview | — |
+| `zh-HK` | `cantonese` | `zh-Hant-HK` | preview | — |
 | `ar` | — | `msa` | preview | `maghrebi`, `libyan`, `sudanese`, `yemeni`, `ar-LY`, `ar-SD`, `ar-YE` |
 | `ar-EG` | `egyptian` | `eg`, `egypt`, `masri` | preview | — |
 | `ar-x-gulf` | `gulf` | `khaleeji`, `saudi`, `emirati` | preview | `ar-QA`, `ar-BH`, `ar-OM`, `qatari`, `bahraini`, `omani` |
@@ -40,7 +48,8 @@ another dialect. Scripted turns are sent as written, so they load with a warning
 
 **Preview** means the pack runs but has not had the native-speaker review and the STT check
 that make it stable (below). The guided scenario form marks the language "(preview)", and the
-scores it produces are as trustworthy as the pack's wording. Every Arabic pack is a preview today.
+scores it produces are as trustworthy as the pack's wording. Every pack but `en` is a preview
+today.
 
 ### How the packs are grouped
 
@@ -60,6 +69,32 @@ scores it produces are as trustworthy as the pack's wording. Every Arabic pack i
   `voice.code_switching` ([ADR-0055](../adr/0055-full-duplex-voice-driver-and-metrics.md))
   may be set too, but only to the same languages (`[ar, en]`, in any order): a different list
   is a load error, because the simulator and the judges would be told different mixes.
+
+- **English.** `en` is the stable base pack, plain everyday English, unchanged. `en-US` and
+  `en-GB` add US or UK spelling, words, date order and tone. Other regions (`en-AU`, `en-CA`,
+  `en-IE`, `en-NZ`) are written as plain English, with a warning.
+- **Western Europe.** `fr-FR` (French, polite *vous*), `de-DE` (German, polite *Sie*, umlauts
+  and ß), `es-ES` (Spanish as spoken in Spain, *vosotros*, *vale*) and `it-IT` (Italian,
+  polite *Lei*). The bare codes `fr`, `de`, `es` and `it` are these packs. Another region
+  (`fr-CA`, `fr-BE`, `de-AT`, `de-CH`, `es-MX`, `es-419`) has no pack and is **refused**, so a
+  Mexican customer is never written as a Spaniard without anyone saying so; use the bare code
+  if European wording is acceptable, knowingly. There is no Portuguese pack.
+- **Chinese.** `zh-CN` is Mandarin in Simplified characters, as typed in mainland China;
+  `zh-HK` is Cantonese in Traditional characters, as typed in Hong Kong: colloquial written
+  Cantonese (嘅, 咗, 喺, 唔, 係), with an English word here and there. `zh` alone is **refused**:
+  say which. Neither stands in for the other, and `zh-TW`, `zh-MO`, `zh-SG`, `zh-Hant` and
+  `zh-Hans` have no pack (refused). `zh-Hans-CN` and `zh-Hant-HK` are other spellings of the
+  two packs.
+
+### Moved by the US/EU step
+
+`en-US`, `en-GB`, `american`, `british` and `uk` were declared fallbacks of `en` (they loaded
+with a "no pack yet" warning); they now name their own packs. A saved run keeps the pack it was
+graded against (below), and the pair `language: en-GB` + `dialect: american`, which loaded as
+English before, still loads as English, with a warning naming both packs. `fr`, `de`, `es`,
+`it` and `zh-*` had no pack, so an LLM persona in them was refused; scripted turns in them,
+which loaded with a warning, now load without one, and their typing noise follows the pack's
+keyboard.
 
 ### Script: Arabic letters, not Arabizi
 
@@ -101,6 +136,23 @@ new run of the same scenario uses the new pack.
 (`en`, `ar`, `ar-EG`, `ar-x-gulf`) keep the old label (`ar (egyptian)`) byte for byte, so their
 saved grades and digests stay valid. The rubric of a new pack includes its tag.
 
+Some packs also tell the judges their **written form**, on a line of its own, and it joins the
+rubric:
+
+| Pack | `Expected written form:` says |
+|---|---|
+| `zh-CN` | Simplified characters; Traditional characters or written Cantonese do not match |
+| `zh-HK` | Traditional characters; written Cantonese **and** Standard Written Chinese (書面語) are both acceptable, mixed too; Simplified characters do not match |
+| `en-US`, `en-GB` | a US/UK spelling or vocabulary difference is not a change of language |
+
+So an agent that answers a Hong Kong customer in Simplified characters fails
+`judge.language_consistency`, and one that answers in formal written Chinese does not. A
+customer simulated in the wrong written form fails `judge.persona_consistency`, which is on the
+harness axis: the attempt is invalidated, never blamed on the agent.
+
+The simulator is told the pack's name too: `Language: Chinese (Cantonese, Hong Kong) (zh-HK).`
+before its instruction (the four older packs keep their prompt).
+
 ## `output.language_script`
 
 Version 2 counts the letters of each message by Unicode script: `arabic`, `latin`, `han`,
@@ -124,13 +176,39 @@ Left out, the scripts come from the persona's pack (`arabic` for the Arabic pack
 `latin` for `ar-x-codeswitch`, `latin` for English). For scripted turns in a dialect or region
 with no pack of its own, they come from the pack that stands in for it, else from the
 language's base pack (`ar-OM` and `ar` + `hassaniya` take `arabic`), and `validate` warns that
-the default is a stand-in's. When nothing gives one (`fr`, with no French pack), leaving
+the default is a stand-in's. When nothing gives one (`sw`, with no Swahili pack), leaving
 `script` out is a **load error**: the check could never be measured. `script: arabic` and
 `script: latin` work as before.
+
+**Chinese: Han only.** `zh-CN` and `zh-HK` both expect `han`. Simplified and Traditional
+characters are the same Unicode script, so `output.language_script` cannot tell them apart and
+does not try (no character-variant table ships, because none could be verified). The written
+form is graded by `judge.language_consistency`, told the pack's form (above). A Chinese
+scenario with `output.language_script` and no `judge.language_consistency` loads with a warning
+that the written form is not measured.
 
 `min_primary_share` is the share of a reply's letters the first expected script must have.
 Left out, it is the pack's own (`ar-x-codeswitch`: 0.5, so a reply must be at least half
 Arabic), and none when `script` or `scripts` is given. `0` turns it off.
+
+## Typing noise
+
+`persona.typing_noise` mistypes words with seeded, reproducible slips, never touching numbers,
+URLs, e-mail addresses, currency codes, quoted text or planted injections. A slip that hits a
+neighbouring key uses the pack's keyboard:
+
+| Keyboard | Packs |
+|---|---|
+| QWERTY | `en`, `en-US`, `en-GB`, `es-ES`, `it-IT`, the Arabic packs (Arabic letters use the Arabic PC layout) |
+| AZERTY | `fr-FR` |
+| QWERTZ | `de-DE` |
+| input method (`ime`) | `zh-CN`, `zh-HK` |
+
+Chinese is typed through an input method, whose real mistakes are whole wrong characters (a
+homophone picked from the candidate list). Opseval does not model that, so on `zh-CN` and
+`zh-HK` typing noise **never changes a Chinese character**; only Latin words in a message slip,
+on QWERTY. `validate` says so when `typing_noise` is set on a Chinese persona. QWERTY gives
+exactly the noise every pack had before keyboards existed.
 
 ## Voices for a voice run
 
@@ -156,6 +234,25 @@ provider that publishes voices per locale and map each pack to a voice of that l
 | `ar-x-codeswitch` | a Gulf voice that reads English words in Latin letters well; listen first |
 | `ar` | a Modern Standard Arabic voice (many providers list it as `ar-SA` or `ar-XA`) |
 | `default` | any voice, for the languages you did not map |
+
+For the US/EU and Chinese packs:
+
+| Key in `OPSEVAL_TTS_VOICE_MAP` | Map it to |
+|---|---|
+| `en-US`, `en-GB`, `fr-FR`, `de-DE`, `es-ES`, `it-IT` | a voice your provider lists for exactly that locale; OpenAI-compatible voices read these languages, with an accent that is **unverified** |
+| `zh-CN` | a Mandarin voice (`zh-CN` locale) |
+| `zh-HK` | a **Cantonese** voice (`zh-HK` or `yue` locale). OpenAI-compatible voices are **unverified** for Cantonese and may read Traditional characters in Mandarin: listen first |
+| `en` | an English voice, for `en` and the English regions without a pack |
+
+Map `zh-CN` and `zh-HK` separately and do not map a plain `zh`: the lookup goes from the pack
+tag to the primary language, so a `zh` entry would speak for both, while a `zh-CN` entry never
+speaks for `zh-HK`. The built-in STT is asked for `zh` for both Chinese packs (OpenAI-compatible
+transcription takes the primary language); whether it transcribes Cantonese well is unverified,
+which is why `zh-HK` needs the STT check below before it is stable. The STT canary is spoken in
+French, German, Spanish or Italian for those packs; Chinese keeps the English canary, because
+its word error rate counts space-separated words and Chinese has no spaces. The voice bridge's
+spoken checkpoint answers ("Yes, please go ahead") exist in English and Arabic only, so a voice
+caller in another language approves in English for now.
 
 ```bash
 export OPSEVAL_TTS_VOICE_MAP='{"ar-SA": "<your ar-SA voice>", "ar-EG": "<your ar-EG voice>",
@@ -213,3 +310,25 @@ of these, and the reviewer's name, in that pull request:
 
 Record the STT provider and model the check used: a pack is stable for the speech stack it was
 checked with, and the pull request says so.
+
+### The US/EU and Chinese packs
+
+The same two steps, with these specifics:
+
+- **One reviewer per pack, from that country.** A reviewer from Quebec does not review `fr-FR`,
+  a Taiwanese reviewer does not review `zh-HK`, and an American does not review `en-GB`: the
+  point is to catch words and forms that belong to the neighbour. `en-US` and `en-GB` review
+  spelling, words and date order; `fr-FR`, `de-DE` and `it-IT` the polite address the pack
+  chose (*vous*, *Sie*, *Lei*); `es-ES` the Spain-only forms (*vosotros*, *vale*).
+- **Chinese reviewers check the characters.** For `zh-CN`, that every example and simulated
+  message is Simplified; for `zh-HK`, that every one is Traditional, that the written Cantonese
+  reads as a Hong Kong customer types, and that the judge note's two acceptable written forms
+  are right. Label `judge.language_consistency` too, with at least one agent reply in each
+  written form (Cantonese, Standard Written Chinese, Simplified), because only the judge grades
+  the form: its false passes on Simplified replies for `zh-HK` must be within the `calibrate`
+  limit.
+- **The STT check for `zh-HK` decides the STT provider.** Run it with Cantonese recordings.
+  The canary's word error rate does not fit Chinese (no spaces), so judge the transcripts
+  through `opseval calibrate` on `voice.intelligible` and `judge.pronunciation_dialect_fit`
+  over a voice run of a correct agent, with zero false fails, and record the provider, model
+  and the language code it was given (`zh` today).

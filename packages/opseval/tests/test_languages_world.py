@@ -4,7 +4,7 @@
 
 ``en`` stays the stable base pack, unchanged. ``fr``, ``de``, ``es`` and ``it`` alone are the
 country pack. ``zh`` alone names no pack, and the two Chinese packs never stand in for each
-other: a Cantonese customer is never simulated, graded or spoken as Mandarin silently."""
+other: a Cantonese customer is never simulated or graded as Mandarin silently."""
 
 from __future__ import annotations
 
