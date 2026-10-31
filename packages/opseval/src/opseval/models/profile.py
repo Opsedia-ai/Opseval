@@ -6,10 +6,11 @@ Adopting Opseval for a new agent means writing a profile, not forking the tool.
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class FrameKind(StrEnum):
@@ -217,6 +218,78 @@ class AudioConfig(BaseModel):
         return self
 
 
+E164 = re.compile(r"^\+[1-9][0-9]{6,14}$")
+"""A phone number in E.164 form: ``+``, a country code and the subscriber number, digits only,
+at most 15 of them."""
+
+
+def e164(value: str, what: str) -> str:
+    """``value`` if it is an E.164 number, else ``ValueError`` naming ``what``. The number itself
+    is never repeated in the message: it is personal data."""
+    if not isinstance(value, str) or E164.fullmatch(value) is None:
+        raise ValueError(
+            f"{what} must be an E.164 number: '+', a country code and digits only (+15551234567)"
+        )
+    return value
+
+
+class TelephonyConfig(BaseModel):
+    """The agent is reached by a phone call (ADR-0056): ``--transport phone``.
+
+    Opseval places a call from ``from`` (a number the operator owns, on the provider's account)
+    to ``to`` (the agent's test number, which must also be in
+    ``OPSEVAL_TELEPHONY_ALLOWED_NUMBERS``), and streams the call's audio through the voice
+    bridge. The provider's secret (for Twilio, ``OPSEVAL_TWILIO_AUTH_TOKEN``) is a setting, never
+    part of the profile."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, use_attribute_docstrings=True)
+
+    provider: str = Field(default="twilio", pattern=r"^[a-z][a-z0-9_-]{0,39}$")
+    """``twilio`` (built in) or a plugin of the ``opseval.telephony`` group, which must also be
+    named in ``OPSEVAL_TELEPHONY`` to be loaded."""
+    to: str
+    """The agent's phone number (E.164). Stored as configured; the record keeps its last four
+    digits only."""
+    from_: str | None = Field(default=None, alias="from")
+    """The number the call comes from (E.164), owned by the provider account. Twilio needs it."""
+    account_sid: str | None = Field(default=None, pattern=r"^AC[0-9a-fA-F]{32}$")
+    """The Twilio account SID (``AC`` and 32 hex digits). Not a secret; the auth token is."""
+    ring_timeout_seconds: int = Field(default=30, ge=5, le=120)
+    """How long the agent's number may ring before the call is ``no-answer``: the agent's
+    fault, like a customer left ringing."""
+    max_call_seconds: int = Field(default=600, ge=30, le=14_400)
+    """The provider ends the call after this long whatever happens (Twilio ``TimeLimit``), so a
+    run that lost track of a call cannot keep paying for it."""
+    options: dict[str, Any] = Field(default_factory=dict)
+    """Provider-specific settings for a plugin. The built-in Twilio provider takes none."""
+
+    @field_validator("to")
+    @classmethod
+    def _to(cls, value: str) -> str:
+        return e164(value, "telephony.to")
+
+    @field_validator("from_")
+    @classmethod
+    def _from(cls, value: str | None) -> str | None:
+        return None if value is None else e164(value, "telephony.from")
+
+    @model_validator(mode="after")
+    def _provider(self) -> TelephonyConfig:
+        if self.provider == "twilio":
+            missing = [
+                name
+                for name, value in (("account_sid", self.account_sid), ("from", self.from_))
+                if value is None
+            ]
+            if missing:
+                raise ValueError(f"telephony with provider twilio needs {' and '.join(missing)}")
+            if self.options:
+                raise ValueError("telephony.options is for plugins; the twilio provider takes none")
+            if self.from_ == self.to:
+                raise ValueError("telephony.from and telephony.to are the same number")
+        return self
+
+
 def placeholder_path(template: Any, name: str, at: str = "") -> str | None:
     """The dotted path of the exact ``"{name}"`` value in a frame template, or ``None``.
 
@@ -302,6 +375,9 @@ class SutProfile(BaseModel):
     audio: AudioConfig | None = None
     """A speaking agent, reached over ``audio-http`` or ``audio-ws`` through the voice bridge
     (ADR-0053). Its turns are spoken; the transcript becomes each reply's ``text``."""
+    telephony: TelephonyConfig | None = None
+    """A phone agent (ADR-0056), reached with ``--transport phone`` by placing a call. Needs
+    ``audio:`` too (for Twilio: ``codec: mulaw``, ``rate: 8000``, the phone line's format)."""
 
     # --- conversation model -----------------------------------------------------------
     phases: list[str] = Field(default_factory=list)
@@ -345,6 +421,19 @@ class SutProfile(BaseModel):
             )
         if self.audio is not None:
             self._check_voice()
+        if self.telephony is not None:
+            if self.audio is None:
+                raise ValueError(
+                    "telephony needs an audio: block too: a phone agent speaks, through the voice "
+                    "bridge (ADR-0056)"
+                )
+            if self.telephony.provider == "twilio" and (
+                self.audio.codec != "mulaw" or self.audio.rate != 8_000
+            ):
+                raise ValueError(
+                    "a Twilio call carries mulaw at 8000 Hz: set audio.codec: mulaw and "
+                    "audio.rate: 8000"
+                )
         for name, spec in self.checkpoints.items():
             if spec.phase is not None and self.phases and spec.phase not in self.phases:
                 raise ValueError(f"checkpoint {name!r} refers to unknown phase {spec.phase!r}")

@@ -65,6 +65,7 @@ from opseval.speech.base import Audio, Transcript
 from opseval.speech.guard import GuardedSpeechToText, GuardedTextToSpeech
 from opseval.speech.wer import word_error_rate
 from opseval.transport.audio import (
+    REALTIME,
     AgentAudio,
     AgentFrame,
     AgentSpeechEnd,
@@ -320,6 +321,7 @@ class VoiceBridge(Session):
             noise=noises.info(self.voice.noise) if self.voice.noise is not None else None,
             inputs=self._log.inputs(),
             stt_min_confidence=self.kit.min_confidence,
+            call=self.audio.call_info(),
         )
         # Computed from what the record keeps, exactly as `opseval rescore` recomputes it, so
         # the stored rows and a recomputation can never differ for the same rules.
@@ -423,12 +425,24 @@ class VoiceBridge(Session):
         self._caller_end_ms = None
         self._spoken += 1
         lead, clean, noisy = await self._caller_audio(text, self._spoken)
+        await self._press(self._spoken)
         if lead:
             await self._stream(lead)  # a planted silence before the turn: the caller's time
         start = self.audio.clock.now_ms()
         self._event(start, "speech_start", "caller")
         await self._stream(noisy)
         await self._caller_done(text, clean, noisy, start, timeout=timeout)
+
+    async def _press(self, number: int) -> None:
+        """The keys ``voice.dtmf`` presses at the start of caller turn ``number``, before its
+        words (ADR-0056): sent through the session (``send_dtmf``) and recorded as a caller
+        ``dtmf`` event on the attempt's clock, which ``voice.dtmf_navigation`` reads."""
+        press = next((p for p in self.voice.dtmf if p.caller_turn == number), None)
+        if press is None:
+            return
+        at = self.audio.clock.now_ms()
+        await self.audio.send_dtmf(press.digits)
+        self._event(at, "dtmf", "caller", press.digits)
 
     async def _caller_done(
         self,
@@ -1037,7 +1051,10 @@ class VoiceTransport(Transport):
         except BaseException:
             await session.close()
             raise
-        if self.voice is not None and self.voice.runs_duplex:
+        # A phone line plays the caller in real time (``realtime``): always the duplex driver,
+        # or the agent's latency would include the seconds it spent hearing the caller.
+        realtime = REALTIME in session.capabilities
+        if realtime or (self.voice is not None and self.voice.runs_duplex):
             from opseval.voice.duplex import DuplexBridge
 
             try:

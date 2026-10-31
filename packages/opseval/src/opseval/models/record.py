@@ -304,6 +304,35 @@ class VoiceMetricInputs(Frozen):
     barge_ins: tuple[VoiceBargeIn, ...] = ()
 
 
+class CallInfo(Frozen):
+    """The phone call behind a voice attempt (ADR-0056), as the provider reported it.
+
+    Phone numbers are personal data: only their last four digits are kept, never the number.
+    A value the provider did not report is ``None``, never 0 (a price is often reported only
+    some time after the call)."""
+
+    provider: str
+    call_id: str | None = None
+    """The provider's id for the call (Twilio's ``CallSid``), to find it in the provider's
+    console."""
+    status: str | None = None
+    """The call's last status as the provider names it (``completed``, ``busy``, ...)."""
+    to_last4: str | None = Field(default=None, pattern=r"^[0-9]{1,4}$")
+    """The last four digits of the number called (the agent's)."""
+    from_last4: str | None = Field(default=None, pattern=r"^[0-9]{1,4}$")
+    """The last four digits of the number the call came from."""
+    answered_ms: float | None = Field(default=None, ge=0)
+    """When the call's media began, on the attempt's clock."""
+    duration_seconds: float | None = Field(default=None, ge=0)
+    price: float | None = Field(default=None, ge=0)
+    """What the provider charged for the call, in ``price_unit``."""
+    price_unit: str | None = Field(default=None, max_length=8)
+    observes: tuple[Literal["dtmf", "hangup", "transfer"], ...] = ()
+    """What this provider can see the agent do on the line. An event it cannot see is *not
+    measured*, never "the agent did not": Twilio's media stream carries the agent's key presses
+    and its hang-up, but not a transfer the far end makes."""
+
+
 class VoiceTimeline(Frozen):
     """A voice attempt's timeline on its monotonic clock (ADR-0053, ADR-0055)."""
 
@@ -328,6 +357,9 @@ class VoiceTimeline(Frozen):
     stt_min_confidence: float | None = Field(default=None, ge=0, le=1)
     """``OPSEVAL_STT_MIN_CONFIDENCE`` when the call ran (layout 8): the bound under which a
     word or turn Opseval heard counts as unsure (``judge.pronunciation_dialect_fit``)."""
+    call: CallInfo | None = None
+    """The phone call, for an attempt made with ``--transport phone`` (layout 10). None for
+    every other voice transport."""
 
     @field_validator("rate")
     @classmethod

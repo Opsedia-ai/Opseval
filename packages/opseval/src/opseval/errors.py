@@ -53,6 +53,14 @@ class TransportClosed(TransportError):
         self.code = code
 
 
+class TelephonyError(TransportError):
+    """The phone call could not be placed or kept for a reason on Opseval's side (ADR-0056):
+    the provider's API failed, timed out or refused Opseval's credentials, the voice gateway is
+    unreachable, a webhook or stream could not be verified, or the provider failed the call
+    with an error code for its own network or Opseval's account. Never the agent's fault: a
+    busy, unanswered or rejected agent number is a :class:`TransportTimeout` instead."""
+
+
 class SimulatorError(HarnessError):
     """The customer simulator could not produce a valid turn or decision."""
 
@@ -72,6 +80,10 @@ class RateLimited(Exception):
 
 class TransportRateLimited(TransportError, RateLimited):
     """The agent's endpoint kept answering HTTP 429."""
+
+
+class TelephonyRateLimited(TelephonyError, RateLimited):
+    """The telephony provider kept answering HTTP 429."""
 
 
 class LLMRateLimited(LLMInfraError, RateLimited):

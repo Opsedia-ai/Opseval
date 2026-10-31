@@ -46,6 +46,22 @@ class Silence(_Strict):
     and the silence goes between the two halves (a caller pausing mid-sentence)."""
 
 
+class DtmfPress(_Strict):
+    """The caller presses keys on the phone's keypad (ADR-0055, ADR-0056), at the start of one of
+    its turns, before it speaks: an IVR menu choice. ``voice.dtmf_navigation`` checks what the
+    agent answered to it."""
+
+    caller_turn: Annotated[int, Field(ge=1, le=100)]
+    """Which caller turn presses the keys (1 = the opening message), before its words."""
+    digits: str = Field(pattern=r"^[0-9*#A-D]{1,32}$")
+    """The keys, in order: ``0``-``9``, ``*``, ``#`` and ``A``-``D``."""
+    expect: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=10
+    )
+    """Words the agent's spoken answer to the press must contain (any one of them, ignoring
+    case), such as the menu option chosen. Empty: any spoken answer will do."""
+
+
 NoiseKind = Literal["white", "pink", "babble"]
 
 
@@ -75,6 +91,9 @@ class VoiceSpec(_Strict):
     """Interruptions the caller makes (duplex only)."""
     silences: list[Silence] = Field(default_factory=list)
     noise: Noise | None = None
+    dtmf: list[DtmfPress] = Field(default_factory=list, max_length=50)
+    """Keys the caller presses, each at the start of one of its turns. Needs a transport that
+    can press keys (the ``dtmf`` capability: ``phone``, or ``audio-ws`` with a DTMF event)."""
     caller_voice: str | None = Field(default=None, min_length=1, max_length=100)
     """The caller's voice: a persona voice name looked up in ``OPSEVAL_TTS_VOICE_MAP`` (then
     the language, then ``default``), or a provider voice as is. Unset: by language."""
@@ -100,6 +119,9 @@ class VoiceSpec(_Strict):
         where = [(s.caller_turn, s.at) for s in self.silences]
         if len(set(where)) != len(where):
             raise ValueError("silences: one 'before' and one 'mid' per caller turn at most")
+        pressed = [d.caller_turn for d in self.dtmf]
+        if len(set(pressed)) != len(pressed):
+            raise ValueError("dtmf: one press per caller turn at most (put the keys together)")
         if self.code_switching and self.caller_voice is None:
             raise ValueError(
                 "code_switching needs a caller_voice that speaks every listed language; "
@@ -112,4 +134,4 @@ class VoiceSpec(_Strict):
         return self.duplex or bool(self.barge_in)
 
 
-__all__ = ["BargeIn", "Noise", "NoiseKind", "Silence", "VoiceSpec"]
+__all__ = ["BargeIn", "DtmfPress", "Noise", "NoiseKind", "Silence", "VoiceSpec"]

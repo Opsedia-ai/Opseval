@@ -158,6 +158,34 @@ class Settings(BaseSettings):
     this many days, before the run itself goes (``OPSEVAL_RETENTION_DAYS``). The record keeps
     every turn's hash and transcript, and the audio reads as "pruned", never as missing."""
 
+    # Phone calls (ADR-0056). Opseval dials only numbers listed here, and the provider's
+    # secret and the gateway's control token are secrets.
+    telephony: str = ""
+    """Telephony provider plugins (``opseval.telephony`` entry points) that may be loaded, by
+    name, comma-separated. A profile's ``telephony.provider`` other than the built-in
+    ``twilio`` must be named here: installing a package never places calls on its own."""
+    telephony_allowed_numbers: str = ""
+    """The only numbers a call may be placed to (E.164, comma-separated): the agent's test
+    numbers. A profile whose ``telephony.to`` is not listed is refused (exit 3). There is no
+    wildcard, so Opseval can never dial a real customer."""
+    telephony_max_calls: int = Field(default=50, ge=1, le=10_000)
+    """The most calls one run may place (every attempt of every scenario is one call): a suite
+    that would place more is refused at launch (exit 3), because every call is billed."""
+    twilio_auth_token: SecretStr | None = None
+    """The Twilio account's auth token: authenticates Opseval to Twilio's REST API and verifies
+    the ``X-Twilio-Signature`` of every webhook and media stream the voice gateway receives."""
+    twilio_api_url: str = "https://api.twilio.com"
+    """Twilio's REST API. Its host must be in ``OPSEVAL_ALLOWED_HOSTS`` (TLS)."""
+    twilio_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    """How long one Twilio REST request may take. Longer is a harness error, never the
+    agent's timeout."""
+    voice_gateway_url: str = "ws://127.0.0.1:8767"
+    """Where a run reaches ``opseval voice-gateway``'s control channel. Loopback only: the
+    gateway hands each attempt the audio of the call it placed over it."""
+    voice_gateway_token: SecretStr | None = None
+    """The shared secret of the gateway's control channel: both ``opseval voice-gateway`` and
+    the run read it, and the gateway refuses a control connection without it."""
+
     # Trace source: OTLP-JSON spans on disk (ADR-0028)
     otlp_spans_path: str | None = None
     """OTLP-JSON spans (a file or folder) for `traces.source: otlp-file` (ADR-0028)."""
@@ -461,6 +489,8 @@ SECRET_FIELDS = (
     "stt_key",
     "stt_second_key",
     "audio_encryption_key",
+    "twilio_auth_token",
+    "voice_gateway_token",
     "langfuse_secret_key",
     "serve_token",
     "oidc_client_secret",

@@ -51,8 +51,8 @@ def relayout(run: Path, layout: str | None, *, started: datetime | None = None) 
 
 def test_a_new_run_records_its_layout(run: Path) -> None:
     assert json.loads((run / "manifest.json").read_text("utf-8"))["layout"] == LAYOUT
-    assert LAYOUT == "opseval-runs/9", (
-        "9: a usage row carries its cost split, known part and unpriced calls (ADR-0066 D2)"
+    assert LAYOUT == "opseval-runs/10", (
+        "10: a voice timeline may carry the phone call behind it (ADR-0056)"
     )
 
 
@@ -66,6 +66,7 @@ def test_a_new_run_records_its_layout(run: Path) -> None:
         "opseval-runs/6",
         "opseval-runs/7",
         "opseval-runs/8",
+        "opseval-runs/9",
     ],
 )
 def test_an_older_layout_run_is_still_read(run: Path, older: str) -> None:

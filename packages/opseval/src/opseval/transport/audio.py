@@ -25,7 +25,7 @@ from typing import Any, ClassVar, Literal
 
 from opseval.audio import AudioFormat, warm
 from opseval.errors import UnsupportedCapability
-from opseval.models.record import TransportEvent
+from opseval.models.record import CallInfo, TransportEvent
 
 Speaker = Literal["caller", "agent"]
 DTMF = "dtmf"
@@ -35,6 +35,11 @@ DUPLEX = "duplex"
 """The capability of a streaming transport that reads the agent while the caller speaks, so
 the full-duplex driver (ADR-0055) can run on it. A request/response transport (``audio-http``)
 hears the caller only once the turn is over, so it cannot."""
+REALTIME = "realtime"
+"""The line plays the caller's audio in real time, as a phone call does (ADR-0056). Such a
+session always runs on the full-duplex driver, which paces the caller on the attempt's clock:
+on the turn-based bridge the seconds the agent spends *hearing* the caller would be counted as
+its own latency. A ``realtime`` session also declares ``duplex``."""
 
 
 class AttemptClock:
@@ -159,6 +164,11 @@ class AudioSession(ABC):
         """Drops, resumes and token refreshes seen by this session (recorded as evidence)."""
         return ()
 
+    def call_info(self) -> CallInfo | None:
+        """The phone call behind this session (ADR-0056), read once the session is closed.
+        None for every transport that is not a phone call."""
+        return None
+
     @abstractmethod
     async def start(self) -> None:
         """Open the call or stream. A connection that never opens is a harness error."""
@@ -220,6 +230,7 @@ __all__ = [
     "AgentTranscript",
     "DTMF",
     "DUPLEX",
+    "REALTIME",
     "AttemptClock",
     "AudioSession",
     "Dtmf",
