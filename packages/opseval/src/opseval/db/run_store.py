@@ -27,16 +27,16 @@ import json
 import shlex
 import threading
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
 
 import asyncpg  # type: ignore[import-untyped]
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import defer
 
 from opseval.blobs import BlobStore
@@ -71,6 +71,7 @@ from opseval.storage import (
     FinishedRuns,
     PrunedMarker,
     RunCounts,
+    RunOrigin,
     StoredRun,
     UnknownLayout,
     UnreadableRun,
@@ -294,6 +295,16 @@ class DbRunAudio:
         """What ``opseval audio export`` takes to find this run: its id and project."""
         project = self.store.project_ref or "<org/project>"
         return f"{shlex.quote(self.run_id)} --project {shlex.quote(project)}"
+
+
+def import_lock_key(run_id: str) -> int:
+    """The advisory-lock key of a run id's import: 64 bits of a namespaced sha256."""
+    digest = hashlib.sha256(f"opseval-run-import\0{run_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def _origin(kind: str | None, ci: Any) -> RunOrigin | None:
+    return RunOrigin(kind, dict(ci)) if kind is not None and isinstance(ci, dict) else None
 
 
 class DbRunStore:
@@ -1009,6 +1020,77 @@ class DbRunStore:
 
         return self._run(go, write=True) == 1
 
+    @contextlib.contextmanager
+    def import_lock(self, run_id: str) -> Iterator[bool]:
+        """Hold the run id's import lock for the block: ``True`` when it was free and is now
+        ours, ``False`` when another import holds it (nothing is waited for).
+
+        A session-level ``pg_try_advisory_lock`` on a connection of its own, kept for the
+        whole import (which spans many transactions). Postgres releases it when that session
+        ends, so a crashed importer never leaves it held: a run row still ``importing`` while
+        the lock is free was cut short, and may be removed."""
+        key = import_lock_key(run_id)
+        lock = text("SELECT pg_try_advisory_lock(:k)")
+
+        async def acquire() -> tuple[AsyncConnection, bool]:
+            conn = await self.engine.connect()
+            try:
+                got = bool(await conn.scalar(lock, {"k": key}))
+                await conn.commit()  # the lock is the session's: no transaction stays open
+            except BaseException:
+                await conn.close()
+                raise
+            return conn, got
+
+        try:
+            conn, held = self._loop.run(acquire())
+        except (ConfigError, StorageError):
+            raise
+        except _DB_ERRORS as exc:
+            raise StorageError(
+                f"the import lock could not be taken ({type(exc).__name__})"
+            ) from exc
+
+        async def release() -> None:
+            try:
+                if held:
+                    await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+                    await conn.commit()
+            finally:
+                await conn.close()  # closing the session releases the lock in any case
+
+        try:
+            yield held
+        finally:
+            with contextlib.suppress(StorageError, *_DB_ERRORS):
+                self._loop.run(release())
+
+    def set_origin(self, run_id: str, kind: str, ci: dict[str, Any]) -> None:
+        """Record where the run came from (ADR-0058 E2): ``ci`` and what the CI system said.
+        Written on every upload of the run, so a lost first answer leaves nothing missing."""
+        project_id, task_id = self._owner(run_id)
+        body = _json(ci)
+
+        async def go(s: AsyncSession) -> int:
+            done = await s.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.project_id == project_id, Run.task_id == task_id)
+                .values(origin=kind, ci=body)
+            )
+            return int(getattr(done, "rowcount", 0) or 0)
+
+        if self._run(go, write=True) != 1:
+            raise ConfigError(f"no run {run_id!r} in {self.label}: origin not written")
+
+    def origin(self, run_id: str) -> RunOrigin | None:
+        async def go(s: AsyncSession) -> tuple[str | None, Any] | None:
+            q = self._live(select(Run.origin, Run.ci).where(Run.id == run_id))
+            found = (await s.execute(q)).one_or_none()
+            return None if found is None else (found[0], found[1])
+
+        found = self._run(go)
+        return _origin(found[0], found[1]) if found is not None else None
+
     def cancel_requested(self, run_id: str) -> bool:
         async def go(s: AsyncSession) -> bool:
             q = self._live(select(Run.cancel.is_not(None)).where(Run.id == run_id))
@@ -1227,6 +1309,7 @@ class DbRunStore:
                     cancel_requested=row.cancel is not None,
                     changed_at=row.updated_at.timestamp() if finished else None,
                     counts=counts,
+                    origin=_origin(row.origin, row.ci),
                 )
             )
         return out

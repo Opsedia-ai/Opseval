@@ -74,6 +74,13 @@ ADR-0043.
 
 ## For your information
 
+- **A released constraint name differs from the model (found in review of #96):** migration
+  `0005` created the runs status check as `ck_runs_ck_runs_status` (the naming convention
+  applied on top of a full name), while `db/schema.py` says `ck_runs_status`. Nothing reads
+  check names today and the drift test does not compare them, so nothing is wrong at run time;
+  renaming it needs a new migration (never an edit of `0005`). `0007` uses `op.f(...)` and is
+  tested to match. Decide whether to rename it in the next migration.
+
 - **Behaviour you may notice (ADR-0043):** `scorers: default` now follows the profile (no
   `flow.phase_order` without phases; a declared `must_call` or `ordering` is checked), and every
   scaffolded scenario has `conversation.agent_replied`, which fails a turn answered with nothing.

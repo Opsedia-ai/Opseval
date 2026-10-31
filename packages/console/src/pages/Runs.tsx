@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { GitCompareArrows, Play } from "lucide-react";
 import { api } from "../lib/api";
+import { CiOrigin } from "../components/CiOrigin";
 import { ProgressLine } from "../components/Progress";
 import { useApi } from "../lib/useApi";
 import { Button, Card, CoralButton, Count, Data, Explainer, GatePill, Mono, Page, PageHeader, ResultBar, StatePill, Table } from "../components/ui";
@@ -25,7 +26,8 @@ export default function Runs() {
                   {rows.map((r) => (
                     <tr key={r.id}>
                       <td><Link to={`/runs/${r.id}`} className="font-mono text-[13px] font-medium underline">{r.id}</Link>
-                        <div className="text-xs">{r.startedAt ? new Date(r.startedAt).toLocaleString() : ""}</div></td>
+                        <div className="text-xs">{r.startedAt ? new Date(r.startedAt).toLocaleString() : ""}</div>
+                        <CiOrigin run={r} /></td>
                       <td className="text-ink">{r.suite}</td>
                       <td><StatePill state={r.state} /></td>
                       <td title={r.error ?? undefined}><GatePill gate={r.gate} />{r.error && <div className="mt-1 max-w-64 truncate text-xs">{r.error}</div>}</td>
