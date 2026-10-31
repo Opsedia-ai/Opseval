@@ -1270,14 +1270,16 @@ class TestCapAndLimits:
         cat_dir = catalogue(tmp_path, scenario, {})
         started = time.perf_counter()
         cat = load(cat_dir)
-        assert time.perf_counter() - started < 0.5
+        # Building 27 million scenarios would take minutes; the bound is loose enough for a
+        # loaded CI runner (a load there has taken 0.9 s) and still proves nothing was built.
+        assert time.perf_counter() - started < 5
         [problem] = problems_of(cat)
         assert "expands to 27000000 scenarios" in problem and "OPSEVAL_MAX_EXPANSION" in problem
         # With an exclude, a space too large to scan is refused up front too.
         excluded = plain(matrix={**self.BIG, "exclude": [{"language": "l0"}]})
         started = time.perf_counter()
         cat = load(catalogue(tmp_path, excluded, {}))
-        assert time.perf_counter() - started < 0.5
+        assert time.perf_counter() - started < 5
         assert any("27000000 cells before exclude" in p for p in problems_of(cat))
 
     def test_excludes_are_counted_lazily_up_to_the_cap(self, tmp_path: Path) -> None:
