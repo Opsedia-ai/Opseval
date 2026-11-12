@@ -15,7 +15,7 @@
 
 FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
 
-FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS build
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS build
 COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /src
 COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
@@ -34,7 +34,7 @@ RUN uv export --frozen --package opseval --no-dev --no-emit-workspace --format r
 RUN --network=none pip wheel --no-cache-dir --no-build-isolation --no-deps --wheel-dir /out \
         packages/opseval
 
-FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
 LABEL org.opencontainers.image.title="opseval" \
       org.opencontainers.image.description="Black-box evaluation for conversational AI agents" \
       org.opencontainers.image.licenses="Apache-2.0"
