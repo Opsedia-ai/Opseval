@@ -13,7 +13,7 @@
 # The console is not in this image: `opseval serve` binds to loopback only (ADR-0031), which
 # a container cannot be reached on. Run the console on your own machine.
 
-FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d AS uv
 
 FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS build
 COPY --from=uv /uv /usr/local/bin/uv
